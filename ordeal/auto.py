@@ -106,6 +106,75 @@ class FuzzResult:
 
 
 # ============================================================================
+# Common parameter name → strategy inference
+# ============================================================================
+
+# Maps parameter names (and patterns) to sensible Hypothesis strategies.
+# This eliminates the most common fixture boilerplate — users only need
+# to provide strategies for truly domain-specific types.
+COMMON_NAME_STRATEGIES: dict[str, st.SearchStrategy[Any]] = {
+    # Text
+    "text": st.text(min_size=0, max_size=200),
+    "prompt": st.text(min_size=1, max_size=200),
+    "response": st.text(min_size=0, max_size=500),
+    "message": st.text(min_size=1, max_size=200),
+    "content": st.text(min_size=0, max_size=500),
+    "query": st.text(min_size=1, max_size=200),
+    "input": st.text(min_size=0, max_size=200),
+    "output": st.text(min_size=0, max_size=500),
+    "label": st.text(min_size=1, max_size=50),
+    "name": st.text(min_size=1, max_size=50),
+    "key": st.text(min_size=1, max_size=50),
+    "description": st.text(min_size=0, max_size=200),
+    # Numeric
+    "seed": st.integers(min_value=0, max_value=2**31 - 1),
+    "random_seed": st.integers(min_value=0, max_value=2**31 - 1),
+    "threshold": st.floats(min_value=0.0, max_value=1.0, allow_nan=False),
+    "alpha": st.floats(min_value=0.0, max_value=2.0, allow_nan=False),
+    "probability": st.floats(min_value=0.0, max_value=1.0, allow_nan=False),
+    "weight": st.floats(min_value=0.0, max_value=1.0, allow_nan=False),
+    "tolerance": st.floats(min_value=1e-10, max_value=0.1, allow_nan=False),
+    "tol": st.floats(min_value=1e-10, max_value=0.1, allow_nan=False),
+    "count": st.integers(min_value=0, max_value=100),
+    "n": st.integers(min_value=1, max_value=100),
+    "size": st.integers(min_value=1, max_value=100),
+    "max_tokens": st.integers(min_value=1, max_value=500),
+    "max_iterations": st.integers(min_value=1, max_value=20),
+    "num_prompts": st.integers(min_value=1, max_value=50),
+    "top_k": st.integers(min_value=1, max_value=10),
+    "batch_size": st.integers(min_value=1, max_value=32),
+    # Boolean
+    "verbose": st.booleans(),
+    "strict": st.booleans(),
+    "normalize": st.booleans(),
+}
+
+# Suffix patterns: if param name ends with these, use this strategy
+_SUFFIX_STRATEGIES: dict[str, st.SearchStrategy[Any]] = {
+    "_text": st.text(min_size=0, max_size=200),
+    "_path": st.text(min_size=1, max_size=50),
+    "_count": st.integers(min_value=0, max_value=100),
+    "_size": st.integers(min_value=1, max_value=100),
+    "_rate": st.floats(min_value=0.0, max_value=1.0, allow_nan=False),
+    "_prob": st.floats(min_value=0.0, max_value=1.0, allow_nan=False),
+    "_threshold": st.floats(min_value=0.0, max_value=1.0, allow_nan=False),
+    "_weight": st.floats(min_value=0.0, max_value=1.0, allow_nan=False),
+    "_flag": st.booleans(),
+    "_enabled": st.booleans(),
+}
+
+
+def _strategy_for_name(name: str) -> st.SearchStrategy[Any] | None:
+    """Try to infer a strategy from the parameter name alone."""
+    if name in COMMON_NAME_STRATEGIES:
+        return COMMON_NAME_STRATEGIES[name]
+    for suffix, strategy in _SUFFIX_STRATEGIES.items():
+        if name.endswith(suffix):
+            return strategy
+    return None
+
+
+# ============================================================================
 # Helpers
 # ============================================================================
 
@@ -130,28 +199,43 @@ def _get_public_functions(mod: ModuleType) -> list[tuple[str, Any]]:
 
 def _infer_strategies(
     func: Any,
-    fixtures: dict[str, st.SearchStrategy] | None = None,
-) -> dict[str, st.SearchStrategy] | None:
-    """Infer strategies from type hints + fixtures. Returns None if incomplete."""
+    fixtures: dict[str, st.SearchStrategy[Any]] | None = None,
+) -> dict[str, st.SearchStrategy[Any]] | None:
+    """Infer strategies from fixtures → name patterns → type hints.
+
+    Resolution order per parameter:
+    1. Explicit fixture (user-provided)
+    2. Common name pattern (COMMON_NAME_STRATEGIES)
+    3. Type hint (via strategy_for_type)
+    4. Default value → skip
+    5. None → can't infer, return None for entire function
+    """
     try:
         hints = get_type_hints(func)
     except Exception:
-        return None
+        hints = {}
 
     sig = inspect.signature(func)
-    strategies: dict[str, st.SearchStrategy] = {}
+    strategies: dict[str, st.SearchStrategy[Any]] = {}
 
     for name, param in sig.parameters.items():
         if name == "self" or name == "cls":
             continue
+        # 1. Explicit fixture
         if fixtures and name in fixtures:
             strategies[name] = fixtures[name]
+        # 2. Common name pattern
+        elif (name_strat := _strategy_for_name(name)) is not None:
+            strategies[name] = name_strat
+        # 3. Type hint
         elif name in hints:
             strategies[name] = strategy_for_type(hints[name])
+        # 4. Has default → skip
         elif param.default is not inspect.Parameter.empty:
-            continue  # has default, can skip
+            continue
+        # 5. Can't infer
         else:
-            return None  # required param with no type hint and no fixture
+            return None
 
     return strategies if strategies else None
 

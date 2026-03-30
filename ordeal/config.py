@@ -75,11 +75,22 @@ class ReportConfig:
 
 
 @dataclass
+class ScanConfig:
+    """One ``[[scan]]`` entry — a module to auto-test."""
+
+    module: str
+    max_examples: int = 50
+    fixtures: dict[str, str] = field(default_factory=dict)
+    # fixture values are sampled_from specs like "violence,cyber,sexual"
+
+
+@dataclass
 class OrdealConfig:
     """Top-level configuration loaded from ``ordeal.toml``."""
 
     explorer: ExplorerConfig = field(default_factory=ExplorerConfig)
     tests: list[TestConfig] = field(default_factory=list)
+    scan: list[ScanConfig] = field(default_factory=list)
     report: ReportConfig = field(default_factory=ReportConfig)
 
 
@@ -90,7 +101,7 @@ class OrdealConfig:
 _VALID_CHECKPOINT_STRATEGIES = {"energy", "uniform", "recent"}
 _VALID_REPORT_FORMATS = {"json", "text", "both"}
 
-_KNOWN_SECTIONS = {"explorer", "tests", "report", "faults"}
+_KNOWN_SECTIONS = {"explorer", "tests", "scan", "report", "faults"}
 _KNOWN_EXPLORER_KEYS = {
     "target_modules",
     "max_time",
@@ -185,6 +196,19 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
             )
         )
 
+    # -- Scan --
+    scans: list[ScanConfig] = []
+    for i, s in enumerate(raw.get("scan", [])):
+        if "module" not in s:
+            raise ConfigError(f"[[scan]] entry {i} is missing required 'module' key")
+        scans.append(
+            ScanConfig(
+                module=s["module"],
+                max_examples=int(s.get("max_examples", 50)),
+                fixtures=s.get("fixtures", {}),
+            )
+        )
+
     # -- Report --
     report_raw = raw.get("report", {})
     _warn_unknown_keys("report", report_raw, _KNOWN_REPORT_KEYS)
@@ -202,4 +226,4 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
             f"Invalid report format: {report.format!r}. Must be one of: {_VALID_REPORT_FORMATS}"
         )
 
-    return OrdealConfig(explorer=explorer, tests=tests, report=report)
+    return OrdealConfig(explorer=explorer, tests=tests, scan=scans, report=report)

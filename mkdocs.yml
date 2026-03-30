@@ -37,11 +37,12 @@ nav:
   - Getting Started: getting-started.md
   - Core Concepts: core-concepts.md
   - Guides:
-      - Auto: auto.md
-      - Configuration: configuration.md
-      - Explorer: explorer.md
-      - CLI: cli.md
-      - Mutations: mutations.md
-      - Simulation: simulate.md
-      - Integrations: integrations.md
-  - API Reference: api-reference.md
+      - Auto: guides/auto.md
+      - Configuration: guides/configuration.md
+      - Explorer: guides/explorer.md
+      - CLI: guides/cli.md
+      - Mutations: guides/mutations.md
+      - Simulation: guides/simulate.md
+      - Integrations: guides/integrations.md
+  - Reference:
+      - API: reference/api.md

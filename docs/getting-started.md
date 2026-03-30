@@ -88,5 +88,5 @@ FAILED test_chaos.py::TestScoreServiceChaos::runTest
 ## Next steps
 
 - [Core Concepts](core-concepts.md) — understand faults, nemesis, swarm, assertions
-- [Explorer Guide](explorer.md) — coverage-guided deep exploration
-- [Configuration](configuration.md) — `ordeal.toml` for reproducible runs
+- [Explorer Guide](guides/explorer.md) — coverage-guided deep exploration
+- [Configuration](guides/configuration.md) — `ordeal.toml` for reproducible runs

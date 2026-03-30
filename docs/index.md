@@ -32,14 +32,14 @@ pytest --chaos
 
 | Capability | Inspired by | Module |
 |---|---|---|
-| Stateful chaos testing with nemesis | Jepsen + Hypothesis | [`ordeal.chaos`](api-reference.md) |
-| Coverage-guided exploration | Antithesis | [`ordeal.explore`](explorer.md) |
+| Stateful chaos testing with nemesis | Jepsen + Hypothesis | [`ordeal.chaos`](reference/api.md) |
+| Coverage-guided exploration | Antithesis | [`ordeal.explore`](guides/explorer.md) |
 | Property assertions (`always`, `sometimes`, `reachable`) | Antithesis | [`ordeal.assertions`](core-concepts.md) |
 | Inline fault injection (BUGGIFY) | FoundationDB | [`ordeal.buggify`](core-concepts.md) |
 | Boundary-biased property testing | Jane Street QuickCheck | [`ordeal.quickcheck`](core-concepts.md) |
-| AST mutation testing | Meta ACH | [`ordeal.mutations`](mutations.md) |
-| Deterministic simulation (Clock, FileSystem) | No-mock testing | [`ordeal.simulate`](simulate.md) |
-| IO / numerical / timing faults | Chaos engineering | [`ordeal.faults`](api-reference.md) |
+| AST mutation testing | Meta ACH | [`ordeal.mutations`](guides/mutations.md) |
+| Deterministic simulation (Clock, FileSystem) | No-mock testing | [`ordeal.simulate`](guides/simulate.md) |
+| IO / numerical / timing faults | Chaos engineering | [`ordeal.faults`](reference/api.md) |
 
 ## Install
 
@@ -60,14 +60,14 @@ uv add ordeal
 
 ## Features
 
-- **[Auto](auto.md)** — Zero-boilerplate: `scan_module`, `fuzz`, `chaos_for`
-- **[Explorer](explorer.md)** — Coverage-guided exploration with AFL-style edge hashing and checkpointing
-- **[Simulation](simulate.md)** — Deterministic Clock and FileSystem for no-mock testing
-- **[Mutations](mutations.md)** — Validate that your chaos tests actually catch bugs
-- **[Integrations](integrations.md)** — Atheris coverage-guided fuzzing, Schemathesis API testing
+- **[Auto](guides/auto.md)** — Zero-boilerplate: `scan_module`, `fuzz`, `chaos_for`
+- **[Explorer](guides/explorer.md)** — Coverage-guided exploration with AFL-style edge hashing and checkpointing
+- **[Simulation](guides/simulate.md)** — Deterministic Clock and FileSystem for no-mock testing
+- **[Mutations](guides/mutations.md)** — Validate that your chaos tests actually catch bugs
+- **[Integrations](guides/integrations.md)** — Atheris coverage-guided fuzzing, Schemathesis API testing
 
 ## Reference
 
-- **[CLI](cli.md)** — `ordeal explore`, `ordeal replay`, pytest `--chaos` flag
-- **[Configuration](configuration.md)** — `ordeal.toml` schema and options
-- **[API Reference](api-reference.md)** — Complete public API
+- **[CLI](guides/cli.md)** — `ordeal explore`, `ordeal replay`, pytest `--chaos` flag
+- **[Configuration](guides/configuration.md)** — `ordeal.toml` schema and options
+- **[API Reference](reference/api.md)** — Complete public API

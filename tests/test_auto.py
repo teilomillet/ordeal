@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tests._auto_target as target
 from ordeal.auto import chaos_for, fuzz, scan_module
-from ordeal.invariants import bounded, finite
+from ordeal.invariants import finite
 
 
 class TestScanModule:

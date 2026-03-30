@@ -23,7 +23,7 @@ import importlib
 import inspect
 from dataclasses import dataclass, field
 from types import ModuleType
-from typing import Any, get_args, get_origin, get_type_hints
+from typing import Any, get_origin, get_type_hints
 
 import hypothesis.strategies as st
 from hypothesis import given, settings
@@ -34,10 +34,10 @@ from ordeal.faults import Fault
 from ordeal.invariants import Invariant
 from ordeal.quickcheck import strategy_for_type
 
-
 # ============================================================================
 # Result types
 # ============================================================================
+
 
 @dataclass
 class FunctionResult:
@@ -109,6 +109,7 @@ class FuzzResult:
 # Helpers
 # ============================================================================
 
+
 def _resolve_module(module: str | ModuleType) -> ModuleType:
     if isinstance(module, str):
         return importlib.import_module(module)
@@ -172,6 +173,7 @@ def _type_matches(value: Any, expected: type) -> bool:
 # 1. scan_module
 # ============================================================================
 
+
 def scan_module(
     module: str | ModuleType,
     *,
@@ -218,7 +220,10 @@ def scan_module(
         return_type = hints.get("return")
 
         func_result = _test_one_function(
-            name, func, strategies, return_type,
+            name,
+            func,
+            strategies,
+            return_type,
             max_examples=max_examples,
             check_return_type=check_return_type,
         )
@@ -238,6 +243,7 @@ def _test_one_function(
 ) -> FunctionResult:
     """Run no-crash + return-type checks on a single function."""
     try:
+
         @given(**strategies)
         @settings(max_examples=max_examples, database=None)
         def test(**kwargs: Any) -> None:
@@ -248,6 +254,7 @@ def _test_one_function(
                         f"Expected return type {return_type}, "
                         f"got {type(result).__name__}: {result!r}"
                     )
+
         test()
         return FunctionResult(name=name, passed=True)
     except Exception as e:
@@ -257,6 +264,7 @@ def _test_one_function(
 # ============================================================================
 # 2. fuzz
 # ============================================================================
+
 
 def fuzz(
     fn: Any,
@@ -285,8 +293,7 @@ def fuzz(
     strategies = _infer_strategies(fn, fixtures or None)
     if strategies is None:
         raise ValueError(
-            f"Cannot infer strategies for {fn.__name__}. "
-            f"Provide fixtures for untyped parameters."
+            f"Cannot infer strategies for {fn.__name__}. Provide fixtures for untyped parameters."
         )
 
     try:
@@ -297,15 +304,15 @@ def fuzz(
 
     failures: list[Exception] = []
     try:
+
         @given(**strategies)
         @settings(max_examples=max_examples, database=None)
         def test(**kwargs: Any) -> None:
             result = fn(**kwargs)
             if check_return_type and return_type is not None:
                 if not _type_matches(result, return_type):
-                    raise AssertionError(
-                        f"Expected {return_type}, got {type(result).__name__}"
-                    )
+                    raise AssertionError(f"Expected {return_type}, got {type(result).__name__}")
+
         test()
     except Exception as e:
         failures.append(e)
@@ -320,6 +327,7 @@ def fuzz(
 # ============================================================================
 # 3. chaos_for
 # ============================================================================
+
 
 def chaos_for(
     module: str | ModuleType,

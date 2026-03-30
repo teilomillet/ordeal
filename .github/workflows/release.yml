@@ -11,47 +11,33 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      id-token: write   # OIDC for PyPI trusted publisher
+      id-token: write
+    env:
+      # Strip 'v' prefix at job level so all steps see it.
+      # github.ref_name = "v0.1.0" → version = "0.1.0"
+      SETUPTOOLS_SCM_PRETEND_VERSION: ${{ vars.VERSION_OVERRIDE || '' }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           fetch-tags: true
-          ref: ${{ github.ref }}
 
-      - name: Debug git state
+      - name: Set version from tag
         run: |
-          echo "GITHUB_REF=$GITHUB_REF"
-          echo "HEAD=$(git rev-parse HEAD)"
-          git describe --tags --always
-          git tag -l 'v*'
-          git log --oneline -3
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          echo "SETUPTOOLS_SCM_PRETEND_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Building ordeal $VERSION from tag $TAG"
 
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Install build tools
-        run: pip install build setuptools-scm
-
-      - name: Verify version from tag
-        run: |
-          VERSION=$(python -c "from setuptools_scm import get_version; print(get_version())")
-          echo "Building version: $VERSION"
-          if [ "$VERSION" = "0.0.0" ]; then
-            echo "ERROR: setuptools-scm could not resolve version from tag"
-            echo "Trying SETUPTOOLS_SCM_PRETEND_VERSION from tag..."
-          fi
+        run: pip install build
 
       - name: Build sdist + wheel
-        env:
-          # Fallback: extract version from git tag if setuptools-scm fails
-          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ github.ref_name }}
-        run: |
-          # Strip 'v' prefix: v0.1.0 -> 0.1.0
-          export SETUPTOOLS_SCM_PRETEND_VERSION="${SETUPTOOLS_SCM_PRETEND_VERSION#v}"
-          echo "SETUPTOOLS_SCM_PRETEND_VERSION=$SETUPTOOLS_SCM_PRETEND_VERSION"
-          python -m build
+        run: python -m build
 
       - name: Verify package version
         run: |

@@ -671,7 +671,7 @@ def generate_mutants(
         counter.visit(tree)
 
         for i in range(counter.count):
-            mutated_tree = copy.deepcopy(tree)
+            mutated_tree = ast.parse(source)
             applicator = applicator_cls(target_idx=i)
             applicator.visit(mutated_tree)
             ast.fix_missing_locations(mutated_tree)

@@ -165,10 +165,12 @@ class TestCheckpointFileExchange:
             assert len(files) == 1
             assert "w0" in files[0].name
 
-            # Verify the file is a valid state dict
-            state = pickle.loads(files[0].read_bytes())
-            assert isinstance(state, dict)
-            assert state["service"].state == "pivoted"
+            # Verify the file is a valid snapshot payload
+            payload = pickle.loads(files[0].read_bytes())
+            assert isinstance(payload, dict)
+            assert "state_dict" in payload
+            assert "fault_active" in payload
+            assert payload["state_dict"]["service"].state == "pivoted"
         finally:
             import shutil
 
@@ -203,7 +205,8 @@ class TestCheckpointFileExchange:
 
             # The loaded checkpoint should be in pivoted state
             cp = subscriber._checkpoints[0]
-            assert cp.machine_copy.service.state == "pivoted"
+            restored = subscriber._restore_machine(cp.snapshot)
+            assert restored.service.state == "pivoted"
 
         finally:
             import shutil

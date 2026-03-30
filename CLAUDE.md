@@ -10,7 +10,7 @@ Built on ideas from Antithesis (deterministic exploration), FoundationDB (BUGGIF
 
 ```bash
 uv sync                          # install dependencies
-uv run pytest                    # run all tests (~205 tests)
+uv run pytest                    # run all tests (~456 tests)
 uv run pytest tests/test_X.py    # single module
 uv run pytest -x                 # stop on first failure
 uv run pytest --chaos            # enable chaos mode in tests
@@ -34,7 +34,7 @@ ordeal/
 ├── quickcheck.py       @quickcheck decorator with boundary-biased type-driven strategies
 ├── simulate.py         Deterministic simulation primitives: Clock, FileSystem
 ├── invariants.py       Composable invariants with & operator: no_nan & bounded(0, 1)
-├── mutations.py        AST-based mutation testing with 4 operators
+├── mutations.py        AST-based mutation testing with 14 operators
 ├── trace.py            Trace recording, JSON serialization, replay, delta-debugging shrink
 ├── config.py           ordeal.toml loader with strict validation
 ├── cli.py              CLI entry point: ordeal explore / ordeal replay
@@ -103,6 +103,6 @@ ordeal/
 ### Add a new mutation operator
 
 1. Create an AST `NodeTransformer` subclass in `ordeal/mutations.py`.
-2. Register it in `_APPLICATORS` dict with a string key.
-3. The applicator yields `Mutant` objects with location and description.
+2. Register it in the `OPERATORS` dict with a string key mapping to `(Counter, Applicator)`.
+3. The counter counts mutation sites; the applicator applies the Nth mutation.
 4. Add tests in `tests/test_battle.py` or a dedicated test file.

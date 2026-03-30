@@ -135,7 +135,7 @@ Set this explicitly in CI for reproducibility. When a failure is found, the seed
 
 The maximum number of checkpoints kept in the corpus. When the limit is reached, the lowest-energy checkpoint is evicted (under the `"energy"` strategy) or a random one is removed.
 
-256 is generous for most use cases. Increase it if you have long runs where many distinct interesting states accumulate. Decrease it if checkpoint `deepcopy` is expensive for your machine state.
+256 is generous for most use cases. Increase it if you have long runs where many distinct interesting states accumulate. Decrease it if your machine state is large (each checkpoint stores a snapshot of the user state dict).
 
 ### `workers`
 
@@ -143,7 +143,7 @@ Number of parallel worker processes. Default 1 (sequential). Each worker gets a 
 
 Set to the number of available CPU cores for maximum throughput. In CI, match your runner's core count. Locally, leave headroom for other work (e.g., `workers = 6` on an 8-core machine).
 
-Workers don't share checkpoints or coverage — they explore independently and results are aggregated at the end (runs summed, edges unioned). This means some edge discovery may overlap. Use `ordeal.scaling.benchmark()` to measure actual efficiency for your test.
+Workers share discoveries via a shared-memory edge bitmap and a shared checkpoint pool. Edges are deduplicated across workers in real time; checkpoints from significant discoveries are published for other workers to branch from. Use `ordeal.scaling.benchmark()` to measure actual efficiency for your test.
 
 ```toml
 [explorer]

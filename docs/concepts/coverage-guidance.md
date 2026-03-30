@@ -36,7 +36,7 @@ The `CoverageCollector` only traces files that match your `target_modules`. If y
 
 ## Checkpoints
 
-When a run discovers edges that have never been seen before, ordeal saves a **checkpoint**: a deep copy of the entire ChaosTest machine at that moment -- all state variables, all active faults, the full history.
+When a run discovers edges that have never been seen before, ordeal saves a **checkpoint**: a lightweight snapshot of the ChaosTest machine at that moment -- all user state variables and which faults are active.
 
 Future runs can start FROM that checkpoint instead of from scratch. This means the Explorer does not have to re-discover the rare state every time. It saves its progress and branches forward into unknown territory.
 
@@ -46,7 +46,7 @@ This is what makes the Explorer qualitatively different from random testing. Ran
 
 A checkpoint stores:
 
-- **machine_copy**: A full deep copy of the ChaosTest instance (via `copy.deepcopy`)
+- **snapshot**: A lightweight state-dict snapshot (user state + fault active flags, skipping heavy Fault objects)
 - **new_edge_count**: How many new edges this checkpoint discovered
 - **step / run_id**: When and where it was created
 - **energy**: A scheduling weight (explained next)
@@ -105,8 +105,8 @@ Here is the full loop, step by step.
                   [checkpoint]          [fresh]
                         |                  |
                +--------v-------+  +-------v--------+
-               | deepcopy saved |  | new ChaosTest  |
-               | machine state  |  | instance       |
+               | restore from   |  | new ChaosTest  |
+               | snapshot       |  | instance       |
                +--------+-------+  +-------+--------+
                         |                  |
                         +--------+---------+
@@ -168,7 +168,7 @@ Here is the full loop, step by step.
 
 In detail:
 
-1. **Start or resume.** The Explorer flips a weighted coin (default: 40% chance of loading a checkpoint). If it loads a checkpoint, it deep-copies the saved machine state so the original is preserved for future runs. If not, it creates a fresh ChaosTest instance.
+1. **Start or resume.** The Explorer flips a weighted coin (default: 40% chance of loading a checkpoint). If it loads a checkpoint, it creates a fresh ChaosTest instance and restores the saved state onto it, so the original snapshot is preserved for future runs. If not, it creates a fresh ChaosTest instance from scratch.
 
 2. **Step loop.** For a random number of steps (1 to `steps_per_run`, default 50), the Explorer does one of two things:
    - With probability `fault_toggle_prob` (default 0.3): toggle a random fault on or off.

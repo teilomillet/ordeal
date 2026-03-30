@@ -58,15 +58,26 @@ class CoverageCollector:
     Uses AFL-style edge hashing: ``hash(prev_location XOR cur_location)``.
     This captures control-flow *transitions*, not just line visits.
 
-    Thread-safe for free-threaded Python 3.13+: ``_prev_loc`` is per-thread
-    (each thread traces its own call stack), and ``_edges`` is lock-protected.
+    Optimizations over naive per-line locking:
+
+    - **Filename cache**: ``_is_target`` result is cached per filename so
+      the path-segment check runs at most once per unique file.
+    - **Thread-local edge buffer**: Edges accumulate in a per-thread list
+      and are flushed to the shared set every 256 edges, reducing lock
+      acquisitions by ~256x.
+
+    Thread-safe for free-threaded Python 3.13+: ``_prev_loc`` and the
+    edge buffer are per-thread, and ``_edges`` is lock-protected.
     """
+
+    _FLUSH_THRESHOLD = 256
 
     def __init__(self, target_paths: list[str]) -> None:
         self._targets = target_paths
         self._edges: set[int] = set()
         self._edges_lock = threading.Lock()
         self._tls = threading.local()
+        self._target_cache: dict[str, bool] = {}
 
     def _is_target(self, filename: str) -> bool:
         """Check if *filename* belongs to one of the target modules.
@@ -90,17 +101,44 @@ class CoverageCollector:
         return False
 
     def _trace(self, frame: Any, event: str, arg: Any) -> Any:
-        if event == "line" and self._is_target(frame.f_code.co_filename):
-            loc = hash((frame.f_code.co_filename, frame.f_lineno)) & 0xFFFF
-            prev = getattr(self._tls, "prev_loc", 0)
+        if event != "line":
+            return self._trace
+        fn = frame.f_code.co_filename
+        is_target = self._target_cache.get(fn)
+        if is_target is None:
+            is_target = self._is_target(fn)
+            self._target_cache[fn] = is_target
+        if not is_target:
+            return self._trace
+
+        loc = hash((fn, frame.f_lineno)) & 0xFFFF
+        prev = getattr(self._tls, "prev_loc", 0)
+        self._tls.prev_loc = loc >> 1
+
+        buf = getattr(self._tls, "edge_buf", None)
+        if buf is None:
+            buf = []
+            self._tls.edge_buf = buf
+        buf.append(prev ^ loc)
+        if len(buf) >= self._FLUSH_THRESHOLD:
             with self._edges_lock:
-                self._edges.add(prev ^ loc)
-            self._tls.prev_loc = loc >> 1
+                self._edges.update(buf)
+            buf.clear()
         return self._trace
+
+    def _flush_local(self) -> None:
+        """Flush the calling thread's edge buffer into the shared set."""
+        buf = getattr(self._tls, "edge_buf", None)
+        if buf:
+            with self._edges_lock:
+                self._edges.update(buf)
+            buf.clear()
 
     def start(self) -> None:
         """Reset state and begin collecting edge coverage via ``sys.settrace``."""
         self._tls.prev_loc = 0
+        self._tls.edge_buf = []
+        self._target_cache.clear()
         with self._edges_lock:
             self._edges.clear()
         sys.settrace(self._trace)
@@ -108,11 +146,13 @@ class CoverageCollector:
     def stop(self) -> frozenset[int]:
         """Stop collection and return the set of observed edges."""
         sys.settrace(None)
+        self._flush_local()
         with self._edges_lock:
             return frozenset(self._edges)
 
     def snapshot(self) -> frozenset[int]:
         """Current edges without stopping collection."""
+        self._flush_local()
         with self._edges_lock:
             return frozenset(self._edges)
 
@@ -168,10 +208,23 @@ _EDGE_BITMAP_SIZE = 65536
 
 
 @dataclass
+class _MachineSnapshot:
+    """Lightweight snapshot: user state dict + fault active flags.
+
+    Avoids deep-copying Fault objects (which carry locks, compiled
+    patterns, and monkeypatched references).  Restore by creating a
+    fresh machine and overlaying the saved state.
+    """
+
+    state_dict: dict[str, Any]
+    fault_active: dict[str, bool]
+
+
+@dataclass
 class Checkpoint:
     """A saved machine state with energy-based scheduling weight."""
 
-    machine_copy: ChaosTest
+    snapshot: _MachineSnapshot
     new_edge_count: int
     step: int
     run_id: int
@@ -383,6 +436,37 @@ class Explorer:
         self._rules: list[_RuleInfo] = []
         self._invariant_names: list[str] = []
 
+    # -- Snapshot / restore -------------------------------------------------
+
+    def _snapshot_machine(self, machine: ChaosTest) -> _MachineSnapshot:
+        """Create a lightweight snapshot, skipping Fault objects."""
+        state: dict[str, Any] = {}
+        for k, v in machine.__dict__.items():
+            if k == "_faults":
+                continue
+            try:
+                state[k] = copy.deepcopy(v)
+            except Exception:
+                pass
+        fault_active = {f.name: f.active for f in machine._faults}
+        return _MachineSnapshot(state_dict=state, fault_active=fault_active)
+
+    def _restore_machine(self, snapshot: _MachineSnapshot) -> ChaosTest:
+        """Restore a fresh machine from a snapshot."""
+        machine = self.test_class()
+        for k, v in snapshot.state_dict.items():
+            try:
+                machine.__dict__[k] = copy.deepcopy(v)
+            except Exception:
+                machine.__dict__[k] = v
+        for f in machine._faults:
+            was_active = snapshot.fault_active.get(f.name, False)
+            if was_active and not f.active:
+                f.activate()
+            elif not was_active and f.active:
+                f.deactivate()
+        return machine
+
     # -- Discovery ----------------------------------------------------------
 
     def _discover(self) -> None:
@@ -519,17 +603,19 @@ class Explorer:
             return
         fname = f"cp-w{self._worker_id}-r{run_id}-s{step}.pkl"
         try:
-            snapshot = copy.deepcopy(machine)
-            state = {}
-            for k, v in snapshot.__dict__.items():
+            snap = self._snapshot_machine(machine)
+            # Filter to only picklable values
+            picklable_state: dict[str, Any] = {}
+            for k, v in snap.state_dict.items():
                 try:
                     pickle.dumps(v)
-                    state[k] = v
+                    picklable_state[k] = v
                 except Exception:
                     pass
+            payload = {"state_dict": picklable_state, "fault_active": snap.fault_active}
             tmp = self._pool_dir / f".tmp-{fname}"
             with open(tmp, "wb") as f:
-                pickle.dump(state, f)
+                pickle.dump(payload, f)
             tmp.rename(self._pool_dir / fname)  # atomic on POSIX
             self._pool_publish_count += 1
             self._pool_loaded.add(fname)
@@ -555,12 +641,14 @@ class Explorer:
                 self._pool_loaded.add(path.name)
                 try:
                     with open(path, "rb") as f:
-                        state = pickle.load(f)
-                    machine = self.test_class()
-                    machine.__dict__.update(state)
+                        payload = pickle.load(f)
+                    snap = _MachineSnapshot(
+                        state_dict=payload.get("state_dict", payload),
+                        fault_active=payload.get("fault_active", {}),
+                    )
                     self._checkpoints.append(
                         Checkpoint(
-                            machine_copy=machine,
+                            snapshot=snap,
                             new_edge_count=0,
                             step=0,
                             run_id=-1,
@@ -589,7 +677,7 @@ class Explorer:
 
         self._checkpoints.append(
             Checkpoint(
-                machine_copy=copy.deepcopy(machine),
+                snapshot=self._snapshot_machine(machine),
                 new_edge_count=new_count,
                 step=step,
                 run_id=run_id,
@@ -708,7 +796,7 @@ class Explorer:
             from_cp = self._checkpoints and self.rng.random() < self.checkpoint_prob
             if from_cp:
                 source_cp = self._select_checkpoint()
-                machine = copy.deepcopy(source_cp.machine_copy)
+                machine = self._restore_machine(source_cp.snapshot)
                 rule_log.append(f"[checkpoint r{source_cp.run_id}s{source_cp.step}]")
             else:
                 machine = self.test_class()

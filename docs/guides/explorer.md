@@ -183,7 +183,7 @@ Maximum number of checkpoints in the corpus. When the corpus is full, the lowest
 **Guidance:**
 
 - 256 is a reasonable default. It is large enough to maintain diversity but small enough to keep memory usage bounded.
-- Each checkpoint is a `copy.deepcopy` of your ChaosTest instance. If your test class holds large state (big data structures, many objects), each checkpoint consumes that much memory. Monitor memory usage if you increase this significantly.
+- Each checkpoint stores a snapshot of your ChaosTest instance's state dict (skipping heavy Fault objects). If your test class holds large user state (big data structures, many objects), each checkpoint consumes that much memory. Monitor memory usage if you increase this significantly.
 - Increase to 512-1024 for systems with many distinct interesting states. If you see the edge count still climbing when the checkpoint corpus is already full, you may benefit from keeping more checkpoints alive.
 - Decrease to 64-128 for memory-constrained environments or when each checkpoint is large.
 

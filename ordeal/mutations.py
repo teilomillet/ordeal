@@ -575,3 +575,49 @@ def mutate_function_and_test(
         result.mutants.append(mutant)
 
     return result
+
+
+def mutation_faults(
+    target: str,
+    operators: list[str] | None = None,
+) -> list[tuple[Mutant, PatchFault]]:
+    """Generate :class:`PatchFault` objects for each mutant of a function.
+
+    Each fault, when activated, replaces the target function with a mutated
+    version.  Use with the Explorer to let the nemesis toggle mutations
+    during coverage-guided exploration::
+
+        explorer = Explorer(MyTest, mutation_targets=["myapp.scoring.compute"])
+
+    Args:
+        target: Dotted path to the function (e.g. ``"myapp.scoring.compute"``).
+        operators: Mutation operators to use (default: all).
+
+    Returns:
+        List of ``(Mutant, PatchFault)`` pairs.
+    """
+    module_path, func_name = target.rsplit(".", 1)
+    module = importlib.import_module(module_path)
+    func = getattr(module, func_name)
+    source = textwrap.dedent(inspect.getsource(func))
+
+    results: list[tuple[Mutant, PatchFault]] = []
+    for mutant, mutated_tree in generate_mutants(source, operators):
+        try:
+            code = compile(mutated_tree, f"<mutant:{mutant.description}>", "exec")
+            namespace = dict(module.__dict__)
+            exec(code, namespace)  # noqa: S102
+            mutated_func = namespace.get(func_name)
+            if mutated_func is None:
+                continue
+        except Exception:
+            continue
+
+        fault = PatchFault(
+            target,
+            lambda orig, mf=mutated_func: mf,
+            name=f"mutant({mutant.operator}@L{mutant.line}:{mutant.description})",
+        )
+        results.append((mutant, fault))
+
+    return results

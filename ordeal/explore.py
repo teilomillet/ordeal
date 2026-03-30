@@ -246,6 +246,8 @@ class ExplorationResult:
     adaptation_phase: int = 0
     unique_states: int = 0
     properties_satisfied: int = 0
+    mutations_total: int = 0
+    mutations_killed: int = 0
 
     def summary(self) -> str:
         """Human-readable exploration summary."""
@@ -258,6 +260,12 @@ class ExplorationResult:
             lines.append(f"States: {self.unique_states} unique state hashes")
         if self.properties_satisfied > 0:
             lines.append(f"Properties: {self.properties_satisfied} sometimes-properties satisfied")
+        if self.mutations_total > 0:
+            survived = self.mutations_total - self.mutations_killed
+            lines.append(
+                f"Mutations: {self.mutations_killed}/{self.mutations_total} killed"
+                f" ({survived} survived)"
+            )
         if self.adaptation_phase > 0:
             lines.append(f"Adapted: {self.adaptation_phase} phase(s) of escalation")
         if self.unique_edges > 0 and self.total_runs > 0:
@@ -314,6 +322,7 @@ class Explorer:
         record_traces: bool = False,
         workers: int = 1,
         share_edges: bool = True,
+        mutation_targets: list[str] | None = None,
     ) -> None:
         """Initialize the exploration engine.
 
@@ -328,6 +337,11 @@ class Explorer:
             record_traces: If True, keep full traces in the result.
             workers: Number of parallel worker processes. ``0`` means auto
                 (uses ``os.cpu_count()``). Default ``1`` (sequential).
+            mutation_targets: Dotted paths to functions to mutate
+                (e.g. ``["myapp.service.process"]``).  Mutations become
+                faults that the nemesis toggles during exploration.
+                Killed mutants = your tests catch the bug.  Surviving
+                mutants = test gap found.
             share_edges: When ``workers > 1``, use a shared-memory edge
                 bitmap so workers skip edges already found by others.
                 AFL-style: one byte per edge hash, single-byte atomic
@@ -345,6 +359,7 @@ class Explorer:
         self.record_traces = record_traces
         self.workers = (os.cpu_count() or 1) if workers <= 0 else workers
         self.share_edges = share_edges
+        self.mutation_targets = mutation_targets or []
 
         # Shared-memory edge bitmap (set by _run_parallel / _worker_fn)
         # 65536 bytes — one byte per possible 16-bit edge hash.
@@ -631,6 +646,26 @@ class Explorer:
         start = _time.monotonic()
         class_name = _qualified_name(self.test_class)
 
+        # Generate mutation faults from target functions
+        _mutation_pairs: list[tuple] = []
+        _original_test_class = self.test_class
+        if self.mutation_targets:
+            from ordeal.mutations import mutation_faults as _gen_mutation_faults
+
+            for mt in self.mutation_targets:
+                try:
+                    _mutation_pairs.extend(_gen_mutation_faults(mt))
+                except Exception:
+                    pass
+            if _mutation_pairs:
+                _mfaults = [f for _, f in _mutation_pairs]
+
+                class _MutatedTest(self.test_class):
+                    faults = list(self.test_class.faults) + _mfaults
+
+                self.test_class = _MutatedTest
+                result.mutations_total = len(_mutation_pairs)
+
         _runs_since_new: int = 0
         _adapt_phase: int = 0
         _orig_fault_prob = self.fault_toggle_prob
@@ -784,6 +819,14 @@ class Explorer:
                     edges_discovered=new_edges_this_run,
                     duration=_time.monotonic() - run_start,
                 )
+                # Check if any mutation faults are active (killed mutants)
+                _active_names = {f.name for f in machine.active_faults}
+                for _mutant, _mfault in _mutation_pairs:
+                    if _mfault.name in _active_names and not _mutant.killed:
+                        _mutant.killed = True
+                        _mutant.error = str(e)[:200]
+                        result.mutations_killed += 1
+
                 result.failures.append(
                     Failure(
                         error=e,
@@ -844,7 +887,8 @@ class Explorer:
                     )
                 )
 
-        # Restore tracker and original params after exploration
+        # Restore test class and original params after exploration
+        self.test_class = _original_test_class
         _assertions.tracker.active = _tracker_was_active
         self.fault_toggle_prob = _orig_fault_prob
         self.checkpoint_strategy = _orig_cp_strategy

@@ -557,6 +557,28 @@ shrink(
 
 Shrink a failing trace to the minimal reproducing sequence. Three phases: delta debugging, step elimination, fault simplification.
 
+### generate_tests
+
+```python
+generate_tests(
+    traces: list[Trace],
+    *,
+    class_path: str | None = None,
+) -> str
+```
+
+Convert exploration traces into standalone pytest test functions. Each generated test replays the exact rule/fault sequence — failures become regression tests, deep paths become coverage tests.
+
+```python
+from ordeal.trace import generate_tests
+
+result = explorer.run(max_time=60, record_traces=True)
+test_source = generate_tests(result.traces)
+Path("tests/test_generated.py").write_text(test_source)
+```
+
+Or from the CLI: `ordeal explore --generate-tests tests/test_generated.py`
+
 ---
 
 ## QuickCheck

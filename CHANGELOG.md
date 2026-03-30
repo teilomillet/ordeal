@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.30
+
+- **Generate tests from traces** — `ordeal explore --generate-tests tests/test_gen.py` turns exploration traces into standalone pytest functions. Failures become regression tests, deep paths become coverage tests. Also available via `generate_tests()` Python API.
+
 ## 0.1.19
 
 - **Mutation score in audit** — audit now runs `validate_mined_properties()` and reports how many mutations the mined properties catch: `"mutation: 14/18 (78%)"`

@@ -353,6 +353,7 @@ ordeal explore -c ci.toml -v            # custom config, verbose
 ordeal explore --max-time 300 --seed 99 # override settings
 ordeal replay trace.json                # reproduce a failure
 ordeal replay --shrink trace.json       # minimize a failure trace
+ordeal explore --generate-tests tests/test_gen.py  # turn traces into pytest tests
 ```
 
 ## Documentation

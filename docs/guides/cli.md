@@ -176,6 +176,7 @@ ordeal explore --max-time 300          # override time
 ordeal explore --seed 99               # override seed
 ordeal explore --no-shrink             # skip failure minimization
 ordeal explore -w 4                    # 4 parallel workers
+ordeal explore --generate-tests tests/test_generated.py  # turn traces into pytest tests
 ```
 
 The `--workers` / `-w` flag runs exploration across multiple processes. Each worker gets a unique seed for independent state-space exploration. Results are aggregated: runs/steps are summed, edges are unioned for true unique count. Use `--workers $(nproc)` for full CPU utilization.

@@ -88,6 +88,8 @@ class CoverageCollector:
         self._target_cache: dict[str, bool] = {}
         self._snapshot_cache: frozenset[int] | None = None
         self._dirty = False
+        self._prev_trace: Any = None
+        self._coverage_cov: Any = None
 
     def _is_target(self, filename: str) -> bool:
         """Check if *filename* belongs to one of the target modules.
@@ -155,11 +157,31 @@ class CoverageCollector:
         self._dirty = False
         with self._edges_lock:
             self._edges.clear()
+        # Pause coverage.py's collector if active so we can install our
+        # tracer without permanently clobbering its C-level trace function.
+        self._coverage_cov = None
+        try:
+            import coverage
+
+            cov = coverage.Coverage.current()
+            if cov is not None and cov._collector is not None:
+                cov._collector.pause()
+                self._coverage_cov = cov
+        except Exception:
+            pass
+        self._prev_trace = sys.gettrace()
         sys.settrace(self._trace)
 
     def stop(self) -> frozenset[int]:
-        """Stop collection and return the set of observed edges."""
-        sys.settrace(None)
+        """Stop collection and restore the previous trace function."""
+        sys.settrace(self._prev_trace)
+        # Resume coverage.py's collector — this reinstalls its C tracer.
+        if self._coverage_cov is not None:
+            try:
+                self._coverage_cov._collector.resume()
+            except Exception:
+                pass
+            self._coverage_cov = None
         self._flush_local()
         with self._edges_lock:
             self._snapshot_cache = frozenset(self._edges)

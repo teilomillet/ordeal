@@ -155,8 +155,10 @@ def _sanitize(obj: Any) -> Any:
     if isinstance(obj, bytes):
         return {"__bytes__": base64.b64encode(obj).decode()}
     if isinstance(obj, (set, frozenset)):
-        sortable = all(isinstance(x, (int, float, str)) for x in obj)
-        return {"__set__": sorted(obj) if sortable else list(obj)}
+        try:
+            return {"__set__": sorted(obj)}
+        except TypeError:
+            return {"__set__": list(obj)}
     if isinstance(obj, Exception):
         return {"__error__": str(obj), "__type__": type(obj).__name__}
     if isinstance(obj, (str, int, float, bool)) or obj is None:
@@ -174,8 +176,10 @@ def _encode_bytes(obj: Any) -> dict:
 
 
 def _encode_set(obj: Any) -> dict:
-    sortable = all(isinstance(x, (int, float, str)) for x in obj)
-    return {"__set__": sorted(obj) if sortable else list(obj)}
+    try:
+        return {"__set__": sorted(obj)}
+    except TypeError:
+        return {"__set__": list(obj)}
 
 
 # Dispatch table: one dict lookup instead of cascading isinstance.

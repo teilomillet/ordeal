@@ -162,6 +162,19 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         return 0
 
 
+def _cmd_audit(args: argparse.Namespace) -> int:
+    """Run ordeal audit on specified modules."""
+    from ordeal.audit import audit_report
+
+    report = audit_report(
+        args.modules,
+        test_dir=args.test_dir,
+        max_examples=args.max_examples,
+    )
+    print(report)
+    return 0
+
+
 # ============================================================================
 # Reporting
 # ============================================================================
@@ -258,12 +271,24 @@ def main(argv: list[str] | None = None) -> int:
     replay_p.add_argument("--shrink", action="store_true", help="Shrink the trace")
     replay_p.add_argument("--output", "-o", help="Save shrunk trace to this path")
 
+    # -- ordeal audit --
+    audit_p = sub.add_parser("audit", help="Audit test coverage vs ordeal auto-scan")
+    audit_p.add_argument("modules", nargs="+", help="Module paths to audit")
+    audit_p.add_argument(
+        "--test-dir", "-t", default="tests", help="Test directory (default: tests)"
+    )
+    audit_p.add_argument(
+        "--max-examples", type=int, default=20, help="Examples per function (default: 20)"
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "explore":
         return _cmd_explore(args)
     elif args.command == "replay":
         return _cmd_replay(args)
+    elif args.command == "audit":
+        return _cmd_audit(args)
     else:
         parser.print_help()
         return 0

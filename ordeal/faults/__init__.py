@@ -11,33 +11,62 @@ Three built-in fault types:
 
 from __future__ import annotations
 
+import copy
 import importlib
+import threading
 from abc import ABC, abstractmethod
 from typing import Any, Callable
 
+_LOCK_TYPE = type(threading.Lock())
+
 
 class Fault(ABC):
-    """Base class for all fault injections."""
+    """Base class for all fault injections.
+
+    Thread-safe for free-threaded Python 3.13+: the ``active`` flag
+    and activate/deactivate transitions are guarded by a lock.
+    """
 
     def __init__(self, name: str | None = None):
         self.name = name or self.__class__.__name__
-        self.active = False
+        self._active = False
+        self._state_lock = threading.Lock()
+
+    @property
+    def active(self) -> bool:
+        return self._active
 
     def activate(self) -> None:
         """Activate the fault injection if not already active."""
-        if not self.active:
+        with self._state_lock:
+            if self._active:
+                return
             self._do_activate()
-            self.active = True
+            self._active = True
 
     def deactivate(self) -> None:
         """Deactivate the fault injection if currently active."""
-        if self.active:
+        with self._state_lock:
+            if not self._active:
+                return
             self._do_deactivate()
-            self.active = False
+            self._active = False
 
     def reset(self) -> None:
         """Deactivate and clear any internal state."""
         self.deactivate()
+
+    def __deepcopy__(self, memo: dict) -> Fault:
+        """Deep-copy with fresh locks (locks can't be copied/pickled)."""
+        cls = self.__class__
+        result = cls.__new__(cls)
+        memo[id(self)] = result
+        for k, v in self.__dict__.items():
+            if isinstance(v, _LOCK_TYPE):
+                object.__setattr__(result, k, threading.Lock())
+            else:
+                object.__setattr__(result, k, copy.deepcopy(v, memo))
+        return result
 
     @abstractmethod
     def _do_activate(self) -> None:

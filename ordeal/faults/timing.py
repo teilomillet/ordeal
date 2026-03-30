@@ -10,6 +10,7 @@ faults = [
 from __future__ import annotations
 
 import functools
+import threading
 import time
 from typing import Any
 
@@ -75,13 +76,16 @@ class _IntermittentCrashFault(PatchFault):
         self._call_count = 0
         self._every_n = every_n
         self._error = error
+        self._counter_lock = threading.Lock()
 
         def wrapper(original):
             @functools.wraps(original)
             def crashing(*args: Any, **kwargs: Any) -> Any:
-                self._call_count += 1
-                if self._call_count % self._every_n == 0:
-                    raise self._error(f"Simulated crash in {target} (call #{self._call_count})")
+                with self._counter_lock:
+                    self._call_count += 1
+                    count = self._call_count
+                if count % self._every_n == 0:
+                    raise self._error(f"Simulated crash in {target} (call #{count})")
                 return original(*args, **kwargs)
 
             return crashing
@@ -89,7 +93,8 @@ class _IntermittentCrashFault(PatchFault):
         super().__init__(target, wrapper, name=f"intermittent_crash({target}, every {every_n})")
 
     def reset(self) -> None:
-        self._call_count = 0
+        with self._counter_lock:
+            self._call_count = 0
         super().reset()
 
 
@@ -108,15 +113,17 @@ class _JitterFault(PatchFault):
     def __init__(self, target: str, magnitude: float = 0.01) -> None:
         self._magnitude = magnitude
         self._counter = 0
+        self._counter_lock = threading.Lock()
 
         def wrapper(original):
             @functools.wraps(original)
             def jittered(*args: Any, **kwargs: Any) -> Any:
                 result = original(*args, **kwargs)
                 if isinstance(result, (int, float)):
-                    # Deterministic "jitter" based on call count
-                    self._counter += 1
-                    sign = 1 if self._counter % 2 == 0 else -1
+                    with self._counter_lock:
+                        self._counter += 1
+                        count = self._counter
+                    sign = 1 if count % 2 == 0 else -1
                     return result + sign * self._magnitude * abs(result or 1)
                 return result
 
@@ -125,7 +132,8 @@ class _JitterFault(PatchFault):
         super().__init__(target, wrapper, name=f"jitter({target}, {magnitude})")
 
     def reset(self) -> None:
-        self._counter = 0
+        with self._counter_lock:
+            self._counter = 0
         super().reset()
 
 

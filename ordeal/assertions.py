@@ -67,12 +67,26 @@ class Property:
 
 
 class PropertyTracker:
-    """Thread-safe accumulator for property assertion results."""
+    """Thread-safe accumulator for property assertion results.
+
+    All access to ``active`` and ``_properties`` is guarded by a lock,
+    making this safe for free-threaded Python 3.13+.
+    """
 
     def __init__(self) -> None:
         self._properties: dict[str, Property] = {}
         self._lock = threading.Lock()
-        self.active = False
+        self._active = False
+
+    @property
+    def active(self) -> bool:
+        with self._lock:
+            return self._active
+
+    @active.setter
+    def active(self, value: bool) -> None:
+        with self._lock:
+            self._active = value
 
     def reset(self) -> None:
         with self._lock:
@@ -85,9 +99,9 @@ class PropertyTracker:
         condition: bool,
         details: dict[str, Any] | None = None,
     ) -> None:
-        if not self.active:
-            return
         with self._lock:
+            if not self._active:
+                return
             if name not in self._properties:
                 self._properties[name] = Property(name=name, type=prop_type)
             p = self._properties[name]
@@ -100,9 +114,9 @@ class PropertyTracker:
                     p.first_failure_details = details
 
     def record_hit(self, name: str, prop_type: str) -> None:
-        if not self.active:
-            return
         with self._lock:
+            if not self._active:
+                return
             if name not in self._properties:
                 self._properties[name] = Property(name=name, type=prop_type)
             self._properties[name].hits += 1
@@ -110,12 +124,14 @@ class PropertyTracker:
     @property
     def results(self) -> list[Property]:
         """All tracked properties (both passed and failed)."""
-        return list(self._properties.values())
+        with self._lock:
+            return list(self._properties.values())
 
     @property
     def failures(self) -> list[Property]:
         """Only the properties that have not passed."""
-        return [p for p in self._properties.values() if not p.passed]
+        with self._lock:
+            return [p for p in self._properties.values() if not p.passed]
 
 
 # ---------------------------------------------------------------------------
@@ -131,8 +147,9 @@ def always(condition: bool, name: str, **details: Any) -> None:
     Raises ``AssertionError`` immediately on violation (triggers Hypothesis
     shrinking when used inside a ``ChaosTest``).
     """
+    # record() checks active internally under the lock
     tracker.record(name, "always", condition, details or None)
-    if tracker.active and not condition:
+    if not condition and tracker.active:
         msg = f"always violated: {name}"
         if details:
             msg += f" | {details}"

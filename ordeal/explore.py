@@ -27,6 +27,7 @@ import importlib
 import multiprocessing as mp
 import random
 import sys
+import threading
 import time as _time
 import warnings
 from dataclasses import dataclass, field
@@ -51,12 +52,16 @@ class CoverageCollector:
 
     Uses AFL-style edge hashing: ``hash(prev_location XOR cur_location)``.
     This captures control-flow *transitions*, not just line visits.
+
+    Thread-safe for free-threaded Python 3.13+: ``_prev_loc`` is per-thread
+    (each thread traces its own call stack), and ``_edges`` is lock-protected.
     """
 
     def __init__(self, target_paths: list[str]) -> None:
         self._targets = target_paths
         self._edges: set[int] = set()
-        self._prev_loc: int = 0
+        self._edges_lock = threading.Lock()
+        self._tls = threading.local()
 
     def _is_target(self, filename: str) -> bool:
         """Check if *filename* belongs to one of the target modules.
@@ -82,24 +87,29 @@ class CoverageCollector:
     def _trace(self, frame: Any, event: str, arg: Any) -> Any:
         if event == "line" and self._is_target(frame.f_code.co_filename):
             loc = hash((frame.f_code.co_filename, frame.f_lineno)) & 0xFFFF
-            self._edges.add(self._prev_loc ^ loc)
-            self._prev_loc = loc >> 1
+            prev = getattr(self._tls, "prev_loc", 0)
+            with self._edges_lock:
+                self._edges.add(prev ^ loc)
+            self._tls.prev_loc = loc >> 1
         return self._trace
 
     def start(self) -> None:
         """Reset state and begin collecting edge coverage via ``sys.settrace``."""
-        self._prev_loc = 0
-        self._edges.clear()
+        self._tls.prev_loc = 0
+        with self._edges_lock:
+            self._edges.clear()
         sys.settrace(self._trace)
 
     def stop(self) -> frozenset[int]:
         """Stop collection and return the set of observed edges."""
         sys.settrace(None)
-        return frozenset(self._edges)
+        with self._edges_lock:
+            return frozenset(self._edges)
 
     def snapshot(self) -> frozenset[int]:
         """Current edges without stopping collection."""
-        return frozenset(self._edges)
+        with self._edges_lock:
+            return frozenset(self._edges)
 
 
 # ============================================================================

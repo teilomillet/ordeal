@@ -115,9 +115,11 @@ These are the beliefs that shape ordeal's design:
 
 4. **Zero cost in production.** `buggify()` is a no-op. Assertions are inactive. Faults aren't registered. Ordeal adds nothing to your production binary.
 
-5. **The machine explores, the human decides.** You define what "correct" means. The machine finds violations. This separation is fundamental — it's why ordeal works for both humans and AI agents.
+5. **Thread-safe by design.** Every shared structure — the PropertyTracker, fault activation, coverage collection, call counters — is lock-guarded. Ordeal is safe for free-threaded Python 3.13+ (no-GIL) out of the box. You don't need to think about it.
 
-6. **Depth over breadth.** One thorough chaos test that explores 10,000 interleavings is worth more than 100 hand-written test cases that each check one scenario. Ordeal favors depth of exploration over volume of test code.
+6. **The machine explores, the human decides.** You define what "correct" means. The machine finds violations. This separation is fundamental — it's why ordeal works for both humans and AI agents.
+
+7. **Depth over breadth.** One thorough chaos test that explores 10,000 interleavings is worth more than 100 hand-written test cases that each check one scenario. Ordeal favors depth of exploration over volume of test code.
 
 ## What's next
 

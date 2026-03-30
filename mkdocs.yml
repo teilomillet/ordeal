@@ -34,15 +34,24 @@ extra:
 
 nav:
   - Home: index.md
+  - Philosophy: philosophy.md
   - Getting Started: getting-started.md
   - Core Concepts: core-concepts.md
+  - Concepts:
+      - Chaos Testing: concepts/chaos-testing.md
+      - Coverage Guidance: concepts/coverage-guidance.md
+      - Property Assertions: concepts/property-assertions.md
+      - Fault Injection: concepts/fault-injection.md
+      - Shrinking: concepts/shrinking.md
   - Guides:
-      - Auto: guides/auto.md
-      - Configuration: guides/configuration.md
+      - Writing Tests: guides/writing-tests.md
       - Explorer: guides/explorer.md
+      - Auto Testing: guides/auto.md
+      - Configuration: guides/configuration.md
       - CLI: guides/cli.md
       - Mutations: guides/mutations.md
       - Simulation: guides/simulate.md
       - Integrations: guides/integrations.md
   - Reference:
       - API: reference/api.md
+  - Troubleshooting: troubleshooting.md

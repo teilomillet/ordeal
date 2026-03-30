@@ -78,6 +78,8 @@ auto_configure(buggify_probability=0.2, seed=42)
 from ordeal import always, sometimes, reachable, unreachable
 ```
 
+**Thread safety:** The PropertyTracker is fully lock-guarded — safe for free-threaded Python 3.13+/3.14. All access to `active` and `_properties` is synchronized.
+
 ### always
 
 ```python
@@ -237,6 +239,8 @@ is_active() -> bool                              # check if enabled
 ```python
 from ordeal.faults import Fault, PatchFault, LambdaFault
 ```
+
+**Thread safety:** The `active` flag and activate/deactivate transitions are lock-guarded. `intermittent_crash` and `jitter` call counters are also lock-protected. Deep-copying faults creates fresh locks (for checkpoint serialization). Safe for free-threaded Python 3.13+.
 
 **Fault** (ABC):
 
@@ -1032,7 +1036,9 @@ mine(
 ) -> MineResult
 ```
 
-Discover likely properties of a function by running it many times with random inputs and observing patterns in outputs. Properties checked: type consistency, never None, no NaN, non-negative, bounded [0,1], never empty, deterministic, idempotent.
+Discover likely properties of a function by running it many times with random inputs and observing patterns in outputs.
+
+Properties checked: type consistency, never None, no NaN, non-negative, bounded [0,1], never empty, deterministic, idempotent, observed range, monotonicity (per numeric input parameter), and length relationships (`len(output) == len(input)`).
 
 ```python
 result = mine(myapp.scoring.compute, max_examples=500)

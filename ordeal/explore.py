@@ -57,9 +57,28 @@ class CoverageCollector:
         self._prev_loc: int = 0
 
     def _is_target(self, filename: str) -> bool:
-        # Normalize to forward slashes so target matching works on Windows
+        """Check if *filename* belongs to one of the target modules.
+
+        Uses path-segment matching so ``"app"`` matches ``app/foo.py``
+        but not ``myapp/foo.py``.  Handles both directory segments
+        and filename segments (stripping ``.py`` extension).
+        """
         normalized = filename.replace("\\", "/")
-        return any(t in normalized for t in self._targets)
+        # Build segments, stripping .py from the last one
+        segments = normalized.split("/")
+        bare_segments = [
+            s.removesuffix(".py") if s.endswith(".py") else s
+            for s in segments
+        ]
+        for target in self._targets:
+            # Convert dotted module path to slash-separated segments
+            target_parts = target.replace(".", "/").split("/")
+            n = len(target_parts)
+            # Check if target_parts appear as a contiguous subsequence
+            for i in range(len(bare_segments) - n + 1):
+                if bare_segments[i : i + n] == target_parts:
+                    return True
+        return False
 
     def _trace(self, frame: Any, event: str, arg: Any) -> Any:
         if event == "line" and self._is_target(frame.f_code.co_filename):

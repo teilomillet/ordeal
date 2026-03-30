@@ -72,3 +72,8 @@ line-length = 99
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
+
+[dependency-groups]
+dev = [
+    "numpy>=2.4.4",
+]

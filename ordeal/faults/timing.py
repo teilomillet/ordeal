@@ -33,18 +33,34 @@ def timeout(
     return PatchFault(target, wrapper, name=f"timeout({target}, {delay}s)")
 
 
-def slow(target: str, delay: float = 1.0) -> PatchFault:
-    """Add *delay* seconds to every call of *target*."""
+def slow(
+    target: str,
+    delay: float = 1.0,
+    mode: str = "simulate",
+) -> PatchFault:
+    """Add *delay* seconds to every call of *target*.
+
+    Args:
+        target: Dotted path to the function to slow down.
+        delay: Delay in seconds.
+        mode: ``"simulate"`` (default) records the delay without sleeping —
+            safe for Explorer and fast tests.  ``"real"`` calls
+            ``time.sleep(delay)`` for production fault injection.
+    """
+    if mode not in ("simulate", "real"):
+        raise ValueError(f"mode must be 'simulate' or 'real', got {mode!r}")
 
     def wrapper(original):
         @functools.wraps(original)
         def slowed(*args: Any, **kwargs: Any) -> Any:
-            time.sleep(delay)
+            if mode == "real":
+                time.sleep(delay)
+            # In simulate mode: no sleep, just call through
             return original(*args, **kwargs)
 
         return slowed
 
-    return PatchFault(target, wrapper, name=f"slow({target}, {delay}s)")
+    return PatchFault(target, wrapper, name=f"slow({target}, {delay}s, {mode})")
 
 
 class _IntermittentCrashFault(PatchFault):

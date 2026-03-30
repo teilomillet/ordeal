@@ -549,6 +549,7 @@ wheels = [
 
 [[package]]
 name = "ordeal"
+version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "hypothesis" },
@@ -572,6 +573,11 @@ dev = [
     { name = "ruff" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "numpy" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "atheris", marker = "extra == 'all'", specifier = ">=2.3.0" },
@@ -585,6 +591,9 @@ requires-dist = [
     { name = "schemathesis", marker = "extra == 'api'", specifier = ">=3.30.0" },
 ]
 provides-extras = ["atheris", "api", "all", "dev"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "numpy", specifier = ">=2.4.4" }]
 
 [[package]]
 name = "packaging"

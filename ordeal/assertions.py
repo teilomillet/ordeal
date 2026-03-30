@@ -14,6 +14,7 @@ In testing, they accumulate results and raise on violation (always/unreachable).
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -139,6 +140,9 @@ def sometimes(condition: bool, name: str, **details: Any) -> None:
     Never raises — checked at the end of the test session via the property
     report.  Use to verify that interesting situations actually occur during
     chaos testing.
+
+    For a simpler, standalone version that doesn't require tracker setup,
+    use :func:`check_sometimes` instead.
     """
     tracker.record(name, "sometimes", condition, details or None)
 
@@ -146,6 +150,31 @@ def sometimes(condition: bool, name: str, **details: Any) -> None:
 def reachable(name: str, **details: Any) -> None:
     """Assert this code path executes at least once during the run."""
     tracker.record_hit(name, "reachable")
+
+
+def check_sometimes(
+    fn: Callable[[], bool],
+    name: str,
+    attempts: int = 200,
+) -> None:
+    """Assert *fn* returns ``True`` at least once in *attempts* calls.
+
+    Simple, standalone — no tracker, no setup, no deferred checking.
+    Raises immediately if the predicate never fires.  Use this to detect
+    dead code paths and broken features::
+
+        check_sometimes(
+            lambda: score_text("hack exploit") != [],
+            "taxonomy detects harm keywords",
+        )
+    """
+    for _ in range(attempts):
+        if fn():
+            return
+    msg = (
+        f"'sometimes' never fired in {attempts} attempts: {name}"
+    )
+    raise AssertionError(msg)
 
 
 def unreachable(name: str, **details: Any) -> None:

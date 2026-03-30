@@ -19,6 +19,10 @@ Inline fault injection (FoundationDB-style)::
     if buggify():
         inject_chaos()
 
+Metamorphic relation testing::
+
+    from ordeal.metamorphic import Relation, metamorphic
+
 Mutation testing::
 
     from ordeal.mutations import mutate_function_and_test
@@ -44,7 +48,7 @@ from hypothesis.stateful import (
     rule,
 )
 
-from ordeal.assertions import always, reachable, sometimes, unreachable
+from ordeal.assertions import always, check_sometimes, reachable, sometimes, unreachable
 from ordeal.buggify import buggify, buggify_value
 from ordeal.chaos import ChaosTest
 
@@ -59,6 +63,7 @@ __all__ = [
     # Assertions
     "always",
     "sometimes",
+    "check_sometimes",
     "reachable",
     "unreachable",
     # Buggify

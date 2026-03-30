@@ -258,11 +258,113 @@ class _ReturnNoneCounter(_Counter):
             self.count += 1
 
 
+class _BoundaryApplicator(_Applicator):
+    """Mutate integer constants: ``n`` -> ``n + 1`` (off-by-one)."""
+
+    def visit_Constant(self, node: ast.Constant) -> ast.AST:
+        self.generic_visit(node)
+        if isinstance(node.value, int) and not isinstance(node.value, bool) and not self.applied:
+            if self.current_idx == self.target_idx:
+                node = copy.deepcopy(node)
+                original = node.value
+                node.value = original + 1
+                self.description = f"{original} -> {original + 1}"
+                self.line = node.lineno
+                self.col = node.col_offset
+                self.applied = True
+            self.current_idx += 1
+        return node
+
+
+class _BoundaryCounter(_Counter):
+    def visit_Constant(self, node: ast.Constant) -> None:
+        self.generic_visit(node)
+        if isinstance(node.value, int) and not isinstance(node.value, bool):
+            self.count += 1
+
+
+class _ConstantApplicator(_Applicator):
+    """Replace numeric constants with 0, 1, or -1."""
+
+    REPLACEMENTS = [0, 1, -1]
+
+    def visit_Constant(self, node: ast.Constant) -> ast.AST:
+        self.generic_visit(node)
+        if isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+            if not self.applied:
+                if self.current_idx == self.target_idx:
+                    node = copy.deepcopy(node)
+                    original = node.value
+                    for replacement in self.REPLACEMENTS:
+                        if replacement != original:
+                            node.value = replacement
+                            break
+                    self.description = f"{original} -> {node.value}"
+                    self.line = node.lineno
+                    self.col = node.col_offset
+                    self.applied = True
+                self.current_idx += 1
+        return node
+
+
+class _ConstantCounter(_Counter):
+    def visit_Constant(self, node: ast.Constant) -> None:
+        self.generic_visit(node)
+        if isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+            self.count += 1
+
+
+class _DeleteStatementApplicator(_Applicator):
+    """Replace a statement with ``pass``."""
+
+    def _try_delete(self, node: ast.AST) -> ast.AST:
+        if not self.applied:
+            if self.current_idx == self.target_idx:
+                pass_node = ast.Pass()
+                ast.copy_location(node, pass_node)
+                self.description = "delete statement"
+                self.line = getattr(node, "lineno", 0)
+                self.col = getattr(node, "col_offset", 0)
+                self.applied = True
+                return pass_node
+            self.current_idx += 1
+        return node
+
+    def visit_Assign(self, node: ast.Assign) -> ast.AST:
+        self.generic_visit(node)
+        return self._try_delete(node)
+
+    def visit_Expr(self, node: ast.Expr) -> ast.AST:
+        self.generic_visit(node)
+        return self._try_delete(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> ast.AST:
+        self.generic_visit(node)
+        return self._try_delete(node)
+
+
+class _DeleteStatementCounter(_Counter):
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self.generic_visit(node)
+        self.count += 1
+
+    def visit_Expr(self, node: ast.Expr) -> None:
+        self.generic_visit(node)
+        self.count += 1
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self.generic_visit(node)
+        self.count += 1
+
+
 OPERATORS: dict[str, tuple[type[_Counter], type[_Applicator]]] = {
     "arithmetic": (_ArithmeticCounter, _ArithmeticApplicator),
     "comparison": (_ComparisonCounter, _ComparisonApplicator),
     "negate": (_NegateCounter, _NegateApplicator),
     "return_none": (_ReturnNoneCounter, _ReturnNoneApplicator),
+    "boundary": (_BoundaryCounter, _BoundaryApplicator),
+    "constant": (_ConstantCounter, _ConstantApplicator),
+    "delete_statement": (_DeleteStatementCounter, _DeleteStatementApplicator),
 }
 
 

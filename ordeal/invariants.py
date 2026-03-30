@@ -177,3 +177,200 @@ def non_empty() -> Invariant:
             raise AssertionError(f"Invariant '{name}' violated: value is empty")
 
     return Invariant("non_empty", check)
+
+
+# ---------------------------------------------------------------------------
+# Tensor / array invariants (numpy-guarded)
+# ---------------------------------------------------------------------------
+
+
+def _to_numpy(value: Any) -> Any:
+    """Convert array-like to numpy, if possible."""
+    try:
+        import numpy as np
+
+        if isinstance(value, np.ndarray):
+            return value
+        if hasattr(value, "__array__"):
+            return value.__array__()
+        return np.asarray(value)
+    except (ImportError, TypeError, ValueError):
+        return None
+
+
+def unit_normalized(*, tol: float = 1e-6) -> Invariant:
+    """Each row vector has L2 norm within *tol* of 1.0.
+
+    For 1-D arrays, checks the single vector norm.
+    For 2-D arrays, checks each row independently.
+    """
+
+    def check(value: Any, name: str = "unit_normalized") -> None:
+        arr = _to_numpy(value)
+        if arr is None:
+            raise AssertionError(f"Invariant '{name}': cannot convert to array")
+        import numpy as np
+
+        if arr.ndim == 1:
+            norm = float(np.linalg.norm(arr))
+            if abs(norm - 1.0) > tol:
+                raise AssertionError(
+                    f"Invariant '{name}' violated: norm={norm:.8f}, expected ~1.0"
+                )
+        elif arr.ndim == 2:
+            norms = np.linalg.norm(arr, axis=1)
+            for i, n in enumerate(norms):
+                if abs(n - 1.0) > tol:
+                    raise AssertionError(
+                        f"Invariant '{name}' violated: row {i} norm={n:.8f}, expected ~1.0"
+                    )
+        else:
+            raise AssertionError(f"Invariant '{name}': expected 1-D or 2-D array, got {arr.ndim}-D")
+
+    return Invariant("unit_normalized", check)
+
+
+def orthonormal(*, tol: float = 1e-6) -> Invariant:
+    """Rows of a 2-D array form an orthonormal set.
+
+    Checks that ``M @ M.T`` is close to the identity matrix.
+    """
+
+    def check(value: Any, name: str = "orthonormal") -> None:
+        arr = _to_numpy(value)
+        if arr is None:
+            raise AssertionError(f"Invariant '{name}': cannot convert to array")
+        import numpy as np
+
+        if arr.ndim != 2:
+            raise AssertionError(f"Invariant '{name}': expected 2-D array, got {arr.ndim}-D")
+        gram = arr @ arr.T
+        identity = np.eye(gram.shape[0])
+        max_err = float(np.max(np.abs(gram - identity)))
+        if max_err > tol:
+            raise AssertionError(
+                f"Invariant '{name}' violated: max |G - I| = {max_err:.8f} > {tol}"
+            )
+
+    return Invariant("orthonormal", check)
+
+
+def symmetric(*, tol: float = 1e-6) -> Invariant:
+    """2-D array is symmetric: ``M == M.T`` within tolerance."""
+
+    def check(value: Any, name: str = "symmetric") -> None:
+        arr = _to_numpy(value)
+        if arr is None:
+            raise AssertionError(f"Invariant '{name}': cannot convert to array")
+        import numpy as np
+
+        if arr.ndim != 2 or arr.shape[0] != arr.shape[1]:
+            raise AssertionError(
+                f"Invariant '{name}': expected square 2-D array, got shape {arr.shape}"
+            )
+        max_err = float(np.max(np.abs(arr - arr.T)))
+        if max_err > tol:
+            raise AssertionError(
+                f"Invariant '{name}' violated: max |M - M.T| = {max_err:.8f} > {tol}"
+            )
+
+    return Invariant("symmetric", check)
+
+
+def positive_semi_definite(*, tol: float = 1e-6) -> Invariant:
+    """All eigenvalues of a square matrix are >= -tol."""
+
+    def check(value: Any, name: str = "positive_semi_definite") -> None:
+        arr = _to_numpy(value)
+        if arr is None:
+            raise AssertionError(f"Invariant '{name}': cannot convert to array")
+        import numpy as np
+
+        if arr.ndim != 2 or arr.shape[0] != arr.shape[1]:
+            raise AssertionError(
+                f"Invariant '{name}': expected square 2-D array, got shape {arr.shape}"
+            )
+        eigenvalues = np.linalg.eigvalsh(arr)
+        min_eig = float(np.min(eigenvalues))
+        if min_eig < -tol:
+            raise AssertionError(
+                f"Invariant '{name}' violated: min eigenvalue = {min_eig:.8f}"
+            )
+
+    return Invariant("positive_semi_definite", check)
+
+
+def rank_bounded(min_rank: int = 0, max_rank: int | None = None) -> Invariant:
+    """Matrix rank is within [min_rank, max_rank]."""
+
+    label = f"rank_bounded({min_rank}, {max_rank})"
+
+    def check(value: Any, name: str = label) -> None:
+        arr = _to_numpy(value)
+        if arr is None:
+            raise AssertionError(f"Invariant '{name}': cannot convert to array")
+        import numpy as np
+
+        r = int(np.linalg.matrix_rank(arr))
+        if r < min_rank:
+            raise AssertionError(
+                f"Invariant '{name}' violated: rank={r} < min_rank={min_rank}"
+            )
+        if max_rank is not None and r > max_rank:
+            raise AssertionError(
+                f"Invariant '{name}' violated: rank={r} > max_rank={max_rank}"
+            )
+
+    return Invariant(label, check)
+
+
+# ---------------------------------------------------------------------------
+# Statistical invariants
+# ---------------------------------------------------------------------------
+
+
+def mean_bounded(lo: float, hi: float) -> Invariant:
+    """Mean of a numeric sequence must be in [lo, hi]."""
+    label = f"mean_bounded({lo}, {hi})"
+
+    def check(value: Any, name: str = label) -> None:
+        arr = _to_numpy(value)
+        if arr is not None:
+            import numpy as np
+
+            m = float(np.mean(arr))
+        else:
+            seq = list(value)
+            if not seq:
+                raise AssertionError(f"Invariant '{name}': empty sequence")
+            m = sum(seq) / len(seq)
+        if not (lo <= m <= hi):
+            raise AssertionError(
+                f"Invariant '{name}' violated: mean={m:.6f} not in [{lo}, {hi}]"
+            )
+
+    return Invariant(label, check)
+
+
+def variance_bounded(lo: float, hi: float) -> Invariant:
+    """Variance of a numeric sequence must be in [lo, hi]."""
+    label = f"variance_bounded({lo}, {hi})"
+
+    def check(value: Any, name: str = label) -> None:
+        arr = _to_numpy(value)
+        if arr is not None:
+            import numpy as np
+
+            v = float(np.var(arr))
+        else:
+            seq = list(value)
+            if not seq:
+                raise AssertionError(f"Invariant '{name}': empty sequence")
+            m = sum(seq) / len(seq)
+            v = sum((x - m) ** 2 for x in seq) / len(seq)
+        if not (lo <= v <= hi):
+            raise AssertionError(
+                f"Invariant '{name}' violated: variance={v:.6f} not in [{lo}, {hi}]"
+            )
+
+    return Invariant(label, check)

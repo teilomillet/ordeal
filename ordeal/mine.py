@@ -64,6 +64,7 @@ STRUCTURAL_LIMITATIONS: list[str] = [
     "performance and resource usage",
     "concurrency and thread safety",
     "state mutation and side effects",
+    "higher-arity algebraic laws (checked for 2-param functions only)",
 ]
 """Things mine() fundamentally cannot discover from random sampling.
 
@@ -363,6 +364,71 @@ def _check_length_relationship(
     return results
 
 
+def _check_commutative(
+    fn: Callable[..., Any],
+    inputs: list[dict[str, Any]],
+    outputs: list[Any],
+) -> MinedProperty:
+    """Check if f(a, b) == f(b, a) for 2-parameter functions."""
+    import inspect
+
+    sig = inspect.signature(fn)
+    params = [n for n in sig.parameters if n not in ("self", "cls")]
+    if len(params) != 2:
+        return MinedProperty("commutative", 0, 0)
+
+    a_name, b_name = params
+    total = 0
+    holds = 0
+    for kwargs, out in zip(inputs[:50], outputs[:50]):
+        try:
+            swapped = {a_name: kwargs[b_name], b_name: kwargs[a_name]}
+            out_swapped = fn(**swapped)
+            total += 1
+            if out == out_swapped:
+                holds += 1
+        except Exception:
+            pass
+    if total == 0:
+        return MinedProperty("commutative", 0, 0)
+    return MinedProperty("commutative", holds, total)
+
+
+def _check_associative(
+    fn: Callable[..., Any],
+    inputs: list[dict[str, Any]],
+) -> MinedProperty:
+    """Check if f(a, f(b, c)) == f(f(a, b), c) for 2-parameter functions."""
+    import inspect
+
+    sig = inspect.signature(fn)
+    params = [n for n in sig.parameters if n not in ("self", "cls")]
+    if len(params) != 2:
+        return MinedProperty("associative", 0, 0)
+
+    a_name, b_name = params
+    total = 0
+    holds = 0
+    # Take triples of values from the first parameter
+    for i in range(0, min(len(inputs) - 2, 30), 3):
+        a = inputs[i][a_name]
+        b = inputs[i + 1][a_name]
+        c = inputs[i + 2][a_name]
+        try:
+            bc = fn(**{a_name: b, b_name: c})
+            left = fn(**{a_name: a, b_name: bc})
+            ab = fn(**{a_name: a, b_name: b})
+            right = fn(**{a_name: ab, b_name: c})
+            total += 1
+            if left == right:
+                holds += 1
+        except Exception:
+            pass
+    if total == 0:
+        return MinedProperty("associative", 0, 0)
+    return MinedProperty("associative", holds, total)
+
+
 # ============================================================================
 # Main entry point
 # ============================================================================
@@ -438,6 +504,8 @@ def mine(
     ]
     all_props.extend(_check_monotonic(inputs, outputs))
     all_props.extend(_check_length_relationship(inputs, outputs))
+    all_props.append(_check_commutative(fn, inputs, outputs))
+    all_props.append(_check_associative(fn, inputs))
 
     # Separate applicable (total > 0) from not-applicable (total == 0)
     props = [p for p in all_props if p.total > 0]

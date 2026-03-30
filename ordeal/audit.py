@@ -676,25 +676,109 @@ def _suggest_tests(
 # ============================================================================
 
 
+def _type_repr(tp: type) -> str:
+    """Best-effort render of a type annotation for code generation."""
+    if tp is type(None):
+        return "None"
+    if hasattr(tp, "__name__") and not hasattr(tp, "__args__"):
+        return tp.__name__
+    s = str(tp)
+    for prefix in ("typing.", "collections.abc."):
+        s = s.replace(prefix, "")
+    return s
+
+
+def _func_sig_for_codegen(
+    func: object,
+) -> tuple[list[str], list[str], str] | None:
+    """Extract param info for generated ``@quickcheck`` test, or *None*.
+
+    Returns ``(param_names, param_decls_with_types, call_args_str)``
+    only when every required parameter has a renderable type hint.
+    """
+    import inspect
+    from typing import get_type_hints
+
+    try:
+        hints = get_type_hints(func)
+    except Exception:
+        return None
+
+    sig = inspect.signature(func)
+    names: list[str] = []
+    decls: list[str] = []
+    for pname, param in sig.parameters.items():
+        if pname in ("self", "cls"):
+            continue
+        if param.default is not inspect.Parameter.empty:
+            continue
+        if pname not in hints:
+            return None
+        type_str = _type_repr(hints[pname])
+        if "." in type_str:
+            return None  # needs an import we can't safely generate
+        names.append(pname)
+        decls.append(f"{pname}: {type_str}")
+
+    return (names, decls, ", ".join(names)) if names else None
+
+
+def _property_to_assertion(
+    prop_name: str,
+    module: str,
+    func_name: str,
+    param_names: list[str],
+) -> str | None:
+    """Map a mined property name to an assertion line, or *None*."""
+    call = f"{module}.{func_name}"
+
+    if prop_name == "never None":
+        return "assert result is not None"
+    if prop_name.startswith("output type is "):
+        tp = prop_name.removeprefix("output type is ")
+        return f"assert type(result).__name__ == {tp!r}"
+    if prop_name == "no NaN":
+        return "assert not (isinstance(result, float) and math.isnan(result))"
+    if prop_name == "output >= 0":
+        return "assert result >= 0"
+    if prop_name == "output in [0, 1]":
+        return "assert 0 <= result <= 1"
+    if prop_name == "never empty":
+        return "assert len(result) > 0"
+    if prop_name == "deterministic":
+        return f"assert {call}({', '.join(param_names)}) == result"
+    if prop_name == "idempotent":
+        if len(param_names) == 1:
+            return f"assert {call}(result) == result"
+        if len(param_names) >= 2:
+            rest = ", ".join(param_names[1:])
+            return f"assert {call}(result, {rest}) == result"
+    if prop_name == "commutative" and len(param_names) == 2:
+        return f"assert {call}({param_names[1]}, {param_names[0]}) == result"
+    for op in ("==", "<=", ">="):
+        prefix = f"len(output) {op} len("
+        if prop_name.startswith(prefix):
+            param = prop_name.removeprefix(prefix).rstrip(")")
+            if param in param_names:
+                return f"assert len(result) {op} len({param})"
+
+    return None
+
+
 def _generate_migrated_test(
     module: str,
     max_examples: int,
     warnings: list[str],
 ) -> tuple[str, int, list[str]]:
-    """Generate a consolidated test file: ordeal fuzz + mined properties.
+    """Generate a consolidated test file: ordeal fuzz + mined property assertions.
 
     Returns ``(source_code, test_count, skipped_functions)``.
 
-    The generated file is the test a developer would write after migration:
-    ``fuzz()`` for crash safety, plus comments describing mined properties
-    with Wilson confidence intervals.
+    The generated file has two layers per function:
 
-    **What fuzz() covers:** crash safety only.  It verifies the function
-    doesn't raise exceptions on random inputs.  It does NOT verify the
-    function returns the correct answer.
-
-    **What mine() adds:** property descriptions as comments.  These are
-    informational — the generated test doesn't assert them.
+    - ``fuzz()`` test — crash safety (does NOT verify correctness).
+    - ``@quickcheck`` test — asserts mined properties with random inputs.
+      Falls back to informational comments when type hints are missing.
 
     Args:
         module: Dotted module path.
@@ -702,17 +786,21 @@ def _generate_migrated_test(
         warnings: Mutable list — mining failures are appended here.
     """
     mod = _resolve_module(module)
-    lines = [
+
+    base_imports = [
+        "from ordeal.auto import fuzz",
+        f"import {module}",
+    ]
+    extra_imports: set[str] = set()
+
+    header = [
         f'"""Auto-generated ordeal test for {module}.',
         "",
         "fuzz() tests crash safety only — it does NOT verify correctness.",
-        "Mined properties are informational (stated with confidence bounds).",
+        "Property tests assert mined invariants (confirmed by sampling).",
         '"""',
-        "",
-        "from ordeal.auto import fuzz",
-        f"import {module}",
-        "",
     ]
+    body: list[str] = []
 
     scannable = []
     skipped = []
@@ -726,13 +814,13 @@ def _generate_migrated_test(
     test_count = 0
     for name, _func in scannable:
         test_count += 1
-        lines.append(f"def test_{name}_no_crash():")
-        lines.append(f'    """Crash safety: {module}.{name} does not raise."""')
-        lines.append(f"    result = fuzz({module}.{name}, max_examples={max_examples})")
-        lines.append("    assert result.passed, result.summary()")
-        lines.append("")
+        body.append(f"def test_{name}_no_crash():")
+        body.append(f'    """Crash safety: {module}.{name} does not raise."""')
+        body.append(f"    result = fuzz({module}.{name}, max_examples={max_examples})")
+        body.append("    assert result.passed, result.summary()")
+        body.append("")
 
-    # Mine properties and add as comments (NOT assertions)
+    # Mine properties and generate assertion tests
     mine_cap = min(max_examples, MINE_EXAMPLES_FOR_GENERATED_TEST)
     for name, func in scannable:
         try:
@@ -749,19 +837,59 @@ def _generate_migrated_test(
         if not strong:
             continue
 
+        sig_info = _func_sig_for_codegen(func)
+
+        if sig_info:
+            param_names, param_decls, call_args = sig_info
+            assertions = [
+                (p, _property_to_assertion(p.name, module, name, param_names))
+                for p in strong
+            ]
+            has_any = any(a for _, a in assertions)
+        else:
+            has_any = False
+
         test_count += 1
-        lines.append(f"def test_{name}_properties():")
-        lines.append(f'    """Mined properties for {module}.{name}."""')
 
-        for prop in strong:
-            lower = wilson_lower(prop.holds, prop.total)
-            lines.append(f"    # {prop.name}: {prop.holds}/{prop.total} (>={lower:.1%} at 95% CI)")
+        if has_any:
+            extra_imports.add("from ordeal.quickcheck import quickcheck")
+            if any(a and "math." in a for _, a in assertions):
+                extra_imports.add("import math")
 
-        lines.append(f"    result = fuzz({module}.{name}, max_examples={max_examples})")
-        lines.append("    assert result.passed")
-        lines.append("")
+            body.append("@quickcheck")
+            body.append(f"def test_{name}_properties({', '.join(param_decls)}):")
+            body.append(f'    """Mined properties for {module}.{name}."""')
+            body.append(f"    result = {module}.{name}({call_args})")
 
-    return "\n".join(lines), test_count, skipped
+            for prop, assertion in assertions:
+                lower = wilson_lower(prop.holds, prop.total)
+                ci = f">={lower:.1%} CI"
+                if assertion:
+                    body.append(f"    {assertion}  # {ci}")
+                else:
+                    body.append(
+                        f"    # {prop.name}: {prop.holds}/{prop.total} ({ci})"
+                    )
+            body.append("")
+        else:
+            # Fallback: comment-only (no type hints or no expressible assertions)
+            body.append(f"def test_{name}_properties():")
+            body.append(f'    """Mined properties for {module}.{name}."""')
+            for prop in strong:
+                lower = wilson_lower(prop.holds, prop.total)
+                body.append(
+                    f"    # {prop.name}: {prop.holds}/{prop.total}"
+                    f" (>={lower:.1%} at 95% CI)"
+                )
+            body.append(
+                f"    result = fuzz({module}.{name}, max_examples={max_examples})"
+            )
+            body.append("    assert result.passed")
+            body.append("")
+
+    all_imports = base_imports + sorted(extra_imports)
+    full = header + [""] + all_imports + ["", ""] + body
+    return "\n".join(full), test_count, skipped
 
 
 # ============================================================================

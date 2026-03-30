@@ -6,6 +6,8 @@ from hypothesis import settings as hsettings
 from ordeal import ChaosTest, always, invariant, rule
 from ordeal.assertions import tracker
 from ordeal.mine import (
+    _check_associative,
+    _check_commutative,
     _check_length_relationship,
     _check_monotonic,
     _check_observed_bounds,
@@ -53,6 +55,14 @@ def sort_list(xs: list[int]) -> list[int]:
 
 def first_half(xs: list[int]) -> list[int]:
     return xs[: len(xs) // 2]
+
+
+def add(a: int, b: int) -> int:
+    return a + b
+
+
+def subtract(a: int, b: int) -> int:
+    return a - b
 
 
 class TestMine:
@@ -168,6 +178,30 @@ class TestMine:
         )
         assert length is not None
         assert length.universal
+
+    def test_discovers_commutativity(self):
+        result = mine(add, max_examples=100)
+        comm = next((p for p in result.properties if p.name == "commutative"), None)
+        assert comm is not None
+        assert comm.universal
+
+    def test_discovers_non_commutativity(self):
+        result = mine(subtract, max_examples=100)
+        comm = next((p for p in result.properties if p.name == "commutative"), None)
+        assert comm is not None
+        assert not comm.universal
+
+    def test_discovers_associativity(self):
+        result = mine(add, max_examples=100)
+        assoc = next((p for p in result.properties if p.name == "associative"), None)
+        assert assoc is not None
+        assert assoc.universal
+
+    def test_discovers_non_associativity(self):
+        result = mine(subtract, max_examples=100)
+        assoc = next((p for p in result.properties if p.name == "associative"), None)
+        if assoc is not None:
+            assert not assoc.universal
 
 
 # ============================================================================
@@ -312,3 +346,65 @@ def test_always_observed_bounds():
         assert result.failures == 0
     finally:
         tracker.active = False
+
+
+@quickcheck
+def test_qc_commutative_add(a: int, b: int):
+    """Addition is commutative — checker must agree."""
+    _add = lambda a, b: a + b  # noqa: E731
+    prop = _check_commutative(_add, [{"a": a, "b": b}], [a + b])
+    if prop.total > 0:
+        assert prop.universal
+
+
+@quickcheck
+def test_qc_associative_add(a: int, b: int, c: int):
+    """Addition is associative — checker must agree."""
+    _add = lambda a, b: a + b  # noqa: E731
+    inputs = [{"a": a, "b": b}, {"a": b, "b": c}, {"a": c, "b": a}]
+    prop = _check_associative(_add, inputs)
+    if prop.total > 0:
+        assert prop.universal
+
+
+class RelationalBattle(ChaosTest):
+    """Relational checkers stay consistent under diverse 2-param data."""
+
+    faults = []
+
+    def __init__(self):
+        super().__init__()
+        self._add = lambda a, b: a + b  # noqa: E731
+        self.inputs: list[dict[str, int]] = []
+        self.outputs: list[int] = []
+
+    @rule(
+        a=st.integers(min_value=-100, max_value=100),
+        b=st.integers(min_value=-100, max_value=100),
+    )
+    def add_pair(self, a, b):
+        self.inputs.append({"a": a, "b": b})
+        self.outputs.append(a + b)
+
+    @invariant()
+    def commutative_holds(self):
+        prop = _check_commutative(self._add, self.inputs, self.outputs)
+        if prop.total > 0:
+            assert prop.universal
+            assert prop.holds <= prop.total
+
+    @invariant()
+    def associative_holds(self):
+        prop = _check_associative(self._add, self.inputs)
+        if prop.total > 0:
+            assert prop.universal
+            assert prop.holds <= prop.total
+
+    def teardown(self):
+        self.inputs.clear()
+        self.outputs.clear()
+        super().teardown()
+
+
+TestRelationalBattle = RelationalBattle.TestCase
+TestRelationalBattle.settings = hsettings(max_examples=50, stateful_step_count=20)

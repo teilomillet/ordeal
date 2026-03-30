@@ -291,26 +291,16 @@ def _suggest_tests(
         # Describe what to test
         if "if " in line_text or "elif " in line_text:
             condition = line_text.split("if ", 1)[-1].rstrip(":")
-            suggestions.append(
-                f"L{first} in {func_name}(): test when {condition}"
-            )
+            suggestions.append(f"L{first} in {func_name}(): test when {condition}")
         elif "return " in line_text:
-            suggestions.append(
-                f"L{first} in {func_name}(): test input that triggers this return"
-            )
+            suggestions.append(f"L{first} in {func_name}(): test input that triggers this return")
         elif "raise " in line_text:
             exc = line_text.split("raise ", 1)[-1].split("(")[0]
-            suggestions.append(
-                f"L{first} in {func_name}(): test that {exc} is raised"
-            )
+            suggestions.append(f"L{first} in {func_name}(): test that {exc} is raised")
         elif "for " in line_text:
-            suggestions.append(
-                f"L{first} in {func_name}(): test with non-empty input for loop"
-            )
+            suggestions.append(f"L{first} in {func_name}(): test with non-empty input for loop")
         else:
-            suggestions.append(
-                f"L{first} in {func_name}(): cover '{line_text[:60]}'"
-            )
+            suggestions.append(f"L{first} in {func_name}(): cover '{line_text[:60]}'")
 
     return suggestions
 

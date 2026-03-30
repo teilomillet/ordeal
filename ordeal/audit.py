@@ -842,8 +842,7 @@ def _generate_migrated_test(
         if sig_info:
             param_names, param_decls, call_args = sig_info
             assertions = [
-                (p, _property_to_assertion(p.name, module, name, param_names))
-                for p in strong
+                (p, _property_to_assertion(p.name, module, name, param_names)) for p in strong
             ]
             has_any = any(a for _, a in assertions)
         else:
@@ -867,9 +866,7 @@ def _generate_migrated_test(
                 if assertion:
                     body.append(f"    {assertion}  # {ci}")
                 else:
-                    body.append(
-                        f"    # {prop.name}: {prop.holds}/{prop.total} ({ci})"
-                    )
+                    body.append(f"    # {prop.name}: {prop.holds}/{prop.total} ({ci})")
             body.append("")
         else:
             # Fallback: comment-only (no type hints or no expressible assertions)
@@ -878,12 +875,9 @@ def _generate_migrated_test(
             for prop in strong:
                 lower = wilson_lower(prop.holds, prop.total)
                 body.append(
-                    f"    # {prop.name}: {prop.holds}/{prop.total}"
-                    f" (>={lower:.1%} at 95% CI)"
+                    f"    # {prop.name}: {prop.holds}/{prop.total} (>={lower:.1%} at 95% CI)"
                 )
-            body.append(
-                f"    result = fuzz({module}.{name}, max_examples={max_examples})"
-            )
+            body.append(f"    result = fuzz({module}.{name}, max_examples={max_examples})")
             body.append("    assert result.passed")
             body.append("")
 

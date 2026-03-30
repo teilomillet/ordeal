@@ -446,7 +446,9 @@ def _measure_coverage(
 
     # Write coverage JSON to a temp file
     with tempfile.NamedTemporaryFile(
-        suffix=".json", prefix="ordeal_cov_", delete=False,
+        suffix=".json",
+        prefix="ordeal_cov_",
+        delete=False,
     ) as tmp:
         json_path = Path(tmp.name)
 
@@ -456,19 +458,21 @@ def _measure_coverage(
     # Why: conftest.py in the project's test/ directory may import
     # project-specific modules that fail when run from a different context.
     # For generated files, we bypass conftest with --override-ini.
-    in_project = any(
-        str(f).startswith(cwd) and "/.ordeal/" not in str(f)
-        for f in test_files
-    )
+    in_project = any(str(f).startswith(cwd) and "/.ordeal/" not in str(f) for f in test_files)
 
     cmd = [
-        sys.executable, "-m", "pytest",
+        sys.executable,
+        "-m",
+        "pytest",
         *[str(f) for f in test_files],
         f"--cov={module_name}",
         f"--cov-report=json:{json_path}",
         "--cov-report=",  # suppress terminal output
-        "-q", "--tb=no", "--no-header",
-        "-p", "no:ordeal",
+        "-q",
+        "--tb=no",
+        "--no-header",
+        "-p",
+        "no:ordeal",
     ]
 
     if not in_project:
@@ -510,7 +514,8 @@ def _measure_coverage(
     except json.JSONDecodeError as exc:
         json_path.unlink(missing_ok=True)
         return CoverageMeasurement(
-            Status.FAILED, error=f"invalid JSON: {exc}",
+            Status.FAILED,
+            error=f"invalid JSON: {exc}",
         )
     finally:
         json_path.unlink(missing_ok=True)
@@ -644,16 +649,12 @@ def _suggest_tests(
             condition = line_text.split("if ", 1)[-1].rstrip(":")
             suggestions.append(f"L{first} in {func_name}(): test when {condition}")
         elif "return " in line_text:
-            suggestions.append(
-                f"L{first} in {func_name}(): test input that triggers this return"
-            )
+            suggestions.append(f"L{first} in {func_name}(): test input that triggers this return")
         elif "raise " in line_text:
             exc_type = line_text.split("raise ", 1)[-1].split("(")[0]
             suggestions.append(f"L{first} in {func_name}(): test that {exc_type} is raised")
         elif "for " in line_text:
-            suggestions.append(
-                f"L{first} in {func_name}(): test with non-empty input for loop"
-            )
+            suggestions.append(f"L{first} in {func_name}(): test with non-empty input for loop")
         else:
             suggestions.append(
                 f"L{first} in {func_name}(): cover '{line_text[:SOURCE_TRUNCATION]}'"
@@ -733,7 +734,8 @@ def _generate_migrated_test(
             continue
 
         strong = [
-            p for p in mine_result.properties
+            p
+            for p in mine_result.properties
             if p.universal and p.total >= MIN_SAMPLES_FOR_PROPERTY
         ]
         if not strong:
@@ -745,10 +747,7 @@ def _generate_migrated_test(
 
         for prop in strong:
             lower = wilson_lower(prop.holds, prop.total)
-            lines.append(
-                f"    # {prop.name}: {prop.holds}/{prop.total} "
-                f"(>={lower:.1%} at 95% CI)"
-            )
+            lines.append(f"    # {prop.name}: {prop.holds}/{prop.total} (>={lower:.1%} at 95% CI)")
 
         lines.append(f"    result = fuzz({module}.{name}, max_examples={max_examples})")
         lines.append("    assert result.passed")
@@ -846,7 +845,8 @@ def audit(
         result.current_coverage = _measure_coverage(test_files, module)
     else:
         result.current_coverage = CoverageMeasurement(
-            Status.FAILED, error="no test files found",
+            Status.FAILED,
+            error="no test files found",
         )
 
     # -- 2. Generate migrated test --
@@ -860,7 +860,9 @@ def audit(
     result.gap_functions = [name for name, _reason in scan_result.skipped]
 
     generated, test_count, _skipped = _generate_migrated_test(
-        module, max_examples, result.warnings,
+        module,
+        max_examples,
+        result.warnings,
     )
     result.generated_test = generated
     result.migrated_test_count = test_count
@@ -876,8 +878,7 @@ def audit(
                 if p.universal and p.total >= 5:
                     lower = wilson_lower(p.holds, p.total)
                     result.mined_properties.append(
-                        f"{name}: {p.name} ({p.holds}/{p.total}, "
-                        f">={lower:.0%} CI)"
+                        f"{name}: {p.name} ({p.holds}/{p.total}, >={lower:.0%} CI)"
                     )
         except Exception as exc:
             result.warnings.append(
@@ -953,15 +954,8 @@ def audit_report(
         lines.append(f"    migrated: {total_mig_tests} tests | {total_mig_lines} lines")
         if total_cur_tests > 0:
             test_red = (1 - total_mig_tests / total_cur_tests) * 100
-            line_red = (
-                (1 - total_mig_lines / total_cur_lines) * 100
-                if total_cur_lines > 0
-                else 0
-            )
-            lines.append(
-                f"    saving:   {test_red:.0f}% fewer tests "
-                f"| {line_red:.0f}% less code"
-            )
+            line_red = (1 - total_mig_lines / total_cur_lines) * 100 if total_cur_lines > 0 else 0
+            lines.append(f"    saving:   {test_red:.0f}% fewer tests | {line_red:.0f}% less code")
         if total_warnings > 0:
             lines.append(f"    warnings: {total_warnings} (run with --verbose)")
 

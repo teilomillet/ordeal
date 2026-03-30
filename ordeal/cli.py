@@ -192,6 +192,104 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_benchmark(args: argparse.Namespace) -> int:
+    """Measure parallel scaling and fit USL parameters."""
+    import os
+
+    from ordeal.scaling import analyze as _analyze_scaling
+
+    try:
+        cfg = load_config(args.config)
+    except FileNotFoundError:
+        _stderr(f"Config not found: {args.config}\n")
+        return 1
+    except ConfigError as e:
+        _stderr(f"Config error: {e}\n")
+        return 1
+
+    if not cfg.tests:
+        _stderr("No [[tests]] entries in config.\n")
+        return 1
+
+    test_cfg = cfg.tests[0]
+    try:
+        test_class = test_cfg.resolve()
+    except (ImportError, AttributeError) as e:
+        _stderr(f"Cannot import {test_cfg.class_path}: {e}\n")
+        return 1
+
+    max_workers = args.max_workers or os.cpu_count() or 4
+    time_per_trial = args.time
+    metric = args.metric
+
+    _stderr(f"Benchmarking {test_cfg.class_path}\n")
+    _stderr(f"  CPUs: {os.cpu_count()}, max workers: {max_workers}\n")
+    _stderr(f"  Time per trial: {time_per_trial}s, metric: {metric}\n\n")
+
+    measurements: list[tuple[int, float]] = []
+    n = 1
+    while n <= max_workers:
+        _stderr(f"  N={n:2d} ... ")
+
+        explorer = Explorer(
+            test_class,
+            target_modules=cfg.explorer.target_modules,
+            seed=cfg.explorer.seed,
+            max_checkpoints=cfg.explorer.max_checkpoints,
+            checkpoint_prob=cfg.explorer.checkpoint_prob,
+            checkpoint_strategy=cfg.explorer.checkpoint_strategy,
+            fault_toggle_prob=cfg.explorer.fault_toggle_prob,
+            workers=n,
+        )
+
+        import time as _t
+
+        t0 = _t.monotonic()
+        result = explorer.run(
+            max_time=time_per_trial,
+            steps_per_run=cfg.explorer.steps_per_run,
+        )
+        wall = _t.monotonic() - t0
+
+        if metric == "edges":
+            throughput = result.unique_edges / max(wall, 0.001)
+        elif metric == "steps":
+            throughput = result.total_steps / max(wall, 0.001)
+        else:
+            throughput = result.total_runs / max(wall, 0.001)
+
+        measurements.append((n, throughput))
+
+        _stderr(
+            f"{result.total_runs:5d} runs, {result.total_steps:6d} steps, "
+            f"{result.unique_edges:3d} edges, "
+            f"{throughput:.0f} {metric}/s\n"
+        )
+
+        n *= 2
+
+    # Normalize and analyze
+    baseline = measurements[0][1]
+    if baseline <= 0:
+        _stderr("Baseline throughput is zero — cannot analyze.\n")
+        return 1
+    normalized = [(n, t / baseline) for n, t in measurements]
+
+    _stderr("\n")
+
+    if len(normalized) >= 3:
+        analysis = _analyze_scaling(normalized)
+        print(analysis.summary())
+    else:
+        _stderr("Need at least 3 data points (1, 2, 4+ workers) to fit USL.\n")
+        print("Raw measurements:")
+        for n, t in measurements:
+            c = t / baseline
+            print(f"  N={n:2d}: {c:.2f}x ({c / n * 100:.1f}% efficient)")
+
+    return 0
+
+
 # ============================================================================
 # Reporting
 # ============================================================================
@@ -312,6 +410,24 @@ def main(argv: list[str] | None = None) -> int:
         help="Save generated test file to this path",
     )
 
+    # -- ordeal benchmark --
+    bench_p = sub.add_parser("benchmark", help="Measure parallel scaling (USL analysis)")
+    bench_p.add_argument(
+        "--config", "-c", default="ordeal.toml", help="Config file (default: ordeal.toml)"
+    )
+    bench_p.add_argument(
+        "--max-workers", type=int, default=None, help="Max workers to test (default: CPU count)"
+    )
+    bench_p.add_argument(
+        "--time", type=float, default=10.0, help="Seconds per trial (default: 10)"
+    )
+    bench_p.add_argument(
+        "--metric",
+        choices=["runs", "steps", "edges"],
+        default="runs",
+        help="Throughput metric to fit (default: runs)",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "explore":
@@ -320,6 +436,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_replay(args)
     elif args.command == "audit":
         return _cmd_audit(args)
+    elif args.command == "benchmark":
+        return _cmd_benchmark(args)
     else:
         parser.print_help()
         return 0

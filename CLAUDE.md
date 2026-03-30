@@ -56,7 +56,7 @@ ordeal/
 - **Swarm mode**: Each test run uses a random subset of faults. Better aggregate coverage than all-faults-always-on.
 - **Energy scheduling**: Checkpoints that led to new edge coverage get higher selection probability. Constants: reward=2.0, decay=0.95, min=0.01.
 - **Assertions**: `always`/`unreachable` raise immediately (triggers Hypothesis shrinking). `sometimes`/`reachable` are deferred — checked at session end via PropertyTracker.
-- **buggify()**: No-op when chaos mode is inactive. Thread-local RNG, seed-controlled, zero overhead in production.
+- **buggify()**: No-op when chaos mode is inactive. Thread-local RNG, seed-controlled, negligible overhead in production.
 - **PatchFault**: Resolves a dotted path (e.g. `"myapp.api.call"`) and wraps the target function with fault behavior. Activate/deactivate cycle managed by ChaosTest.
 - **Optional deps**: atheris, schemathesis, numpy are behind try/except imports with helpful error messages.
 

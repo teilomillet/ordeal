@@ -113,7 +113,7 @@ These are the beliefs that shape ordeal's design:
 
 3. **Reproducibility is non-negotiable.** Every run has a seed. Every failure has a trace. Every trace can be replayed. If you can't reproduce it, you can't fix it.
 
-4. **Zero cost in production.** `buggify()` is a no-op. Assertions are inactive. Faults aren't registered. Ordeal adds nothing to your production binary.
+4. **Negligible overhead in production.** `buggify()` is a no-op when inactive. Assertions are dormant. Faults aren't registered. Ordeal adds nothing meaningful to your production runtime.
 
 5. **Thread-safe by design.** Every shared structure — the PropertyTracker, fault activation, coverage collection, call counters — is lock-guarded. Ordeal is safe for free-threaded Python 3.13+ (no-GIL) out of the box. You don't need to think about it.
 

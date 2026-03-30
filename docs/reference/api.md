@@ -205,7 +205,7 @@ from ordeal.buggify import buggify, buggify_value, activate, deactivate, set_see
 buggify(probability: float | None = None) -> bool
 ```
 
-Returns `True` during chaos testing with configurable probability. Returns `False` in production (zero cost).
+Returns `True` during chaos testing with configurable probability. No-op when inactive (negligible overhead).
 
 ```python
 if buggify():
@@ -432,8 +432,15 @@ explorer.run(
     shrink: bool = True,
     max_shrink_time: float = 30.0,
     progress: Callable[[ProgressSnapshot], None] | None = None,
+    resume_from: str | Path | None = None,    # resume from saved state
+    save_state_to: str | Path | None = None,  # save state on completion
 ) -> ExplorationResult
 ```
+
+| Method | Returns | Description |
+|---|---|---|
+| `save_state(path)` | `None` | Save checkpoint corpus, edges, and RNG state to a pickle file for later resumption |
+| `load_state(path)` | `dict` | Restore saved state; returns counters (`total_edges`, `checkpoints`) |
 
 ```python
 explorer = Explorer(
@@ -443,6 +450,13 @@ explorer = Explorer(
 )
 result = explorer.run(max_time=120, steps_per_run=100)
 print(result.summary())
+
+# Resume a previous run:
+result = explorer.run(
+    max_time=120,
+    resume_from=".ordeal/state.pkl",
+    save_state_to=".ordeal/state.pkl",
+)
 ```
 
 ### ExplorationResult

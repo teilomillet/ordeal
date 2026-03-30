@@ -158,7 +158,7 @@ def process(data):
     return buggify_value(result, float('nan'))        # sometimes corrupt output
 ```
 
-Seed-controlled. Thread-local. Zero-cost in production. This is [FoundationDB's BUGGIFY](https://apple.github.io/foundationdb/testing.html) for Python — the code under test *is* the test harness.
+Seed-controlled. Thread-local. No-op when inactive. This is [FoundationDB's BUGGIFY](https://apple.github.io/foundationdb/testing.html) for Python — the code under test *is* the test harness.
 
 ### Coverage-guided exploration
 

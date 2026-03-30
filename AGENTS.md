@@ -51,7 +51,7 @@ This applies everywhere: faults, assertions, invariants, strategies. The user sh
 
 - `ChaosTest` extends Hypothesis's `RuleBasedStateMachine`. The nemesis rule is auto-injected.
 - The Explorer is separate from Hypothesis — it drives rules manually with coverage feedback.
-- `buggify()` is zero-cost in production (thread-local `_state.active` check).
+- `buggify()` is a no-op when inactive (thread-local `_state.active` check, negligible overhead).
 - Assertions use a global `PropertyTracker` — thread-safe, activated by `--chaos` flag or `auto_configure()`.
 - TOML config (`ordeal.toml`) is the interface between humans/agents and the Explorer.
 - Traces are JSON. Replay uses recorded param values, not re-drawing from strategies.

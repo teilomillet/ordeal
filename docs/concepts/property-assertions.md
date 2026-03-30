@@ -144,7 +144,7 @@ The tracker has two states:
 
 **Active** -- records everything. Assertions behave as described above. Activated by the `--chaos` flag or by calling `auto_configure()` in your `conftest.py`.
 
-**Inactive** -- all four assertion functions are zero-cost no-ops. They do nothing. No recording, no checking, no overhead. This is the default state, and it's why you can leave `always`/`sometimes`/`reachable`/`unreachable` calls in your production code without any performance impact. They're dormant until you turn chaos mode on.
+**Inactive** -- all four assertion functions are no-ops with negligible overhead. No recording, no checking. This is the default state, and it's why you can leave `always`/`sometimes`/`reachable`/`unreachable` calls in your production code safely. They're dormant until you turn chaos mode on.
 
 ```python
 # conftest.py -- option A: use the CLI flag

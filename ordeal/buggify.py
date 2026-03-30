@@ -1,7 +1,7 @@
 """FoundationDB-style inline fault injection.
 
 Place ``buggify()`` calls in the code under test.  They return ``False``
-in production (zero cost) and probabilistically return ``True`` during
+when inactive (no-op, negligible overhead) and probabilistically return ``True`` during
 chaos testing::
 
     from ordeal.buggify import buggify, buggify_value

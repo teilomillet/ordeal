@@ -775,6 +775,162 @@ class Explorer:
         except Exception:
             pass
 
+    # -- Step execution helpers (extracted from run() for readability) -----
+
+    def _execute_step(
+        self,
+        machine: ChaosTest,
+        rule_log: list[str],
+        trace_steps: list[TraceStep],
+        ts_offset: float,
+        new_edges_this_run: int,
+    ) -> dict[str, Any]:
+        """Execute one exploration step: either a fault toggle or a rule.
+
+        Returns a dict with ``rule_log_entry`` and ``trace_step`` keys.
+        """
+        if machine._faults and self.rng.random() < self.fault_toggle_prob:
+            toggle_name = self._toggle_fault(machine)
+            rule_log.append(toggle_name)
+            trace_steps.append(
+                TraceStep(
+                    kind="fault_toggle",
+                    name=toggle_name,
+                    active_faults=[f.name for f in machine.active_faults],
+                    edge_count=len(self._total_edges) + new_edges_this_run,
+                    timestamp_offset=ts_offset,
+                )
+            )
+        else:
+            rule_info = self.rng.choice(self._rules)
+            params = self._execute_rule(machine, rule_info)
+            rule_log.append(rule_info.name)
+
+            serializable_params = {
+                k: v for k, v in params.items() if not isinstance(v, _DataProxy)
+            }
+            # active_faults omitted on rule steps (derivable from
+            # fault_toggle sequence, saves ~70% of list comprehensions)
+            trace_steps.append(
+                TraceStep(
+                    kind="rule",
+                    name=rule_info.name,
+                    params=serializable_params,
+                    edge_count=len(self._total_edges) + new_edges_this_run,
+                    timestamp_offset=ts_offset,
+                )
+            )
+
+    def _process_coverage(
+        self,
+        machine: ChaosTest,
+        collector: CoverageCollector | None,
+        step: int,
+        run_id: int,
+        new_edges_this_run: int,
+        result: ExplorationResult,
+        use_coverage: bool,
+        _assertions: Any,
+    ) -> int:
+        """Check for new edges, states, and properties after a step.
+
+        Returns the updated ``new_edges_this_run`` count.
+        """
+        # Edge coverage
+        if collector:
+            edges = collector.snapshot()
+            new = edges - self._total_edges
+            if new and self._shared_bitmap is not None:
+                new = {e for e in new if not self._shared_bitmap[e]}
+            if new:
+                new_edges_this_run += len(new)
+                self._total_edges |= new
+                if self._shared_bitmap is not None:
+                    for e in new:
+                        self._shared_bitmap[e] = 1
+                self._save_checkpoint(machine, len(new), step, run_id)
+                self._pool_publish(machine, len(new), step, run_id)
+                result.checkpoints_saved += 1
+
+        # State-aware coverage
+        if hasattr(machine, "state_hash"):
+            sh = machine.state_hash()
+            if sh and sh not in self._total_states:
+                self._total_states.add(sh)
+                new_edges_this_run += 1
+                if use_coverage:
+                    self._save_checkpoint(machine, 1, step, run_id)
+                    self._pool_publish(machine, 1, step, run_id)
+                    result.checkpoints_saved += 1
+
+        # Property-guided search
+        for p in _assertions.tracker.results:
+            if (
+                p.type == "sometimes"
+                and p.passes > 0
+                and p.name not in self._satisfied_properties
+            ):
+                self._satisfied_properties.add(p.name)
+                result.properties_satisfied += 1
+                new_edges_this_run += 1
+                if use_coverage:
+                    self._save_checkpoint(machine, 1, step, run_id)
+                    result.checkpoints_saved += 1
+
+        return new_edges_this_run
+
+    def _record_failure(
+        self,
+        e: Exception,
+        run_id: int,
+        step: int,
+        trace_steps: list[TraceStep],
+        rule_log: list[str],
+        machine: ChaosTest,
+        source_cp: Checkpoint | None,
+        new_edges_this_run: int,
+        run_start: float,
+        class_name: str,
+        result: ExplorationResult,
+        _mutation_pairs: list[tuple],
+    ) -> Trace:
+        """Record a failure into the result and return the trace."""
+        trace = Trace(
+            run_id=run_id,
+            seed=self.seed,
+            test_class=class_name,
+            from_checkpoint=source_cp.run_id if source_cp else None,
+            steps=trace_steps,
+            failure=TraceFailure(
+                error_type=type(e).__name__,
+                error_message=str(e)[:500],
+                step=step,
+            ),
+            edges_discovered=new_edges_this_run,
+            duration=_time.monotonic() - run_start,
+        )
+        # Check if any mutation faults are active (killed mutants)
+        _active_names = {f.name for f in machine.active_faults}
+        for _mutant, _mfault in _mutation_pairs:
+            if _mfault.name in _active_names and not _mutant.killed:
+                _mutant.killed = True
+                _mutant.error = str(e)[:200]
+                result.mutations_killed += 1
+
+        result.failures.append(
+            Failure(
+                error=e,
+                step=step,
+                run_id=run_id,
+                active_faults=[f.name for f in machine.active_faults],
+                rule_log=rule_log,
+                trace=trace,
+            )
+        )
+        return trace
+
+    # -- Checkpoint scheduling ----------------------------------------------
+
     def _find_min_energy_idx(self) -> int:
         """Find the index of the lowest-energy checkpoint."""
         min_e = self._checkpoints[0].energy
@@ -949,119 +1105,20 @@ class Explorer:
                     result.total_steps += 1
                     ts_offset = _time.monotonic() - run_start
 
-                    # Nemesis or rule
-                    if machine._faults and self.rng.random() < self.fault_toggle_prob:
-                        toggle_name = self._toggle_fault(machine)
-                        rule_log.append(toggle_name)
-                        trace_steps.append(
-                            TraceStep(
-                                kind="fault_toggle",
-                                name=toggle_name,
-                                active_faults=[f.name for f in machine.active_faults],
-                                edge_count=len(self._total_edges) + new_edges_this_run,
-                                timestamp_offset=ts_offset,
-                            )
-                        )
-                    else:
-                        rule_info = self.rng.choice(self._rules)
-                        params = self._execute_rule(machine, rule_info)
-                        rule_log.append(rule_info.name)
-
-                        # Record serializable params (skip _DataProxy)
-                        serializable_params = {
-                            k: v for k, v in params.items() if not isinstance(v, _DataProxy)
-                        }
-                        # active_faults omitted on rule steps (derivable
-                        # from fault_toggle sequence, saves ~70% of list
-                        # comprehensions in the hot loop)
-                        trace_steps.append(
-                            TraceStep(
-                                kind="rule",
-                                name=rule_info.name,
-                                params=serializable_params,
-                                edge_count=len(self._total_edges) + new_edges_this_run,
-                                timestamp_offset=ts_offset,
-                            )
-                        )
-
-                    # Invariants
+                    self._execute_step(
+                        machine, rule_log, trace_steps, ts_offset, new_edges_this_run
+                    )
                     self._check_invariants(machine)
-
-                    # Coverage
-                    if collector:
-                        edges = collector.snapshot()
-                        new = edges - self._total_edges
-                        # Filter out edges another worker already found
-                        if new and self._shared_bitmap is not None:
-                            new = {e for e in new if not self._shared_bitmap[e]}
-                        if new:
-                            new_edges_this_run += len(new)
-                            self._total_edges |= new
-                            # Publish to shared bitmap
-                            if self._shared_bitmap is not None:
-                                for e in new:
-                                    self._shared_bitmap[e] = 1
-                            self._save_checkpoint(machine, len(new), step, run_id)
-                            self._pool_publish(machine, len(new), step, run_id)
-                            result.checkpoints_saved += 1
-
-                    # State-aware coverage (per-step, inside step loop)
-                    if hasattr(machine, "state_hash"):
-                        sh = machine.state_hash()
-                        if sh and sh not in self._total_states:
-                            self._total_states.add(sh)
-                            new_edges_this_run += 1
-                            if use_coverage:
-                                self._save_checkpoint(machine, 1, step, run_id)
-                                self._pool_publish(machine, 1, step, run_id)
-                                result.checkpoints_saved += 1
-
-                    # Property-guided search (per-step)
-                    for p in _assertions.tracker.results:
-                        if (
-                            p.type == "sometimes"
-                            and p.passes > 0
-                            and p.name not in self._satisfied_properties
-                        ):
-                            self._satisfied_properties.add(p.name)
-                            result.properties_satisfied += 1
-                            new_edges_this_run += 1
-                            if use_coverage:
-                                self._save_checkpoint(machine, 1, step, run_id)
-                                result.checkpoints_saved += 1
+                    new_edges_this_run = self._process_coverage(
+                        machine, collector, step, run_id,
+                        new_edges_this_run, result, use_coverage, _assertions,
+                    )
 
             except Exception as e:
-                trace = Trace(
-                    run_id=run_id,
-                    seed=self.seed,
-                    test_class=class_name,
-                    from_checkpoint=source_cp.run_id if source_cp else None,
-                    steps=trace_steps,
-                    failure=TraceFailure(
-                        error_type=type(e).__name__,
-                        error_message=str(e)[:500],
-                        step=step,
-                    ),
-                    edges_discovered=new_edges_this_run,
-                    duration=_time.monotonic() - run_start,
-                )
-                # Check if any mutation faults are active (killed mutants)
-                _active_names = {f.name for f in machine.active_faults}
-                for _mutant, _mfault in _mutation_pairs:
-                    if _mfault.name in _active_names and not _mutant.killed:
-                        _mutant.killed = True
-                        _mutant.error = str(e)[:200]
-                        result.mutations_killed += 1
-
-                result.failures.append(
-                    Failure(
-                        error=e,
-                        step=step,
-                        run_id=run_id,
-                        active_faults=[f.name for f in machine.active_faults],
-                        rule_log=rule_log,
-                        trace=trace,
-                    )
+                trace = self._record_failure(
+                    e, run_id, step, trace_steps, rule_log, machine,
+                    source_cp, new_edges_this_run, run_start, class_name,
+                    result, _mutation_pairs,
                 )
                 if self.record_traces:
                     result.traces.append(trace)

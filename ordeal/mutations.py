@@ -637,6 +637,100 @@ _SKIP_METHODS = frozenset(
 )
 
 
+# ============================================================================
+# Equivalence filtering — skip mutants that are semantically identical
+# ============================================================================
+
+# Algebraic identities: operator + constant operand = no-op.
+# e.g. x + 0 == x, x * 1 == x, x ** 1 == x, x // 1 == x, x - 0 == x.
+# When the arithmetic mutator swaps + to - (or * to /) and the other
+# operand is a neutral element, the mutation is equivalent.
+_IDENTITY_OPS: dict[type, set[int | float]] = {
+    ast.Add: {0, 0.0},       # x + 0 == x
+    ast.Sub: {0, 0.0},       # x - 0 == x
+    ast.Mult: {1, 1.0},      # x * 1 == x
+    ast.Div: {1, 1.0},       # x / 1 == x
+    ast.FloorDiv: {1, 1.0},  # x // 1 == x
+    ast.Pow: {1, 1.0},       # x ** 1 == x
+}
+
+
+def _is_algebraic_identity(node: ast.BinOp) -> bool:
+    """Check if a BinOp is an algebraic identity (result == one operand).
+
+    Detects patterns like ``x + 0``, ``x * 1``, ``x ** 1`` where the
+    operation has no effect.  Mutations of these nodes produce equivalent
+    mutants (e.g. ``x + 0`` -> ``x - 0`` — both equal ``x``).
+    """
+    neutrals = _IDENTITY_OPS.get(type(node.op))
+    if neutrals is None:
+        return False
+    # Check right operand (most common: x + 0, x * 1)
+    if isinstance(node.right, ast.Constant) and node.right.value in neutrals:
+        return True
+    # Check left operand for commutative ops (0 + x, 1 * x)
+    if type(node.op) in (ast.Add, ast.Mult) and isinstance(node.left, ast.Constant):
+        if node.left.value in neutrals:
+            return True
+    return False
+
+
+def _bytecode_equal(a: types.CodeType, b: types.CodeType) -> bool:
+    """Recursively compare bytecode of two code objects.
+
+    The top-level module code just defines functions, so we must also
+    compare the bytecode of nested code objects (the actual functions).
+    """
+    if a.co_code != b.co_code:
+        return False
+    # Compare nested code objects (functions, classes, comprehensions)
+    a_inner = [c for c in a.co_consts if isinstance(c, types.CodeType)]
+    b_inner = [c for c in b.co_consts if isinstance(c, types.CodeType)]
+    if len(a_inner) != len(b_inner):
+        return False
+    return all(_bytecode_equal(ai, bi) for ai, bi in zip(a_inner, b_inner))
+
+
+def _is_equivalent_mutant(
+    original_tree: ast.Module,
+    mutated_tree: ast.Module,
+    operator: str,
+    description: str,
+    line: int,
+) -> bool:
+    """Detect mutants that are semantically equivalent to the original.
+
+    Checks:
+    1. Algebraic identities in the *mutated* tree (the result of the
+       mutation is a no-op expression like ``x + 0``).
+    2. Algebraic identities in the *original* tree at the mutation site
+       (mutating a no-op is still a no-op for the swapped neutral).
+    3. Duplicate AST output (original and mutated compile to identical code).
+    """
+    # 1+2: Check for algebraic identities at the mutation site
+    if operator == "arithmetic":
+        for tree in (original_tree, mutated_tree):
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.BinOp)
+                    and hasattr(node, "lineno")
+                    and node.lineno == line
+                    and _is_algebraic_identity(node)
+                ):
+                    return True
+
+    # 3: AST-level deduplication — compile both and compare bytecode
+    try:
+        orig_code = compile(original_tree, "<orig>", "exec")
+        mut_code = compile(mutated_tree, "<mut>", "exec")
+        if _bytecode_equal(orig_code, mut_code):
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
 def _is_inside_skip_method(tree: ast.Module, line: int) -> bool:
     """Check if a mutation line falls inside a method we should skip."""
     for node in ast.walk(tree):
@@ -679,6 +773,11 @@ def generate_mutants(
             if applicator.applied:
                 # Skip mutations in display/repr methods
                 if _is_inside_skip_method(tree, applicator.line):
+                    continue
+                # Skip semantically equivalent mutants
+                if _is_equivalent_mutant(
+                    tree, mutated_tree, op_name, applicator.description, applicator.line
+                ):
                     continue
                 mutant = Mutant(
                     operator=op_name,
@@ -813,12 +912,77 @@ def validate_mined_properties(
     return mutate_function_and_test(target, mined_test, operators)
 
 
+def _is_runtime_equivalent(
+    original: Callable,
+    mutant_fn: Callable,
+    n_samples: int = 10,
+) -> bool:
+    """Heuristic: run both functions on random inputs, skip if outputs match.
+
+    Generates *n_samples* sets of arguments from the function's type hints
+    (via ``strategy_for_type``) and compares outputs.  If every output is
+    identical, the mutant is likely equivalent — testing it is wasted work.
+
+    Returns ``True`` (skip) when all samples agree.  Falls back to ``False``
+    (test it) when inputs can't be generated or any sample disagrees.
+    """
+    import warnings
+
+    try:
+        sig = inspect.signature(original)
+    except (ValueError, TypeError):
+        return False
+
+    params = [
+        p
+        for p in sig.parameters.values()
+        if p.name != "self" and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+    ]
+    if not params:
+        try:
+            return original() == mutant_fn()
+        except Exception:
+            return False
+
+    try:
+        from typing import get_type_hints
+
+        from ordeal.quickcheck import strategy_for_type
+
+        hints = get_type_hints(original)
+    except Exception:
+        return False
+
+    strategies = []
+    for p in params:
+        if p.name not in hints:
+            return False
+        try:
+            strategies.append(strategy_for_type(hints[p.name]))
+        except Exception:
+            return False
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for _ in range(n_samples):
+            try:
+                args = [s.example() for s in strategies]
+                if original(*args) != mutant_fn(*args):
+                    return False
+            except Exception:
+                return False
+
+    return True
+
+
 def mutate_function_and_test(
     target: str,
     test_fn: Callable[[], None],
     operators: list[str] | None = None,
     *,
     workers: int = 1,
+    filter_equivalent: bool = True,
+    equivalence_samples: int = 10,
 ) -> MutationResult:
     """Mutate a single function and run *test_fn* against each mutant.
 
@@ -832,6 +996,11 @@ def mutate_function_and_test(
         workers: Number of parallel worker processes. ``1`` (default)
             runs sequentially.  Higher values give near-linear speedup
             since each mutant is tested independently.
+        filter_equivalent: If ``True`` (default), skip mutants that produce
+            identical output to the original on random sample inputs.
+            Reduces noise from equivalent mutants that always survive.
+        equivalence_samples: Number of random inputs for equivalence
+            filtering.  Default ``10``.
     """
     module_path, func_name = target.rsplit(".", 1)
     module = importlib.import_module(module_path)
@@ -856,6 +1025,12 @@ def mutate_function_and_test(
                 continue
         except Exception:
             continue  # mutant doesn't compile — skip
+
+        # Runtime equivalence filter: skip if outputs match on samples
+        if filter_equivalent and _is_runtime_equivalent(
+            func, mutated_func, n_samples=equivalence_samples
+        ):
+            continue
 
         # Swap via PatchFault
         fault = PatchFault(target, lambda orig, mf=mutated_func: mf)

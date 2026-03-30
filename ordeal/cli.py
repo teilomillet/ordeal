@@ -104,7 +104,7 @@ def _cmd_explore(args: argparse.Namespace) -> int:
             checkpoint_prob=cfg.explorer.checkpoint_prob,
             checkpoint_strategy=cfg.explorer.checkpoint_strategy,
             fault_toggle_prob=cfg.explorer.fault_toggle_prob,
-            record_traces=cfg.report.traces,
+            record_traces=cfg.report.traces or bool(args.generate_tests),
             workers=cfg.explorer.workers,
         )
 
@@ -130,6 +130,17 @@ def _cmd_explore(args: argparse.Namespace) -> int:
             for trace in result.traces:
                 if trace.failure:
                     trace.save(traces_dir / f"fail-run-{trace.run_id}.json")
+
+        # Generate tests from traces
+        if args.generate_tests and result.traces:
+            from ordeal.trace import generate_tests
+
+            test_src = generate_tests(result.traces, class_path=test_cfg.class_path)
+            if test_src:
+                out = Path(args.generate_tests)
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(test_src)
+                _stderr(f"Generated tests: {out}\n")
 
     # -- Report --
     _print_report(all_results, cfg)
@@ -472,6 +483,13 @@ def main(argv: list[str] | None = None) -> int:
     explore_p.add_argument("--no-shrink", action="store_true", help="Skip shrinking")
     explore_p.add_argument(
         "--workers", "-w", type=int, help="Parallel worker processes (default: 1)"
+    )
+    explore_p.add_argument(
+        "--generate-tests",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Generate pytest tests from exploration traces (e.g. tests/test_generated.py)",
     )
 
     # -- ordeal replay --

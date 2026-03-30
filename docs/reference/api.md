@@ -356,12 +356,12 @@ For any code making HTTP/API calls. Simulates real-world network failures withou
 | Function | Signature | Description |
 |---|---|---|
 | `http_error` | `(target: str, status_code: int = 500, message: str = "Internal Server Error") -> PatchFault` | Raise `HTTPFaultError` with status code and fake response |
-| `connection_reset` | `(target: str) -> PatchFault` | Raise `ConnectionResetError` |
+| `connection_reset` | `(target: str) -> PatchFault` | Raise `ConnectionError` |
 | `rate_limited` | `(target: str, retry_after: float = 30.0) -> PatchFault` | Raise HTTP 429 with `Retry-After` header |
 | `auth_failure` | `(target: str, status_code: int = 401) -> PatchFault` | Raise HTTP 401/403 |
 | `dns_failure` | `(target: str) -> PatchFault` | Raise `OSError` (simulated DNS resolution failure) |
 | `partial_response` | `(target: str, fraction: float = 0.5) -> PatchFault` | Truncate response to fraction of content |
-| `intermittent_http_error` | `(target: str, every_n: int = 3, status_code: int = 503) -> Fault` | HTTP error every Nth call; resets on `reset()` |
+| `intermittent_http_error` | `(target: str, every_n: int = 3, status_code: int = 503, message: str = "Service Unavailable") -> Fault` | HTTP error every Nth call; resets on `reset()` |
 
 ```python
 faults = [

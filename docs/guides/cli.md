@@ -130,6 +130,38 @@ Use this when you have function pairs that should be inverses (encode/decode, se
 | `g` | required | Second function (positional) |
 | `--max-examples`, `-n` | `200` | Examples to sample |
 
+### `ordeal benchmark`
+
+Measure how parallel exploration scales on your machine and test class. Runs the Explorer at N=1, 2, 4, 8... workers, measures throughput, and fits the Universal Scaling Law (USL):
+
+```bash
+ordeal benchmark                          # uses ordeal.toml, first [[tests]] entry
+ordeal benchmark -c ci.toml               # custom config
+ordeal benchmark --max-workers 16         # test up to 16 workers
+ordeal benchmark --time 30                # 30s per trial (default: 10s)
+ordeal benchmark --metric edges           # fit on edges/sec instead of runs/sec
+```
+
+```
+Scaling Analysis (Universal Scaling Law)
+  sigma (contention):  0.080755
+  kappa (coherence):   0.005578
+  Regime:              usl
+  Optimal workers:     13.4
+  Peak throughput:     7.64x
+
+  Diagnosis:
+    Contention (sigma): 8.1% serialized fraction.
+    Coherence (kappa):  0.005578 cross-worker sync cost.
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--config`, `-c` | `ordeal.toml` | Config file |
+| `--max-workers` | CPU count | Maximum workers to test |
+| `--time` | `10` | Seconds per trial |
+| `--metric` | `runs` | `"runs"` (runs/sec) or `"edges"` (edges/sec) |
+
 ### `ordeal explore`
 
 Your main command for deep exploration. Reads `ordeal.toml`, loads each ChaosTest class, and runs coverage-guided exploration with fault injection, energy scheduling, and swarm mode.

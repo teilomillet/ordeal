@@ -1257,6 +1257,60 @@ Mine properties of `target`, then mutate the code and check whether the mined pr
 
 ---
 
+## Metamorphic
+
+```python
+from ordeal.metamorphic import Relation, RelationSet, metamorphic
+```
+
+Metamorphic testing checks *relationships* between outputs rather than exact values. Define a relation that transforms input and checks how outputs relate, then apply it as a decorator.
+
+### Relation
+
+```python
+Relation(
+    name: str,                                              # human-readable label
+    transform: Callable[[tuple], tuple],                    # transform input args
+    check: Callable[[Any, Any], bool],                      # (original_out, transformed_out) -> bool
+)
+```
+
+Compose with `+`: `(relation_a + relation_b)` checks both.
+
+### metamorphic
+
+```python
+@metamorphic(*relations: Relation | RelationSet, max_examples: int = 100)
+def test_fn(x: int, y: int):
+    return x + y
+```
+
+Decorator. For each Hypothesis-generated input, runs the function on original and transformed inputs, then asserts the relation's `check` holds. Strategies inferred from type hints.
+
+```python
+commutative = Relation(
+    "commutative",
+    transform=lambda args: (args[1], args[0]),
+    check=lambda a, b: a == b,
+)
+
+negate_involution = Relation(
+    "negate is involution",
+    transform=lambda args: (-args[0],),
+    check=lambda a, b: abs(a + b) < 1e-6,
+)
+
+@metamorphic(commutative)
+def test_add(x: int, y: int):
+    return x + y
+
+@metamorphic(negate_involution)
+def test_negate(x: float):
+    return -x
+```
+
+---
+
 ## Config
 
 ```python

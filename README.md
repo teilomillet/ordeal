@@ -63,6 +63,7 @@ Ordeal automates this. It brings ideas from the most rigorous engineering cultur
 | Mutation testing | Flip `+` to `-`, `<` to `<=` — verify your tests actually catch real bugs | [Meta ACH](https://engineering.fb.com) |
 | Differential testing | Compare two implementations on random inputs — catches regressions | Equivalence testing |
 | Property mining | Discover invariants from execution traces — type, bounds, monotonicity | Specification mining |
+| Metamorphic testing | Check output *relationships* across transformed inputs | [Metamorphic relations](https://en.wikipedia.org/wiki/Metamorphic_testing) |
 
 **Read the full [philosophy](https://docs.byordeal.com/philosophy) to understand why this matters.**
 

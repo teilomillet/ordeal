@@ -104,6 +104,7 @@ When ordeal passes, it means something. Not "the tests pass" — but that the co
 | Mutation testing | Verify tests catch real code changes | [Meta ACH](https://engineering.fb.com) |
 | Differential testing | Compare two implementations on random inputs | Regression testing |
 | Property mining | Discover invariants from execution traces | Specification mining |
+| Metamorphic testing | Check output *relationships* across transformed inputs | [Metamorphic relations](https://en.wikipedia.org/wiki/Metamorphic_testing) |
 | Network faults | HTTP errors, rate limiting, DNS failure, connection reset | Real-world API failures |
 | Concurrency faults | Lock contention, thread boundaries, stale state | Thread-safety testing |
 

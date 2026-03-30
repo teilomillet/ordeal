@@ -145,17 +145,24 @@ class PropertyTracker:
 tracker = PropertyTracker()
 
 
-def always(condition: bool, name: str, **details: Any) -> None:
+def always(condition: bool, name: str, *, mute: bool = False, **details: Any) -> None:
     """Assert *condition* is ``True`` every time this line executes.
 
     Raises ``AssertionError`` immediately on violation — whether or not
-    the tracker is active.  This ensures violations are never silent.
+    the tracker is active.  Violations are never silent by default.
+
+    Pass ``mute=True`` to record the violation without raising.  The
+    violation still appears in the property report (when ``--chaos`` is
+    active) — it is tracked, not hidden.  Use this when a known issue
+    is too loud and you need to focus on something else::
+
+        always(not math.isnan(x), "no NaN", mute=True)  # tracked, not fatal
 
     When the tracker IS active (``--chaos``), the result is also recorded
-    for the property report.
+    for the property report regardless of ``mute``.
     """
     tracker.record(name, "always", condition, details or None)
-    if not condition:
+    if not condition and not mute:
         msg = f"always violated: {name}"
         if details:
             msg += f" | {details}"
@@ -199,14 +206,18 @@ def reachable(name: str, **details: Any) -> None:
     tracker.record_hit(name, "reachable")
 
 
-def unreachable(name: str, **details: Any) -> None:
+def unreachable(name: str, *, mute: bool = False, **details: Any) -> None:
     """Assert this code path *never* executes.
 
     Raises ``AssertionError`` immediately — whether or not the tracker
-    is active.  Violations are never silent.
+    is active.  Violations are never silent by default.
+
+    Pass ``mute=True`` to record the hit without raising.  The hit
+    still appears in the property report — it is tracked, not hidden.
     """
     tracker.record_hit(name, "unreachable")
-    msg = f"unreachable code reached: {name}"
-    if details:
-        msg += f" | {details}"
-    raise AssertionError(msg)
+    if not mute:
+        msg = f"unreachable code reached: {name}"
+        if details:
+            msg += f" | {details}"
+        raise AssertionError(msg)

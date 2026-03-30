@@ -86,15 +86,20 @@ from ordeal import always, sometimes, reachable, unreachable
 always(
     condition: bool,
     name: str,
+    *,
+    mute: bool = False,
     **details: Any,
 ) -> None
 ```
 
-Assert condition is `True` every time. Raises `AssertionError` immediately on violation — whether or not `--chaos` is active. Violations are never silent. When the tracker is active, the result is also recorded for the property report.
+Assert condition is `True` every time. Raises `AssertionError` immediately on violation — whether or not `--chaos` is active. Violations are never silent by default.
+
+Pass `mute=True` to record the violation without raising. The violation still shows in the property report — tracked, not hidden. Use when a known issue is too loud and you need to focus on something else.
 
 ```python
 always(result >= 0, "result is non-negative")
 always(not math.isnan(score), "score is never NaN", value=score)
+always(response.ok, "API healthy", mute=True)  # known flaky, tracked not fatal
 ```
 
 ### sometimes
@@ -140,11 +145,13 @@ except TimeoutError:
 ```python
 unreachable(
     name: str,
+    *,
+    mute: bool = False,
     **details: Any,
 ) -> None
 ```
 
-Assert code path never executes. Raises `AssertionError` immediately — whether or not `--chaos` is active. Violations are never silent.
+Assert code path never executes. Raises `AssertionError` immediately — whether or not `--chaos` is active. Violations are never silent by default. Pass `mute=True` to record without raising.
 
 ```python
 if data is None and not error_occurred:

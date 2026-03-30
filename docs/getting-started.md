@@ -163,6 +163,14 @@ This matters. Get it wrong and your assertions silently do nothing.
 
 **The design principle:** violations are never silent. `always()` and `unreachable()` raise `AssertionError` whether or not `--chaos` is active. The `--chaos` flag adds the *tracking* layer (property report, `sometimes`/`reachable` deferred checks) and activates `buggify()`. But if something is wrong, you'll know immediately — no flag required.
 
+**Too loud?** If a known violation fires constantly and you need to focus on something else, pass `mute=True`:
+
+```python
+always(response.ok, "API healthy", mute=True)  # tracked in report, doesn't raise
+```
+
+The violation is still recorded and shows in the property report — it's tracked, not hidden. You see it, you just don't get interrupted by it. Remove `mute=True` when you're ready to fix it.
+
 ## What happens under the hood
 
 1. **Hypothesis generates a random sequence of rules.** It might run `score_user`, then `score_user` again, then the nemesis, then `score_user` — in any order, any number of times.

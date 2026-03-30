@@ -288,65 +288,89 @@ class TestCheckpointFileExchange:
 class TestParallelWithPool:
     """Verify parallel exploration actually uses the checkpoint pool."""
 
-    def test_parallel_creates_and_cleans_pool_dir(self):
-        """_run_parallel creates a temp dir and cleans it up."""
+    def test_parallel_runs_with_pool(self):
+        """Parallel exploration with pool enabled runs successfully."""
         explorer = Explorer(
             DeepServiceChaos,
             target_modules=["tests._deep_target"],
             workers=2,
             seed=42,
+            share_checkpoints=True,
         )
         result = explorer.run(max_time=3, steps_per_run=20)
-
-        # Pool dir should have been cleaned up
-        # We can't easily check it was created, but we can verify
-        # the explorer ran successfully with workers > 1
         assert result.total_runs > 0
         assert result.total_steps > 0
 
-    def test_shared_pool_reaches_deeper_states(self):
-        """With sharing, workers reach deeper phases more often.
+    def test_parallel_runs_without_pool(self):
+        """Parallel exploration with pool disabled still works."""
+        explorer = Explorer(
+            DeepServiceChaos,
+            target_modules=["tests._deep_target"],
+            workers=2,
+            seed=42,
+            share_checkpoints=False,
+        )
+        result = explorer.run(max_time=3, steps_per_run=20)
+        assert result.total_runs > 0
+        assert result.total_steps > 0
 
-        Run 5 trials each with/without pool and compare max phase reached.
-        This is a statistical test — pool should help on average.
+
+class TestPoolAblation:
+    """Ablation: does the checkpoint pool actually help?
+
+    Compares the same number of workers (2) with pool on vs off,
+    same time budget, same seeds.  This isolates the pool's
+    contribution from parallelism itself.
+
+    The pool helps because:
+    - Worker A discovers phase-1 state and publishes it
+    - Worker B loads that checkpoint and explores from phase 1
+    - Without the pool, Worker B must independently reach phase 1
+
+    On the DeepService target (4-phase gated state machine), this
+    matters because each phase gate requires 5+ correct sequential
+    steps — reaching phase 2 from scratch is much harder than
+    branching from a shared phase-1 checkpoint.
+    """
+
+    def test_pool_does_not_hurt(self):
+        """Pool-enabled should find >= 90% of pool-disabled edges.
+
+        Conservative test: the pool shouldn't make things worse.
+        Sharing checkpoints adds overhead (pickle, filesystem I/O),
+        so this ensures the overhead doesn't dominate.
         """
-        trials = 5
-        time_per = 3.0
-        steps = 30
-
-        phases_with_pool: list[int] = []
-        phases_without_pool: list[int] = []
+        trials = 3
+        with_pool: list[int] = []
+        without_pool: list[int] = []
 
         for trial in range(trials):
-            seed = 100 + trial * 37
+            seed = 200 + trial * 53
 
-            # WITH shared pool (default)
-            explorer = Explorer(
+            exp_on = Explorer(
                 DeepServiceChaos,
                 target_modules=["tests._deep_target"],
-                workers=4,
+                workers=2,
                 seed=seed,
-                share_edges=True,
+                share_checkpoints=True,
             )
-            result = explorer.run(max_time=time_per, steps_per_run=steps)
-            phases_with_pool.append(result.unique_edges)
+            res_on = exp_on.run(max_time=3, steps_per_run=25)
+            with_pool.append(res_on.unique_edges)
 
-            # WITHOUT pool (workers=1, same total time)
-            explorer_solo = Explorer(
+            exp_off = Explorer(
                 DeepServiceChaos,
                 target_modules=["tests._deep_target"],
-                workers=1,
+                workers=2,
                 seed=seed,
+                share_checkpoints=False,
             )
-            result_solo = explorer_solo.run(max_time=time_per, steps_per_run=steps)
-            phases_without_pool.append(result_solo.unique_edges)
+            res_off = exp_off.run(max_time=3, steps_per_run=25)
+            without_pool.append(res_off.unique_edges)
 
-        # Parallel should find at least as many edges on average
-        avg_with = sum(phases_with_pool) / trials
-        avg_without = sum(phases_without_pool) / trials
+        avg_on = sum(with_pool) / trials
+        avg_off = sum(without_pool) / trials
 
-        # Relaxed assertion — parallel with 4 workers should do at least
-        # as well as single worker in the same wall time
-        assert avg_with >= avg_without * 0.8, (
-            f"Pool should help: avg edges with={avg_with:.1f}, without={avg_without:.1f}"
+        assert avg_on >= avg_off * 0.9, (
+            f"Pool should not hurt: with={avg_on:.1f}, "
+            f"without={avg_off:.1f}"
         )

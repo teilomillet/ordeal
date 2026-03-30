@@ -224,7 +224,10 @@ workers = 8       # explicit 8 workers
 
 Override from the CLI: `ordeal explore -w 4`.
 
-Workers share discoveries through a **shared edge bitmap** (enabled by default via `share_edges`): a 64KB shared-memory buffer where each byte marks a discovered edge. Workers skip edges already found by others. Zero locks — single-byte writes are atomic. This causes workers to naturally diverge into different regions of the state space.
+Workers share discoveries through two mechanisms enabled by default:
+
+- **Shared edge bitmap** (`share_edges`): a 64KB shared-memory buffer where each byte marks a discovered edge. Workers skip edges already found by others. Zero locks -- single-byte writes are atomic. This causes workers to naturally diverge into different regions of the state space.
+- **Shared checkpoint pool** (`share_checkpoints`): workers publish significant discoveries as pickle files to a shared temp directory. Other workers load these checkpoints and branch from states they would never have reached independently. Disable with `share_checkpoints = false` if the pickle overhead is too high for your state.
 
 
 ## Reading the output
@@ -558,9 +561,23 @@ By default, `ordeal explore` uses all CPU cores (`workers = 0` means auto-detect
 
 Workers collaborate through two mechanisms, both enabled by default:
 
-**Shared edge bitmap** (AFL-style): a 64KB shared-memory buffer where each byte marks a discovered edge hash. When worker 3 finds edge `0xAB12`, workers 1-8 see it immediately and skip it. Single-byte writes are atomic — zero locks needed.
+**Shared edge bitmap** (`share_edges=True`): a 64KB shared-memory buffer where each byte marks a discovered edge hash. When worker 3 finds edge `0xAB12`, workers 1-8 see it immediately and skip it. Single-byte writes are atomic -- zero locks needed. This prevents workers from wasting time rediscovering edges another worker already found.
 
-**Shared checkpoint pool**: when a worker discovers a significant new state (2+ new edges), it publishes the machine state as a pickle file to a shared temporary directory. Other workers load these checkpoints and branch from states they would never have reached independently. This is the difference between "8 independent explorers" and "8 explorers collaborating on the same search."
+**Shared checkpoint pool** (`share_checkpoints=True`): when a worker discovers a significant new state (2+ new edges), it publishes the machine state as a pickle file to a shared temporary directory. Other workers poll this directory every 2 seconds and load new checkpoints into their local corpus with initial energy equal to the discovery reward. This means one worker can branch from a state another worker discovered -- the difference between "8 independent explorers" and "8 explorers collaborating on the same search."
+
+Either mechanism can be disabled independently:
+
+```python
+explorer = Explorer(
+    MyServiceChaos,
+    target_modules=["myapp"],
+    workers=4,
+    share_edges=True,          # default: skip edges others found
+    share_checkpoints=True,    # default: share interesting states
+)
+```
+
+The pool is most valuable when the state space is deep (many steps to reach an interesting state). Worker A might reach phase 2 of your service after a lucky sequence. Without sharing, workers B-D must independently find the same sequence. With sharing, worker A publishes its phase-2 state and everyone branches from there.
 
 ### Usage
 

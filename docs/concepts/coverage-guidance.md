@@ -196,11 +196,15 @@ This is why coverage-guided testing finds bugs that random testing does not. Ran
 
 ## Parallel exploration and shared edges
 
-When running with multiple workers (`workers=N`), each worker has its own checkpoint corpus and runs independently. But they share a **64KB edge bitmap** in shared memory — one byte per possible 16-bit edge hash.
+When running with multiple workers (`workers=N`), each worker has its own checkpoint corpus and runs independently. Workers collaborate through two shared data structures:
 
-When a worker discovers a new edge, it writes `1` to the bitmap. Other workers check the bitmap before saving checkpoints: if an edge was already found by another worker, they skip it and keep exploring deeper. This means workers naturally diverge into different regions of the state space instead of duplicating each other's work.
+**Shared edge bitmap** (`share_edges=True`, default): a 64KB shared-memory buffer, one byte per possible 16-bit edge hash. When a worker discovers a new edge, it writes `1` to the bitmap. Other workers check the bitmap before saving checkpoints: if an edge was already found by another worker, they skip it and keep exploring deeper. Workers naturally diverge into different regions of the state space instead of duplicating each other's work. Single-byte writes are atomic on all architectures -- no locks, no contention. This is the same technique AFL uses for its coverage map.
 
-The bitmap uses single-byte writes, which are atomic on all architectures — no locks, no contention. This is the same technique AFL uses for its coverage map.
+**Shared checkpoint pool** (`share_checkpoints=True`, default): when a worker discovers a significant new state (2+ new edges in one run), it pickles the machine state to a shared temporary directory. Other workers poll this directory every 2 seconds and load new checkpoints into their local corpus. This means one worker's deep discovery becomes every worker's starting point.
+
+The pool matters most on deep targets. If reaching phase 3 of your service requires 15 specific steps, a single worker might need hundreds of runs to stumble into it. With the pool, once *any* worker reaches phase 3, all workers can branch from there and search for phase 4 independently. The effective search depth per worker drops from 15 to the distance between phases.
+
+Pool overhead is small: one `pickle.dump` per significant discovery (capped at 20 publishes per worker), one `glob` + `pickle.load` per sync (every 2 seconds). For typical ChaosTest state dicts (a few kilobytes), this adds negligible latency.
 
 ## Comparison with pure Hypothesis
 

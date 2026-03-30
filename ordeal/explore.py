@@ -421,6 +421,7 @@ class Explorer:
         record_traces: bool = False,
         workers: int = 1,
         share_edges: bool = True,
+        share_checkpoints: bool = True,
         mutation_targets: list[str] | None = None,
     ) -> None:
         """Initialize the exploration engine.
@@ -445,6 +446,11 @@ class Explorer:
                 bitmap so workers skip edges already found by others.
                 AFL-style: one byte per edge hash, single-byte atomic
                 writes, zero locks.  Default ``True``.
+            share_checkpoints: When ``workers > 1``, share checkpoints
+                between workers via a file-based pool.  Workers publish
+                significant discoveries and subscribe to others' finds,
+                allowing one worker to branch from a state another
+                discovered.  Default ``True``.
         """
         self.test_class = test_class
         self.target_paths = [m.replace(".", "/") for m in (target_modules or [])]
@@ -458,6 +464,7 @@ class Explorer:
         self.record_traces = record_traces
         self.workers = (os.cpu_count() or 1) if workers <= 0 else workers
         self.share_edges = share_edges
+        self.share_checkpoints = share_checkpoints
         self.mutation_targets = mutation_targets or []
 
         # Shared-memory edge bitmap (set by _run_parallel / _worker_fn)
@@ -1276,7 +1283,11 @@ class Explorer:
             shm_name = shm.name
 
         # Shared checkpoint pool directory
-        pool_dir = tempfile.mkdtemp(prefix="ordeal-pool-")
+        pool_dir = (
+            tempfile.mkdtemp(prefix="ordeal-pool-")
+            if self.share_checkpoints
+            else None
+        )
 
         try:
             worker_args = []
@@ -1337,7 +1348,8 @@ class Explorer:
             if shm is not None:
                 shm.close()
                 shm.unlink()
-            shutil.rmtree(pool_dir, ignore_errors=True)
+            if pool_dir is not None:
+                shutil.rmtree(pool_dir, ignore_errors=True)
 
 
 def _worker_fn(args: dict[str, Any]) -> dict[str, Any]:

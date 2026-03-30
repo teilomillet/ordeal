@@ -65,7 +65,8 @@ class TestDiff:
         import hypothesis.strategies as st
 
         result = diff(
-            add_v1, add_v2,
+            add_v1,
+            add_v2,
             max_examples=20,
             x=st.integers(0, 10),
             y=st.integers(0, 10),

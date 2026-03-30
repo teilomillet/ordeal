@@ -272,8 +272,7 @@ def mine(
     strategies = _infer_strategies(fn, normalized)
     if strategies is None:
         raise ValueError(
-            f"Cannot infer strategies for {fn.__name__}. "
-            f"Provide fixtures for untyped parameters."
+            f"Cannot infer strategies for {fn.__name__}. Provide fixtures for untyped parameters."
         )
 
     # Collect outputs and inputs

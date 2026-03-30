@@ -1,6 +1,5 @@
 """Tests for ordeal.mine — property mining."""
 
-
 from ordeal.mine import mine
 
 

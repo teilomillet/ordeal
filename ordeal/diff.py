@@ -62,10 +62,7 @@ class DiffResult:
     def summary(self) -> str:
         """Human-readable report."""
         status = "EQUIVALENT" if self.equivalent else "DIVERGENT"
-        lines = [
-            f"diff({self.function_a}, {self.function_b}): "
-            f"{self.total} examples, {status}"
-        ]
+        lines = [f"diff({self.function_a}, {self.function_b}): {self.total} examples, {status}"]
         if self.mismatches:
             lines.append(f"  {len(self.mismatches)} mismatch(es):")
             for m in self.mismatches[:3]:
@@ -190,11 +187,13 @@ def diff(
             out_a = fn_a(**kwargs)
             out_b = fn_b(**kwargs)
             if not check_equal(out_a, out_b):
-                mismatches.append(Mismatch(
-                    args=kwargs,
-                    output_a=out_a,
-                    output_b=out_b,
-                ))
+                mismatches.append(
+                    Mismatch(
+                        args=kwargs,
+                        output_a=out_a,
+                        output_b=out_b,
+                    )
+                )
                 raise AssertionError("outputs differ")
 
         test()

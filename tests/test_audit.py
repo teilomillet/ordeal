@@ -1,0 +1,388 @@
+"""Tests for ordeal.audit — epistemic soundness of the audit module.
+
+Tests verify that the audit:
+1. Parses coverage JSON correctly (known-good fixtures)
+2. Fails visibly on bad data (never silent zeros)
+3. Computes Wilson CI correctly (against known values)
+4. Self-verifies internal consistency
+5. Reports known unknowns
+6. Produces correct output for the test target module
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from ordeal.audit import (
+    CoverageMeasurement,
+    CoverageResult,
+    ModuleAudit,
+    Status,
+    _count_lines_in_file,
+    _count_tests_in_file,
+    _find_test_files,
+    _suggest_tests,
+    _verify_consistency,
+    wilson_lower,
+)
+
+# ============================================================================
+# Wilson score interval
+# ============================================================================
+
+
+class TestWilsonLower:
+    """Verify Wilson CI against known values from statistics tables."""
+
+    def test_zero_total(self):
+        assert wilson_lower(0, 0) == 0.0
+
+    def test_perfect_small_sample(self):
+        """10/10 at 95% CI → lower bound ~0.72."""
+        lower = wilson_lower(10, 10)
+        assert 0.70 < lower < 0.75, f"10/10: {lower:.3f}"
+
+    def test_perfect_large_sample(self):
+        """500/500 at 95% CI → lower bound ~0.993."""
+        lower = wilson_lower(500, 500)
+        assert 0.990 < lower < 0.996, f"500/500: {lower:.4f}"
+
+    def test_half_rate(self):
+        """50/100 at 95% CI → lower bound ~0.40."""
+        lower = wilson_lower(50, 100)
+        assert 0.39 < lower < 0.42, f"50/100: {lower:.3f}"
+
+    def test_zero_successes(self):
+        """0/100 at 95% CI → lower bound ~0.0."""
+        lower = wilson_lower(0, 100)
+        assert lower < 0.01, f"0/100: {lower:.4f}"
+
+    def test_monotonic_in_successes(self):
+        """More successes → higher lower bound."""
+        bounds = [wilson_lower(k, 100) for k in range(0, 101, 10)]
+        for i in range(1, len(bounds)):
+            assert bounds[i] >= bounds[i - 1]
+
+    def test_monotonic_in_sample_size(self):
+        """Larger sample → tighter bound (higher lower for same rate)."""
+        bounds = [wilson_lower(n, n) for n in [10, 50, 100, 500]]
+        for i in range(1, len(bounds)):
+            assert bounds[i] >= bounds[i - 1]
+
+
+# ============================================================================
+# File counting
+# ============================================================================
+
+
+class TestCountTests:
+    def test_counts_test_functions(self, tmp_path: Path):
+        f = tmp_path / "test_example.py"
+        f.write_text("def test_a(): pass\ndef test_b(): pass\ndef helper(): pass\n")
+        count, err = _count_tests_in_file(f)
+        assert count == 2
+        assert err is None
+
+    def test_returns_error_on_missing_file(self, tmp_path: Path):
+        f = tmp_path / "nonexistent.py"
+        count, err = _count_tests_in_file(f)
+        assert count == 0
+        assert err is not None
+        assert "cannot read" in err
+
+    def test_empty_file(self, tmp_path: Path):
+        f = tmp_path / "empty.py"
+        f.write_text("")
+        count, err = _count_tests_in_file(f)
+        assert count == 0
+        assert err is None
+
+
+class TestCountLines:
+    def test_counts_non_empty(self, tmp_path: Path):
+        f = tmp_path / "code.py"
+        f.write_text("line1\n\nline3\n  \nline5\n")
+        count, err = _count_lines_in_file(f)
+        assert count == 3  # line1, line3, line5
+        assert err is None
+
+    def test_returns_error_on_missing(self, tmp_path: Path):
+        f = tmp_path / "missing.py"
+        count, err = _count_lines_in_file(f)
+        assert count == 0
+        assert err is not None
+
+
+# ============================================================================
+# Test file discovery
+# ============================================================================
+
+
+class TestFindTestFiles:
+    def test_finds_by_name(self, tmp_path: Path):
+        (tmp_path / "test_scoring.py").write_text("def test_a(): pass")
+        (tmp_path / "test_scoring_props.py").write_text("def test_b(): pass")
+        (tmp_path / "test_other.py").write_text("def test_c(): pass")
+        files = _find_test_files("myapp.scoring", tmp_path)
+        names = {f.name for f in files}
+        assert names == {"test_scoring.py", "test_scoring_props.py"}
+
+    def test_ignores_substring_match(self, tmp_path: Path):
+        """test_scoring_props matches, but test_prescoring does not."""
+        (tmp_path / "test_scoring.py").write_text("")
+        (tmp_path / "test_prescoring.py").write_text("")
+        files = _find_test_files("myapp.scoring", tmp_path)
+        assert len(files) == 1
+        assert files[0].name == "test_scoring.py"
+
+    def test_empty_dir(self, tmp_path: Path):
+        assert _find_test_files("myapp.scoring", tmp_path) == []
+
+    def test_nonexistent_dir(self, tmp_path: Path):
+        assert _find_test_files("myapp.scoring", tmp_path / "nope") == []
+
+
+# ============================================================================
+# Coverage measurement types
+# ============================================================================
+
+
+class TestCoverageMeasurement:
+    def test_verified_has_result(self):
+        m = CoverageMeasurement(
+            Status.VERIFIED,
+            result=CoverageResult(
+                percent=98.0,
+                total_statements=50,
+                missing_count=1,
+                missing_lines=frozenset({42}),
+                source="test",
+            ),
+        )
+        assert m.status == Status.VERIFIED
+        assert m.percent == 98.0
+        assert m.missing_lines == frozenset({42})
+
+    def test_failed_has_error(self):
+        m = CoverageMeasurement(Status.FAILED, error="timed out")
+        assert m.status == Status.FAILED
+        assert m.percent == 0.0
+        assert m.missing_lines == frozenset()
+        assert m.error == "timed out"
+
+    def test_failed_default(self):
+        m = CoverageMeasurement(Status.FAILED, error="not measured yet")
+        assert m.percent == 0.0
+
+
+# ============================================================================
+# Self-verification
+# ============================================================================
+
+
+class TestVerifyConsistency:
+    def _make_coverage(
+        self, percent: float, stmts: int, missing: frozenset[int],
+    ) -> CoverageMeasurement:
+        return CoverageMeasurement(
+            Status.VERIFIED,
+            result=CoverageResult(
+                percent=percent,
+                total_statements=stmts,
+                missing_count=len(missing),
+                missing_lines=missing,
+                source="test",
+            ),
+        )
+
+    def test_consistent_passes(self):
+        cur = self._make_coverage(98.0, 50, frozenset({42}))
+        mig = self._make_coverage(96.0, 50, frozenset({42, 43}))
+        warnings: list[str] = []
+        _verify_consistency(cur, mig, "def test_a(): pass\n", 1, warnings)
+        assert warnings == []
+
+    def test_statement_count_mismatch(self):
+        cur = self._make_coverage(98.0, 50, frozenset())
+        mig = self._make_coverage(96.0, 45, frozenset())
+        warnings: list[str] = []
+        _verify_consistency(cur, mig, "def test_a(): pass\n", 1, warnings)
+        assert any("statement count mismatch" in w for w in warnings)
+
+    def test_test_count_mismatch(self):
+        cur = self._make_coverage(98.0, 50, frozenset())
+        mig = self._make_coverage(96.0, 50, frozenset())
+        warnings: list[str] = []
+        # generated has 2 test defs, but we claim 1
+        _verify_consistency(
+            cur, mig,
+            "def test_a(): pass\ndef test_b(): pass\n",
+            1,
+            warnings,
+        )
+        assert any("test count mismatch" in w for w in warnings)
+
+    def test_skips_when_failed(self):
+        cur = CoverageMeasurement(Status.FAILED, error="timeout")
+        mig = CoverageMeasurement(Status.FAILED, error="timeout")
+        warnings: list[str] = []
+        _verify_consistency(cur, mig, "", 0, warnings)
+        # Should not crash, should not produce statement mismatch
+        assert not any("statement count" in w for w in warnings)
+
+
+# ============================================================================
+# ModuleAudit summary formatting
+# ============================================================================
+
+
+class TestModuleAuditSummary:
+    def test_verified_shows_label(self):
+        a = ModuleAudit(module="myapp.scoring")
+        a.current_coverage = CoverageMeasurement(
+            Status.VERIFIED,
+            result=CoverageResult(98.0, 50, 1, frozenset({42}), "test"),
+        )
+        s = a.summary()
+        assert "[verified]" in s
+        assert "98%" in s
+
+    def test_failed_shows_reason(self):
+        a = ModuleAudit(module="myapp.scoring")
+        a.current_coverage = CoverageMeasurement(
+            Status.FAILED, error="timed out after 120s",
+        )
+        s = a.summary()
+        assert "FAILED" in s
+        assert "timed out" in s
+
+    def test_not_checked_shown(self):
+        a = ModuleAudit(module="myapp.scoring")
+        a.not_checked = ["output value correctness"]
+        s = a.summary()
+        assert "NOT verified" in s
+        assert "output value correctness" in s
+
+    def test_warnings_counted(self):
+        a = ModuleAudit(module="myapp.scoring")
+        a.warnings = ["something failed", "another issue"]
+        s = a.summary()
+        assert "warnings: 2" in s
+
+    def test_coverage_preserved_when_both_verified(self):
+        a = ModuleAudit(module="x")
+        a.current_coverage = CoverageMeasurement(
+            Status.VERIFIED,
+            result=CoverageResult(98.0, 50, 1, frozenset(), "test"),
+        )
+        a.migrated_coverage = CoverageMeasurement(
+            Status.VERIFIED,
+            result=CoverageResult(97.0, 50, 1, frozenset(), "test"),
+        )
+        assert a.coverage_preserved  # 97 >= 98 - 2
+
+    def test_coverage_not_preserved_when_gap_too_large(self):
+        a = ModuleAudit(module="x")
+        a.current_coverage = CoverageMeasurement(
+            Status.VERIFIED,
+            result=CoverageResult(98.0, 50, 1, frozenset(), "test"),
+        )
+        a.migrated_coverage = CoverageMeasurement(
+            Status.VERIFIED,
+            result=CoverageResult(90.0, 50, 5, frozenset(), "test"),
+        )
+        assert not a.coverage_preserved  # 90 < 98 - 2
+
+    def test_coverage_not_preserved_when_failed(self):
+        a = ModuleAudit(module="x")
+        a.current_coverage = CoverageMeasurement(
+            Status.FAILED, error="timeout",
+        )
+        assert not a.coverage_preserved
+
+
+# ============================================================================
+# Suggestion generation
+# ============================================================================
+
+
+class TestSuggestTests:
+    def test_no_gap_no_suggestions(self):
+        # Same missing lines → no gap
+        result = _suggest_tests("tests._auto_target", frozenset({5}), frozenset({5}))
+        assert result == []
+
+    def test_suggests_for_gap_lines(self):
+        # Migrated misses line 17 that current covers
+        result = _suggest_tests(
+            "tests._auto_target",
+            frozenset(),          # current covers everything
+            frozenset({17}),      # migrated misses line 17
+        )
+        assert len(result) >= 1
+        assert "L17" in result[0]
+
+    def test_handles_module_not_found(self):
+        result = _suggest_tests(
+            "nonexistent.module.xyz",
+            frozenset(),
+            frozenset({10}),
+        )
+        assert len(result) >= 1
+        assert "cannot suggest" in result[0]
+
+
+# ============================================================================
+# Integration: audit on the test target module
+# ============================================================================
+
+
+class TestAuditIntegration:
+    """Run a real audit on tests._auto_target and verify output."""
+
+    def test_audit_produces_result(self, tmp_path: Path):
+        """Audit a module with known test files → verified coverage."""
+        # _find_test_files matches test_<short>.py where short = "_auto_target"
+        # so the file must be named test__auto_target.py (double underscore)
+        test_file = tmp_path / "test__auto_target.py"
+        test_file.write_text(
+            "from tests._auto_target import add, greet\n"
+            "def test_add(): assert add(1, 2) == 3\n"
+            "def test_greet(): assert greet('world') == 'hello world'\n"
+        )
+
+        from ordeal.audit import audit
+
+        result = audit(
+            "tests._auto_target",
+            test_dir=str(tmp_path),
+            max_examples=5,
+        )
+
+        # Should have found and measured the test file
+        assert result.current_test_count == 2, (
+            f"expected 2 tests, got {result.current_test_count}. "
+            f"warnings: {result.warnings}"
+        )
+        assert result.module == "tests._auto_target"
+
+        # Should have generated a migrated test
+        assert result.migrated_test_count > 0
+        assert len(result.generated_test) > 0
+
+        # Should list known unknowns
+        assert len(result.not_checked) > 0
+        assert any("correctness" in item for item in result.not_checked)
+
+    def test_audit_no_tests_fails_visibly(self, tmp_path: Path):
+        """Audit with empty test dir → FAILED, not silent 0%."""
+        from ordeal.audit import audit
+
+        result = audit(
+            "tests._auto_target",
+            test_dir=str(tmp_path),
+            max_examples=5,
+        )
+
+        assert result.current_coverage.status == Status.FAILED
+        assert "no test files" in (result.current_coverage.error or "")

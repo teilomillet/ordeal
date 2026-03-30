@@ -141,6 +141,7 @@ class TrackerChaos(ChaosTest):
     @rule(n_threads=st.integers(min_value=2, max_value=THREADS))
     def concurrent_record_hit(self, n_threads: int) -> None:
         """N threads concurrently call record_hit."""
+
         def work():
             for _ in range(ITERS):
                 self.tracker.record_hit("reach", "reachable")
@@ -229,6 +230,7 @@ class FaultChaos(ChaosTest):
     @rule(n_threads=st.integers(min_value=2, max_value=THREADS))
     def concurrent_toggle(self, n_threads: int) -> None:
         """N threads toggling activate/deactivate rapidly."""
+
         def work():
             for _ in range(ITERS):
                 self.target_fault.activate()
@@ -319,6 +321,7 @@ class EdgesChaos(ChaosTest):
                 for i in range(edges_per_thread):
                     with self.collector._edges_lock:
                         self.collector._edges.add(start + i)
+
             return work
 
         threads = []

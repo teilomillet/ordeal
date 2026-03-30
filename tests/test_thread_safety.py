@@ -202,7 +202,6 @@ class TestPropertyTrackerThreadSafety:
             assert p.hits >= 0
             assert p.passes >= 0
 
-
     def test_record_returns_active_state(self):
         """record() return value reflects the active state atomically."""
         tracker = PropertyTracker()

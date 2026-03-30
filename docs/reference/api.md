@@ -1,140 +1,1154 @@
 # API Reference
 
-Complete module listing. Each links to in-code docstrings.
+Complete public API with signatures, parameters, and usage.
 
 ## Core
 
-| Import | What |
-|---|---|
-| `ordeal.ChaosTest` | Stateful chaos test base class |
-| `ordeal.rule` | Declare a test rule (re-export from Hypothesis) |
-| `ordeal.invariant` | Declare an invariant check (re-export) |
-| `ordeal.initialize` | Declare initialization rule (re-export) |
-| `ordeal.precondition` | Gate a rule on current state (re-export) |
-| `ordeal.Bundle` | Named collection for data flow between rules (re-export) |
-| `ordeal.auto_configure()` | Enable chaos mode programmatically |
+### ChaosTest
 
-## Auto
+```python
+from ordeal import ChaosTest
+```
 
-| Import | What |
+Base class for stateful chaos tests. Extends Hypothesis's `RuleBasedStateMachine`.
+
+**Class attributes:**
+
+| Attribute | Type | Default | Description |
+|---|---|---|---|
+| `faults` | `list[Fault]` | `[]` | Faults to inject during testing |
+| `swarm` | `bool` | `False` | Random fault subsets per run |
+
+**Methods:**
+
+| Method | Returns | Description |
+|---|---|---|
+| `active_faults` | `list[Fault]` | Property: currently active faults |
+| `teardown()` | `None` | Deactivate all faults, clean up |
+
+```python
+class MyServiceChaos(ChaosTest):
+    faults = [timing.timeout("myapp.api.call")]
+    swarm = True
+
+    @rule()
+    def do_something(self):
+        ...
+
+TestMyServiceChaos = MyServiceChaos.TestCase
+```
+
+### Hypothesis re-exports
+
+These are re-exported from `hypothesis.stateful` for convenience:
+
+```python
+from ordeal import rule, invariant, initialize, precondition, Bundle
+```
+
+| Import | Description |
 |---|---|
-| `auto.scan_module(module)` | Smoke-test every public function |
-| `auto.fuzz(fn, **fixtures)` | Deep-fuzz a single function |
-| `auto.chaos_for(module, ...)` | Auto-generate ChaosTest from API |
-| `auto.ScanResult` | Result of `scan_module` |
-| `auto.FuzzResult` | Result of `fuzz` |
+| `rule(**kwargs)` | Declare a test rule (decorator) |
+| `invariant()` | Declare an invariant check (decorator) |
+| `initialize(**kwargs)` | Declare an initialization rule (decorator) |
+| `precondition(condition)` | Gate a rule on current state (decorator) |
+| `Bundle(name)` | Named collection for data flow between rules |
+
+### auto_configure
+
+```python
+auto_configure(
+    buggify_probability: float = 0.1,
+    seed: int | None = None,
+) -> None
+```
+
+Enable chaos testing programmatically. Alternative to `--chaos` flag.
+
+```python
+from ordeal import auto_configure
+auto_configure(buggify_probability=0.2, seed=42)
+```
+
+---
 
 ## Assertions
 
-| Import | What |
-|---|---|
-| `ordeal.always(cond, name)` | Must be true every call |
-| `ordeal.sometimes(cond, name)` | Must be true at least once |
-| `ordeal.reachable(name)` | Code path must execute |
-| `ordeal.unreachable(name)` | Code path must never execute |
+```python
+from ordeal import always, sometimes, reachable, unreachable
+```
+
+### always
+
+```python
+always(
+    condition: bool,
+    name: str,
+    **details: Any,
+) -> None
+```
+
+Assert condition is `True` every time. Raises `AssertionError` immediately on violation, triggering Hypothesis shrinking.
+
+```python
+always(result >= 0, "result is non-negative")
+always(not math.isnan(score), "score is never NaN", value=score)
+```
+
+### sometimes
+
+```python
+sometimes(
+    condition: bool | Callable[[], bool],
+    name: str,
+    *,
+    attempts: int | None = None,
+    **details: Any,
+) -> None
+```
+
+Assert condition is `True` at least once across the session. Deferred — checked at session end via PropertyTracker.
+
+If `condition` is callable and `attempts` is set, polls the callable up to `attempts` times for standalone use.
+
+```python
+sometimes(cache_hit, "cache is exercised")
+sometimes(lambda: service.ready(), "service starts", attempts=10)
+```
+
+### reachable
+
+```python
+reachable(
+    name: str,
+    **details: Any,
+) -> None
+```
+
+Record that a code path executed. Deferred — must be hit at least once by session end.
+
+```python
+except TimeoutError:
+    reachable("timeout-handling-path")
+    handle_timeout()
+```
+
+### unreachable
+
+```python
+unreachable(
+    name: str,
+    **details: Any,
+) -> None
+```
+
+Assert code path never executes. Raises `AssertionError` immediately.
+
+```python
+if data is None and not error_occurred:
+    unreachable("data-lost-silently")
+```
+
+### PropertyTracker
+
+```python
+from ordeal.assertions import tracker
+```
+
+Global singleton. Accumulates property results across runs.
+
+| Method | Returns | Description |
+|---|---|---|
+| `reset()` | `None` | Clear all tracked properties |
+| `record(name, prop_type, condition, details)` | `None` | Record a property result |
+| `record_hit(name, prop_type)` | `None` | Record a hit without condition |
+| `results` | `list[Property]` | All tracked properties |
+| `failures` | `list[Property]` | Only failed properties |
+
+### Property
+
+```python
+from ordeal.assertions import Property
+```
+
+| Attribute | Type | Description |
+|---|---|---|
+| `name` | `str` | Property name |
+| `type` | `str` | `"always"`, `"sometimes"`, `"reachable"`, `"unreachable"` |
+| `hits` | `int` | Times evaluated |
+| `passes` | `int` | Times condition was True |
+| `failures` | `int` | Times condition was False |
+| `first_failure_details` | `dict | None` | Details from first failure |
+| `passed` | `bool` | Whether property passed (per type semantics) |
+| `summary` | `str` | One-line `"PASS ..."` or `"FAIL ..."` |
+
+---
 
 ## Buggify
 
-| Import | What |
-|---|---|
-| `ordeal.buggify()` | Returns True during testing (probabilistic) |
-| `ordeal.buggify_value(normal, faulty)` | Returns faulty during testing |
-| `ordeal.buggify.activate(prob)` | Enable for current thread |
-| `ordeal.buggify.deactivate()` | Disable for current thread |
-| `ordeal.buggify.set_seed(seed)` | Seed the RNG |
+```python
+from ordeal.buggify import buggify, buggify_value, activate, deactivate, set_seed, is_active
+```
+
+### buggify
+
+```python
+buggify(probability: float | None = None) -> bool
+```
+
+Returns `True` during chaos testing with configurable probability. Returns `False` in production (zero cost).
+
+```python
+if buggify():
+    raise ConnectionError("simulated failure")
+
+if buggify(0.5):  # 50% chance when active
+    time.sleep(random.random())
+```
+
+### buggify_value
+
+```python
+buggify_value(normal: _T, faulty: _T, probability: float | None = None) -> _T
+```
+
+Returns `faulty` during chaos testing, `normal` otherwise.
+
+```python
+return buggify_value(computed_result, float('nan'))
+return buggify_value(response, TimeoutError("simulated"), 0.3)
+```
+
+### activate / deactivate / set_seed / is_active
+
+```python
+activate(probability: float = 0.1) -> None     # enable for current thread
+deactivate() -> None                             # disable for current thread
+set_seed(seed: int) -> None                      # seed RNG for reproducibility
+is_active() -> bool                              # check if enabled
+```
+
+---
 
 ## Faults
 
-| Import | What |
+### Base classes
+
+```python
+from ordeal.faults import Fault, PatchFault, LambdaFault
+```
+
+**Fault** (ABC):
+
+| Method | Description |
 |---|---|
-| `faults.Fault` | Base class (subclass for custom faults) |
-| `faults.PatchFault(target, wrapper_fn)` | Monkey-patch a function |
-| `faults.LambdaFault(name, on_activate, on_deactivate)` | Quick custom fault |
-| `faults.io.error_on_call(target, error, msg)` | Raise on call |
-| `faults.io.return_empty(target)` | Return None |
-| `faults.io.truncate_output(target, fraction)` | Truncate output |
-| `faults.io.corrupt_output(target)` | Random bytes output |
-| `faults.io.disk_full()` | Writes fail (global) |
-| `faults.io.permission_denied()` | Writes fail (global) |
-| `faults.numerical.nan_injection(target)` | Output becomes NaN |
-| `faults.numerical.inf_injection(target)` | Output becomes Inf |
-| `faults.numerical.wrong_shape(target, expected, actual)` | Wrong array shape |
-| `faults.numerical.corrupted_floats(type)` | Standalone corrupt float source |
-| `faults.timing.timeout(target, delay)` | Raise TimeoutError |
-| `faults.timing.slow(target, delay)` | Add real delay |
-| `faults.timing.intermittent_crash(target, every_n)` | Crash periodically |
-| `faults.timing.jitter(target, magnitude)` | Perturb numeric output |
+| `activate()` | Enable fault injection |
+| `deactivate()` | Disable fault injection |
+| `reset()` | Deactivate and clear state |
+| `name: str` | Human-readable name |
+| `active: bool` | Whether currently active |
+
+**PatchFault**:
+
+```python
+PatchFault(
+    target: str,                                    # dotted path: "myapp.api.call"
+    wrapper_fn: Callable[[Callable], Callable],     # receives original, returns replacement
+    name: str | None = None,
+)
+```
+
+Resolves `target` to a function, replaces it with `wrapper_fn(original)` when active, restores on deactivation. Lazy resolution (resolved on first activation).
+
+**LambdaFault**:
+
+```python
+LambdaFault(
+    name: str,
+    on_activate: Callable[[], None],
+    on_deactivate: Callable[[], None],
+)
+```
+
+### I/O faults
+
+```python
+from ordeal.faults import io
+```
+
+| Function | Signature | Description |
+|---|---|---|
+| `error_on_call` | `(target: str, error: type = IOError, message: str = "Simulated I/O error") -> PatchFault` | Target raises error on every call |
+| `return_empty` | `(target: str) -> PatchFault` | Target returns `None` |
+| `corrupt_output` | `(target: str) -> PatchFault` | Target returns random bytes (same length) |
+| `truncate_output` | `(target: str, fraction: float = 0.5) -> PatchFault` | Target output truncated to fraction |
+| `disk_full` | `() -> Fault` | Global: writes fail with `OSError(ENOSPC)` |
+| `permission_denied` | `() -> Fault` | Global: opens fail with `PermissionError` |
+
+```python
+faults = [
+    io.error_on_call("myapp.storage.save", IOError, "disk unreachable"),
+    io.corrupt_output("myapp.cache.read"),
+    io.disk_full(),
+]
+```
+
+### Numerical faults
+
+```python
+from ordeal.faults import numerical
+```
+
+| Function | Signature | Description |
+|---|---|---|
+| `nan_injection` | `(target: str) -> PatchFault` | Numeric output becomes NaN |
+| `inf_injection` | `(target: str) -> PatchFault` | Numeric output becomes Inf |
+| `wrong_shape` | `(target: str, expected: tuple, actual: tuple) -> PatchFault` | Returns array with wrong shape |
+| `corrupted_floats` | `(corrupt_type: str = "nan") -> Fault` | Standalone corrupt float source; use `fault.value()` |
+
+```python
+faults = [
+    numerical.nan_injection("myapp.model.predict"),
+    numerical.wrong_shape("myapp.embed", (1, 512), (1, 256)),
+]
+```
+
+### Timing faults
+
+```python
+from ordeal.faults import timing
+```
+
+| Function | Signature | Description |
+|---|---|---|
+| `timeout` | `(target: str, delay: float = 30.0, error: type = TimeoutError) -> PatchFault` | Target raises instantly (no real sleep) |
+| `slow` | `(target: str, delay: float = 1.0, mode: str = "simulate") -> PatchFault` | Add delay; `"simulate"` = instant, `"real"` = actual sleep |
+| `intermittent_crash` | `(target: str, every_n: int = 3, error: type = RuntimeError) -> Fault` | Crash every Nth call; resets on `reset()` |
+| `jitter` | `(target: str, magnitude: float = 0.01) -> Fault` | Add deterministic numeric jitter to return value |
+
+```python
+faults = [
+    timing.timeout("myapp.api.call"),
+    timing.intermittent_crash("myapp.worker.process", every_n=5),
+    timing.jitter("myapp.sensor.read", magnitude=0.001),
+]
+```
+
+---
 
 ## Explorer
 
-| Import | What |
-|---|---|
-| `explore.Explorer(test_class, ...)` | Coverage-guided engine |
-| `explore.Explorer.run(...)` | Run exploration loop |
-| `explore.CoverageCollector(paths)` | AFL-style edge coverage |
-| `explore.ExplorationResult` | Results dataclass |
-| `explore.Failure` | Failure with trace |
-| `explore.ProgressSnapshot` | Live stats |
+```python
+from ordeal.explore import Explorer, ExplorationResult, Failure, ProgressSnapshot, CoverageCollector, Checkpoint
+```
+
+### Explorer
+
+```python
+Explorer(
+    test_class: type,                           # ChaosTest subclass
+    *,
+    target_modules: list[str] | None = None,    # modules to track for coverage
+    seed: int = 42,
+    max_checkpoints: int = 256,
+    checkpoint_prob: float = 0.4,               # probability of starting from checkpoint
+    checkpoint_strategy: str = "energy",        # "energy", "uniform", "recent"
+    fault_toggle_prob: float = 0.3,
+    record_traces: bool = False,
+    workers: int = 1,                           # parallel worker processes
+)
+```
+
+```python
+explorer.run(
+    *,
+    max_time: float = 60.0,
+    max_runs: int | None = None,
+    steps_per_run: int = 50,
+    shrink: bool = True,
+    max_shrink_time: float = 30.0,
+    progress: Callable[[ProgressSnapshot], None] | None = None,
+) -> ExplorationResult
+```
+
+```python
+explorer = Explorer(
+    MyServiceChaos,
+    target_modules=["myapp"],
+    checkpoint_strategy="energy",
+)
+result = explorer.run(max_time=120, steps_per_run=100)
+print(result.summary())
+```
+
+### ExplorationResult
+
+| Attribute | Type | Description |
+|---|---|---|
+| `total_runs` | `int` | Runs completed |
+| `total_steps` | `int` | Total steps across all runs |
+| `unique_edges` | `int` | Unique control-flow edges discovered |
+| `checkpoints_saved` | `int` | Checkpoints in corpus |
+| `failures` | `list[Failure]` | Failures found |
+| `duration_seconds` | `float` | Wall-clock time |
+| `edge_log` | `list[tuple[int, int]]` | `(run_id, cumulative_edges)` |
+| `traces` | `list[Trace]` | Recorded traces (if `record_traces=True`) |
+| `summary()` | `str` | Human-readable report |
+
+### Failure
+
+| Attribute | Type | Description |
+|---|---|---|
+| `error` | `Exception` | The exception raised |
+| `step` | `int` | Step number when failure occurred |
+| `run_id` | `int` | Run that found this failure |
+| `active_faults` | `list[str]` | Faults active at failure time |
+| `rule_log` | `list[str]` | Sequence of rules/faults leading to failure |
+| `trace` | `Trace | None` | Full trace for replay |
+
+### ProgressSnapshot
+
+| Attribute | Type | Description |
+|---|---|---|
+| `elapsed` | `float` | Seconds since start |
+| `total_runs` | `int` | Runs completed |
+| `total_steps` | `int` | Steps completed |
+| `unique_edges` | `int` | Edges discovered |
+| `checkpoints` | `int` | Checkpoints saved |
+| `failures` | `int` | Failures found |
+| `runs_per_second` | `float` | Throughput |
+
+### CoverageCollector
+
+```python
+CoverageCollector(target_paths: list[str])
+```
+
+| Method | Returns | Description |
+|---|---|---|
+| `start()` | `None` | Begin collecting edge coverage via `sys.settrace` |
+| `stop()` | `frozenset[int]` | Stop and return observed edges |
+| `snapshot()` | `frozenset[int]` | Current edges without stopping |
+
+---
 
 ## Trace
 
-| Import | What |
-|---|---|
-| `trace.Trace` | Full run recording |
-| `trace.TraceStep` | Single step in a trace |
-| `trace.replay(trace)` | Reproduce a failure |
-| `trace.shrink(trace, test_class)` | Minimize a failure |
+```python
+from ordeal.trace import Trace, TraceStep, TraceFailure, replay, shrink
+```
+
+### Trace
+
+| Attribute | Type | Description |
+|---|---|---|
+| `run_id` | `int` | Run identifier |
+| `seed` | `int` | RNG seed |
+| `test_class` | `str` | `"module.path:ClassName"` |
+| `from_checkpoint` | `int | None` | Checkpoint run_id, or `None` if fresh |
+| `steps` | `list[TraceStep]` | Ordered steps |
+| `failure` | `TraceFailure | None` | Failure info if applicable |
+| `edges_discovered` | `int` | New edges found |
+| `duration` | `float` | Run duration |
+
+| Method | Returns | Description |
+|---|---|---|
+| `to_dict()` | `dict` | JSON-serializable dict |
+| `save(path)` | `None` | Write to JSON file |
+| `Trace.from_dict(data)` | `Trace` | Reconstruct from dict |
+| `Trace.load(path)` | `Trace` | Load from JSON file |
+
+### TraceStep
+
+| Attribute | Type | Description |
+|---|---|---|
+| `kind` | `str` | `"rule"` or `"fault_toggle"` |
+| `name` | `str` | Rule name or `"+fault"` / `"-fault"` |
+| `params` | `dict` | Parameters drawn for this step |
+| `active_faults` | `list[str]` | Faults active at this step |
+| `edge_count` | `int` | Cumulative edges at this step |
+| `timestamp_offset` | `float` | Time since run start |
+
+### replay
+
+```python
+replay(
+    trace: Trace,
+    test_class: type | None = None,     # auto-resolved from trace.test_class if None
+) -> Exception | None
+```
+
+Replay a trace step-by-step. Returns the exception if it reproduces, `None` otherwise.
+
+### shrink
+
+```python
+shrink(
+    trace: Trace,
+    test_class: type | None = None,
+    *,
+    max_time: float = 30.0,
+) -> Trace
+```
+
+Shrink a failing trace to the minimal reproducing sequence. Three phases: delta debugging, step elimination, fault simplification.
+
+---
 
 ## QuickCheck
 
-| Import | What |
-|---|---|
-| `quickcheck.quickcheck` | Decorator: infer strategies from types |
-| `quickcheck.strategy_for_type(tp)` | Derive strategy from type hint |
-| `quickcheck.biased.integers(min, max)` | Boundary-biased integers |
-| `quickcheck.biased.floats(min, max)` | Boundary-biased floats |
-| `quickcheck.biased.strings(min, max)` | Boundary-biased strings |
-| `quickcheck.biased.lists(elements, ...)` | Boundary-biased lists |
+```python
+from ordeal.quickcheck import quickcheck, strategy_for_type, biased
+```
+
+### quickcheck
+
+```python
+@quickcheck
+def test_fn(x: int, y: str) -> None:
+    ...
+
+@quickcheck(max_examples=500)
+def test_fn(x: float) -> None:
+    ...
+
+@quickcheck(x=st.integers(min_value=0))  # override specific parameter
+def test_fn(x: int, y: str) -> None:
+    ...
+```
+
+Decorator. Infers strategies from type hints, runs as property test with `max_examples=100` (default).
+
+### strategy_for_type
+
+```python
+strategy_for_type(tp: type, *, _depth: int = 0) -> st.SearchStrategy
+```
+
+Derive a boundary-biased strategy from a type hint. Handles: `int`, `float`, `str`, `bool`, `bytes`, `None`, `list[T]`, `dict[K, V]`, `tuple`, `set`, `Union`, `Optional`, `dataclass`. Recursion depth limited to 5.
+
+### biased
+
+Namespace of boundary-biased strategies:
+
+```python
+biased.integers(min_value=None, max_value=None) -> SearchStrategy[int]
+biased.floats(min_value=None, max_value=None, *, allow_nan=False, allow_infinity=False) -> SearchStrategy[float]
+biased.strings(min_size=0, max_size=100) -> SearchStrategy[str]
+biased.bytes_(min_size=0, max_size=100) -> SearchStrategy[bytes]
+biased.lists(elements, min_size=0, max_size=50) -> SearchStrategy[list]
+```
+
+Biased toward boundary values: 0, -1, +1, empty, max-length, powers of 2, range endpoints.
+
+---
 
 ## Invariants
 
-| Import | What |
+```python
+from ordeal.invariants import (
+    Invariant, no_nan, no_inf, finite, bounded, monotonic,
+    unique, non_empty, unit_normalized, orthonormal, symmetric,
+    positive_semi_definite, rank_bounded, mean_bounded, variance_bounded,
+)
+```
+
+### Invariant
+
+```python
+Invariant(name: str, check_fn: Callable[..., None])
+```
+
+| Method | Description |
 |---|---|
-| `invariants.no_nan` | Reject NaN |
-| `invariants.no_inf` | Reject Inf |
-| `invariants.finite` | `no_nan & no_inf` |
-| `invariants.bounded(lo, hi)` | Value in range |
-| `invariants.monotonic(strict=False)` | Non-decreasing sequence |
-| `invariants.unique(key=None)` | No duplicates |
-| `invariants.non_empty()` | Not empty/falsy |
-| `inv_a & inv_b` | Compose with `&` |
+| `__call__(value, *, name=None)` | Run check, raise `AssertionError` on violation |
+| `__and__(other)` | Compose: `(a & b)(x)` checks both |
+
+### Built-in invariants
+
+| Invariant | Signature | Description |
+|---|---|---|
+| `no_nan` | singleton | Reject NaN in scalars, sequences, numpy arrays |
+| `no_inf` | singleton | Reject Inf/-Inf |
+| `finite` | singleton | `no_nan & no_inf` |
+| `bounded` | `(lo: float, hi: float)` | All values in `[lo, hi]` |
+| `monotonic` | `(*, strict: bool = False)` | Non-decreasing (or strictly increasing) |
+| `unique` | `(*, key: Callable | None = None)` | No duplicates (optionally by key) |
+| `non_empty` | `()` | Not empty/falsy |
+| `unit_normalized` | `(*, tol: float = 1e-6)` | Row vectors have L2 norm ~1.0 |
+| `orthonormal` | `(*, tol: float = 1e-6)` | Rows form orthonormal set |
+| `symmetric` | `(*, tol: float = 1e-6)` | Matrix equals its transpose |
+| `positive_semi_definite` | `(*, tol: float = 1e-6)` | All eigenvalues >= -tol |
+| `rank_bounded` | `(min_rank=0, max_rank=None)` | Matrix rank in range |
+| `mean_bounded` | `(lo: float, hi: float)` | Mean in `[lo, hi]` |
+| `variance_bounded` | `(lo: float, hi: float)` | Variance in `[lo, hi]` |
+
+```python
+valid_score = finite & bounded(0, 1)
+valid_score(model_output)
+
+valid_embedding = unit_normalized() & bounded(-1, 1)
+valid_embedding(embedding_matrix)
+```
+
+---
 
 ## Simulate
 
-| Import | What |
-|---|---|
-| `simulate.Clock(start=0)` | Controllable clock |
-| `simulate.Clock.advance(seconds)` | Advance time (instant) |
-| `simulate.Clock.set_timer(delay, cb)` | Schedule callback |
-| `simulate.Clock.patch()` | Context manager: patch `time.time`/`time.sleep` |
-| `simulate.FileSystem()` | In-memory filesystem |
-| `simulate.FileSystem.inject_fault(path, type)` | Inject fault |
+```python
+from ordeal.simulate import Clock, FileSystem
+```
+
+### Clock
+
+```python
+Clock(start: float = 0.0)
+```
+
+| Method | Signature | Description |
+|---|---|---|
+| `time()` | `-> float` | Current simulated time |
+| `sleep(seconds)` | `-> None` | Advance by seconds (instant) |
+| `advance(seconds)` | `-> None` | Advance, firing timers whose deadline passed |
+| `set_timer(delay, callback)` | `-> int` | Schedule callback; returns timer ID |
+| `pending_timers` | `-> int` | Property: unfired timer count |
+| `patch()` | context manager | Patch `time.time()` and `time.sleep()` |
+
+```python
+clock = Clock()
+clock.set_timer(10.0, lambda: print("fired"))
+clock.advance(15.0)  # timer fires at t=10
+
+with clock.patch():
+    import time
+    time.sleep(3600)  # instant
+```
+
+### FileSystem
+
+```python
+FileSystem()
+```
+
+| Method | Signature | Description |
+|---|---|---|
+| `write(path, data)` | `(str, str | bytes) -> None` | Write data, respecting faults |
+| `read(path)` | `(str) -> bytes` | Read raw bytes, respecting faults |
+| `read_text(path, encoding="utf-8")` | `(str, str) -> str` | Read decoded string |
+| `exists(path)` | `(str) -> bool` | True if path exists (no "missing" fault) |
+| `delete(path)` | `(str) -> None` | Remove path |
+| `list_dir(prefix="/")` | `(str) -> list[str]` | Paths starting with prefix |
+| `inject_fault(path, fault)` | `(str, str) -> None` | Inject: `"corrupt"`, `"missing"`, `"readonly"`, `"full"` |
+| `clear_fault(path)` | `(str) -> None` | Remove fault on path |
+| `clear_all_faults()` | `-> None` | Remove all faults |
+| `reset()` | `-> None` | Remove all files and faults |
+
+---
 
 ## Mutations
 
-| Import | What |
-|---|---|
-| `mutations.mutate_function_and_test(target, test_fn)` | Mutate a function |
-| `mutations.mutate_and_test(module, test_fn)` | Mutate a module |
-| `mutations.generate_mutants(source)` | Generate AST mutants |
-| `mutations.MutationResult` | Results with `.score`, `.summary()` |
+```python
+from ordeal.mutations import mutate_function_and_test, mutate_and_test, generate_mutants, MutationResult, Mutant
+```
+
+### mutate_function_and_test
+
+```python
+mutate_function_and_test(
+    target: str,                                # dotted path: "myapp.scoring.compute"
+    test_fn: Callable[[], None],                # test to run against each mutant
+    operators: list[str] | None = None,         # None = all operators
+) -> MutationResult
+```
+
+Mutate a single function via PatchFault. Safer than module-level. Recommended.
+
+### mutate_and_test
+
+```python
+mutate_and_test(
+    target: str,                                # module path: "myapp.scoring"
+    test_fn: Callable[[], None],
+    operators: list[str] | None = None,
+) -> MutationResult
+```
+
+Mutate entire module, swap in `sys.modules`. Only works if tests import the module, not individual functions.
+
+### generate_mutants
+
+```python
+generate_mutants(
+    source: str,                                # source code string
+    operators: list[str] | None = None,
+) -> list[tuple[Mutant, ast.Module]]
+```
+
+Generate all possible mutants from source. Returns list of `(Mutant, modified_ast)`.
+
+### MutationResult
+
+| Attribute | Type | Description |
+|---|---|---|
+| `target` | `str` | What was mutated |
+| `mutants` | `list[Mutant]` | All generated mutants |
+| `total` | `int` | Total mutants |
+| `killed` | `int` | Mutants caught by tests |
+| `survived` | `list[Mutant]` | Mutants tests missed |
+| `score` | `float` | Kill ratio (1.0 = all caught) |
+| `summary()` | `str` | Human-readable report |
+
+### Mutant
+
+| Attribute | Type | Description |
+|---|---|---|
+| `operator` | `str` | `"arithmetic"`, `"comparison"`, `"negate"`, `"return_none"`, `"boundary"`, `"constant"`, `"delete"` |
+| `description` | `str` | What changed: `"+ -> -"` |
+| `line` | `int` | Source line |
+| `col` | `int` | Source column |
+| `killed` | `bool` | Whether test caught it |
+| `error` | `str | None` | Compilation error if mutant was invalid |
+| `location` | `str` | `"L42:8"` |
+
+**Available operators:** `arithmetic`, `comparison`, `negate`, `return_none`, `boundary`, `constant`, `delete`
+
+---
+
+## Auto
+
+```python
+from ordeal.auto import scan_module, fuzz, chaos_for, register_fixture
+```
+
+### scan_module
+
+```python
+scan_module(
+    module: str | ModuleType,
+    *,
+    max_examples: int = 50,
+    check_return_type: bool = True,
+    fixtures: dict[str, SearchStrategy] | None = None,
+) -> ScanResult
+```
+
+Smoke-test every public function. Generates random inputs from type hints, checks: no crash, return type matches.
+
+```python
+result = scan_module("myapp.scoring")
+assert result.passed
+print(result.summary())
+```
+
+### fuzz
+
+```python
+fuzz(
+    fn: Any,
+    *,
+    max_examples: int = 1000,
+    check_return_type: bool = False,
+    **fixtures: SearchStrategy | Any,
+) -> FuzzResult
+```
+
+Deep-fuzz a single function.
+
+```python
+result = fuzz(myapp.scoring.compute, model=model_strategy)
+assert result.passed
+```
+
+### chaos_for
+
+```python
+chaos_for(
+    module: str | ModuleType,
+    *,
+    fixtures: dict[str, SearchStrategy] | None = None,
+    invariants: list[Invariant] | None = None,
+    faults: list[Fault] | None = None,
+    max_examples: int = 50,
+    stateful_step_count: int = 30,
+) -> type
+```
+
+Auto-generate a ChaosTest from a module's public API. Each function becomes a `@rule`.
+
+```python
+TestScoring = chaos_for(
+    "myapp.scoring",
+    invariants=[finite, bounded(0, 1)],
+    faults=[timing.timeout("myapp.scoring.predict")],
+)
+```
+
+### register_fixture
+
+```python
+register_fixture(name: str, strategy: SearchStrategy) -> None
+```
+
+Register a named fixture for auto-scan. Highest priority after explicit fixtures.
+
+### ScanResult
+
+| Attribute | Type | Description |
+|---|---|---|
+| `module` | `str` | Module tested |
+| `functions` | `list[FunctionResult]` | Per-function results |
+| `skipped` | `list[tuple[str, str]]` | `(name, reason)` for skipped functions |
+| `passed` | `bool` | All functions passed |
+| `total` | `int` | Functions tested |
+| `failed` | `int` | Failures |
+| `summary()` | `str` | Human-readable report |
+
+### FuzzResult
+
+| Attribute | Type | Description |
+|---|---|---|
+| `function` | `str` | Function tested |
+| `examples` | `int` | Examples run |
+| `failures` | `list[Exception]` | Exceptions found |
+| `passed` | `bool` | No failures |
+| `summary()` | `str` | Human-readable report |
+
+---
+
+## Strategies
+
+```python
+from ordeal.strategies import corrupted_bytes, adversarial_strings, nan_floats, edge_integers, mixed_types
+```
+
+| Strategy | Signature | Description |
+|---|---|---|
+| `corrupted_bytes` | `(min_size=0, max_size=1024)` | Edge-case bytes: empty, all-zero, all-0xFF |
+| `adversarial_strings` | `(min_size=0, max_size=256)` | SQL injection, XSS, path traversal, null bytes |
+| `nan_floats` | `()` | NaN, Inf, -Inf, subnormals, boundaries |
+| `edge_integers` | `(bits=64)` | 0, +/-1, min/max for N bits |
+| `mixed_types` | `()` | None, bool, int, float, str, bytes, lists, dicts |
+
+```python
+from hypothesis import given
+from ordeal.strategies import adversarial_strings
+
+@given(s=adversarial_strings())
+def test_parser_doesnt_crash(s):
+    parse(s)  # should never raise unhandled exception
+```
+
+---
+
+## Audit
+
+```python
+from ordeal.audit import audit, audit_report, ModuleAudit
+```
+
+### audit
+
+```python
+audit(
+    module: str,                    # dotted path: "myapp.scoring"
+    *,
+    test_dir: str = "tests",       # directory containing existing tests
+    max_examples: int = 20,        # Hypothesis examples per function
+) -> ModuleAudit
+```
+
+Audit a single module: measure existing test coverage vs ordeal-migrated tests. Every number in the result is either `[verified]` or `FAILED: reason` — the audit never silently returns 0%.
+
+Coverage is measured via coverage.py JSON reports (stable schema), not terminal parsing. Results are cross-checked for consistency. Generated test files are saved to `.ordeal/test_<module>_migrated.py`.
+
+### audit_report
+
+```python
+audit_report(
+    modules: list[str],
+    *,
+    test_dir: str = "tests",
+    max_examples: int = 20,
+) -> str
+```
+
+Audit multiple modules and produce a formatted summary report. Every number labeled `[verified]` or `FAILED`.
+
+### ModuleAudit
+
+| Attribute | Type | Description |
+|---|---|---|
+| `module` | `str` | Module path |
+| `current_test_count` | `int` | Existing test count |
+| `current_test_lines` | `int` | Lines of existing test code |
+| `current_coverage` | `CoverageMeasurement` | Coverage from existing tests (with status) |
+| `migrated_test_count` | `int` | Tests in generated migrated file |
+| `migrated_lines` | `int` | Lines in generated migrated file |
+| `migrated_coverage` | `CoverageMeasurement` | Coverage from migrated tests (with status) |
+| `mined_properties` | `list[str]` | Properties with Wilson CI bounds |
+| `gap_functions` | `list[str]` | Functions needing fixtures |
+| `suggestions` | `list[str]` | Actionable suggestions for uncovered lines |
+| `not_checked` | `list[str]` | Known unknowns — what ordeal structurally cannot verify |
+| `warnings` | `list[str]` | Every problem visible here |
+| `generated_test` | `str` | Full generated test file content |
+| `coverage_preserved` | `bool` | True if migrated >= current - 2% (False if either failed) |
+| `summary()` | `str` | Human-readable report with `[verified]`/`FAILED` labels |
+
+### CoverageMeasurement
+
+Every coverage number carries its epistemic status.
+
+```python
+from ordeal.audit import CoverageMeasurement, Status
+```
+
+| Attribute | Type | Description |
+|---|---|---|
+| `status` | `Status` | `VERIFIED` or `FAILED` |
+| `result` | `CoverageResult | None` | Structured data if verified |
+| `error` | `str | None` | Explanation if failed |
+| `percent` | `float` | Coverage %, or 0.0 if failed |
+| `missing_lines` | `frozenset[int]` | Uncovered lines, or empty if failed |
+
+### CoverageResult
+
+```python
+from ordeal.audit import CoverageResult
+```
+
+| Attribute | Type | Description |
+|---|---|---|
+| `percent` | `float` | Coverage percentage |
+| `total_statements` | `int` | Total source statements |
+| `missing_count` | `int` | Number of uncovered statements |
+| `missing_lines` | `frozenset[int]` | Uncovered line numbers |
+| `source` | `str` | How measured (e.g. `"coverage.py JSON"`) |
+
+### wilson_lower
+
+```python
+wilson_lower(successes: int, total: int, z: float = 1.96) -> float
+```
+
+Lower bound of the Wilson score confidence interval. For mined properties: 500/500 at 95% CI gives lower bound ~0.994, meaning "holds with >=99.4% probability" — not "always holds."
+
+---
+
+## Scaling
+
+```python
+from ordeal.scaling import usl, amdahl, optimal_n, peak_throughput, fit_usl, analyze, benchmark
+```
+
+Universal Scaling Law (USL) and Amdahl's Law for predicting parallel exploration performance.
+
+### usl
+
+```python
+usl(n: float, sigma: float, kappa: float) -> float
+```
+
+`C(N) = N / [1 + sigma*(N-1) + kappa*N*(N-1)]`. Returns relative throughput (C(1) = 1).
+
+- `sigma`: contention coefficient — fraction of serialized work
+- `kappa`: coherence coefficient — cross-worker sync cost (grows quadratically)
+
+### amdahl / optimal_n / peak_throughput
+
+```python
+amdahl(n: float, sigma: float) -> float          # USL with kappa=0
+optimal_n(sigma: float, kappa: float) -> float    # worker count at peak throughput
+peak_throughput(sigma: float, kappa: float) -> float
+```
+
+### fit_usl
+
+```python
+fit_usl(measurements: list[tuple[int | float, float]]) -> tuple[float, float]
+```
+
+Fit sigma and kappa from `(N, throughput)` pairs via least squares. Requires >= 3 data points.
+
+### analyze
+
+```python
+analyze(measurements: list[tuple[int | float, float]]) -> ScalingAnalysis
+```
+
+Fit USL and return full analysis with diagnosis.
+
+### benchmark
+
+```python
+benchmark(
+    test_class: type,
+    *,
+    target_modules: list[str] | None = None,
+    max_workers: int | None = None,       # default: CPU count
+    time_per_trial: float = 10.0,
+    seed: int = 42,
+    steps_per_run: int = 50,
+    metric: str = "runs",                 # "runs" or "edges"
+) -> ScalingAnalysis
+```
+
+Benchmark exploration at N=1, 2, 4, ... workers, measure throughput, fit USL parameters automatically.
+
+```python
+from ordeal.scaling import benchmark
+analysis = benchmark(MyServiceChaos, target_modules=["myapp"])
+print(analysis.summary())
+```
+
+### ScalingAnalysis
+
+| Attribute | Type | Description |
+|---|---|---|
+| `sigma` | `float` | Contention coefficient |
+| `kappa` | `float` | Coherence coefficient |
+| `n_optimal` | `float` | Worker count at peak throughput |
+| `peak` | `float` | Maximum achievable throughput multiplier |
+| `regime` | `str` | `"linear"`, `"amdahl"`, or `"usl"` |
+| `efficiency(n)` | `float` | Parallel efficiency C(N)/N at N workers |
+| `throughput(n)` | `float` | Predicted relative throughput at N workers |
+| `summary()` | `str` | Human-readable report with diagnosis |
+
+---
+
+## Mine
+
+```python
+from ordeal.mine import mine, MineResult, MinedProperty
+```
+
+### mine
+
+```python
+mine(
+    fn: Callable,
+    *,
+    max_examples: int = 500,
+    **fixtures: SearchStrategy | Any,
+) -> MineResult
+```
+
+Discover likely properties of a function by running it many times with random inputs and observing patterns in outputs. Properties checked: type consistency, never None, no NaN, non-negative, bounded [0,1], never empty, deterministic, idempotent.
+
+```python
+result = mine(myapp.scoring.compute, max_examples=500)
+for p in result.universal:
+    print(p)
+# ALWAYS  output type is float (500/500)
+# ALWAYS  deterministic (50/50)
+# ALWAYS  output in [0, 1] (500/500)
+```
+
+### MineResult
+
+Results are separated into three categories: checked and applicable, checked but not relevant, and structurally impossible to check.
+
+| Attribute | Type | Description |
+|---|---|---|
+| `function` | `str` | Function name |
+| `examples` | `int` | Examples run |
+| `properties` | `list[MinedProperty]` | Checked and applicable (total > 0) |
+| `not_applicable` | `list[str]` | Checked but not relevant (e.g. "bounded [0,1]" for string output) |
+| `not_checked` | `list[str]` | Structural limitations — things mine() cannot verify |
+| `universal` | `list[MinedProperty]` | Properties that held on every example |
+| `likely` | `list[MinedProperty]` | Properties with >= 95% confidence |
+| `summary()` | `str` | Human-readable report |
+
+### STRUCTURAL_LIMITATIONS
+
+```python
+from ordeal.mine import STRUCTURAL_LIMITATIONS
+```
+
+Things mine() fundamentally cannot discover from random sampling — these require domain knowledge:
+
+- Output value correctness (fuzz checks crash safety, not behavior)
+- Cross-function consistency (e.g., batch == map of individual)
+- Domain-specific invariants (e.g., weighted sum, refusal detection)
+- Error handling for intentionally invalid inputs
+- Performance and resource usage
+- Concurrency and thread safety
+- State mutation and side effects
+
+### MinedProperty
+
+| Attribute | Type | Description |
+|---|---|---|
+| `name` | `str` | Property description |
+| `holds` | `int` | Times property held |
+| `total` | `int` | Times property was checked |
+| `counterexample` | `dict | None` | First counterexample if not universal |
+| `confidence` | `float` | `holds / total` |
+| `universal` | `bool` | True if held on every example |
+
+---
 
 ## Config
 
-| Import | What |
-|---|---|
-| `config.load_config(path)` | Load `ordeal.toml` |
-| `config.OrdealConfig` | Top-level config |
-| `config.ExplorerConfig` | Explorer settings |
-| `config.TestConfig` | `[[tests]]` entry |
-| `config.ReportConfig` | `[report]` settings |
+```python
+from ordeal.config import load_config, OrdealConfig, ExplorerConfig, TestConfig, ReportConfig, ScanConfig
+```
+
+### load_config
+
+```python
+load_config(path: str | Path = "ordeal.toml") -> OrdealConfig
+```
+
+Load and validate an `ordeal.toml`. Raises `FileNotFoundError` if missing, `ConfigError` on invalid keys/types.
+
+### OrdealConfig
+
+| Attribute | Type | Default |
+|---|---|---|
+| `explorer` | `ExplorerConfig` | see below |
+| `tests` | `list[TestConfig]` | `[]` |
+| `scan` | `list[ScanConfig]` | `[]` |
+| `report` | `ReportConfig` | see below |
+
+### ExplorerConfig
+
+| Attribute | Type | Default |
+|---|---|---|
+| `target_modules` | `list[str]` | `[]` |
+| `max_time` | `float` | `60.0` |
+| `max_runs` | `int | None` | `None` |
+| `seed` | `int` | `42` |
+| `max_checkpoints` | `int` | `256` |
+| `checkpoint_prob` | `float` | `0.4` |
+| `checkpoint_strategy` | `str` | `"energy"` |
+| `steps_per_run` | `int` | `50` |
+| `fault_toggle_prob` | `float` | `0.3` |
+| `workers` | `int` | `1` |
+
+### TestConfig
+
+| Attribute | Type | Required |
+|---|---|---|
+| `class_path` | `str` | Yes |
+| `steps_per_run` | `int | None` | No |
+| `swarm` | `bool | None` | No |
+
+`resolve() -> type` — import and return the ChaosTest class.
+
+### ReportConfig
+
+| Attribute | Type | Default |
+|---|---|---|
+| `format` | `str` | `"text"` |
+| `output` | `str` | `"ordeal-report.json"` |
+| `traces` | `bool` | `False` |
+| `traces_dir` | `str` | `".ordeal/traces"` |
+| `verbose` | `bool` | `False` |
+
+### ScanConfig
+
+| Attribute | Type | Default |
+|---|---|---|
+| `module` | `str` | required |
+| `max_examples` | `int` | `50` |
+| `fixtures` | `dict[str, str]` | `{}` |

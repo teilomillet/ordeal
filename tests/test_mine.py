@@ -1,6 +1,17 @@
 """Tests for ordeal.mine — property mining."""
 
-from ordeal.mine import mine
+import hypothesis.strategies as st
+from hypothesis import settings as hsettings
+
+from ordeal import ChaosTest, always, invariant, rule
+from ordeal.assertions import tracker
+from ordeal.mine import (
+    _check_length_relationship,
+    _check_monotonic,
+    _check_observed_bounds,
+    mine,
+)
+from ordeal.quickcheck import quickcheck
 
 
 def clamp(x: float) -> float:
@@ -91,8 +102,6 @@ class TestMine:
         assert "mine(clamp)" in s
 
     def test_with_fixture(self):
-        import hypothesis.strategies as st
-
         result = mine(
             clamp,
             max_examples=50,
@@ -143,8 +152,6 @@ class TestMine:
         assert bounds.universal
 
     def test_discovers_length_preserving(self):
-        import hypothesis.strategies as st
-
         result = mine(sort_list, max_examples=100, xs=st.lists(st.integers()))
         length = next(
             (p for p in result.properties if "len(output) == len(" in p.name),
@@ -154,8 +161,6 @@ class TestMine:
         assert length.universal
 
     def test_discovers_length_shrinking(self):
-        import hypothesis.strategies as st
-
         result = mine(first_half, max_examples=100, xs=st.lists(st.integers()))
         length = next(
             (p for p in result.properties if "len(output) <= len(" in p.name),
@@ -163,3 +168,147 @@ class TestMine:
         )
         assert length is not None
         assert length.universal
+
+
+# ============================================================================
+# ordeal-powered tests: @quickcheck, ChaosTest, always()
+# ============================================================================
+
+
+@quickcheck
+def test_qc_bounds_always_universal(xs: list[int]):
+    """Observed bounds are tautologically universal by construction."""
+    prop = _check_observed_bounds(xs)
+    if prop.total > 0:
+        assert prop.universal
+
+
+@quickcheck
+def test_qc_monotone_identity(xs: list[int]):
+    """The identity function must be detected as non-decreasing."""
+    if len(xs) < 2 or len(set(xs)) < 2:
+        return
+    props = _check_monotonic([{"x": x} for x in xs], list(xs))
+    assert any("non-decreasing" in p.name and p.universal for p in props)
+
+
+@quickcheck
+def test_qc_monotone_negation(xs: list[int]):
+    """Negation must be detected as non-increasing."""
+    if len(xs) < 2 or len(set(xs)) < 2:
+        return
+    props = _check_monotonic([{"x": x} for x in xs], [-x for x in xs])
+    assert any("non-increasing" in p.name and p.universal for p in props)
+
+
+@quickcheck
+def test_qc_length_sorted(xs: list[int]):
+    """sorted() preserves length — checker must agree."""
+    if not xs:
+        return
+    props = _check_length_relationship([{"xs": xs}], [sorted(xs)])
+    eqs = [p for p in props if "==" in p.name]
+    assert eqs and eqs[0].universal
+
+
+class MonotoneBattle(ChaosTest):
+    """Checkers stay consistent as diverse numeric pairs accumulate."""
+
+    faults = []
+
+    def __init__(self):
+        super().__init__()
+        self.inputs: list[dict[str, int]] = []
+        self.outputs: list[int] = []
+
+    @rule(x=st.integers(min_value=-100, max_value=100))
+    def add_linear(self, x):
+        self.inputs.append({"x": x})
+        self.outputs.append(x * 3 + 7)
+
+    @rule(x=st.integers(min_value=-100, max_value=100))
+    def add_square(self, x):
+        self.inputs.append({"x": x})
+        self.outputs.append(x * x)
+
+    @rule(x=st.integers(min_value=-100, max_value=100))
+    def add_negative(self, x):
+        self.inputs.append({"x": x})
+        self.outputs.append(-x)
+
+    @invariant()
+    def bounds_universal(self):
+        prop = _check_observed_bounds(self.outputs)
+        if prop.total > 0:
+            assert prop.universal
+
+    @invariant()
+    def monotone_valid(self):
+        for p in _check_monotonic(self.inputs, self.outputs):
+            assert 0.0 <= p.confidence <= 1.0
+            assert p.holds <= p.total
+
+    def teardown(self):
+        self.inputs.clear()
+        self.outputs.clear()
+        super().teardown()
+
+
+TestMonotoneBattle = MonotoneBattle.TestCase
+TestMonotoneBattle.settings = hsettings(max_examples=50, stateful_step_count=20)
+
+
+class LengthBattle(ChaosTest):
+    """Length checker consistency under diverse list operations."""
+
+    faults = []
+
+    def __init__(self):
+        super().__init__()
+        self.inputs: list[dict[str, list]] = []
+        self.outputs: list[list] = []
+
+    @rule(xs=st.lists(st.integers(), max_size=10))
+    def add_sorted(self, xs):
+        self.inputs.append({"xs": xs})
+        self.outputs.append(sorted(xs))
+
+    @rule(xs=st.lists(st.integers(), max_size=10))
+    def add_reversed(self, xs):
+        self.inputs.append({"xs": xs})
+        self.outputs.append(list(reversed(xs)))
+
+    @rule(xs=st.lists(st.integers(), max_size=10))
+    def add_first_half(self, xs):
+        self.inputs.append({"xs": xs})
+        self.outputs.append(xs[: len(xs) // 2])
+
+    @invariant()
+    def length_valid(self):
+        for p in _check_length_relationship(self.inputs, self.outputs):
+            assert 0.0 <= p.confidence <= 1.0
+            assert p.holds <= p.total
+
+    def teardown(self):
+        self.inputs.clear()
+        self.outputs.clear()
+        super().teardown()
+
+
+TestLengthBattle = LengthBattle.TestCase
+TestLengthBattle.settings = hsettings(max_examples=50, stateful_step_count=20)
+
+
+def test_always_observed_bounds():
+    """Demonstrate ordeal's always() assertion with observed bounds."""
+    tracker.active = True
+    tracker.reset()
+    try:
+        for vals in [[1, 2, 3], [-5, 0, 5], [42], [0, 0, 0], list(range(100))]:
+            prop = _check_observed_bounds(vals)
+            always(prop.universal, "observed bounds universal")
+        result = next(r for r in tracker.results if r.name == "observed bounds universal")
+        assert result.passes == 5
+        assert result.failures == 0
+    finally:
+        tracker.active = False

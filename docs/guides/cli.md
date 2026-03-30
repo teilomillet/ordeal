@@ -53,6 +53,35 @@ ordeal audit myapp.scoring --save-generated test_migrated.py  # save to file
 | `--show-generated` | off | Print the generated test file |
 | `--save-generated` | — | Save generated test to this path |
 
+### `ordeal mine`
+
+Discover properties of a function or all public functions in a module. Prints what mine() finds — type invariants, algebraic laws, bounds, monotonicity, length relationships — with confidence levels.
+
+```bash
+ordeal mine myapp.scoring.compute           # single function
+ordeal mine myapp.scoring                   # all public functions
+ordeal mine myapp.scoring.compute -n 1000   # more examples = tighter confidence
+```
+
+Output:
+
+```
+mine(compute): 500 examples
+  ALWAYS  output type is float (500/500)
+  ALWAYS  deterministic (50/50)
+  ALWAYS  output in [0, 1] (500/500)
+  ALWAYS  observed range [0.0, 0.9987] (500/500)
+  ALWAYS  monotonically non-decreasing (499/499)
+    n/a: commutative, associative
+```
+
+Use this to understand a function before writing tests. The `ALWAYS` properties are candidates for assertions; the `n/a` list shows what doesn't apply. `result.not_checked` (visible in the Python API) lists what mine() structurally cannot verify — those are the tests you write manually.
+
+| Flag | Default | Description |
+|---|---|---|
+| `target` | required | Dotted path: `mymod.func` or `mymod` (positional) |
+| `--max-examples`, `-n` | `500` | Examples to sample |
+
 ### `ordeal explore`
 
 Your main command for deep exploration. Reads `ordeal.toml`, loads each ChaosTest class, and runs coverage-guided exploration with fault injection, energy scheduling, and swarm mode.

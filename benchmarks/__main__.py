@@ -149,7 +149,7 @@ def bench_mutation_generation() -> dict:
     """Measure generate_mutants on a small function."""
     from ordeal.mutations import generate_mutants
 
-    source = '''\
+    source = """\
 def compute(a, b, mode="add"):
     if mode == "add":
         result = a + b
@@ -162,7 +162,7 @@ def compute(a, b, mode="add"):
     if result < 0:
         result = -result
     return result
-'''
+"""
 
     def fn():
         generate_mutants(source)

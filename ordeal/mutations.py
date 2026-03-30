@@ -841,9 +841,7 @@ def mutate_function_and_test(
     mutant_pairs = generate_mutants(source, operators)
 
     if workers > 1:
-        return _parallel_function_test(
-            target, test_fn, mutant_pairs, module, func_name, workers
-        )
+        return _parallel_function_test(target, test_fn, mutant_pairs, module, func_name, workers)
 
     result = MutationResult(target=target)
 

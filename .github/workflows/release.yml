@@ -15,7 +15,17 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 0   # setuptools-scm needs full history + tags
+          fetch-depth: 0
+          fetch-tags: true
+          ref: ${{ github.ref }}
+
+      - name: Debug git state
+        run: |
+          echo "GITHUB_REF=$GITHUB_REF"
+          echo "HEAD=$(git rev-parse HEAD)"
+          git describe --tags --always
+          git tag -l 'v*'
+          git log --oneline -3
 
       - uses: actions/setup-python@v6
         with:
@@ -28,19 +38,24 @@ jobs:
         run: |
           VERSION=$(python -c "from setuptools_scm import get_version; print(get_version())")
           echo "Building version: $VERSION"
-          # Fail if version is 0.0.0 (tag not found)
           if [ "$VERSION" = "0.0.0" ]; then
             echo "ERROR: setuptools-scm could not resolve version from tag"
-            exit 1
+            echo "Trying SETUPTOOLS_SCM_PRETEND_VERSION from tag..."
           fi
 
       - name: Build sdist + wheel
-        run: python -m build
+        env:
+          # Fallback: extract version from git tag if setuptools-scm fails
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ github.ref_name }}
+        run: |
+          # Strip 'v' prefix: v0.1.0 -> 0.1.0
+          export SETUPTOOLS_SCM_PRETEND_VERSION="${SETUPTOOLS_SCM_PRETEND_VERSION#v}"
+          echo "SETUPTOOLS_SCM_PRETEND_VERSION=$SETUPTOOLS_SCM_PRETEND_VERSION"
+          python -m build
 
       - name: Verify package version
         run: |
           ls dist/
-          # Ensure no 0.0.0 packages
           if ls dist/ | grep -q "0.0.0"; then
             echo "ERROR: Package built as 0.0.0"
             exit 1

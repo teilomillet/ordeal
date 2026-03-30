@@ -157,6 +157,10 @@ _ENERGY_REWARD = 2.0
 _ENERGY_DECAY = 0.95
 _ENERGY_MIN = 0.01
 
+# Shared-memory edge bitmap: one byte per 16-bit edge hash.
+# Single-byte writes are atomic — no locks needed.
+_EDGE_BITMAP_SIZE = 65536
+
 
 @dataclass
 class Checkpoint:
@@ -277,6 +281,7 @@ class Explorer:
         fault_toggle_prob: float = 0.3,
         record_traces: bool = False,
         workers: int = 1,
+        share_edges: bool = True,
     ) -> None:
         """Initialize the exploration engine.
 
@@ -292,6 +297,10 @@ class Explorer:
             workers: Number of parallel worker processes. Each gets a unique
                 seed for independent state-space exploration. Default 1
                 (sequential). Use ``os.cpu_count()`` for full utilization.
+            share_edges: When ``workers > 1``, use a shared-memory edge
+                bitmap so workers skip edges already found by others.
+                AFL-style: one byte per edge hash, single-byte atomic
+                writes, zero locks.  Default ``True``.
         """
         self.test_class = test_class
         self.target_paths = [m.replace(".", "/") for m in (target_modules or [])]
@@ -304,6 +313,12 @@ class Explorer:
         self.fault_toggle_prob = fault_toggle_prob
         self.record_traces = record_traces
         self.workers = max(1, workers)
+        self.share_edges = share_edges
+
+        # Shared-memory edge bitmap (set by _run_parallel / _worker_fn)
+        # 65536 bytes — one byte per possible 16-bit edge hash.
+        # Single-byte writes are atomic on all architectures.
+        self._shared_bitmap: memoryview | None = None
 
         # Internal state
         self._total_edges: set[int] = set()
@@ -570,9 +585,16 @@ class Explorer:
                     if collector:
                         edges = collector.snapshot()
                         new = edges - self._total_edges
+                        # Filter out edges another worker already found
+                        if new and self._shared_bitmap is not None:
+                            new = {e for e in new if not self._shared_bitmap[e]}
                         if new:
                             new_edges_this_run += len(new)
                             self._total_edges |= new
+                            # Publish to shared bitmap
+                            if self._shared_bitmap is not None:
+                                for e in new:
+                                    self._shared_bitmap[e] = 1
                             self._save_checkpoint(machine, len(new), step, run_id)
                             result.checkpoints_saved += 1
 
@@ -672,71 +694,92 @@ class Explorer:
         """Run exploration across multiple worker processes.
 
         Each worker gets a unique seed (base + i*7919) for independent
-        state-space exploration.  Results are aggregated: runs/steps are
-        summed, edges are unioned for true unique count.
-        """
-        start = _time.monotonic()
+        state-space exploration.  When ``share_edges`` is True, workers
+        communicate via a shared-memory edge bitmap (AFL-style): one
+        byte per 16-bit edge hash, single-byte atomic writes, zero locks.
 
+        Results are aggregated: runs/steps summed, edges unioned.
+        """
+        from multiprocessing.shared_memory import SharedMemory
+
+        start = _time.monotonic()
         class_path = f"{self.test_class.__module__}.{self.test_class.__qualname__}"
 
-        worker_args = []
-        for i in range(self.workers):
-            worker_args.append(
-                {
-                    "class_path": class_path,
-                    "target_modules": self.target_modules,
-                    "seed": self.seed + i * 7919,
-                    "max_time": max_time,
-                    "max_runs": max_runs,
-                    "steps_per_run": steps_per_run,
-                    "max_checkpoints": self.max_checkpoints,
-                    "checkpoint_prob": self.checkpoint_prob,
-                    "checkpoint_strategy": self.checkpoint_strategy,
-                    "fault_toggle_prob": self.fault_toggle_prob,
-                    "record_traces": self.record_traces,
-                    "shrink": shrink,
-                    "max_shrink_time": max_shrink_time,
-                }
-            )
+        # Create shared edge bitmap (65536 bytes, one per edge hash)
+        shm: SharedMemory | None = None
+        shm_name: str | None = None
+        if self.share_edges:
+            shm = SharedMemory(create=True, size=_EDGE_BITMAP_SIZE)
+            shm.buf[:] = b"\x00" * _EDGE_BITMAP_SIZE
+            shm_name = shm.name
 
-        ctx = mp.get_context("fork" if sys.platform != "win32" else "spawn")
-        with ctx.Pool(self.workers) as pool:
-            worker_results = pool.map(_worker_fn, worker_args)
-
-        # Aggregate results
-        result = ExplorationResult()
-        all_edges: set[int] = set()
-
-        for wr in worker_results:
-            result.total_runs += wr["total_runs"]
-            result.total_steps += wr["total_steps"]
-            result.checkpoints_saved += wr["checkpoints_saved"]
-            result.edge_log.extend(wr["edge_log"])
-            all_edges.update(wr["edges"])
-
-            # Reconstruct minimal Failure objects from serialized data
-            for finfo in wr["failures"]:
-                result.failures.append(
-                    Failure(
-                        error=RuntimeError(finfo["error_message"]),
-                        step=finfo["step"],
-                        run_id=finfo["run_id"],
-                        active_faults=finfo["active_faults"],
-                        rule_log=finfo["rule_log"],
-                    )
+        try:
+            worker_args = []
+            for i in range(self.workers):
+                worker_args.append(
+                    {
+                        "class_path": class_path,
+                        "target_modules": self.target_modules,
+                        "seed": self.seed + i * 7919,
+                        "max_time": max_time,
+                        "max_runs": max_runs,
+                        "steps_per_run": steps_per_run,
+                        "max_checkpoints": self.max_checkpoints,
+                        "checkpoint_prob": self.checkpoint_prob,
+                        "checkpoint_strategy": self.checkpoint_strategy,
+                        "fault_toggle_prob": self.fault_toggle_prob,
+                        "record_traces": self.record_traces,
+                        "shrink": shrink,
+                        "max_shrink_time": max_shrink_time,
+                        "shared_edges_name": shm_name,
+                    }
                 )
 
-        result.unique_edges = len(all_edges)
-        self._total_edges = all_edges
-        result.duration_seconds = _time.monotonic() - start
-        return result
+            ctx = mp.get_context("fork" if sys.platform != "win32" else "spawn")
+            with ctx.Pool(self.workers) as pool:
+                worker_results = pool.map(_worker_fn, worker_args)
+
+            # Aggregate results
+            result = ExplorationResult()
+            all_edges: set[int] = set()
+
+            for wr in worker_results:
+                result.total_runs += wr["total_runs"]
+                result.total_steps += wr["total_steps"]
+                result.checkpoints_saved += wr["checkpoints_saved"]
+                result.edge_log.extend(wr["edge_log"])
+                all_edges.update(wr["edges"])
+
+                for finfo in wr["failures"]:
+                    result.failures.append(
+                        Failure(
+                            error=RuntimeError(finfo["error_message"]),
+                            step=finfo["step"],
+                            run_id=finfo["run_id"],
+                            active_faults=finfo["active_faults"],
+                            rule_log=finfo["rule_log"],
+                        )
+                    )
+
+            result.unique_edges = len(all_edges)
+            self._total_edges = all_edges
+            result.duration_seconds = _time.monotonic() - start
+            return result
+        finally:
+            if shm is not None:
+                shm.close()
+                shm.unlink()
 
 
 def _worker_fn(args: dict[str, Any]) -> dict[str, Any]:
     """Worker process: import test class, run single-worker Explorer, return results.
 
     Defined at module level so it can be pickled by multiprocessing.
+    If ``shared_edges_name`` is set, attaches to the shared-memory edge
+    bitmap for cross-worker deduplication.
     """
+    from multiprocessing.shared_memory import SharedMemory
+
     class_path = args["class_path"]
     module_path, _, class_name = class_path.rpartition(".")
     mod = importlib.import_module(module_path)
@@ -754,34 +797,45 @@ def _worker_fn(args: dict[str, Any]) -> dict[str, Any]:
         workers=1,  # each worker runs sequentially
     )
 
-    result = explorer.run(
-        max_time=args["max_time"],
-        max_runs=args.get("max_runs"),
-        steps_per_run=args["steps_per_run"],
-        shrink=args.get("shrink", True),
-        max_shrink_time=args.get("max_shrink_time", 30.0),
-    )
+    # Attach to shared edge bitmap if available
+    shm: SharedMemory | None = None
+    shm_name = args.get("shared_edges_name")
+    if shm_name:
+        shm = SharedMemory(name=shm_name, create=False)
+        explorer._shared_bitmap = shm.buf
 
-    # Serialize — exceptions and traces don't pickle cleanly across processes
-    serialized_failures = []
-    for f in result.failures:
-        serialized_failures.append(
-            {
-                "error_message": str(f.error)[:500],
-                "step": f.step,
-                "run_id": f.run_id,
-                "active_faults": f.active_faults,
-                "rule_log": f.rule_log,
-            }
+    try:
+        result = explorer.run(
+            max_time=args["max_time"],
+            max_runs=args.get("max_runs"),
+            steps_per_run=args["steps_per_run"],
+            shrink=args.get("shrink", True),
+            max_shrink_time=args.get("max_shrink_time", 30.0),
         )
 
-    return {
-        "total_runs": result.total_runs,
-        "total_steps": result.total_steps,
-        "unique_edges": result.unique_edges,
-        "checkpoints_saved": result.checkpoints_saved,
-        "duration_seconds": result.duration_seconds,
-        "failures": serialized_failures,
-        "edge_log": result.edge_log,
-        "edges": list(explorer._total_edges),
-    }
+        # Serialize — exceptions and traces don't pickle cleanly across processes
+        serialized_failures = []
+        for f in result.failures:
+            serialized_failures.append(
+                {
+                    "error_message": str(f.error)[:500],
+                    "step": f.step,
+                    "run_id": f.run_id,
+                    "active_faults": f.active_faults,
+                    "rule_log": f.rule_log,
+                }
+            )
+
+        return {
+            "total_runs": result.total_runs,
+            "total_steps": result.total_steps,
+            "unique_edges": result.unique_edges,
+            "checkpoints_saved": result.checkpoints_saved,
+            "duration_seconds": result.duration_seconds,
+            "failures": serialized_failures,
+            "edge_log": result.edge_log,
+            "edges": list(explorer._total_edges),
+        }
+    finally:
+        if shm is not None:
+            shm.close()

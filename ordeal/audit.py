@@ -150,9 +150,7 @@ def _measure_coverage(
 
     # Detect if test files are inside the project (need conftest)
     # or outside (e.g., .ordeal/ generated files — no conftest)
-    in_project = any(
-        str(f).startswith(cwd) and "/.ordeal/" not in str(f) for f in test_files
-    )
+    in_project = any(str(f).startswith(cwd) and "/.ordeal/" not in str(f) for f in test_files)
 
     cmd = [
         sys.executable,
@@ -260,9 +258,7 @@ def _generate_migrated_test(module: str, max_examples: int) -> str:
             if "bounded" in prop.name or "[0, 1]" in prop.name:
                 lines.append(f"    # {prop.name}: {prop.holds}/{prop.total}")
                 lines.append("    from ordeal.invariants import bounded")
-                lines.append(
-                    "    # Verify: output bounded [0, 1] on random inputs"
-                )
+                lines.append("    # Verify: output bounded [0, 1] on random inputs")
             elif "deterministic" in prop.name:
                 lines.append(f"    # {prop.name}: {prop.holds}/{prop.total}")
             elif "never None" in prop.name:
@@ -377,17 +373,11 @@ def audit_report(
 
     if len(results) > 1:
         lines.append("\n  total:")
-        lines.append(
-            f"    current:  {total_cur_tests} tests | {total_cur_lines} lines"
-        )
-        lines.append(
-            f"    migrated: {total_mig_tests} tests | {total_mig_lines} lines"
-        )
+        lines.append(f"    current:  {total_cur_tests} tests | {total_cur_lines} lines")
+        lines.append(f"    migrated: {total_mig_tests} tests | {total_mig_lines} lines")
         if total_cur_tests > 0:
             test_red = (1 - total_mig_tests / total_cur_tests) * 100
             line_red = (1 - total_mig_lines / total_cur_lines) * 100 if total_cur_lines > 0 else 0
-            lines.append(
-                f"    saving:   {test_red:.0f}% fewer tests | {line_red:.0f}% less code"
-            )
+            lines.append(f"    saving:   {test_red:.0f}% fewer tests | {line_red:.0f}% less code")
 
     return "\n".join(lines)

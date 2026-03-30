@@ -295,11 +295,14 @@ def main(argv: list[str] | None = None) -> int:
         "--max-examples", type=int, default=20, help="Examples per function (default: 20)"
     )
     audit_p.add_argument(
-        "--show-generated", action="store_true",
+        "--show-generated",
+        action="store_true",
         help="Print the generated test file for inspection/debugging",
     )
     audit_p.add_argument(
-        "--save-generated", type=str, default=None,
+        "--save-generated",
+        type=str,
+        default=None,
         help="Save generated test file to this path",
     )
 

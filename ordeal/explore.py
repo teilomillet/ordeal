@@ -610,6 +610,12 @@ class Explorer:
 
         result = ExplorationResult()
         use_coverage = bool(self.target_paths)
+        if not use_coverage:
+            warnings.warn(
+                "Explorer running without target_modules — coverage guidance "
+                "is disabled.  Set target_modules=['your_app'] to enable it.",
+                stacklevel=2,
+            )
         start = _time.monotonic()
         class_name = _qualified_name(self.test_class)
 

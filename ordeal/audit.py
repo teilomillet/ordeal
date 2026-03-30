@@ -151,13 +151,19 @@ def _measure_coverage(
         "no:ordeal",
     ]
 
+    # Force PYTHONPATH to project root so conftest imports resolve
+    cwd = str(Path.cwd())
+    env = dict(__import__("os").environ)
+    env["PYTHONPATH"] = cwd
+
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             timeout=120,
-            cwd=str(Path.cwd()),
+            cwd=cwd,
+            env=env,
         )
         mod_path = module_name.replace(".", "/")
         for line in result.stdout.splitlines():

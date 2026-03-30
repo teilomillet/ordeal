@@ -190,6 +190,75 @@ def test_something(chaos_enabled):
 
 The fixture activates buggify and the PropertyTracker for the duration of the test, then restores the previous state.
 
+### Pytest patterns
+
+**Pattern 1: Separate chaos tests from unit tests.** Keep chaos tests in their own directory so you can run them independently:
+
+```
+tests/
+├── unit/              # fast, deterministic — always run
+│   └── test_scoring.py
+├── chaos/             # slower, exploratory — run with --chaos
+│   └── test_scoring_chaos.py
+└── conftest.py
+```
+
+```bash
+pytest tests/unit/                          # fast CI gate
+pytest tests/chaos/ --chaos --chaos-seed 0  # thorough validation
+```
+
+**Pattern 2: Use `chaos_enabled` for targeted chaos in unit tests.** You don't need `--chaos` for everything. Use the fixture when a specific test needs fault injection:
+
+```python
+def test_retry_logic(chaos_enabled):
+    """This test specifically checks retry behavior under buggify."""
+    from ordeal.buggify import buggify
+    # buggify() is now active — it will sometimes return True
+    result = service_with_retries.call()
+    assert result is not None  # should succeed despite faults
+```
+
+**Pattern 3: Combine `@pytest.mark.chaos` with `ChaosTest.TestCase`.** ChaosTest classes work with or without `--chaos`, but marking them ensures they're skipped in fast CI runs:
+
+```python
+import pytest
+from ordeal import ChaosTest, rule, always
+
+@pytest.mark.chaos
+class ScoreServiceChaos(ChaosTest):
+    faults = [...]
+    @rule()
+    def score(self): ...
+
+TestScoreServiceChaos = ScoreServiceChaos.TestCase
+```
+
+**Pattern 4: Auto-scan via ordeal.toml.** When you add `[[scan]]` entries to `ordeal.toml`, pytest auto-discovers and runs them. No test files needed:
+
+```toml
+# ordeal.toml
+[[scan]]
+module = "myapp.scoring"
+max_examples = 100
+```
+
+```bash
+pytest ordeal.toml --chaos  # auto-scans myapp.scoring
+```
+
+Each public function in the module becomes a test item. Functions without type hints are skipped unless fixtures are provided in the TOML.
+
+**Pattern 5: Different buggify probabilities for different environments.**
+
+```bash
+pytest --chaos --buggify-prob 0.05   # gentle: 5% fault rate (local dev)
+pytest --chaos --buggify-prob 0.1    # moderate: 10% (default, CI)
+pytest --chaos --buggify-prob 0.3    # aggressive: 30% (pre-release stress)
+```
+
+Higher probability = more faults per run = finds more bugs but also more noise. Start gentle, increase as your error handling matures.
+
 ## Exit codes
 
 `ordeal explore` returns **0** on success (no failures found) and **1** if any failure is found or if there is a configuration error. Use this directly in CI scripts:

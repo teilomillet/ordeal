@@ -110,13 +110,50 @@ Use cases:
 - **Porting**: compare a Python prototype against a Rust/C extension
 - **Regression testing**: ensure a bugfix doesn't change other outputs
 
+## register_fixture — teach ordeal your types
+
+When your codebase has domain-specific types that ordeal can't infer from hints, register a fixture once and every auto tool picks it up:
+
+```python
+from ordeal.auto import register_fixture
+import hypothesis.strategies as st
+
+# Register once at import time (e.g., in conftest.py)
+register_fixture("model", st.sampled_from(["gpt-4", "claude-3", "llama-70b"]))
+register_fixture("api_key", st.just("sk-test-key-12345"))
+register_fixture("config", st.fixed_dictionaries({
+    "temperature": st.floats(0.0, 2.0),
+    "max_tokens": st.integers(1, 4096),
+}))
+```
+
+Now `scan_module`, `fuzz`, `mine`, and `diff` all know how to generate these parameters without explicit `fixtures=` overrides:
+
+```python
+# These "just work" because the fixtures are registered
+result = scan_module("myapp.llm")        # uses registered "model" and "api_key"
+result = fuzz(myapp.llm.generate)         # same
+result = mine(myapp.llm.generate)         # same
+```
+
+**Priority order** when resolving a parameter:
+
+1. Explicit `fixtures={"model": ...}` passed to the function (highest)
+2. `register_fixture("model", ...)` global registry
+3. Type hint inference via `strategy_for_type`
+4. Parameter name heuristics (e.g., `"seed"` → integers, `"probability"` → floats 0-1)
+
+Register fixtures for: API clients, database connections, model objects, configuration dicts, authentication tokens — anything that can't be generated from a type hint alone.
+
 ## How it works
 
-All three primitives (`scan_module`, `fuzz`, `chaos_for`):
+All auto primitives (`scan_module`, `fuzz`, `chaos_for`, `mine`, `diff`):
 
 1. Scan the module for public, non-class callables
 2. Infer strategies from type hints (via `ordeal.quickcheck.strategy_for_type`)
-3. Accept `fixtures` overrides for params without hints
-4. Skip functions that can't be tested (no hints, no fixtures)
+3. Check registered fixtures for unresolved parameters
+4. Fall back to parameter name heuristics (`"threshold"` → floats, `"count"` → integers)
+5. Accept explicit `fixtures` overrides (highest priority)
+6. Skip functions that can't be tested (no hints, no fixtures, no heuristics)
 
 Functions starting with `_` are skipped. Functions with defaults for all params work even without type hints.

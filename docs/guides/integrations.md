@@ -70,6 +70,31 @@ fuzz_chaos_test(MyServiceChaos, max_time=300)
 
 In this mode, Atheris drives rule selection, fault toggling, and step counts. The fuzzer's byte stream determines which rules execute and when faults activate, with coverage feedback guiding exploration.
 
+### Practical tips for Atheris
+
+**Start with a time limit, not an iteration count.** Atheris explores breadth-first initially, then narrows as it finds interesting paths. 60 seconds is enough for most functions; security-critical code deserves 300s+.
+
+**Combine with buggify gates.** The power of the Atheris integration is that each `buggify()` call consumes fuzzer bytes. More buggify gates = more decisions for the fuzzer to optimize. Place gates at every fault injection point:
+
+```python
+def parse_message(data: bytes) -> Message:
+    if buggify():
+        data = data[:len(data)//2]  # truncated input
+    if buggify():
+        data = data + b"\x00" * 10  # padded input
+    header = parse_header(data[:8])
+    if buggify():
+        header.version = 0  # force old code path
+    return decode_body(header, data[8:])
+```
+
+**Check the crash corpus.** Atheris saves inputs that caused crashes to a corpus directory. Replay them to verify fixes:
+
+```bash
+ls crash-*  # Atheris crash files
+python -c "import mymodule; mymodule.parse(open('crash-abc123', 'rb').read())"
+```
+
 ---
 
 ## Schemathesis (API chaos testing)
@@ -126,6 +151,45 @@ def test_api(case):
 ```
 
 The decorator randomly activates and deactivates faults before each API call, then resets them afterward to avoid cross-request interference.
+
+### Practical tips for Schemathesis
+
+**Your API must be running.** Schemathesis sends real HTTP requests, so start your server before running tests. In CI, use a Docker container or a test server:
+
+```bash
+# Start server in background
+uvicorn myapp:app --port 8080 &
+sleep 2
+
+# Run chaos API tests
+python -c "
+from ordeal.integrations.schemathesis_ext import chaos_api_test
+from ordeal.faults import timing, io
+chaos_api_test(
+    'http://localhost:8080/openapi.json',
+    faults=[timing.slow('myapp.db.query', delay=2.0)],
+)
+"
+```
+
+**Choose faults that match real failure modes.** Don't just inject random faults — inject the ones your API actually encounters in production:
+
+- Database slow/down: `timing.slow("myapp.db.query")`, `io.error_on_call("myapp.db.execute")`
+- Upstream API failure: `timing.timeout("myapp.external.call")`, `io.return_empty("myapp.cache.get")`
+- Storage issues: `io.disk_full()`, `io.permission_denied()`
+
+**Check status codes, not just crashes.** A 500 Internal Server Error is a bug. But so is a 200 with corrupted data. Use the `@with_chaos` decorator when you need to assert on response content:
+
+```python
+@schema.parametrize()
+@with_chaos(faults=[io.error_on_call("myapp.db.execute")])
+def test_api_handles_db_failure(case):
+    response = case.call()
+    # Should return 503, not 500 or 200 with empty data
+    assert response.status_code in (200, 503), f"Unexpected: {response.status_code}"
+    if response.status_code == 200:
+        assert response.json()  # body should not be empty
+```
 
 ---
 

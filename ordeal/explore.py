@@ -762,9 +762,7 @@ class Explorer:
                             if self._shared_bitmap is not None:
                                 for e in new:
                                     self._shared_bitmap[e] = 1
-                            self._save_checkpoint(
-                                machine, len(new), step, run_id, frozenset(new)
-                            )
+                            self._save_checkpoint(machine, len(new), step, run_id, frozenset(new))
                             self._pool_publish(machine, len(new), step, run_id)
                             result.checkpoints_saved += 1
 

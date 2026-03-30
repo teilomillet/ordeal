@@ -24,7 +24,7 @@ import json
 import time as _time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from ordeal.chaos import ChaosTest
@@ -37,7 +37,13 @@ if TYPE_CHECKING:
 
 @dataclass
 class TraceStep:
-    """A single step in an exploration trace."""
+    """A single step in an exploration trace.
+
+    ``active_faults`` is populated on ``fault_toggle`` steps (the
+    snapshot after the toggle).  On ``rule`` steps it defaults to
+    ``[]`` — the active set is derivable from the preceding
+    ``fault_toggle`` steps in the trace.
+    """
 
     kind: str  # "rule" | "fault_toggle"
     name: str  # rule name or "+fault_name" / "-fault_name"
@@ -73,7 +79,7 @@ class Trace:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to a JSON-serializable dict."""
-        return json.loads(json.dumps(asdict(self), cls=_TraceEncoder))
+        return _sanitize(asdict(self))
 
     def save(self, path: str | Path) -> None:
         """Write trace to a JSON file."""
@@ -108,23 +114,66 @@ class Trace:
 
 
 # ============================================================================
-# JSON encoder/decoder for non-standard types
+# Direct dict sanitization (avoids JSON round-trip in to_dict)
 # ============================================================================
+
+
+def _sanitize(obj: Any) -> Any:
+    """Recursively convert non-JSON-native types to serializable equivalents.
+
+    Applies the same conversions as ``_TraceEncoder`` (bytes → base64,
+    sets → sorted lists, exceptions → dicts) but builds the result dict
+    directly instead of round-tripping through ``json.dumps``/``json.loads``.
+    """
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(v) for v in obj]
+    if isinstance(obj, bytes):
+        return {"__bytes__": base64.b64encode(obj).decode()}
+    if isinstance(obj, (set, frozenset)):
+        sortable = all(isinstance(x, (int, float, str)) for x in obj)
+        return {"__set__": sorted(obj) if sortable else list(obj)}
+    if isinstance(obj, Exception):
+        return {"__error__": str(obj), "__type__": type(obj).__name__}
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    return {"__repr__": repr(obj)}
+
+
+# ============================================================================
+# JSON encoder/decoder for non-standard types (used by save/load)
+# ============================================================================
+
+
+def _encode_bytes(obj: Any) -> dict:
+    return {"__bytes__": base64.b64encode(obj).decode()}
+
+
+def _encode_set(obj: Any) -> dict:
+    sortable = all(isinstance(x, (int, float, str)) for x in obj)
+    return {"__set__": sorted(obj) if sortable else list(obj)}
+
+
+# Dispatch table: one dict lookup instead of cascading isinstance.
+# Exception subclasses are handled by a fallback isinstance check
+# since they can't all be registered here.
+_ENCODE_DISPATCH: dict[type, Callable[[Any], dict]] = {
+    bytes: _encode_bytes,
+    bytearray: _encode_bytes,
+    set: _encode_set,
+    frozenset: _encode_set,
+}
 
 
 class _TraceEncoder(json.JSONEncoder):
     def default(self, obj: Any) -> Any:
-        if isinstance(obj, bytes):
-            return {"__bytes__": base64.b64encode(obj).decode()}
-        if isinstance(obj, (set, frozenset)):
-            sortable = all(isinstance(x, (int, float, str)) for x in obj)
-            return {"__set__": sorted(obj) if sortable else list(obj)}
+        handler = _ENCODE_DISPATCH.get(type(obj))
+        if handler is not None:
+            return handler(obj)
         if isinstance(obj, Exception):
             return {"__error__": str(obj), "__type__": type(obj).__name__}
-        try:
-            return super().default(obj)
-        except TypeError:
-            return {"__repr__": repr(obj)}
+        return {"__repr__": repr(obj)}
 
 
 class _TraceDecoder(json.JSONDecoder):

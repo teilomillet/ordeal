@@ -65,6 +65,9 @@ class CoverageCollector:
     - **Thread-local edge buffer**: Edges accumulate in a per-thread list
       and are flushed to the shared set every 256 edges, reducing lock
       acquisitions by ~256x.
+    - **Snapshot caching**: ``snapshot()`` returns a cached ``frozenset``
+      when no new edges have arrived since the last call, avoiding
+      repeated O(n) construction on steps that don't discover new paths.
 
     Thread-safe for free-threaded Python 3.13+: ``_prev_loc`` and the
     edge buffer are per-thread, and ``_edges`` is lock-protected.
@@ -78,6 +81,8 @@ class CoverageCollector:
         self._edges_lock = threading.Lock()
         self._tls = threading.local()
         self._target_cache: dict[str, bool] = {}
+        self._snapshot_cache: frozenset[int] | None = None
+        self._dirty = False
 
     def _is_target(self, filename: str) -> bool:
         """Check if *filename* belongs to one of the target modules.
@@ -123,6 +128,7 @@ class CoverageCollector:
         if len(buf) >= self._FLUSH_THRESHOLD:
             with self._edges_lock:
                 self._edges.update(buf)
+                self._dirty = True
             buf.clear()
         return self._trace
 
@@ -132,6 +138,7 @@ class CoverageCollector:
         if buf:
             with self._edges_lock:
                 self._edges.update(buf)
+                self._dirty = True
             buf.clear()
 
     def start(self) -> None:
@@ -139,6 +146,8 @@ class CoverageCollector:
         self._tls.prev_loc = 0
         self._tls.edge_buf = []
         self._target_cache.clear()
+        self._snapshot_cache = None
+        self._dirty = False
         with self._edges_lock:
             self._edges.clear()
         sys.settrace(self._trace)
@@ -148,13 +157,23 @@ class CoverageCollector:
         sys.settrace(None)
         self._flush_local()
         with self._edges_lock:
-            return frozenset(self._edges)
+            self._snapshot_cache = frozenset(self._edges)
+            self._dirty = False
+            return self._snapshot_cache
 
     def snapshot(self) -> frozenset[int]:
-        """Current edges without stopping collection."""
+        """Current edges without stopping collection.
+
+        Returns a cached frozenset when no new edges have been
+        flushed since the last call, avoiding repeated construction.
+        """
         self._flush_local()
         with self._edges_lock:
-            return frozenset(self._edges)
+            if not self._dirty and self._snapshot_cache is not None:
+                return self._snapshot_cache
+            self._snapshot_cache = frozenset(self._edges)
+            self._dirty = False
+            return self._snapshot_cache
 
 
 # ============================================================================
@@ -564,16 +583,11 @@ class Explorer:
         return self.rng.choice(self._checkpoints)  # uniform
 
     def _select_energy(self) -> Checkpoint:
-        """Energy-weighted selection: favor checkpoints that led to discoveries."""
-        total = sum(cp.energy for cp in self._checkpoints)
-        r = self.rng.random() * total
-        cumulative = 0.0
-        for cp in self._checkpoints:
-            cumulative += cp.energy
-            if cumulative >= r:
-                cp.times_selected += 1
-                return cp
-        return self._checkpoints[-1]
+        """Energy-weighted selection using C-level random.choices."""
+        weights = [cp.energy for cp in self._checkpoints]
+        (cp,) = self.rng.choices(self._checkpoints, weights=weights, k=1)
+        cp.times_selected += 1
+        return cp
 
     def _select_recent(self) -> Checkpoint:
         """Favor recently-created checkpoints."""
@@ -660,17 +674,23 @@ class Explorer:
         except Exception:
             pass
 
+    def _find_min_energy_idx(self) -> int:
+        """Find the index of the lowest-energy checkpoint."""
+        min_e = self._checkpoints[0].energy
+        min_i = 0
+        for i in range(1, len(self._checkpoints)):
+            if self._checkpoints[i].energy < min_e:
+                min_e = self._checkpoints[i].energy
+                min_i = i
+        return min_i
+
     def _save_checkpoint(self, machine: ChaosTest, new_count: int, step: int, run_id: int) -> None:
         """Save a checkpoint. Evicts lowest-energy checkpoint if at capacity."""
         if self.max_checkpoints <= 0:
             return
         if len(self._checkpoints) >= self.max_checkpoints:
             if self.checkpoint_strategy == "energy":
-                # Evict lowest energy
-                min_idx = min(
-                    range(len(self._checkpoints)), key=lambda i: self._checkpoints[i].energy
-                )
-                self._checkpoints.pop(min_idx)
+                self._checkpoints.pop(self._find_min_energy_idx())
             else:
                 idx = self.rng.randint(0, max(0, len(self._checkpoints) - 2))
                 self._checkpoints.pop(idx)
@@ -835,12 +855,14 @@ class Explorer:
                         serializable_params = {
                             k: v for k, v in params.items() if not isinstance(v, _DataProxy)
                         }
+                        # active_faults omitted on rule steps (derivable
+                        # from fault_toggle sequence, saves ~70% of list
+                        # comprehensions in the hot loop)
                         trace_steps.append(
                             TraceStep(
                                 kind="rule",
                                 name=rule_info.name,
                                 params=serializable_params,
-                                active_faults=[f.name for f in machine.active_faults],
                                 edge_count=len(self._total_edges) + new_edges_this_run,
                                 timestamp_offset=ts_offset,
                             )

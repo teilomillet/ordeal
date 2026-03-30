@@ -529,7 +529,7 @@ from ordeal.trace import Trace, TraceStep, TraceFailure, replay, shrink
 | `kind` | `str` | `"rule"` or `"fault_toggle"` |
 | `name` | `str` | Rule name or `"+fault"` / `"-fault"` |
 | `params` | `dict` | Parameters drawn for this step |
-| `active_faults` | `list[str]` | Faults active at this step |
+| `active_faults` | `list[str]` | Faults active after this step (populated on `fault_toggle` steps; empty on `rule` steps — derive from toggle sequence) |
 | `edge_count` | `int` | Cumulative edges at this step |
 | `timestamp_offset` | `float` | Time since run start |
 
@@ -611,7 +611,7 @@ Decorator. Infers strategies from type hints, runs as property test with `max_ex
 strategy_for_type(tp: type, *, _depth: int = 0) -> st.SearchStrategy
 ```
 
-Derive a boundary-biased strategy from a type hint. Handles: `int`, `float`, `str`, `bool`, `bytes`, `None`, `list[T]`, `dict[K, V]`, `tuple`, `set`, `Union`, `Optional`, `dataclass`, and **Pydantic `BaseModel`** (v2+ — derives strategies from `model_fields` with constraint support: `ge`/`le`/`gt`/`lt`, `min_length`/`max_length`). Recursion depth limited to 5.
+Derive a boundary-biased strategy from a type hint. Results are cached by `(tp, _depth)`. Handles: `int`, `float`, `str`, `bool`, `bytes`, `None`, `list[T]`, `dict[K, V]`, `tuple`, `set`, `Union`, `Optional`, `dataclass`, and **Pydantic `BaseModel`** (v2+ — derives strategies from `model_fields` with constraint support: `ge`/`le`/`gt`/`lt`, `min_length`/`max_length`). Recursion depth limited to 5.
 
 ### biased
 

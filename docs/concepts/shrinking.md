@@ -72,7 +72,7 @@ A `Trace` is a complete record of one exploration run, stored as JSON. It contai
 | `kind` | `"rule"` or `"fault_toggle"` | What type of step this is |
 | `name` | string | Rule method name, or `"+fault"` / `"-fault"` for toggles |
 | `params` | dict | Parameters drawn for this rule call |
-| `active_faults` | list | Which faults were active at this point |
+| `active_faults` | list | Which faults were active after this step (populated on `fault_toggle` steps; empty on `rule` steps) |
 | `edge_count` | int | Cumulative edge coverage after this step |
 | `timestamp_offset` | float | Seconds since the run started |
 

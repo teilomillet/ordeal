@@ -182,12 +182,16 @@ class biased:
 # ============================================================================
 
 
+@functools.lru_cache(maxsize=256)
 def strategy_for_type(tp: type, *, _depth: int = 0) -> st.SearchStrategy:
     """Derive a boundary-biased strategy from a type hint.
 
     Handles: int, float, str, bool, bytes, None, list[T], dict[K,V],
     tuple[T,...], set[T], Optional[T], Union[T,U], dataclasses, and
     falls back to ``hypothesis.strategies.from_type()`` for the rest.
+
+    Results are cached by ``(tp, _depth)`` — the same type at the same
+    recursion depth always returns the same strategy object.
     """
     if _depth > 5:
         return st.just(None)

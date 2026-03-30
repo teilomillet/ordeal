@@ -25,7 +25,7 @@ from ordeal.buggify import activate, buggify, buggify_value, deactivate, set_see
 from ordeal.chaos import ChaosTest
 from ordeal.faults import LambdaFault, PatchFault
 from ordeal.invariants import bounded, finite, monotonic, no_inf, no_nan, unique
-from ordeal.mutations import generate_mutants, mutate_function_and_test
+from ordeal.mutations import generate_mutants, mutate_function_and_test, validate_mined_properties
 from ordeal.strategies import corrupted_bytes, nan_floats
 
 # ============================================================================
@@ -707,3 +707,23 @@ class TestMutationBattle:
         assert result.total > 0
         # Strong boundary tests should kill most mutants
         assert result.score >= 0.5, result.summary()
+
+    def test_validate_mined_properties_kills_mutants(self):
+        """Mined properties of add() should catch arithmetic mutations."""
+        result = validate_mined_properties(
+            "tests._mutation_target.add",
+            max_examples=50,
+            operators=["arithmetic"],
+        )
+        assert result.total > 0
+        assert result.score > 0, "Mined properties should catch at least one mutant"
+
+    def test_validate_mined_properties_clamp(self):
+        """Mined properties of clamp() should catch some mutations."""
+        result = validate_mined_properties(
+            "tests._mutation_target.clamp",
+            max_examples=50,
+            operators=["comparison", "return_none"],
+        )
+        assert result.total > 0
+        assert result.score > 0, result.summary()

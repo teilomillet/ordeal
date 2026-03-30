@@ -485,6 +485,48 @@ def mutate_and_test(
 # ============================================================================
 
 
+def validate_mined_properties(
+    target: str,
+    max_examples: int = 100,
+    operators: list[str] | None = None,
+) -> MutationResult:
+    """Mine properties of *target*, then mutate it and check the properties catch the mutations.
+
+    This answers: "are the properties mine() found strong enough to detect real bugs?"
+    Surviving mutants reveal properties that are too weak — the mined invariants
+    pass even on broken code.
+
+    Args:
+        target: Dotted path to the function (e.g. ``"myapp.scoring.compute"``).
+        max_examples: Examples for mine() property discovery.
+        operators: Mutation operators to use (default: all).
+    """
+    from ordeal.mine import mine
+
+    module_path, func_name = target.rsplit(".", 1)
+    module = importlib.import_module(module_path)
+    func = getattr(module, func_name)
+
+    # Mine the original function's properties
+    mine_result = mine(func, max_examples=max_examples)
+    universal = mine_result.universal
+    if not universal:
+        return MutationResult(target=target)  # nothing to validate
+
+    # Build a test function from the mined properties
+    def mined_test() -> None:
+        current_func = getattr(importlib.import_module(module_path), func_name)
+        re_mined = mine(current_func, max_examples=max(20, max_examples // 5))
+        for original_prop in universal:
+            match = next((p for p in re_mined.properties if p.name == original_prop.name), None)
+            if match is None or not match.universal:
+                raise AssertionError(
+                    f"Property {original_prop.name!r} no longer holds on mutant"
+                )
+
+    return mutate_function_and_test(target, mined_test, operators)
+
+
 def mutate_function_and_test(
     target: str,
     test_fn: Callable[[], None],

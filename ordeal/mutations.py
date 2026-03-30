@@ -259,7 +259,11 @@ class _ReturnNoneCounter(_Counter):
 
 
 class _BoundaryApplicator(_Applicator):
-    """Mutate integer constants: ``n`` -> ``n + 1`` (off-by-one)."""
+    """Mutate integer constants: ``n`` -> ``n + 1`` and ``n`` -> ``n - 1``.
+
+    Both directions are needed: ``<= 10`` with n=10+1 catches upper
+    bound errors, n=10-1 catches lower bound errors.
+    """
 
     def visit_Constant(self, node: ast.Constant) -> ast.AST:
         self.generic_visit(node)
@@ -272,7 +276,21 @@ class _BoundaryApplicator(_Applicator):
                 self.line = node.lineno
                 self.col = node.col_offset
                 self.applied = True
+            elif self.current_idx == self.target_idx - 1:
+                # n-1 direction handled by next index
+                pass
             self.current_idx += 1
+            # Second mutation: n - 1
+            if not self.applied:
+                if self.current_idx == self.target_idx:
+                    node = copy.deepcopy(node)
+                    original = node.value
+                    node.value = original - 1
+                    self.description = f"{original} -> {original - 1}"
+                    self.line = node.lineno
+                    self.col = node.col_offset
+                    self.applied = True
+                self.current_idx += 1
         return node
 
 
@@ -280,7 +298,7 @@ class _BoundaryCounter(_Counter):
     def visit_Constant(self, node: ast.Constant) -> None:
         self.generic_visit(node)
         if isinstance(node.value, int) and not isinstance(node.value, bool):
-            self.count += 1
+            self.count += 2  # both +1 and -1
 
 
 class _ConstantApplicator(_Applicator):
@@ -606,11 +624,37 @@ OPERATORS: dict[str, tuple[type[_Counter], type[_Applicator]]] = {
 # ============================================================================
 
 
+_SKIP_METHODS = frozenset(
+    {
+        "__repr__",
+        "__str__",
+        "__format__",
+        "__hash__",
+        "__sizeof__",
+        "__reduce__",
+        "__reduce_ex__",
+    }
+)
+
+
+def _is_inside_skip_method(tree: ast.Module, line: int) -> bool:
+    """Check if a mutation line falls inside a method we should skip."""
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name in _SKIP_METHODS:
+                if node.lineno <= line <= node.end_lineno:
+                    return True
+    return False
+
+
 def generate_mutants(
     source: str,
     operators: list[str] | None = None,
 ) -> list[tuple[Mutant, ast.Module]]:
-    """Generate all possible mutants from source code.
+    """Generate mutants from source code, filtering out noise.
+
+    Skips mutations inside ``__repr__``, ``__str__``, and other display
+    methods (they produce equivalent mutants that always survive).
 
     Returns a list of ``(Mutant, mutated_AST)`` pairs.
     """
@@ -633,6 +677,9 @@ def generate_mutants(
             ast.fix_missing_locations(mutated_tree)
 
             if applicator.applied:
+                # Skip mutations in display/repr methods
+                if _is_inside_skip_method(tree, applicator.line):
+                    continue
                 mutant = Mutant(
                     operator=op_name,
                     description=applicator.description,

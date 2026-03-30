@@ -520,9 +520,7 @@ def validate_mined_properties(
         for original_prop in universal:
             match = next((p for p in re_mined.properties if p.name == original_prop.name), None)
             if match is None or not match.universal:
-                raise AssertionError(
-                    f"Property {original_prop.name!r} no longer holds on mutant"
-                )
+                raise AssertionError(f"Property {original_prop.name!r} no longer holds on mutant")
 
     return mutate_function_and_test(target, mined_test, operators)
 

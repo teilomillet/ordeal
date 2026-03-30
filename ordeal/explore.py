@@ -57,7 +57,9 @@ class CoverageCollector:
         self._prev_loc: int = 0
 
     def _is_target(self, filename: str) -> bool:
-        return any(t in filename for t in self._targets)
+        # Normalize to forward slashes so target matching works on Windows
+        normalized = filename.replace("\\", "/")
+        return any(t in normalized for t in self._targets)
 
     def _trace(self, frame: Any, event: str, arg: Any) -> Any:
         if event == "line" and self._is_target(frame.f_code.co_filename):

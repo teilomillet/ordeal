@@ -18,6 +18,8 @@ class TestCLI:
     def test_explore_with_real_config(self, tmp_path):
         """End-to-end: write a config, run explore, check exit code."""
         config = tmp_path / "ordeal.toml"
+        # Use forward slashes in TOML — backslashes are escape sequences
+        report_path = str(tmp_path / "report.json").replace("\\", "/")
         config.write_text(
             """
 [explorer]
@@ -33,7 +35,7 @@ class = "tests.test_explore:BranchyChaos"
 format = "json"
 output = "{output}"
 verbose = false
-""".format(output=str(tmp_path / "report.json"))
+""".format(output=report_path)
         )
 
         code = main(["explore", "--config", str(config), "--no-shrink"])

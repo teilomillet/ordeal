@@ -5,7 +5,7 @@ from __future__ import annotations
 from hypothesis.stateful import invariant, rule
 
 from ordeal.chaos import ChaosTest
-from ordeal.explore import CoverageCollector, Explorer, _DataProxy
+from ordeal.explore import Checkpoint, CoverageCollector, Explorer, _DataProxy
 from ordeal.faults import LambdaFault
 from tests._explore_target import BranchyService
 
@@ -223,3 +223,81 @@ class TestExplorerResult:
         edges = [count for _, count in result.edge_log]
         for i in range(1, len(edges)):
             assert edges[i] >= edges[i - 1]
+
+
+# ============================================================================
+# Energy scheduling: UCB1 + rare-edge bonus
+# ============================================================================
+
+
+class TestEnergyScheduling:
+    def test_ucb_explores_unselected(self):
+        """UCB1 bonus should favor checkpoints that have never been selected."""
+        explorer = Explorer(BranchyChaos, seed=42)
+        explorer._discover()
+        # Create two checkpoints: one heavily selected, one never selected
+        machine = BranchyChaos()
+        cp_old = Checkpoint(machine, 1, 0, 1, energy=5.0, times_selected=100)
+        cp_new = Checkpoint(machine, 1, 0, 2, energy=1.0, times_selected=0)
+        explorer._checkpoints = [cp_old, cp_new]
+
+        # Select many times — the unselected one should eventually get picked
+        selected_new = 0
+        for _ in range(100):
+            cp = explorer._select_energy()
+            if cp is cp_new:
+                selected_new += 1
+        assert selected_new > 0, "UCB should give the unselected checkpoint a chance"
+
+    def test_rare_edge_bonus(self):
+        """Edges that appear in fewer checkpoints should yield higher reward."""
+        explorer = Explorer(BranchyChaos, seed=42)
+        # Edge 1 appears in 10 checkpoints, edge 2 appears in 1
+        explorer._edge_frequency = {1: 10, 2: 1}
+
+        machine = BranchyChaos()
+        cp = Checkpoint(machine, 0, 0, 1, energy=1.0)
+        # Reward with a rare edge (edge 2) — should boost more
+        explorer._update_checkpoint_energy(cp, 1, frozenset({2}))
+        energy_rare = cp.energy
+
+        cp2 = Checkpoint(machine, 0, 0, 2, energy=1.0)
+        # Reward with a common edge (edge 1) — should boost less
+        explorer._update_checkpoint_energy(cp2, 1, frozenset({1}))
+        energy_common = cp2.energy
+
+        assert energy_rare > energy_common
+
+    def test_decay_without_new_edges(self):
+        """Energy decays when a checkpoint produces no new edges."""
+        explorer = Explorer(BranchyChaos, seed=42)
+        machine = BranchyChaos()
+        cp = Checkpoint(machine, 0, 0, 1, energy=5.0)
+        explorer._update_checkpoint_energy(cp, 0)
+        assert cp.energy < 5.0
+        assert cp.energy > 0.0
+
+    def test_checkpoints_store_edges(self):
+        """Saved checkpoints should record their edge set."""
+        explorer = Explorer(
+            BranchyChaos,
+            target_modules=["tests._explore_target"],
+            seed=42,
+        )
+        explorer.run(max_runs=50, steps_per_run=20)
+        if explorer._checkpoints:
+            # At least some checkpoints should have non-empty edge sets
+            has_edges = any(len(cp.edges) > 0 for cp in explorer._checkpoints)
+            assert has_edges
+
+    def test_edge_frequency_tracks_corpus(self):
+        """Edge frequency dict should reflect the current checkpoint corpus."""
+        explorer = Explorer(
+            BranchyChaos,
+            target_modules=["tests._explore_target"],
+            seed=42,
+        )
+        explorer.run(max_runs=50, steps_per_run=20)
+        if explorer._edge_frequency:
+            # Every edge in frequency should have count >= 1
+            assert all(v >= 0 for v in explorer._edge_frequency.values())

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import copy
 import importlib
+import math
 import multiprocessing as mp
 import os
 import pickle
@@ -161,6 +162,7 @@ class _DataProxy:
 _ENERGY_REWARD = 2.0
 _ENERGY_DECAY = 0.95
 _ENERGY_MIN = 0.01
+_UCB_C = 1.0  # exploration constant for UCB1 term
 
 # Shared-memory edge bitmap: one byte per 16-bit edge hash.
 # Single-byte writes are atomic — no locks needed.
@@ -177,6 +179,7 @@ class Checkpoint:
     run_id: int
     energy: float = 1.0
     times_selected: int = 0
+    edges: frozenset[int] = field(default_factory=frozenset)
 
 
 # ============================================================================
@@ -354,6 +357,7 @@ class Explorer:
         # Internal state
         self._total_edges: set[int] = set()
         self._checkpoints: list[Checkpoint] = []
+        self._edge_frequency: dict[int, int] = {}  # edge -> count of checkpoints with it
         self._rules: list[_RuleInfo] = []
         self._invariant_names: list[str] = []
 
@@ -454,15 +458,28 @@ class Explorer:
         return self.rng.choice(self._checkpoints)  # uniform
 
     def _select_energy(self) -> Checkpoint:
-        """Energy-weighted selection: favor checkpoints that led to discoveries."""
-        total = sum(cp.energy for cp in self._checkpoints)
+        """Energy + UCB1 selection: balance exploitation and exploration.
+
+        Adds ``_UCB_C * sqrt(ln(N) / n_i)`` to each checkpoint's energy
+        so that under-selected checkpoints get a chance to be explored.
+        """
+        total_sel = sum(cp.times_selected for cp in self._checkpoints) + 1
+        log_n = math.log(total_sel)
+
+        weights: list[float] = []
+        for cp in self._checkpoints:
+            ucb = _UCB_C * math.sqrt(log_n / max(1, cp.times_selected))
+            weights.append(cp.energy + ucb)
+
+        total = sum(weights)
         r = self.rng.random() * total
         cumulative = 0.0
-        for cp in self._checkpoints:
-            cumulative += cp.energy
+        for cp, w in zip(self._checkpoints, weights):
+            cumulative += w
             if cumulative >= r:
                 cp.times_selected += 1
                 return cp
+        self._checkpoints[-1].times_selected += 1
         return self._checkpoints[-1]
 
     def _select_recent(self) -> Checkpoint:
@@ -471,10 +488,22 @@ class Explorer:
         weights = list(range(1, n + 1))
         return self.rng.choices(self._checkpoints, weights=weights, k=1)[0]
 
-    def _update_checkpoint_energy(self, cp: Checkpoint, new_edges: int) -> None:
-        """Reward checkpoints that led to new discoveries, decay others."""
+    def _update_checkpoint_energy(
+        self, cp: Checkpoint, new_edges: int, new_edge_set: frozenset[int] | None = None
+    ) -> None:
+        """Reward checkpoints that led to new discoveries, decay others.
+
+        When *new_edge_set* is provided the reward is weighted by edge
+        rarity: edges that appear in fewer checkpoints contribute more
+        energy, which promotes coverage diversity.
+        """
         if new_edges > 0:
-            cp.energy += new_edges * _ENERGY_REWARD
+            if new_edge_set and self._edge_frequency:
+                # Rare-edge bonus: 1/freq per edge, so novel edges count more
+                rarity = sum(1.0 / self._edge_frequency.get(e, 1) for e in new_edge_set)
+                cp.energy += rarity * _ENERGY_REWARD
+            else:
+                cp.energy += new_edges * _ENERGY_REWARD
         else:
             cp.energy = max(_ENERGY_MIN, cp.energy * _ENERGY_DECAY)
 
@@ -547,18 +576,33 @@ class Explorer:
         except Exception:
             pass
 
-    def _save_checkpoint(self, machine: ChaosTest, new_count: int, step: int, run_id: int) -> None:
+    def _save_checkpoint(
+        self,
+        machine: ChaosTest,
+        new_count: int,
+        step: int,
+        run_id: int,
+        new_edges: frozenset[int] | None = None,
+    ) -> None:
         """Save a checkpoint. Evicts lowest-energy checkpoint if at capacity."""
         if len(self._checkpoints) >= self.max_checkpoints:
             if self.checkpoint_strategy == "energy":
-                # Evict lowest energy
+                # Evict lowest energy — decrement edge frequency for evicted edges
                 min_idx = min(
                     range(len(self._checkpoints)), key=lambda i: self._checkpoints[i].energy
                 )
-                self._checkpoints.pop(min_idx)
+                evicted = self._checkpoints.pop(min_idx)
+                for e in evicted.edges:
+                    self._edge_frequency[e] = max(0, self._edge_frequency.get(e, 1) - 1)
             else:
                 idx = self.rng.randint(0, max(0, len(self._checkpoints) - 2))
-                self._checkpoints.pop(idx)
+                evicted = self._checkpoints.pop(idx)
+                for e in evicted.edges:
+                    self._edge_frequency[e] = max(0, self._edge_frequency.get(e, 1) - 1)
+
+        edges = new_edges or frozenset()
+        for e in edges:
+            self._edge_frequency[e] = self._edge_frequency.get(e, 0) + 1
 
         self._checkpoints.append(
             Checkpoint(
@@ -566,6 +610,7 @@ class Explorer:
                 new_edge_count=new_count,
                 step=step,
                 run_id=run_id,
+                edges=edges,
             )
         )
 
@@ -660,6 +705,7 @@ class Explorer:
 
             step = 0
             new_edges_this_run = 0
+            new_edge_set_this_run: set[int] = set()
             try:
                 for step in range(n_steps):
                     result.total_steps += 1
@@ -710,12 +756,15 @@ class Explorer:
                             new = {e for e in new if not self._shared_bitmap[e]}
                         if new:
                             new_edges_this_run += len(new)
+                            new_edge_set_this_run |= new
                             self._total_edges |= new
                             # Publish to shared bitmap
                             if self._shared_bitmap is not None:
                                 for e in new:
                                     self._shared_bitmap[e] = 1
-                            self._save_checkpoint(machine, len(new), step, run_id)
+                            self._save_checkpoint(
+                                machine, len(new), step, run_id, frozenset(new)
+                            )
                             self._pool_publish(machine, len(new), step, run_id)
                             result.checkpoints_saved += 1
 
@@ -767,7 +816,9 @@ class Explorer:
 
             # Update checkpoint energy
             if source_cp is not None:
-                self._update_checkpoint_energy(source_cp, new_edges_this_run)
+                self._update_checkpoint_energy(
+                    source_cp, new_edges_this_run, frozenset(new_edge_set_this_run) or None
+                )
 
             result.edge_log.append((run_id, len(self._total_edges)))
 

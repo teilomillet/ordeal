@@ -54,6 +54,8 @@ class ModuleAudit:
     # What ordeal discovered
     mined_properties: list[str] = field(default_factory=list)
     gap_functions: list[str] = field(default_factory=list)
+    # Suggestions: what the developer should test to close the gap
+    suggestions: list[str] = field(default_factory=list)
     # Generated test file content (for inspection)
     generated_test: str = ""
 
@@ -95,6 +97,11 @@ class ModuleAudit:
                 f"    gaps:     {len(self.gap_functions)} functions need fixtures: "
                 f"{', '.join(self.gap_functions[:5])}"
             )
+
+        if self.suggestions:
+            lines.append("    suggest:")
+            for s in self.suggestions:
+                lines.append(f"      - {s}")
 
         return "\n".join(lines)
 
@@ -138,13 +145,13 @@ def _find_test_files(module_name: str, test_dir: Path) -> list[Path]:
 def _measure_coverage(
     test_files: list[Path],
     module_name: str,
-) -> tuple[float, int, int]:
-    """Run tests with in-process coverage measurement.
+) -> tuple[float, int, int, set[int]]:
+    """Run tests and measure coverage via subprocess.
 
-    Returns (coverage_pct, uncovered_lines, total_statements).
+    Returns (coverage_pct, uncovered_count, total_statements, missing_lines).
     """
     if not test_files:
-        return 0.0, 0, 0
+        return 0.0, 0, 0, set()
 
     cwd = str(Path.cwd())
 
@@ -158,7 +165,7 @@ def _measure_coverage(
         "pytest",
         *[str(f) for f in test_files],
         f"--cov={module_name}",
-        "--cov-report=term",
+        "--cov-report=term-missing",
         "-q",
         "--tb=no",
         "--no-header",
@@ -185,6 +192,7 @@ def _measure_coverage(
             env=env,
         )
         mod_path = module_name.replace(".", "/")
+        missing_lines: set[int] = set()
         for line in result.stdout.splitlines():
             if mod_path not in line:
                 continue
@@ -195,13 +203,116 @@ def _measure_coverage(
                         pct = float(part.rstrip("%"))
                         stmts = int(parts[i - 2])
                         miss = int(parts[i - 1])
-                        return pct, miss, stmts
+                        # Parse missing line ranges after the %
+                        # Format: "98%   135" or "70%   45, 67-68, 337-340"
+                        rest = " ".join(parts[i + 1 :])
+                        missing_lines = _parse_missing_lines(rest)
+                        return pct, miss, stmts, missing_lines
                     except (ValueError, IndexError):
                         continue
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
 
-    return 0.0, 0, 0
+    return 0.0, 0, 0, set()
+
+
+def _parse_missing_lines(text: str) -> set[int]:
+    """Parse coverage missing-lines format: ``'45, 67-68, 337-340'``."""
+    result: set[int] = set()
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            try:
+                start, end = part.split("-", 1)
+                result.update(range(int(start), int(end) + 1))
+            except ValueError:
+                continue
+        else:
+            try:
+                result.add(int(part))
+            except ValueError:
+                continue
+    return result
+
+
+def _suggest_tests(
+    module_name: str,
+    current_missing: set[int],
+    migrated_missing: set[int],
+) -> list[str]:
+    """Generate test suggestions for lines covered by current but not migrated.
+
+    Reads the source at each gap line and describes what to test.
+    """
+    gap_lines = migrated_missing - current_missing
+    if not gap_lines:
+        return []
+
+    # Read source file
+    try:
+        mod = _resolve_module(module_name)
+        source_file = getattr(mod, "__file__", None)
+        if source_file is None:
+            return []
+        source = Path(source_file).read_text().splitlines()
+    except (ImportError, OSError):
+        return []
+
+    suggestions: list[str] = []
+    # Group consecutive lines into blocks
+    sorted_lines = sorted(gap_lines)
+    blocks: list[list[int]] = []
+    current_block: list[int] = []
+    for ln in sorted_lines:
+        if current_block and ln > current_block[-1] + 2:
+            blocks.append(current_block)
+            current_block = [ln]
+        else:
+            current_block.append(ln)
+    if current_block:
+        blocks.append(current_block)
+
+    for block in blocks[:8]:  # cap at 8 suggestions
+        first = block[0]
+        if first - 1 >= len(source):
+            continue
+        # Read the line and its context
+        line_text = source[first - 1].strip()
+
+        # Find the enclosing function
+        func_name = "<module>"
+        for i in range(first - 1, -1, -1):
+            if source[i].strip().startswith("def "):
+                func_name = source[i].strip().split("(")[0].replace("def ", "")
+                break
+
+        # Describe what to test
+        if "if " in line_text or "elif " in line_text:
+            condition = line_text.split("if ", 1)[-1].rstrip(":")
+            suggestions.append(
+                f"L{first} in {func_name}(): test when {condition}"
+            )
+        elif "return " in line_text:
+            suggestions.append(
+                f"L{first} in {func_name}(): test input that triggers this return"
+            )
+        elif "raise " in line_text:
+            exc = line_text.split("raise ", 1)[-1].split("(")[0]
+            suggestions.append(
+                f"L{first} in {func_name}(): test that {exc} is raised"
+            )
+        elif "for " in line_text:
+            suggestions.append(
+                f"L{first} in {func_name}(): test with non-empty input for loop"
+            )
+        else:
+            suggestions.append(
+                f"L{first} in {func_name}(): cover '{line_text[:60]}'"
+            )
+
+    return suggestions
 
 
 def _generate_migrated_test(module: str, max_examples: int) -> str:
@@ -299,8 +410,9 @@ def audit(
         result.current_test_count += _count_tests_in_file(tf)
         result.current_test_lines += _count_lines_in_file(tf)
 
+    current_missing: set[int] = set()
     if test_files:
-        pct, uncov, total = _measure_coverage(test_files, module)
+        pct, uncov, total, current_missing = _measure_coverage(test_files, module)
         result.current_coverage_pct = pct
         result.current_uncovered = uncov
         result.current_total_stmts = total
@@ -337,9 +449,12 @@ def audit(
     out_path = out_dir / f"test_{mod_short}_migrated.py"
     out_path.write_text(generated)
 
-    pct, uncov, total = _measure_coverage([out_path], module)
+    pct, uncov, total, migrated_missing = _measure_coverage([out_path], module)
     result.migrated_coverage_pct = pct
     result.migrated_uncovered = uncov
+
+    # -- 4. Generate suggestions for closing the coverage gap --
+    result.suggestions = _suggest_tests(module, current_missing, migrated_missing)
 
     return result
 

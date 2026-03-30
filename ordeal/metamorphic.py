@@ -111,7 +111,8 @@ def metamorphic(
     def decorator(fn: Callable[..., Any]) -> Callable[..., None]:
         sig = inspect.signature(fn)
         params = [
-            p for p in sig.parameters.values()
+            p
+            for p in sig.parameters.values()
             if p.name != "self" and p.annotation != inspect.Parameter.empty
         ]
 
@@ -132,9 +133,7 @@ def metamorphic(
                 if not isinstance(transformed_args, tuple):
                     transformed_args = (transformed_args,)
                 # Rebuild kwargs from transformed args
-                transformed_kwargs = {
-                    p.name: v for p, v in zip(params, transformed_args)
-                }
+                transformed_kwargs = {p.name: v for p, v in zip(params, transformed_args)}
                 try:
                     transformed_output = fn(**transformed_kwargs)
                 except Exception:

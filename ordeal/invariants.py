@@ -295,9 +295,7 @@ def positive_semi_definite(*, tol: float = 1e-6) -> Invariant:
         eigenvalues = np.linalg.eigvalsh(arr)
         min_eig = float(np.min(eigenvalues))
         if min_eig < -tol:
-            raise AssertionError(
-                f"Invariant '{name}' violated: min eigenvalue = {min_eig:.8f}"
-            )
+            raise AssertionError(f"Invariant '{name}' violated: min eigenvalue = {min_eig:.8f}")
 
     return Invariant("positive_semi_definite", check)
 
@@ -315,13 +313,9 @@ def rank_bounded(min_rank: int = 0, max_rank: int | None = None) -> Invariant:
 
         r = int(np.linalg.matrix_rank(arr))
         if r < min_rank:
-            raise AssertionError(
-                f"Invariant '{name}' violated: rank={r} < min_rank={min_rank}"
-            )
+            raise AssertionError(f"Invariant '{name}' violated: rank={r} < min_rank={min_rank}")
         if max_rank is not None and r > max_rank:
-            raise AssertionError(
-                f"Invariant '{name}' violated: rank={r} > max_rank={max_rank}"
-            )
+            raise AssertionError(f"Invariant '{name}' violated: rank={r} > max_rank={max_rank}")
 
     return Invariant(label, check)
 
@@ -347,9 +341,7 @@ def mean_bounded(lo: float, hi: float) -> Invariant:
                 raise AssertionError(f"Invariant '{name}': empty sequence")
             m = sum(seq) / len(seq)
         if not (lo <= m <= hi):
-            raise AssertionError(
-                f"Invariant '{name}' violated: mean={m:.6f} not in [{lo}, {hi}]"
-            )
+            raise AssertionError(f"Invariant '{name}' violated: mean={m:.6f} not in [{lo}, {hi}]")
 
     return Invariant(label, check)
 

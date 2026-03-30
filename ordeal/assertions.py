@@ -165,13 +165,10 @@ def sometimes(
             if condition():
                 tracker.record(name, "sometimes", True, details or None)
                 return
-        raise AssertionError(
-            f"sometimes: never true in {attempts} attempts: {name}"
-        )
+        raise AssertionError(f"sometimes: never true in {attempts} attempts: {name}")
 
     cond = condition() if callable(condition) else condition
     tracker.record(name, "sometimes", cond, details or None)
-
 
 
 def reachable(name: str, **details: Any) -> None:

@@ -66,10 +66,7 @@ class CoverageCollector:
         normalized = filename.replace("\\", "/")
         # Build segments, stripping .py from the last one
         segments = normalized.split("/")
-        bare_segments = [
-            s.removesuffix(".py") if s.endswith(".py") else s
-            for s in segments
-        ]
+        bare_segments = [s.removesuffix(".py") if s.endswith(".py") else s for s in segments]
         for target in self._targets:
             # Convert dotted module path to slash-separated segments
             target_parts = target.replace(".", "/").split("/")

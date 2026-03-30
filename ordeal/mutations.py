@@ -646,12 +646,12 @@ _SKIP_METHODS = frozenset(
 # When the arithmetic mutator swaps + to - (or * to /) and the other
 # operand is a neutral element, the mutation is equivalent.
 _IDENTITY_OPS: dict[type, set[int | float]] = {
-    ast.Add: {0, 0.0},       # x + 0 == x
-    ast.Sub: {0, 0.0},       # x - 0 == x
-    ast.Mult: {1, 1.0},      # x * 1 == x
-    ast.Div: {1, 1.0},       # x / 1 == x
+    ast.Add: {0, 0.0},  # x + 0 == x
+    ast.Sub: {0, 0.0},  # x - 0 == x
+    ast.Mult: {1, 1.0},  # x * 1 == x
+    ast.Div: {1, 1.0},  # x / 1 == x
     ast.FloorDiv: {1, 1.0},  # x // 1 == x
-    ast.Pow: {1, 1.0},       # x ** 1 == x
+    ast.Pow: {1, 1.0},  # x ** 1 == x
 }
 
 

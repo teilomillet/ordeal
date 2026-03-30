@@ -865,11 +865,7 @@ class Explorer:
 
         # Property-guided search
         for p in _assertions.tracker.results:
-            if (
-                p.type == "sometimes"
-                and p.passes > 0
-                and p.name not in self._satisfied_properties
-            ):
+            if p.type == "sometimes" and p.passes > 0 and p.name not in self._satisfied_properties:
                 self._satisfied_properties.add(p.name)
                 result.properties_satisfied += 1
                 new_edges_this_run += 1
@@ -1110,15 +1106,30 @@ class Explorer:
                     )
                     self._check_invariants(machine)
                     new_edges_this_run = self._process_coverage(
-                        machine, collector, step, run_id,
-                        new_edges_this_run, result, use_coverage, _assertions,
+                        machine,
+                        collector,
+                        step,
+                        run_id,
+                        new_edges_this_run,
+                        result,
+                        use_coverage,
+                        _assertions,
                     )
 
             except Exception as e:
                 trace = self._record_failure(
-                    e, run_id, step, trace_steps, rule_log, machine,
-                    source_cp, new_edges_this_run, run_start, class_name,
-                    result, _mutation_pairs,
+                    e,
+                    run_id,
+                    step,
+                    trace_steps,
+                    rule_log,
+                    machine,
+                    source_cp,
+                    new_edges_this_run,
+                    run_start,
+                    class_name,
+                    result,
+                    _mutation_pairs,
                 )
                 if self.record_traces:
                     result.traces.append(trace)

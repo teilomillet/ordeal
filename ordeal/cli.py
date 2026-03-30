@@ -73,6 +73,8 @@ def _cmd_explore(args: argparse.Namespace) -> int:
         cfg.explorer.seed = args.seed
     if args.max_time is not None:
         cfg.explorer.max_time = args.max_time
+    if args.workers is not None:
+        cfg.explorer.workers = args.workers
     verbose = args.verbose or cfg.report.verbose
 
     if not cfg.tests:
@@ -101,6 +103,7 @@ def _cmd_explore(args: argparse.Namespace) -> int:
             checkpoint_strategy=cfg.explorer.checkpoint_strategy,
             fault_toggle_prob=cfg.explorer.fault_toggle_prob,
             record_traces=cfg.report.traces,
+            workers=cfg.explorer.workers,
         )
 
         result = explorer.run(
@@ -278,6 +281,9 @@ def main(argv: list[str] | None = None) -> int:
     explore_p.add_argument("--max-time", type=float, help="Override max_time (seconds)")
     explore_p.add_argument("--verbose", "-v", action="store_true", help="Live progress")
     explore_p.add_argument("--no-shrink", action="store_true", help="Skip shrinking")
+    explore_p.add_argument(
+        "--workers", "-w", type=int, help="Parallel worker processes (default: 1)"
+    )
 
     # -- ordeal replay --
     replay_p = sub.add_parser("replay", help="Replay a saved trace")

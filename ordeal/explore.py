@@ -23,6 +23,8 @@ This is ordeal's answer to Antithesis's exploration engine.  It:
 from __future__ import annotations
 
 import copy
+import importlib
+import multiprocessing as mp
 import random
 import sys
 import time as _time
@@ -264,6 +266,7 @@ class Explorer:
         checkpoint_strategy: str = "energy",
         fault_toggle_prob: float = 0.3,
         record_traces: bool = False,
+        workers: int = 1,
     ) -> None:
         """Initialize the exploration engine.
 
@@ -276,9 +279,13 @@ class Explorer:
             checkpoint_strategy: ``"energy"`` | ``"uniform"`` | ``"recent"``.
             fault_toggle_prob: Probability of nemesis action per step.
             record_traces: If True, keep full traces in the result.
+            workers: Number of parallel worker processes. Each gets a unique
+                seed for independent state-space exploration. Default 1
+                (sequential). Use ``os.cpu_count()`` for full utilization.
         """
         self.test_class = test_class
         self.target_paths = [m.replace(".", "/") for m in (target_modules or [])]
+        self.target_modules = target_modules
         self.rng = random.Random(seed)
         self.seed = seed
         self.max_checkpoints = max_checkpoints
@@ -286,6 +293,7 @@ class Explorer:
         self.checkpoint_strategy = checkpoint_strategy
         self.fault_toggle_prob = fault_toggle_prob
         self.record_traces = record_traces
+        self.workers = max(1, workers)
 
         # Internal state
         self._total_edges: set[int] = set()
@@ -458,6 +466,16 @@ class Explorer:
             max_shrink_time: Time limit for shrinking each failure.
             progress: Optional callback for live progress updates.
         """
+        if self.workers > 1:
+            return self._run_parallel(
+                max_time=max_time,
+                max_runs=max_runs,
+                steps_per_run=steps_per_run,
+                shrink=shrink,
+                max_shrink_time=max_shrink_time,
+                progress=progress,
+            )
+
         self._discover()
         if not self._rules:
             raise ValueError(f"No callable rules found on {self.test_class.__name__}")
@@ -628,3 +646,132 @@ class Explorer:
         result.unique_edges = len(self._total_edges)
         result.duration_seconds = _time.monotonic() - start
         return result
+
+    # -- Parallel execution -------------------------------------------------
+
+    def _run_parallel(
+        self,
+        *,
+        max_time: float,
+        max_runs: int | None,
+        steps_per_run: int,
+        shrink: bool,
+        max_shrink_time: float,
+        progress: Callable[[ProgressSnapshot], None] | None,
+    ) -> ExplorationResult:
+        """Run exploration across multiple worker processes.
+
+        Each worker gets a unique seed (base + i*7919) for independent
+        state-space exploration.  Results are aggregated: runs/steps are
+        summed, edges are unioned for true unique count.
+        """
+        start = _time.monotonic()
+
+        class_path = f"{self.test_class.__module__}.{self.test_class.__qualname__}"
+
+        worker_args = []
+        for i in range(self.workers):
+            worker_args.append(
+                {
+                    "class_path": class_path,
+                    "target_modules": self.target_modules,
+                    "seed": self.seed + i * 7919,
+                    "max_time": max_time,
+                    "max_runs": max_runs,
+                    "steps_per_run": steps_per_run,
+                    "max_checkpoints": self.max_checkpoints,
+                    "checkpoint_prob": self.checkpoint_prob,
+                    "checkpoint_strategy": self.checkpoint_strategy,
+                    "fault_toggle_prob": self.fault_toggle_prob,
+                    "record_traces": self.record_traces,
+                    "shrink": shrink,
+                    "max_shrink_time": max_shrink_time,
+                }
+            )
+
+        ctx = mp.get_context("fork" if sys.platform != "win32" else "spawn")
+        with ctx.Pool(self.workers) as pool:
+            worker_results = pool.map(_worker_fn, worker_args)
+
+        # Aggregate results
+        result = ExplorationResult()
+        all_edges: set[int] = set()
+
+        for wr in worker_results:
+            result.total_runs += wr["total_runs"]
+            result.total_steps += wr["total_steps"]
+            result.checkpoints_saved += wr["checkpoints_saved"]
+            result.edge_log.extend(wr["edge_log"])
+            all_edges.update(wr["edges"])
+
+            # Reconstruct minimal Failure objects from serialized data
+            for finfo in wr["failures"]:
+                result.failures.append(
+                    Failure(
+                        error=RuntimeError(finfo["error_message"]),
+                        step=finfo["step"],
+                        run_id=finfo["run_id"],
+                        active_faults=finfo["active_faults"],
+                        rule_log=finfo["rule_log"],
+                    )
+                )
+
+        result.unique_edges = len(all_edges)
+        self._total_edges = all_edges
+        result.duration_seconds = _time.monotonic() - start
+        return result
+
+
+def _worker_fn(args: dict[str, Any]) -> dict[str, Any]:
+    """Worker process: import test class, run single-worker Explorer, return results.
+
+    Defined at module level so it can be pickled by multiprocessing.
+    """
+    class_path = args["class_path"]
+    module_path, _, class_name = class_path.rpartition(".")
+    mod = importlib.import_module(module_path)
+    test_class = getattr(mod, class_name)
+
+    explorer = Explorer(
+        test_class,
+        target_modules=args.get("target_modules"),
+        seed=args["seed"],
+        max_checkpoints=args["max_checkpoints"],
+        checkpoint_prob=args["checkpoint_prob"],
+        checkpoint_strategy=args["checkpoint_strategy"],
+        fault_toggle_prob=args["fault_toggle_prob"],
+        record_traces=args.get("record_traces", False),
+        workers=1,  # each worker runs sequentially
+    )
+
+    result = explorer.run(
+        max_time=args["max_time"],
+        max_runs=args.get("max_runs"),
+        steps_per_run=args["steps_per_run"],
+        shrink=args.get("shrink", True),
+        max_shrink_time=args.get("max_shrink_time", 30.0),
+    )
+
+    # Serialize — exceptions and traces don't pickle cleanly across processes
+    serialized_failures = []
+    for f in result.failures:
+        serialized_failures.append(
+            {
+                "error_message": str(f.error)[:500],
+                "step": f.step,
+                "run_id": f.run_id,
+                "active_faults": f.active_faults,
+                "rule_log": f.rule_log,
+            }
+        )
+
+    return {
+        "total_runs": result.total_runs,
+        "total_steps": result.total_steps,
+        "unique_edges": result.unique_edges,
+        "checkpoints_saved": result.checkpoints_saved,
+        "duration_seconds": result.duration_seconds,
+        "failures": serialized_failures,
+        "edge_log": result.edge_log,
+        "edges": list(explorer._total_edges),
+    }

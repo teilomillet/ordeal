@@ -46,6 +46,7 @@ class ExplorerConfig:
     checkpoint_strategy: str = "energy"  # "energy" | "uniform" | "recent"
     steps_per_run: int = 50
     fault_toggle_prob: float = 0.3
+    workers: int = 1
 
 
 @dataclass
@@ -112,6 +113,7 @@ _KNOWN_EXPLORER_KEYS = {
     "checkpoint_strategy",
     "steps_per_run",
     "fault_toggle_prob",
+    "workers",
 }
 _KNOWN_TEST_KEYS = {"class", "steps_per_run", "swarm"}
 _KNOWN_REPORT_KEYS = {"format", "output", "traces", "traces_dir", "verbose"}
@@ -174,6 +176,7 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
         checkpoint_strategy=explorer_raw.get("checkpoint_strategy", "energy"),
         steps_per_run=int(explorer_raw.get("steps_per_run", 50)),
         fault_toggle_prob=float(explorer_raw.get("fault_toggle_prob", 0.3)),
+        workers=int(explorer_raw.get("workers", 1)),
     )
 
     if explorer.checkpoint_strategy not in _VALID_CHECKPOINT_STRATEGIES:

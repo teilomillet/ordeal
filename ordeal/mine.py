@@ -262,6 +262,107 @@ def _check_idempotent(
     return MinedProperty("idempotent", holds, total)
 
 
+def _check_monotonic(
+    inputs: list[dict[str, Any]],
+    outputs: list[Any],
+) -> list[MinedProperty]:
+    """Check if output is monotonic w.r.t. each numeric input parameter."""
+    if len(inputs) < 2 or len(outputs) < 2:
+        return []
+
+    results: list[MinedProperty] = []
+    param_names = list(inputs[0].keys())
+    multi = len(param_names) > 1
+
+    for param_name in param_names:
+        pairs: list[tuple[float, float]] = []
+        for inp, out in zip(inputs, outputs):
+            v = inp[param_name]
+            if (
+                isinstance(v, (int, float))
+                and not isinstance(v, bool)
+                and isinstance(out, (int, float))
+                and not isinstance(out, bool)
+                and math.isfinite(v)
+                and math.isfinite(out)
+            ):
+                pairs.append((v, out))
+
+        if len(pairs) < 2:
+            continue
+
+        pairs.sort()
+        total = len(pairs) - 1
+        nd = sum(1 for i in range(total) if pairs[i][1] <= pairs[i + 1][1])
+        ni = sum(1 for i in range(total) if pairs[i][1] >= pairs[i + 1][1])
+
+        suffix = f" in {param_name}" if multi else ""
+        if nd >= ni:
+            results.append(MinedProperty(f"monotonically non-decreasing{suffix}", nd, total))
+        else:
+            results.append(MinedProperty(f"monotonically non-increasing{suffix}", ni, total))
+
+    return results
+
+
+def _check_observed_bounds(outputs: list[Any]) -> MinedProperty:
+    """Report the observed min/max range of numeric outputs."""
+    nums = [
+        o
+        for o in outputs
+        if isinstance(o, (int, float)) and not isinstance(o, bool) and math.isfinite(o)
+    ]
+    if not nums:
+        return MinedProperty("observed range", 0, 0)
+
+    lo, hi = min(nums), max(nums)
+
+    def _fmt(v: int | float) -> str:
+        if isinstance(v, int):
+            return str(v)
+        return f"{v:.4g}"
+
+    return MinedProperty(f"observed range [{_fmt(lo)}, {_fmt(hi)}]", len(nums), len(nums))
+
+
+def _check_length_relationship(
+    inputs: list[dict[str, Any]],
+    outputs: list[Any],
+) -> list[MinedProperty]:
+    """Check if output length relates to input length."""
+    if not inputs or not outputs:
+        return []
+
+    results: list[MinedProperty] = []
+
+    for param_name in inputs[0]:
+        eq = le = ge = total = 0
+        for inp, out in zip(inputs, outputs):
+            try:
+                in_len = len(inp[param_name])
+                out_len = len(out)
+            except TypeError:
+                continue
+            total += 1
+            if out_len == in_len:
+                eq += 1
+            if out_len <= in_len:
+                le += 1
+            if out_len >= in_len:
+                ge += 1
+
+        if total == 0:
+            continue
+
+        results.append(MinedProperty(f"len(output) == len({param_name})", eq, total))
+        if le > eq:
+            results.append(MinedProperty(f"len(output) <= len({param_name})", le, total))
+        if ge > eq:
+            results.append(MinedProperty(f"len(output) >= len({param_name})", ge, total))
+
+    return results
+
+
 # ============================================================================
 # Main entry point
 # ============================================================================
@@ -333,7 +434,10 @@ def mine(
         _check_never_empty(outputs),
         _check_deterministic(fn, inputs),
         _check_idempotent(fn, outputs, inputs),
+        _check_observed_bounds(outputs),
     ]
+    all_props.extend(_check_monotonic(inputs, outputs))
+    all_props.extend(_check_length_relationship(inputs, outputs))
 
     # Separate applicable (total > 0) from not-applicable (total == 0)
     props = [p for p in all_props if p.total > 0]

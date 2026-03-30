@@ -214,12 +214,11 @@ class TestPropertyTrackerThreadSafety:
         tracker.active = False
         assert tracker.record_hit("y", "reachable") is False
 
-    def test_always_no_toctou(self):
-        """always() uses atomic active check — no raise after deactivation.
+    def test_always_raises_regardless_of_tracker(self):
+        """always() raises on violation whether or not the tracker is active.
 
-        The record() return value determines whether to raise, not a
-        separate read of tracker.active. This prevents a TOCTOU race
-        where active is toggled between record() and the raise check.
+        Violations are never silent — this prevents the common mistake of
+        using always() without --chaos and thinking the assertion was checked.
         """
         import ordeal.assertions as _mod
 
@@ -228,19 +227,20 @@ class TestPropertyTrackerThreadSafety:
         _mod.tracker = tracker
 
         try:
-            # When inactive: record returns False, no raise even on violation
+            # When inactive: still raises on violation (no silent mode)
             tracker.active = False
-            always(False, "should_not_raise")  # must not raise
+            with pytest.raises(AssertionError, match="always violated"):
+                always(False, "should_raise_even_inactive")
 
-            # When active: record returns True, raise on violation
+            # When active: also raises, and records for the property report
             tracker.active = True
             with pytest.raises(AssertionError, match="always violated"):
-                always(False, "should_raise")
+                always(False, "should_raise_active")
         finally:
             _mod.tracker = old_tracker
 
-    def test_unreachable_no_toctou(self):
-        """unreachable() uses atomic active check — no raise after deactivation."""
+    def test_unreachable_raises_regardless_of_tracker(self):
+        """unreachable() always raises — violations are never silent."""
         import ordeal.assertions as _mod
 
         tracker = PropertyTracker()
@@ -249,11 +249,12 @@ class TestPropertyTrackerThreadSafety:
 
         try:
             tracker.active = False
-            unreachable("should_not_raise")  # must not raise
+            with pytest.raises(AssertionError, match="unreachable code reached"):
+                unreachable("should_raise_even_inactive")
 
             tracker.active = True
             with pytest.raises(AssertionError, match="unreachable code reached"):
-                unreachable("should_raise")
+                unreachable("should_raise_active")
         finally:
             _mod.tracker = old_tracker
 

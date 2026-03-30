@@ -72,9 +72,13 @@ activate(probability=0.1)
 assert is_active()
 ```
 
-## Property assertions not tracked
+## Property assertions not tracked in the report
 
-`always()`, `sometimes()`, etc. only track when the `PropertyTracker` is active.
+`always()` and `unreachable()` always raise on violation — they are never silent, with or without `--chaos`. But the property *report* (hit counts, pass/fail summary) only appears when the PropertyTracker is active.
+
+`sometimes()` and `reachable()` only track when the tracker is active. Without `--chaos`, they do nothing.
+
+To enable the tracker and the property report:
 
 - Run with `--chaos` flag
 - Or call `auto_configure()` at test start

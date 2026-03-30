@@ -148,11 +148,14 @@ tracker = PropertyTracker()
 def always(condition: bool, name: str, **details: Any) -> None:
     """Assert *condition* is ``True`` every time this line executes.
 
-    Raises ``AssertionError`` immediately on violation (triggers Hypothesis
-    shrinking when used inside a ``ChaosTest``).
+    Raises ``AssertionError`` immediately on violation — whether or not
+    the tracker is active.  This ensures violations are never silent.
+
+    When the tracker IS active (``--chaos``), the result is also recorded
+    for the property report.
     """
-    was_active = tracker.record(name, "always", condition, details or None)
-    if was_active and not condition:
+    tracker.record(name, "always", condition, details or None)
+    if not condition:
         msg = f"always violated: {name}"
         if details:
             msg += f" | {details}"
@@ -199,11 +202,11 @@ def reachable(name: str, **details: Any) -> None:
 def unreachable(name: str, **details: Any) -> None:
     """Assert this code path *never* executes.
 
-    Raises ``AssertionError`` immediately on violation.
+    Raises ``AssertionError`` immediately — whether or not the tracker
+    is active.  Violations are never silent.
     """
-    was_active = tracker.record_hit(name, "unreachable")
-    if was_active:
-        msg = f"unreachable code reached: {name}"
-        if details:
-            msg += f" | {details}"
-        raise AssertionError(msg)
+    tracker.record_hit(name, "unreachable")
+    msg = f"unreachable code reached: {name}"
+    if details:
+        msg += f" | {details}"
+    raise AssertionError(msg)

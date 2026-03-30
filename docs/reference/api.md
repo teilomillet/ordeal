@@ -90,7 +90,7 @@ always(
 ) -> None
 ```
 
-Assert condition is `True` every time. Raises `AssertionError` immediately on violation, triggering Hypothesis shrinking.
+Assert condition is `True` every time. Raises `AssertionError` immediately on violation — whether or not `--chaos` is active. Violations are never silent. When the tracker is active, the result is also recorded for the property report.
 
 ```python
 always(result >= 0, "result is non-negative")
@@ -144,7 +144,7 @@ unreachable(
 ) -> None
 ```
 
-Assert code path never executes. Raises `AssertionError` immediately.
+Assert code path never executes. Raises `AssertionError` immediately — whether or not `--chaos` is active. Violations are never silent.
 
 ```python
 if data is None and not error_occurred:

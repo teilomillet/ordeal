@@ -123,15 +123,45 @@ This is the key insight from [Jepsen](https://jepsen.io): a system needs an adve
 ## Run it
 
 ```bash
-# Standard: Hypothesis drives the exploration
-pytest test_chaos.py -v
-
-# With chaos mode: enables assertion tracking + buggify
-pytest test_chaos.py --chaos
-
-# Reproducible: same seed = same exploration
-pytest test_chaos.py --chaos --chaos-seed 42
+pytest test_chaos.py -v                   # faults + invariants work
+pytest test_chaos.py --chaos              # adds: always/sometimes tracking + buggify
+pytest test_chaos.py --chaos --chaos-seed 42  # same as above, reproducible
 ```
+
+## Understanding `--chaos` vs plain pytest
+
+This matters. Get it wrong and your assertions silently do nothing.
+
+**Without `--chaos`** (plain `pytest`):
+
+- Faults toggle normally (the nemesis works)
+- `@invariant()` methods run and `assert` statements work
+- `always()` **raises on violation** — violations are never silent
+- `unreachable()` **raises on violation** — violations are never silent
+- `sometimes()` and `reachable()` don't track (no property report)
+- `buggify()` always returns `False`
+
+**With `--chaos`**:
+
+- Everything above, plus:
+- `sometimes()` and `reachable()` track hits — checked at session end
+- `buggify()` returns `True` probabilistically (default 10%)
+- A property report prints at the end showing all tracked properties
+
+**The practical rule:**
+
+| What you use in rules | Do you need `--chaos`? |
+|---|---|
+| `assert something` | No — works always |
+| `always(condition, "name")` | No — raises on violation regardless |
+| `unreachable("name")` | No — raises when reached regardless |
+| `sometimes(condition, "name")` | **Yes** — not tracked without it |
+| `reachable("name")` | **Yes** — not tracked without it |
+| `buggify()` in production code | **Yes** — returns False without it |
+| Faults (timeout, NaN, etc.) | No — nemesis toggles them regardless |
+| `@invariant()` with `assert` | No — works always |
+
+**The design principle:** violations are never silent. `always()` and `unreachable()` raise `AssertionError` whether or not `--chaos` is active. The `--chaos` flag adds the *tracking* layer (property report, `sometimes`/`reachable` deferred checks) and activates `buggify()`. But if something is wrong, you'll know immediately — no flag required.
 
 ## What happens under the hood
 

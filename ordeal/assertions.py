@@ -98,10 +98,11 @@ class PropertyTracker:
         prop_type: str,
         condition: bool,
         details: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
+        """Record a property observation. Returns True if tracker was active."""
         with self._lock:
             if not self._active:
-                return
+                return False
             if name not in self._properties:
                 self._properties[name] = Property(name=name, type=prop_type)
             p = self._properties[name]
@@ -112,14 +113,17 @@ class PropertyTracker:
                 p.failures += 1
                 if p.first_failure_details is None and details:
                     p.first_failure_details = details
+            return True
 
-    def record_hit(self, name: str, prop_type: str) -> None:
+    def record_hit(self, name: str, prop_type: str) -> bool:
+        """Record a code-path hit. Returns True if tracker was active."""
         with self._lock:
             if not self._active:
-                return
+                return False
             if name not in self._properties:
                 self._properties[name] = Property(name=name, type=prop_type)
             self._properties[name].hits += 1
+            return True
 
     @property
     def results(self) -> list[Property]:
@@ -147,9 +151,8 @@ def always(condition: bool, name: str, **details: Any) -> None:
     Raises ``AssertionError`` immediately on violation (triggers Hypothesis
     shrinking when used inside a ``ChaosTest``).
     """
-    # record() checks active internally under the lock
-    tracker.record(name, "always", condition, details or None)
-    if not condition and tracker.active:
+    was_active = tracker.record(name, "always", condition, details or None)
+    if was_active and not condition:
         msg = f"always violated: {name}"
         if details:
             msg += f" | {details}"
@@ -198,8 +201,8 @@ def unreachable(name: str, **details: Any) -> None:
 
     Raises ``AssertionError`` immediately on violation.
     """
-    tracker.record_hit(name, "unreachable")
-    if tracker.active:
+    was_active = tracker.record_hit(name, "unreachable")
+    if was_active:
         msg = f"unreachable code reached: {name}"
         if details:
             msg += f" | {details}"

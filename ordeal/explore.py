@@ -461,7 +461,12 @@ class Explorer:
             cp.energy = max(_ENERGY_MIN, cp.energy * _ENERGY_DECAY)
 
     def _pool_publish(self, machine: ChaosTest, new_count: int, step: int, run_id: int) -> None:
-        """Publish a checkpoint to the shared pool directory."""
+        """Publish a checkpoint to the shared pool directory.
+
+        Pickles only the instance ``__dict__`` (not the class) because
+        Hypothesis-decorated methods break pickle's identity check.
+        The subscriber reconstructs via ``cls()`` + ``__dict__.update()``.
+        """
         if (
             self._pool_dir is None
             or self._pool_publish_count >= self._max_pool_publish
@@ -470,17 +475,30 @@ class Explorer:
             return
         fname = f"cp-w{self._worker_id}-r{run_id}-s{step}.pkl"
         try:
+            # Deep-copy first, then extract picklable state
+            snapshot = copy.deepcopy(machine)
+            state = {}
+            for k, v in snapshot.__dict__.items():
+                try:
+                    pickle.dumps(v)
+                    state[k] = v
+                except Exception:
+                    pass  # skip unpicklable attrs
             tmp = self._pool_dir / f".tmp-{fname}"
             with open(tmp, "wb") as f:
-                pickle.dump(copy.deepcopy(machine), f)
+                pickle.dump(state, f)
             tmp.rename(self._pool_dir / fname)  # atomic on POSIX
             self._pool_publish_count += 1
             self._pool_loaded.add(fname)
         except Exception:
-            pass  # skip unpicklable checkpoints
+            pass  # skip on any error
 
     def _pool_subscribe(self) -> None:
-        """Load new checkpoints from other workers."""
+        """Load new checkpoints from other workers.
+
+        Reconstructs machines by creating a fresh instance (proper
+        Hypothesis init) then overlaying the saved state dict.
+        """
         if self._pool_dir is None:
             return
         now = _time.monotonic()
@@ -494,14 +512,16 @@ class Explorer:
                 self._pool_loaded.add(path.name)
                 try:
                     with open(path, "rb") as f:
-                        machine = pickle.load(f)
+                        state = pickle.load(f)
+                    machine = self.test_class()
+                    machine.__dict__.update(state)
                     self._checkpoints.append(
                         Checkpoint(
                             machine_copy=machine,
                             new_edge_count=0,
                             step=0,
                             run_id=-1,
-                            energy=_ENERGY_REWARD,  # start with decent energy
+                            energy=_ENERGY_REWARD,
                         )
                     )
                 except Exception:

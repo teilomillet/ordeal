@@ -194,6 +194,14 @@ Coverage guidance pushes exploration toward these intersections automatically. T
 
 This is why coverage-guided testing finds bugs that random testing does not. Random testing treats all directions equally. Coverage-guided testing allocates more runs to directions that are producing new information. Over time, it tunnels into the deep corners of your state space -- exactly where the bugs are.
 
+## Parallel exploration and shared edges
+
+When running with multiple workers (`workers=N`), each worker has its own checkpoint corpus and runs independently. But they share a **64KB edge bitmap** in shared memory — one byte per possible 16-bit edge hash.
+
+When a worker discovers a new edge, it writes `1` to the bitmap. Other workers check the bitmap before saving checkpoints: if an edge was already found by another worker, they skip it and keep exploring deeper. This means workers naturally diverge into different regions of the state space instead of duplicating each other's work.
+
+The bitmap uses single-byte writes, which are atomic on all architectures — no locks, no contention. This is the same technique AFL uses for its coverage map.
+
 ## Comparison with pure Hypothesis
 
 Hypothesis is excellent at what it does: exploring rule interleavings with algebraic shrinking. When you write a `ChaosTest` and run it with pytest, Hypothesis explores different orderings of your rules and faults, and when it finds a failure, it shrinks it to a minimal example.

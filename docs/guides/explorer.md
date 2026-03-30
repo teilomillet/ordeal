@@ -451,6 +451,8 @@ Decrease `fault_toggle_prob` to 0.1. The system runs longer without fault interf
 
 The Explorer can run across multiple worker processes. Each worker gets a unique seed (base + i*7919) for independent state-space exploration. Results are aggregated: runs and steps are summed, edges are unioned for the true unique count.
 
+By default, workers communicate via a **shared-memory edge bitmap** (AFL-style): a 64KB buffer where each byte represents one of 65,536 possible edge hashes. When a worker discovers a new edge, it writes a `1` to the corresponding byte. Other workers check the bitmap before saving checkpoints — if an edge was already found by another worker, they skip it and keep exploring. Single-byte writes are atomic on all architectures, so no locks are needed.
+
 ### From the CLI
 
 ```bash
@@ -482,7 +484,8 @@ workers = 8
 
 - **Long pre-release runs.** 8 workers for 5 minutes covers more state space than 1 worker for 40 minutes, because each worker explores independently from a different seed.
 - **CI with available cores.** If your CI runners have 4+ cores, use them.
-- **Diminishing returns.** Each worker has its own checkpoint corpus and coverage set. They don't share discoveries, so edge coverage may overlap. Use `ordeal.scaling.benchmark()` to measure actual scaling efficiency for your test.
+- **Diminishing returns.** Each worker has its own checkpoint corpus. The shared edge bitmap reduces overlap (workers skip edges others already found), but checkpoints are still per-worker. Use `ordeal.scaling.benchmark()` to measure actual scaling efficiency for your test.
+- **Disabling shared edges.** Pass `share_edges=False` to disable the bitmap if you want fully independent exploration (useful for benchmarking or when shared memory is unavailable).
 
 ### Measuring scaling efficiency
 

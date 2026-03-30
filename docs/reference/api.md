@@ -360,6 +360,7 @@ Explorer(
     fault_toggle_prob: float = 0.3,
     record_traces: bool = False,
     workers: int = 1,                           # parallel worker processes
+    share_edges: bool = True,                   # shared-memory edge bitmap for workers
 )
 ```
 

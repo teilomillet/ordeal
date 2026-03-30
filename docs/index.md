@@ -60,6 +60,7 @@ uv add ordeal
 
 ## Features
 
+- **[Auto](auto.md)** — Zero-boilerplate: `scan_module`, `fuzz`, `chaos_for`
 - **[Explorer](explorer.md)** — Coverage-guided exploration with AFL-style edge hashing and checkpointing
 - **[Simulation](simulate.md)** — Deterministic Clock and FileSystem for no-mock testing
 - **[Mutations](mutations.md)** — Validate that your chaos tests actually catch bugs

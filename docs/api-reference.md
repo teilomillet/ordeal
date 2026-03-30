@@ -14,6 +14,16 @@ Complete module listing. Each links to in-code docstrings.
 | `ordeal.Bundle` | Named collection for data flow between rules (re-export) |
 | `ordeal.auto_configure()` | Enable chaos mode programmatically |
 
+## Auto
+
+| Import | What |
+|---|---|
+| `auto.scan_module(module)` | Smoke-test every public function |
+| `auto.fuzz(fn, **fixtures)` | Deep-fuzz a single function |
+| `auto.chaos_for(module, ...)` | Auto-generate ChaosTest from API |
+| `auto.ScanResult` | Result of `scan_module` |
+| `auto.FuzzResult` | Result of `fuzz` |
+
 ## Assertions
 
 | Import | What |

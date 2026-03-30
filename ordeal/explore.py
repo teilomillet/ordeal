@@ -245,7 +245,7 @@ class _DataProxy:
 # ============================================================================
 
 _ENERGY_REWARD = 2.0
-_ENERGY_DECAY = 0.95
+_ENERGY_DECAY = 0.8
 _ENERGY_MIN = 0.01
 
 # Shared-memory edge bitmap: one byte per 16-bit edge hash.
@@ -706,8 +706,19 @@ class Explorer:
         return self.rng.choice(self._checkpoints)  # uniform
 
     def _select_energy(self) -> Checkpoint:
-        """Energy-weighted selection using C-level random.choices."""
-        weights = [cp.energy for cp in self._checkpoints]
+        """Energy-weighted selection with recency and exploration bonuses.
+
+        Combines three signals to balance exploitation and exploration:
+        - **Energy**: checkpoints that found new edges get higher weight
+        - **Recency**: newer checkpoints (frontier) get a sqrt bonus
+        - **Exploration**: over-selected checkpoints are penalized
+        """
+        weights = [
+            cp.energy
+            * (1 + i) ** 0.5
+            / (1 + cp.times_selected) ** 0.5
+            for i, cp in enumerate(self._checkpoints)
+        ]
         (cp,) = self.rng.choices(self._checkpoints, weights=weights, k=1)
         cp.times_selected += 1
         return cp

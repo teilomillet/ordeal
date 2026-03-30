@@ -256,8 +256,8 @@ def bench_ablation() -> dict:
     from ordeal import ChaosTest
     from ordeal.explore import Explorer
     from ordeal.faults import LambdaFault
-    from tests._deep_target import DeepService
     from tests._explore_target import BranchyService
+    from tests._hard_target import HardService
 
     class _BranchyChaos(ChaosTest):
         faults = [LambdaFault("noop", lambda: None, lambda: None)]
@@ -280,53 +280,103 @@ def bench_ablation() -> dict:
 
         @invariant()
         def ok(self):
-            assert self.svc.state in {"init", "a", "b", "ab", "c", "deep"}
+            assert self.svc.state in {
+                "init", "a", "b", "ab", "c", "deep",
+            }
 
         def teardown(self):
             self.svc.reset()
             super().teardown()
 
-    class _DeepChaos(ChaosTest):
+    class _HardChaos(ChaosTest):
         faults = [LambdaFault("noop", lambda: None, lambda: None)]
 
         def __init__(self):
             super().__init__()
-            self.svc = DeepService()
+            self.svc = HardService()
 
         @rule()
-        def do_acc(self):
-            self.svc.accumulate()
+        def do_a(self):
+            self.svc.advance_a()
 
         @rule()
-        def do_pivot(self):
-            self.svc.pivot()
+        def do_b(self):
+            self.svc.advance_b()
 
         @rule()
-        def do_climb(self):
-            self.svc.climb()
+        def do_c(self):
+            self.svc.advance_c()
 
         @rule()
-        def do_strike(self):
-            self.svc.strike()
+        def do_d(self):
+            self.svc.advance_d()
 
         @rule()
-        def do_noop(self):
-            self.svc.noop()
+        def do_e(self):
+            self.svc.advance_e()
+
+        @rule()
+        def n1(self):
+            self.svc.noise_counter()
+
+        @rule()
+        def n2(self):
+            self.svc.noise_toggle()
+
+        @rule()
+        def n3(self):
+            self.svc.noise_accumulate()
+
+        @rule()
+        def n4(self):
+            self.svc.noise_cycle()
+
+        @rule()
+        def n5(self):
+            self.svc.noise_flag()
+
+        @rule()
+        def n6(self):
+            self.svc.noise_reset()
+
+        @rule()
+        def n7(self):
+            self.svc.noise_pulse()
+
+        @rule()
+        def n8(self):
+            self.svc.noise_swap()
+
+        @rule()
+        def n9(self):
+            self.svc.noise_modulo()
+
+        @rule()
+        def n10(self):
+            self.svc.noise_cascade()
+
+        @rule()
+        def n11(self):
+            self.svc.noise_mirror()
+
+        @rule()
+        def n12(self):
+            self.svc.noise_wave()
 
         @invariant()
         def ok(self):
-            assert self.svc.phase in {0, 1, 2, 3, 4}
+            assert 0 <= self.svc.phase <= 5
 
         def teardown(self):
             super().teardown()
 
     targets = [
         ("branchy", _BranchyChaos, ["tests._explore_target"]),
-        ("deep", _DeepChaos, ["tests._deep_target"]),
+        ("hard", _HardChaos, ["tests._hard_target"]),
     ]
     strategies = ["energy", "uniform", "recent"]
     n_runs = 200
-    n_seeds = 3
+    n_seeds = 5
     quartiles = [n_runs // 4, n_runs // 2, 3 * n_runs // 4, n_runs - 1]
 
     print(f"\n{'':>14}", end="")
@@ -348,10 +398,10 @@ def bench_ablation() -> dict:
                     target_modules=modules,
                     seed=seed,
                     checkpoint_strategy=strategy,
-                    checkpoint_prob=0.5,
+                    checkpoint_prob=0.7,
                 )
                 result = explorer.run(
-                    max_runs=n_runs, steps_per_run=25
+                    max_runs=n_runs, steps_per_run=20
                 )
 
                 for i, q in enumerate(quartiles):

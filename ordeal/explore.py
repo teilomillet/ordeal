@@ -530,6 +530,8 @@ class Explorer:
 
     def _save_checkpoint(self, machine: ChaosTest, new_count: int, step: int, run_id: int) -> None:
         """Save a checkpoint. Evicts lowest-energy checkpoint if at capacity."""
+        if self.max_checkpoints <= 0:
+            return
         if len(self._checkpoints) >= self.max_checkpoints:
             if self.checkpoint_strategy == "energy":
                 # Evict lowest energy

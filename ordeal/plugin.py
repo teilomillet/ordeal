@@ -121,7 +121,7 @@ class OrdealScanItem(pytest.Item):
         self.add_marker(pytest.mark.ordeal_scan)
 
     def runtest(self) -> None:
-        from ordeal.auto import fuzz, _resolve_module, _get_public_functions
+        from ordeal.auto import _resolve_module, fuzz
 
         mod = _resolve_module(self.module_name)
         func = getattr(mod, self.func_name)
@@ -129,7 +129,11 @@ class OrdealScanItem(pytest.Item):
         if not result.passed:
             raise OrdealScanError(result.summary())
 
-    def repr_failure(self, excinfo: pytest.ExceptionInfo[BaseException], style: str | None = None) -> str:
+    def repr_failure(
+        self,
+        excinfo: pytest.ExceptionInfo[BaseException],
+        style: str | None = None,
+    ) -> str:
         if isinstance(excinfo.value, OrdealScanError):
             return str(excinfo.value)
         return super().repr_failure(excinfo, style=style)  # type: ignore[arg-type]
@@ -192,7 +196,7 @@ def pytest_collect_file(parent: pytest.Collector, file_path: Any) -> OrdealScanC
     if not str(file_path).endswith("ordeal.toml"):
         return None
 
-    from ordeal.config import load_config, ConfigError
+    from ordeal.config import ConfigError, load_config
 
     try:
         cfg = load_config(str(file_path))

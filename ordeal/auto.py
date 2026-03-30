@@ -164,10 +164,38 @@ _SUFFIX_STRATEGIES: dict[str, st.SearchStrategy[Any]] = {
 }
 
 
+# User-registered strategies (project-specific, added at runtime)
+_REGISTERED_STRATEGIES: dict[str, st.SearchStrategy[Any]] = {}
+
+
+def register_fixture(name: str, strategy: st.SearchStrategy[Any]) -> None:
+    """Register a named fixture strategy for auto-scan.
+
+    Registered strategies have highest priority after explicit fixtures.
+    Call this in ``conftest.py`` to teach ordeal about project-specific
+    types::
+
+        from ordeal.auto import register_fixture
+        import hypothesis.strategies as st
+
+        register_fixture("model", st.builds(make_mock_model))
+        register_fixture("direction", st.builds(make_unit_vector))
+
+    After registration, ``scan_module`` and ``fuzz`` will auto-resolve
+    parameters named ``model`` or ``direction`` without explicit fixtures.
+    """
+    _REGISTERED_STRATEGIES[name] = strategy
+
+
 def _strategy_for_name(name: str) -> st.SearchStrategy[Any] | None:
     """Try to infer a strategy from the parameter name alone."""
+    # 1. User-registered (project-specific, highest priority)
+    if name in _REGISTERED_STRATEGIES:
+        return _REGISTERED_STRATEGIES[name]
+    # 2. Built-in common names
     if name in COMMON_NAME_STRATEGIES:
         return COMMON_NAME_STRATEGIES[name]
+    # 3. Suffix patterns
     for suffix, strategy in _SUFFIX_STRATEGIES.items():
         if name.endswith(suffix):
             return strategy
@@ -221,19 +249,25 @@ def _infer_strategies(
     for name, param in sig.parameters.items():
         if name == "self" or name == "cls":
             continue
-        # 1. Explicit fixture
+        has_default = param.default is not inspect.Parameter.empty
+        # 1. Explicit fixture (always wins)
         if fixtures and name in fixtures:
             strategies[name] = fixtures[name]
-        # 2. Common name pattern
+        # 2. Default is None → keep it None (don't generate random junk
+        #    for optional params — the function chose None as default
+        #    for a reason)
+        elif has_default and param.default is None:
+            continue
+        # 3. Common name pattern
         elif (name_strat := _strategy_for_name(name)) is not None:
             strategies[name] = name_strat
-        # 3. Type hint
+        # 4. Type hint
         elif name in hints:
             strategies[name] = strategy_for_type(hints[name])
-        # 4. Has default → skip
-        elif param.default is not inspect.Parameter.empty:
+        # 5. Has non-None default → let Python use it
+        elif has_default:
             continue
-        # 5. Can't infer
+        # 6. Can't infer
         else:
             return None
 

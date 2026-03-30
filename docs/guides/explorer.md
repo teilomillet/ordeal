@@ -200,6 +200,22 @@ RNG seed for the Explorer. Controls all random decisions: checkpoint selection, 
 - For local development, you can vary the seed across runs to get different exploration paths: `ordeal explore --seed $RANDOM`.
 - The seed is recorded in every trace file, so even if you forget what seed you used, you can recover it from the trace.
 
+### `workers`
+
+**Type:** `int` -- **Default:** `0` (auto: uses all CPU cores)
+
+Number of parallel worker processes. Each worker explores independently with a unique seed. Set to `1` for sequential exploration, or `0` (the default) to automatically use all available CPU cores.
+
+```toml
+workers = 0       # auto: os.cpu_count()
+workers = 1       # sequential (no multiprocessing)
+workers = 8       # explicit 8 workers
+```
+
+Override from the CLI: `ordeal explore -w 4`.
+
+Workers share discoveries through a **shared edge bitmap** (enabled by default via `share_edges`): a 64KB shared-memory buffer where each byte marks a discovered edge. Workers skip edges already found by others. Zero locks — single-byte writes are atomic. This causes workers to naturally diverge into different regions of the state space.
+
 
 ## Reading the output
 
@@ -449,67 +465,72 @@ Decrease `fault_toggle_prob` to 0.1. The system runs longer without fault interf
 
 ## Parallel exploration
 
-The Explorer can run across multiple worker processes. Each worker gets a unique seed (base + i*7919) for independent state-space exploration. Results are aggregated: runs and steps are summed, edges are unioned for the true unique count.
+By default, `ordeal explore` uses all CPU cores (`workers = 0` means auto-detect). Each worker explores independently with a unique seed. Results are aggregated: runs and steps are summed, edges are unioned for the true unique count.
 
-By default, workers communicate via a **shared-memory edge bitmap** (AFL-style): a 64KB buffer where each byte represents one of 65,536 possible edge hashes. When a worker discovers a new edge, it writes a `1` to the corresponding byte. Other workers check the bitmap before saving checkpoints — if an edge was already found by another worker, they skip it and keep exploring. Single-byte writes are atomic on all architectures, so no locks are needed.
+Workers collaborate through a **shared edge bitmap** (AFL-style, enabled by default): a 64KB shared-memory buffer where each byte marks a discovered edge hash. When worker 3 finds edge `0xAB12`, workers 1-8 see it immediately and skip it. Single-byte writes are atomic — zero locks needed. This causes workers to naturally diverge into different regions of the state space instead of duplicating each other's work.
 
-### From the CLI
+### Usage
 
 ```bash
-ordeal explore -w 4                     # 4 workers
-ordeal explore -w $(nproc)              # use all CPUs
+ordeal explore                          # auto: uses all CPU cores
+ordeal explore -w 4                     # explicit: 4 workers
+ordeal explore -w 1                     # sequential (no multiprocessing)
 ```
-
-### From Python
 
 ```python
 explorer = Explorer(
     MyServiceChaos,
     target_modules=["myapp"],
-    workers=4,
+    workers=0,   # 0 = auto (cpu_count), default
 )
 result = explorer.run(max_time=60)
 ```
-
-### From ordeal.toml
 
 ```toml
 [explorer]
 target_modules = ["myapp"]
 max_time = 300
-workers = 8
+workers = 0       # auto (default)
 ```
 
-### When to use parallel
+### Measuring scaling with `ordeal benchmark`
 
-- **Long pre-release runs.** 8 workers for 5 minutes covers more state space than 1 worker for 40 minutes, because each worker explores independently from a different seed.
-- **CI with available cores.** If your CI runners have 4+ cores, use them.
-- **Diminishing returns.** Each worker has its own checkpoint corpus. The shared edge bitmap reduces overlap (workers skip edges others already found), but checkpoints are still per-worker. Use `ordeal.scaling.benchmark()` to measure actual scaling efficiency for your test.
-- **Disabling shared edges.** Pass `share_edges=False` to disable the bitmap if you want fully independent exploration (useful for benchmarking or when shared memory is unavailable).
+The `ordeal benchmark` CLI measures your actual sigma (contention) and kappa (coherence) by running exploration at N=1, 2, 4, 8... workers and fitting the Universal Scaling Law:
 
-### Measuring scaling efficiency
-
-The `ordeal.scaling` module provides Universal Scaling Law (USL) analysis to predict how throughput scales with worker count:
-
-```python
-from ordeal.scaling import benchmark
-
-analysis = benchmark(MyServiceChaos, target_modules=["myapp"])
-print(analysis.summary())
-# Scaling Analysis (Universal Scaling Law)
-#   sigma (contention):  0.032000
-#   kappa (coherence):   0.000400
-#   Optimal workers:     15.5
-#   Peak throughput:     9.42x
-#
-#   Predicted scaling:
-#     N=  1:   1.00x throughput (100.0% efficient)
-#     N=  4:   3.62x throughput ( 90.6% efficient)
-#     N=  8:   6.28x throughput ( 78.5% efficient)
-#     N= 16:   9.38x throughput ( 58.6% efficient) <-- peak
+```bash
+ordeal benchmark                          # fit USL from ordeal.toml
+ordeal benchmark --max-workers 16         # test up to 16
+ordeal benchmark --time 30                # 30s per trial
+ordeal benchmark --metric steps           # fit on steps/sec
 ```
 
-If `n_optimal` is low (< 4), your test has high contention — reduce shared state before adding workers. If it's high (> 16), you're scaling well.
+Example output:
+
+```
+Scaling Analysis (Universal Scaling Law)
+  sigma (contention):  0.080755
+  kappa (coherence):   0.005578
+  Regime:              usl
+  Optimal workers:     13.4
+  Peak throughput:     7.64x
+
+  Diagnosis:
+    Contention (sigma): 8.1% serialized fraction.
+    Coherence (kappa):  0.005578 cross-worker sync cost.
+```
+
+**Reading the results:**
+- **sigma** is the fraction of work that's serialized (process management). Typically 4-10%.
+- **kappa** is the cross-worker coordination cost (edge bitmap sync). Zero means fully independent.
+- **Optimal workers** is where adding more starts hurting. Beyond this, kappa's quadratic cost outweighs throughput.
+- **Regime**: `linear` (perfect), `amdahl` (bounded by sigma), or `usl` (bounded by both).
+
+If `n_optimal` is low (< 4), your test has high contention. If it's high (> 16), you're scaling well.
+
+### Thread safety
+
+All shared state is lock-protected for free-threaded Python 3.13+ (no GIL). The parallel explorer uses multiprocessing (not threads), so each worker has its own interpreter. Tested and verified on CPython 3.13.5 free-threaded build.
+
 
 ---
 

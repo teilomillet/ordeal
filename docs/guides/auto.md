@@ -66,7 +66,9 @@ Returns a pytest-discoverable `TestCase`. Run with `pytest`.
 
 ## mine — discover properties automatically
 
-`mine()` runs a function many times with random inputs and observes patterns in outputs — type consistency, boundedness, determinism, idempotency. You confirm which are real and turn them into tested invariants:
+`mine()` runs a function many times with random inputs and observes patterns in outputs. It checks: type consistency, never None, no NaN, non-negative, bounded [0,1], never empty, deterministic, idempotent, involution (`f(f(x)) == x`), commutative (`f(a,b) == f(b,a)`), associative (`f(f(a,b),c) == f(a,f(b,c))`), observed range, monotonicity, and length relationships. Float comparisons use `math.isclose` so rounding noise doesn't cause false negatives.
+
+You confirm which properties are real and turn them into tested invariants:
 
 ```python
 from ordeal.mine import mine

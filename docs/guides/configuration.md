@@ -25,7 +25,7 @@ One file, checked into your repo, that anyone (or anything) can read and modify.
 | `checkpoint_strategy` | `str` | `"energy"` | `"energy"`, `"uniform"`, or `"recent"` |
 | `steps_per_run` | `int` | `50` | Max rule steps per run |
 | `fault_toggle_prob` | `float` | `0.3` | Nemesis action probability per step |
-| `workers` | `int` | `1` | Parallel worker processes (each gets unique seed) |
+| `workers` | `int` | `1` | Parallel workers (0 = auto: `os.cpu_count()`) |
 
 ### `[[tests]]`
 

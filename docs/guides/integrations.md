@@ -133,6 +133,13 @@ chaos_api_test(
         io.error_on_call("myapp.storage.save"),
     ],
 )
+
+# With swarm mode — random fault subset per session, better coverage:
+chaos_api_test(
+    "http://localhost:8080/openapi.json",
+    faults=[timing.slow("myapp.db.query"), io.error_on_call("myapp.storage.save")],
+    swarm=True,
+)
 ```
 
 **`@with_chaos` decorator for pytest integration**: gives you more control over assertions, fault selection, and test structure. Use this when you want to combine Schemathesis with your existing test suite.

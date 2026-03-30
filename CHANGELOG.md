@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.17
+
+- **Schemathesis swarm mode** — `chaos_api_test(swarm=True)` and `@with_chaos(swarm=True)` pick a random fault subset per session, matching ChaosTest's swarm design
+- **Mine: algebraic properties** — `mine()` now checks involution (`f(f(x)) == x`), commutativity (`f(a,b) == f(b,a)`), and associativity. Float comparisons use `math.isclose` (rel_tol=1e-9) so rounding noise doesn't cause false negatives
+- **Audit grouped summary** — mined properties grouped by kind: `"commutative(add, mul), deterministic(add)"` instead of flat list
+- **Violations never silent** — `always()` and `unreachable()` raise regardless of `--chaos` flag. `mute=True` parameter for known issues
+- **Explorer warnings** — warns when running without `target_modules` or when 0 edges found
+- **Workers auto-detect** — `workers=0` uses `os.cpu_count()` automatically
+
 ## 0.1.9
 
 - **Thread safety** — all shared structures (PropertyTracker, Fault activation, CoverageCollector, call counters) are lock-guarded. Safe for free-threaded Python 3.13+/3.14 (no-GIL)

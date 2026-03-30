@@ -366,7 +366,7 @@ Explorer(
     checkpoint_strategy: str = "energy",        # "energy", "uniform", "recent"
     fault_toggle_prob: float = 0.3,
     record_traces: bool = False,
-    workers: int = 1,                           # parallel worker processes
+    workers: int = 1,                           # 0 = auto (os.cpu_count())
     share_edges: bool = True,                   # shared-memory edge bitmap for workers
 )
 ```
@@ -1104,7 +1104,7 @@ mine(
 
 Discover likely properties of a function by running it many times with random inputs and observing patterns in outputs.
 
-Properties checked: type consistency, never None, no NaN, non-negative, bounded [0,1], never empty, deterministic, idempotent, observed range, monotonicity (per numeric input parameter), and length relationships (`len(output) == len(input)`).
+Properties checked: type consistency, never None, no NaN, non-negative, bounded [0,1], never empty, deterministic, idempotent, involution (`f(f(x)) == x`), commutative (`f(a,b) == f(b,a)`), associative (`f(f(a,b),c) == f(a,f(b,c))`), observed range, monotonicity (per numeric input parameter), and length relationships (`len(output) == len(input)`). Float comparisons use `math.isclose` (rel_tol=1e-9, abs_tol=1e-12) so rounding noise doesn't cause false negatives.
 
 ```python
 result = mine(myapp.scoring.compute, max_examples=500)

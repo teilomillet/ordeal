@@ -77,20 +77,14 @@ class ModuleAudit:
         if self.current_test_count > 0:
             test_pct = self.test_reduction * 100
             cov_delta = self.ordeal_coverage_pct - self.current_coverage_pct
-            cov_str = (
-                "same coverage"
-                if abs(cov_delta) < 1
-                else f"{cov_delta:+.0f}% coverage"
-            )
-            lines.append(
-                f"    saving:  {test_pct:.0f}% fewer tests "
-                f"| 100% less code "
-                f"| {cov_str}"
-            )
+            cov_str = "same coverage" if abs(cov_delta) < 1 else f"{cov_delta:+.0f}% coverage"
+            lines.append(f"    saving:  {test_pct:.0f}% fewer tests | 100% less code | {cov_str}")
 
         if self.gap_functions:
-            lines.append(f"    gaps:    {len(self.gap_functions)} functions need fixtures: "
-                         f"{', '.join(self.gap_functions[:5])}")
+            lines.append(
+                f"    gaps:    {len(self.gap_functions)} functions need fixtures: "
+                f"{', '.join(self.gap_functions[:5])}"
+            )
 
         return "\n".join(lines)
 
@@ -143,17 +137,26 @@ def _measure_coverage(
         return 0.0, 0, 0
 
     cmd = [
-        sys.executable, "-m", "pytest",
+        sys.executable,
+        "-m",
+        "pytest",
         *[str(f) for f in test_files],
         f"--cov={module_name}",
         "--cov-report=term",
-        "-q", "--tb=no", "--no-header",
-        "-x", "-p", "no:ordeal",
+        "-q",
+        "--tb=no",
+        "--no-header",
+        "-x",
+        "-p",
+        "no:ordeal",
     ]
 
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
             cwd=str(Path.cwd()),
         )
         mod_path = module_name.replace(".", "/")
@@ -222,7 +225,10 @@ def audit(
     # -- 3. Measure ordeal coverage --
     # Write a temporary test file that runs scan_module
     with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".py", prefix="ordeal_audit_", delete=False,
+        mode="w",
+        suffix=".py",
+        prefix="ordeal_audit_",
+        delete=False,
     ) as tmp:
         tmp.write(f"""
 from ordeal.auto import scan_module
@@ -269,9 +275,7 @@ def audit_report(
 
     if len(results) > 1:
         lines.append("\n  total:")
-        lines.append(
-            f"    current: {total_current_tests} tests | {total_current_lines} lines"
-        )
+        lines.append(f"    current: {total_current_tests} tests | {total_current_lines} lines")
         lines.append(f"    ordeal:  {total_ordeal_tests} tests | 0 lines")
         if total_current_tests > 0:
             reduction = (1 - total_ordeal_tests / total_current_tests) * 100

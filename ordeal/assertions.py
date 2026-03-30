@@ -2,18 +2,34 @@
 
 Four assertion types, keyed by name (message string):
 
-- always(condition, name):  must hold every time called
-- sometimes(condition, name): must hold at least once across all calls
-- reachable(name): code path must execute at least once
-- unreachable(name): code path must never execute
+- ``always(condition, name)``   — must hold every time called
+- ``sometimes(condition, name)``— must hold at least once across all calls
+- ``reachable(name)``           — code path must execute at least once
+- ``unreachable(name)``         — code path must never execute
 
-In production (tracker inactive), these are zero-cost no-ops.
-In testing, they accumulate results and raise on violation (always/unreachable).
+**Violation behavior:**
 
-Each function is simple by default and unlocks depth through parameters:
+- ``always`` and ``unreachable`` raise ``AssertionError`` immediately on
+  violation — whether or not ``--chaos`` / the tracker is active.
+  Violations are never silent.  Pass ``mute=True`` to record without
+  raising (tracked in the property report, not hidden).
+- ``sometimes`` and ``reachable`` are deferred: they only track when
+  the ``PropertyTracker`` is active (``--chaos`` or ``auto_configure()``).
+  Without it, they are no-ops.
 
-    sometimes(is_cached, "cache hit")                          # deferred
-    sometimes(lambda: cache.hit_rate() > 0, "cache", attempts=100)  # immediate
+**Tracker (--chaos) adds:**
+
+- Property report at the end of the session (hit counts, pass/fail).
+- Deferred checking for ``sometimes`` and ``reachable``.
+- Does NOT control whether ``always``/``unreachable`` raise — they
+  always raise on violation regardless.
+
+Each function is simple by default and unlocks depth through parameters::
+
+    always(x > 0, "positive")                                     # fatal
+    always(x > 0, "positive", mute=True)                          # tracked, not fatal
+    sometimes(is_cached, "cache hit")                              # deferred
+    sometimes(lambda: cache.hit_rate() > 0, "cache", attempts=100)# immediate
 """
 
 from __future__ import annotations

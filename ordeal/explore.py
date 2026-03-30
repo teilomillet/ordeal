@@ -25,12 +25,17 @@ from __future__ import annotations
 import copy
 import importlib
 import multiprocessing as mp
+import os
+import pickle
 import random
+import shutil
 import sys
+import tempfile
 import threading
 import time as _time
 import warnings
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 import hypothesis.strategies as st
@@ -312,13 +317,21 @@ class Explorer:
         self.checkpoint_strategy = checkpoint_strategy
         self.fault_toggle_prob = fault_toggle_prob
         self.record_traces = record_traces
-        self.workers = max(1, workers)
+        self.workers = (os.cpu_count() or 1) if workers <= 0 else workers
         self.share_edges = share_edges
 
         # Shared-memory edge bitmap (set by _run_parallel / _worker_fn)
-        # 65536 bytes — one byte per possible 16-bit edge hash.
-        # Single-byte writes are atomic on all architectures.
         self._shared_bitmap: memoryview | None = None
+
+        # Shared checkpoint pool (set by _run_parallel / _worker_fn)
+        self._pool_dir: Path | None = None
+        self._worker_id: int = 0
+        self._pool_loaded: set[str] = set()
+        self._pool_publish_count: int = 0
+        self._last_pool_sync: float = 0.0
+        _pool_sync_interval: float = 2.0  # seconds between pool scans
+        self._pool_sync_interval = _pool_sync_interval
+        self._max_pool_publish: int = 20  # max checkpoints to publish per worker
 
         # Internal state
         self._total_edges: set[int] = set()
@@ -447,6 +460,55 @@ class Explorer:
         else:
             cp.energy = max(_ENERGY_MIN, cp.energy * _ENERGY_DECAY)
 
+    def _pool_publish(self, machine: ChaosTest, new_count: int, step: int, run_id: int) -> None:
+        """Publish a checkpoint to the shared pool directory."""
+        if (
+            self._pool_dir is None
+            or self._pool_publish_count >= self._max_pool_publish
+            or new_count < 2  # only publish significant discoveries
+        ):
+            return
+        fname = f"cp-w{self._worker_id}-r{run_id}-s{step}.pkl"
+        try:
+            tmp = self._pool_dir / f".tmp-{fname}"
+            with open(tmp, "wb") as f:
+                pickle.dump(copy.deepcopy(machine), f)
+            tmp.rename(self._pool_dir / fname)  # atomic on POSIX
+            self._pool_publish_count += 1
+            self._pool_loaded.add(fname)
+        except Exception:
+            pass  # skip unpicklable checkpoints
+
+    def _pool_subscribe(self) -> None:
+        """Load new checkpoints from other workers."""
+        if self._pool_dir is None:
+            return
+        now = _time.monotonic()
+        if now - self._last_pool_sync < self._pool_sync_interval:
+            return
+        self._last_pool_sync = now
+        try:
+            for path in self._pool_dir.glob("cp-*.pkl"):
+                if path.name in self._pool_loaded:
+                    continue
+                self._pool_loaded.add(path.name)
+                try:
+                    with open(path, "rb") as f:
+                        machine = pickle.load(f)
+                    self._checkpoints.append(
+                        Checkpoint(
+                            machine_copy=machine,
+                            new_edge_count=0,
+                            step=0,
+                            run_id=-1,
+                            energy=_ENERGY_REWARD,  # start with decent energy
+                        )
+                    )
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
     def _save_checkpoint(self, machine: ChaosTest, new_count: int, step: int, run_id: int) -> None:
         """Save a checkpoint. Evicts lowest-energy checkpoint if at capacity."""
         if len(self._checkpoints) >= self.max_checkpoints:
@@ -516,6 +578,9 @@ class Explorer:
                 break
             if max_runs is not None and result.total_runs >= max_runs:
                 break
+
+            # Pull checkpoints from other workers
+            self._pool_subscribe()
 
             result.total_runs += 1
             run_id = result.total_runs
@@ -596,6 +661,7 @@ class Explorer:
                                 for e in new:
                                     self._shared_bitmap[e] = 1
                             self._save_checkpoint(machine, len(new), step, run_id)
+                            self._pool_publish(machine, len(new), step, run_id)
                             result.checkpoints_saved += 1
 
             except Exception as e:
@@ -713,6 +779,9 @@ class Explorer:
             shm.buf[:] = b"\x00" * _EDGE_BITMAP_SIZE
             shm_name = shm.name
 
+        # Create shared checkpoint pool directory
+        pool_dir = tempfile.mkdtemp(prefix="ordeal-pool-")
+
         try:
             worker_args = []
             for i in range(self.workers):
@@ -732,6 +801,8 @@ class Explorer:
                         "shrink": shrink,
                         "max_shrink_time": max_shrink_time,
                         "shared_edges_name": shm_name,
+                        "pool_dir": pool_dir,
+                        "worker_id": i,
                     }
                 )
 
@@ -769,6 +840,7 @@ class Explorer:
             if shm is not None:
                 shm.close()
                 shm.unlink()
+            shutil.rmtree(pool_dir, ignore_errors=True)
 
 
 def _worker_fn(args: dict[str, Any]) -> dict[str, Any]:
@@ -803,6 +875,12 @@ def _worker_fn(args: dict[str, Any]) -> dict[str, Any]:
     if shm_name:
         shm = SharedMemory(name=shm_name, create=False)
         explorer._shared_bitmap = shm.buf
+
+    # Attach to shared checkpoint pool
+    pool_dir = args.get("pool_dir")
+    if pool_dir:
+        explorer._pool_dir = Path(pool_dir)
+        explorer._worker_id = args.get("worker_id", 0)
 
     try:
         result = explorer.run(

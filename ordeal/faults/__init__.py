@@ -68,6 +68,22 @@ class Fault(ABC):
                 object.__setattr__(result, k, copy.deepcopy(v, memo))
         return result
 
+    def __getstate__(self) -> dict:
+        """Pickle support: exclude locks (recreated in __setstate__)."""
+        state = self.__dict__.copy()
+        lock_keys = [k for k, v in state.items() if isinstance(v, _LOCK_TYPE)]
+        for k in lock_keys:
+            del state[k]
+        state["_lock_attrs"] = lock_keys
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        """Pickle support: recreate locks."""
+        lock_keys = state.pop("_lock_attrs", [])
+        self.__dict__.update(state)
+        for k in lock_keys:
+            setattr(self, k, threading.Lock())
+
     @abstractmethod
     def _do_activate(self) -> None:
         """Subclasses implement this to perform the actual fault injection."""

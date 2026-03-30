@@ -25,10 +25,11 @@ Usage::
     # Mode 2: fuzz a ChaosTest class
     fuzz_chaos_test(MyServiceChaos, max_time=300)
 """
+
 from __future__ import annotations
 
 import sys
-from typing import Any, Callable, Type
+from typing import Any, Callable
 
 from ordeal import buggify as _buggify_mod
 from ordeal.assertions import tracker

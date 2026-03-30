@@ -32,6 +32,7 @@ with your application rules.
 of faults.  Different runs explore different fault combinations, giving
 better aggregate coverage than uniform selection (Groce et al., 2012).
 """
+
 from __future__ import annotations
 
 from typing import ClassVar

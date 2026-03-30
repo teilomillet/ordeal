@@ -5,6 +5,26 @@ description = "Automated chaos testing for Python — fault injection, property 
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
+keywords = [
+    "testing",
+    "chaos-testing",
+    "fault-injection",
+    "property-testing",
+    "fuzzing",
+    "hypothesis",
+    "chaos-engineering",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: Hypothesis",
+    "Framework :: Pytest",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Software Development :: Quality Assurance",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+]
 dependencies = [
     "hypothesis>=6.100.0",
     "pytest>=8.0.0",
@@ -29,9 +49,19 @@ ordeal = "ordeal.cli:main"
 [project.entry-points.pytest11]
 ordeal = "ordeal.plugin"
 
+[project.urls]
+Homepage = "https://github.com/teilomillet/ordeal"
+Documentation = "https://github.com/teilomillet/ordeal/tree/main/docs"
+Repository = "https://github.com/teilomillet/ordeal"
+Issues = "https://github.com/teilomillet/ordeal/issues"
+Changelog = "https://github.com/teilomillet/ordeal/releases"
+
 [build-system]
 requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-data]
+ordeal = ["py.typed"]
 
 [tool.setuptools-scm]
 

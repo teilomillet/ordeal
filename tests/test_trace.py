@@ -1,18 +1,20 @@
 """Tests for ordeal.trace — serialization, replay, and shrinking."""
+
 from __future__ import annotations
 
-from hypothesis.stateful import invariant, rule
+from hypothesis.stateful import rule
 
 from ordeal.chaos import ChaosTest
 from ordeal.trace import Trace, TraceFailure, TraceStep, replay, shrink
-
 
 # ============================================================================
 # Test fixture: a ChaosTest that fails at step N
 # ============================================================================
 
+
 class _BombAt3(ChaosTest):
     """Fails when counter reaches 3."""
+
     faults = []
 
     def __init__(self):
@@ -28,6 +30,7 @@ class _BombAt3(ChaosTest):
 
 class _BombWithFault(ChaosTest):
     """Fails only when a specific fault is active."""
+
     faults = []  # no real faults — we test replay of fault_toggle steps
 
     def __init__(self):
@@ -45,6 +48,7 @@ class _BombWithFault(ChaosTest):
 # ============================================================================
 # Serialization
 # ============================================================================
+
 
 class TestTraceSerialization:
     def test_round_trip(self, tmp_path):
@@ -78,7 +82,10 @@ class TestTraceSerialization:
     def test_bytes_serialization(self, tmp_path):
         """Params with bytes should survive JSON round-trip."""
         trace = Trace(
-            run_id=1, seed=0, test_class="x:Y", from_checkpoint=None,
+            run_id=1,
+            seed=0,
+            test_class="x:Y",
+            from_checkpoint=None,
             steps=[TraceStep(kind="rule", name="f", params={"data": b"\x00\xff"})],
         )
         path = tmp_path / "trace.json"
@@ -91,10 +98,12 @@ class TestTraceSerialization:
 # Replay
 # ============================================================================
 
+
 class TestReplay:
     def test_reproduces_failure(self):
         trace = Trace(
-            run_id=1, seed=42,
+            run_id=1,
+            seed=42,
             test_class="tests.test_trace:_BombAt3",
             from_checkpoint=None,
             steps=[
@@ -109,7 +118,8 @@ class TestReplay:
 
     def test_no_failure_with_fewer_steps(self):
         trace = Trace(
-            run_id=1, seed=42,
+            run_id=1,
+            seed=42,
             test_class="tests.test_trace:_BombAt3",
             from_checkpoint=None,
             steps=[
@@ -122,7 +132,8 @@ class TestReplay:
 
     def test_replay_with_explicit_class(self):
         trace = Trace(
-            run_id=1, seed=42,
+            run_id=1,
+            seed=42,
             test_class="bogus:Bogus",  # wrong class — override
             from_checkpoint=None,
             steps=[
@@ -139,11 +150,13 @@ class TestReplay:
 # Shrinking
 # ============================================================================
 
+
 class TestShrink:
     def test_shrinks_to_minimum(self):
         """A 10-step trace where only 3 steps are needed should shrink to 3."""
         trace = Trace(
-            run_id=1, seed=42,
+            run_id=1,
+            seed=42,
             test_class="tests.test_trace:_BombAt3",
             from_checkpoint=None,
             steps=[TraceStep(kind="rule", name="tick") for _ in range(10)],
@@ -154,7 +167,8 @@ class TestShrink:
 
     def test_shrink_preserves_failure(self):
         trace = Trace(
-            run_id=1, seed=42,
+            run_id=1,
+            seed=42,
             test_class="tests.test_trace:_BombAt3",
             from_checkpoint=None,
             steps=[TraceStep(kind="rule", name="tick") for _ in range(20)],
@@ -168,7 +182,8 @@ class TestShrink:
     def test_shrink_removes_irrelevant_fault_toggles(self):
         """Fault toggles not needed for the failure should be removed."""
         trace = Trace(
-            run_id=1, seed=42,
+            run_id=1,
+            seed=42,
             test_class="tests.test_trace:_BombAt3",
             from_checkpoint=None,
             steps=[

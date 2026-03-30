@@ -1,14 +1,15 @@
 """Tests for ordeal.simulate — no-mock simulation primitives."""
+
 import time
 
 import pytest
 
 from ordeal.simulate import Clock, FileSystem
 
-
 # ============================================================================
 # Clock
 # ============================================================================
+
 
 class TestClock:
     def test_starts_at_zero(self):
@@ -80,6 +81,7 @@ class TestClock:
 # ============================================================================
 # FileSystem
 # ============================================================================
+
 
 class TestFileSystem:
     def test_write_read_bytes(self):

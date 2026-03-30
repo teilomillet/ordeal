@@ -1,4 +1,5 @@
 """Tests for ordeal.explore — coverage-guided exploration with checkpointing."""
+
 from __future__ import annotations
 
 from hypothesis.stateful import invariant, rule
@@ -8,10 +9,10 @@ from ordeal.explore import CoverageCollector, Explorer, _DataProxy
 from ordeal.faults import LambdaFault
 from tests._explore_target import BranchyService
 
-
 # ============================================================================
 # ChaosTest wrapping the BranchyService
 # ============================================================================
+
 
 class BranchyChaos(ChaosTest):
     faults = [
@@ -47,6 +48,7 @@ class BranchyChaos(ChaosTest):
 # A ChaosTest that always fails (for failure detection tests)
 # ============================================================================
 
+
 class FailingChaos(ChaosTest):
     faults = []
 
@@ -64,6 +66,7 @@ class FailingChaos(ChaosTest):
 # ============================================================================
 # Tests
 # ============================================================================
+
 
 class TestCoverageCollector:
     def test_collects_edges(self):

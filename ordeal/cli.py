@@ -1,11 +1,12 @@
 """CLI entry point: ``ordeal explore`` and ``ordeal replay``.
 
-    $ ordeal explore                    # reads ordeal.toml
-    $ ordeal explore -c ci.toml         # custom config
-    $ ordeal explore --max-time 300     # override time
-    $ ordeal replay .ordeal/traces/run-42.json
-    $ ordeal replay --shrink trace.json
+$ ordeal explore                    # reads ordeal.toml
+$ ordeal explore -c ci.toml         # custom config
+$ ordeal explore --max-time 300     # override time
+$ ordeal replay .ordeal/traces/run-42.json
+$ ordeal replay --shrink trace.json
 """
+
 from __future__ import annotations
 
 import argparse
@@ -15,8 +16,8 @@ import time as _time
 from pathlib import Path
 from typing import Any
 
-from ordeal.config import OrdealConfig, load_config, ConfigError
-from ordeal.explore import Explorer, ExplorationResult, ProgressSnapshot
+from ordeal.config import ConfigError, OrdealConfig, load_config
+from ordeal.explore import ExplorationResult, Explorer, ProgressSnapshot
 from ordeal.trace import Trace, replay, shrink
 
 
@@ -28,6 +29,7 @@ def _stderr(msg: str) -> None:
 # ============================================================================
 # Progress reporter
 # ============================================================================
+
 
 class _ProgressPrinter:
     """Prints one-line progress to stderr at a fixed interval."""
@@ -53,6 +55,7 @@ class _ProgressPrinter:
 # ============================================================================
 # Commands
 # ============================================================================
+
 
 def _cmd_explore(args: argparse.Namespace) -> int:
     """Run coverage-guided exploration from ordeal.toml."""
@@ -163,6 +166,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
 # Reporting
 # ============================================================================
 
+
 def _print_report(
     results: list[tuple[str, ExplorationResult]],
     cfg: OrdealConfig,
@@ -174,8 +178,10 @@ def _print_report(
     print("\n--- Ordeal Exploration Report ---\n")
     for class_path, result in results:
         print(f"  {class_path}")
-        print(f"    {result.total_runs} runs, {result.total_steps} steps, "
-              f"{result.duration_seconds:.1f}s")
+        print(
+            f"    {result.total_runs} runs, {result.total_steps} steps, "
+            f"{result.duration_seconds:.1f}s"
+        )
         print(f"    {result.unique_edges} edges, {result.checkpoints_saved} checkpoints")
         if result.failures:
             print(f"    {len(result.failures)} FAILURES:")
@@ -227,6 +233,7 @@ def _write_json_report(
 # Entry point
 # ============================================================================
 
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point for ``ordeal``."""
     parser = argparse.ArgumentParser(
@@ -237,8 +244,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # -- ordeal explore --
     explore_p = sub.add_parser("explore", help="Run coverage-guided exploration")
-    explore_p.add_argument("--config", "-c", default="ordeal.toml",
-                           help="Config file (default: ordeal.toml)")
+    explore_p.add_argument(
+        "--config", "-c", default="ordeal.toml", help="Config file (default: ordeal.toml)"
+    )
     explore_p.add_argument("--seed", type=int, help="Override RNG seed")
     explore_p.add_argument("--max-time", type=float, help="Override max_time (seconds)")
     explore_p.add_argument("--verbose", "-v", action="store_true", help="Live progress")

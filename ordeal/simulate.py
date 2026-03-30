@@ -19,6 +19,7 @@ support injectable faults for chaos testing.
 Integrates with ChaosTest — the nemesis can advance clocks, partition
 networks, corrupt files.
 """
+
 from __future__ import annotations
 
 import heapq
@@ -26,12 +27,12 @@ import os
 import unittest.mock
 from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Any, Callable
-
+from typing import Callable
 
 # ============================================================================
 # Clock
 # ============================================================================
+
 
 class Clock:
     """Deterministic, controllable clock.
@@ -90,14 +91,17 @@ class Clock:
                 time.sleep(10)
                 assert time.time() == 10.0
         """
-        with unittest.mock.patch("time.time", side_effect=self.time), \
-             unittest.mock.patch("time.sleep", side_effect=self.sleep):
+        with (
+            unittest.mock.patch("time.time", side_effect=self.time),
+            unittest.mock.patch("time.sleep", side_effect=self.sleep),
+        ):
             yield self
 
 
 # ============================================================================
 # FileSystem
 # ============================================================================
+
 
 class FileSystem:
     """In-memory filesystem — no disk I/O, injectable faults.

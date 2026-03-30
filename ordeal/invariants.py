@@ -9,10 +9,11 @@ They compose with ``&``::
     valid_score(model_output)          # raises AssertionError on violation
     valid_score(model_output, name="final_score")  # custom name in message
 """
+
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, Iterable
+from typing import Any, Callable
 
 
 class Invariant:
@@ -56,6 +57,7 @@ class _Composed(Invariant):
 # ---------------------------------------------------------------------------
 # Built-in invariants
 # ---------------------------------------------------------------------------
+
 
 def _check_no_nan(value: Any, name: str = "no_nan") -> None:
     if isinstance(value, float) and math.isnan(value):
@@ -106,15 +108,14 @@ finite = no_nan & no_inf
 # Invariant factories (parameterised)
 # ---------------------------------------------------------------------------
 
+
 def bounded(lo: float, hi: float) -> Invariant:
     """Value (or all elements) must be in [lo, hi]."""
 
     def check(value: Any, name: str = f"bounded({lo}, {hi})") -> None:
         if isinstance(value, (int, float)):
             if not (lo <= value <= hi):
-                raise AssertionError(
-                    f"Invariant '{name}' violated: {value} not in [{lo}, {hi}]"
-                )
+                raise AssertionError(f"Invariant '{name}' violated: {value} not in [{lo}, {hi}]")
         elif isinstance(value, (list, tuple)):
             for i, v in enumerate(value):
                 if isinstance(v, (int, float)) and not (lo <= v <= hi):
@@ -123,7 +124,7 @@ def bounded(lo: float, hi: float) -> Invariant:
                     )
         elif hasattr(value, "shape"):
             try:
-                import numpy as np
+                import numpy as np  # noqa: F401
 
                 if (value < lo).any() or (value > hi).any():
                     raise AssertionError(

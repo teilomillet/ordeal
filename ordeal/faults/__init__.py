@@ -8,9 +8,9 @@ Three built-in fault types:
 - LambdaFault: custom activate/deactivate callables
 - Subclass Fault directly for full control
 """
+
 from __future__ import annotations
 
-import functools
 import importlib
 from abc import ABC, abstractmethod
 from typing import Any, Callable

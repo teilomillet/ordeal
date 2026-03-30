@@ -1,19 +1,23 @@
 """Tests for ordeal.config — TOML loading and validation."""
+
 from __future__ import annotations
 
-import pytest
 from pathlib import Path
 
-from ordeal.config import load_config, ConfigError, OrdealConfig
+import pytest
+
+from ordeal.config import ConfigError, OrdealConfig, load_config
 
 
 @pytest.fixture
 def tmp_toml(tmp_path):
     """Write a TOML string and return its path."""
+
     def _write(content: str) -> Path:
         p = tmp_path / "ordeal.toml"
         p.write_text(content)
         return p
+
     return _write
 
 
@@ -24,7 +28,8 @@ class TestLoadConfig:
         assert cfg.explorer.max_time == 60.0  # default
 
     def test_full(self, tmp_toml):
-        cfg = load_config(tmp_toml("""
+        cfg = load_config(
+            tmp_toml("""
 [explorer]
 target_modules = ["myapp", "myapp.api"]
 max_time = 120
@@ -46,7 +51,8 @@ output = "out.json"
 traces = true
 traces_dir = ".traces"
 verbose = true
-"""))
+""")
+        )
         assert cfg.explorer.seed == 99
         assert cfg.explorer.checkpoint_strategy == "recent"
         assert len(cfg.tests) == 1

@@ -10,6 +10,7 @@ Hierarchy:
 
 If ordeal can survive testing itself, it can test anything.
 """
+
 from __future__ import annotations
 
 import math
@@ -27,7 +28,6 @@ from ordeal.invariants import bounded, finite, monotonic, no_inf, no_nan, unique
 from ordeal.mutations import generate_mutants, mutate_function_and_test
 from ordeal.strategies import corrupted_bytes, nan_floats
 
-
 # ============================================================================
 # 1. Fault Lifecycle State Machine
 #
@@ -35,6 +35,7 @@ from ordeal.strategies import corrupted_bytes, nan_floats
 # arbitrary number of faults.  Verifies that the activation log is always
 # consistent with the reported state.
 # ============================================================================
+
 
 class FaultLifecycleBattle(ChaosTest):
     faults = []  # no meta-faults — testing the fault system directly
@@ -115,7 +116,8 @@ class FaultLifecycleBattle(ChaosTest):
 
 TestFaultLifecycleBattle = FaultLifecycleBattle.TestCase
 TestFaultLifecycleBattle.settings = settings(
-    max_examples=200, stateful_step_count=30,
+    max_examples=200,
+    stateful_step_count=30,
 )
 
 
@@ -128,6 +130,7 @@ TestFaultLifecycleBattle.settings = settings(
 # ============================================================================
 
 _NAMES = st.text(min_size=1, max_size=6, alphabet="abcdef")
+
 
 class TrackerBattle(ChaosTest):
     faults = []
@@ -187,7 +190,8 @@ class TrackerBattle(ChaosTest):
 
 TestTrackerBattle = TrackerBattle.TestCase
 TestTrackerBattle.settings = settings(
-    max_examples=200, stateful_step_count=40,
+    max_examples=200,
+    stateful_step_count=40,
 )
 
 
@@ -256,7 +260,8 @@ class PatchFaultBattle(ChaosTest):
 
 TestPatchFaultBattle = PatchFaultBattle.TestCase
 TestPatchFaultBattle.settings = settings(
-    max_examples=200, stateful_step_count=30,
+    max_examples=200,
+    stateful_step_count=30,
 )
 
 
@@ -320,7 +325,8 @@ class ChaosTestLifecycleBattle(ChaosTest):
 
 TestChaosTestLifecycleBattle = ChaosTestLifecycleBattle.TestCase
 TestChaosTestLifecycleBattle.settings = settings(
-    max_examples=100, stateful_step_count=25,
+    max_examples=100,
+    stateful_step_count=25,
 )
 
 
@@ -330,6 +336,7 @@ TestChaosTestLifecycleBattle.settings = settings(
 # Property-based verification of determinism, probability bounds, and
 # value-or-nothing semantics.
 # ============================================================================
+
 
 class TestBuggifyBattle:
     def teardown_method(self):
@@ -366,7 +373,7 @@ class TestBuggifyBattle:
             expected = n * prob
             sigma = math.sqrt(n * prob * (1 - prob))
             assert abs(hits - expected) < 5 * sigma, (
-                f"p={prob}: hits={hits} expected~{expected} 5σ={5*sigma:.0f}"
+                f"p={prob}: hits={hits} expected~{expected} 5σ={5 * sigma:.0f}"
             )
         deactivate()
 
@@ -386,6 +393,7 @@ class TestBuggifyBattle:
 #
 # Verify semantic equivalences that must hold regardless of input.
 # ============================================================================
+
 
 class TestInvariantBattle:
     @given(x=st.floats(allow_nan=True, allow_infinity=True))
@@ -467,6 +475,7 @@ class TestInvariantBattle:
 # PropertyTracker claims thread-safety via a lock.  Verify under contention.
 # ============================================================================
 
+
 class TestConcurrencyBattle:
     def test_parallel_recording_no_data_loss(self):
         """N threads * M records each → exactly N*M total hits."""
@@ -532,6 +541,7 @@ class TestConcurrencyBattle:
 # over many more examples than the unit tests.
 # ============================================================================
 
+
 class TestStrategiesBattle:
     @given(data=corrupted_bytes(max_size=4096))
     @settings(max_examples=500)
@@ -561,6 +571,7 @@ class TestStrategiesBattle:
 # Verify that swarm mode correctly selects fault subsets and that the
 # nemesis only operates on the selected subset.
 # ============================================================================
+
 
 class SwarmBattle(ChaosTest):
     """Verify swarm mode fault subsetting."""
@@ -610,6 +621,7 @@ TestSwarmBattle.settings = settings(max_examples=100, stateful_step_count=15)
 # c) mutate_function_and_test lets mutants survive when tests are weak
 # ============================================================================
 
+
 class TestMutationBattle:
     def test_generates_arithmetic_mutants(self):
         source = "def add(a, b):\n    return a + b\n"
@@ -636,12 +648,7 @@ class TestMutationBattle:
         assert mutants[0][0].description == "return None"
 
     def test_all_operators_combined(self):
-        source = (
-            "def compute(a, b):\n"
-            "    if a > b:\n"
-            "        return a - b\n"
-            "    return a + b\n"
-        )
+        source = "def compute(a, b):\n    if a > b:\n        return a - b\n    return a + b\n"
         mutants = generate_mutants(source)
         # Should have arithmetic (+ and -), comparison (>), negate (if), return_none (x2)
         assert len(mutants) >= 5
@@ -664,9 +671,7 @@ class TestMutationBattle:
             operators=["arithmetic"],
         )
         assert result.total > 0
-        assert result.score == 1.0, (
-            f"Survivors: {[m.description for m in result.survived]}"
-        )
+        assert result.score == 1.0, f"Survivors: {[m.description for m in result.survived]}"
 
     def test_weak_tests_let_mutants_survive(self):
         """A test that only checks one case may miss mutations."""
@@ -689,10 +694,10 @@ class TestMutationBattle:
         import tests._mutation_target as mod
 
         def clamp_tests():
-            assert mod.clamp(5, 0, 10) == 5    # in range
-            assert mod.clamp(-1, 0, 10) == 0   # below
+            assert mod.clamp(5, 0, 10) == 5  # in range
+            assert mod.clamp(-1, 0, 10) == 0  # below
             assert mod.clamp(11, 0, 10) == 10  # above
-            assert mod.clamp(0, 0, 10) == 0    # boundary
+            assert mod.clamp(0, 0, 10) == 0  # boundary
             assert mod.clamp(10, 0, 10) == 10  # boundary
 
         result = mutate_function_and_test(

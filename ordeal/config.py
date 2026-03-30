@@ -20,18 +20,18 @@ Load it::
     cfg = load_config()             # reads ./ordeal.toml
     cfg = load_config("ci.toml")    # or a custom path
 """
+
 from __future__ import annotations
 
 import importlib
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
-
 
 # ============================================================================
 # Schema
 # ============================================================================
+
 
 @dataclass
 class ExplorerConfig:
@@ -92,8 +92,15 @@ _VALID_REPORT_FORMATS = {"json", "text", "both"}
 
 _KNOWN_SECTIONS = {"explorer", "tests", "report", "faults"}
 _KNOWN_EXPLORER_KEYS = {
-    "target_modules", "max_time", "max_runs", "seed", "max_checkpoints",
-    "checkpoint_prob", "checkpoint_strategy", "steps_per_run", "fault_toggle_prob",
+    "target_modules",
+    "max_time",
+    "max_runs",
+    "seed",
+    "max_checkpoints",
+    "checkpoint_prob",
+    "checkpoint_strategy",
+    "steps_per_run",
+    "fault_toggle_prob",
 }
 _KNOWN_TEST_KEYS = {"class", "steps_per_run", "swarm"}
 _KNOWN_REPORT_KEYS = {"format", "output", "traces", "traces_dir", "verbose"}
@@ -115,6 +122,7 @@ def _warn_unknown_keys(section: str, data: dict, known: set[str]) -> None:
 # ============================================================================
 # Loader
 # ============================================================================
+
 
 def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
     """Load and validate an ``ordeal.toml`` file.
@@ -191,8 +199,7 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
 
     if report.format not in _VALID_REPORT_FORMATS:
         raise ConfigError(
-            f"Invalid report format: {report.format!r}. "
-            f"Must be one of: {_VALID_REPORT_FORMATS}"
+            f"Invalid report format: {report.format!r}. Must be one of: {_VALID_REPORT_FORMATS}"
         )
 
     return OrdealConfig(explorer=explorer, tests=tests, report=report)

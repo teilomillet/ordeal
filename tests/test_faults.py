@@ -1,10 +1,10 @@
 """Tests for ordeal.faults — fault injection primitives."""
+
 import math
 
 import pytest
 
 from ordeal.faults import Fault, LambdaFault, PatchFault
-
 
 # -- Helpers ----------------------------------------------------------------
 
@@ -19,19 +19,29 @@ def sample_function(x: int) -> int:
 
 # -- Tests ------------------------------------------------------------------
 
+
 class TestFaultBase:
     def test_starts_inactive(self):
         class F(Fault):
-            def _do_activate(self): pass
-            def _do_deactivate(self): pass
+            def _do_activate(self):
+                pass
+
+            def _do_deactivate(self):
+                pass
+
         f = F(name="test")
         assert not f.active
 
     def test_activate_deactivate_cycle(self):
         activated = []
+
         class F(Fault):
-            def _do_activate(self): activated.append("on")
-            def _do_deactivate(self): activated.append("off")
+            def _do_activate(self):
+                activated.append("on")
+
+            def _do_deactivate(self):
+                activated.append("off")
+
         f = F()
         f.activate()
         assert f.active
@@ -42,9 +52,14 @@ class TestFaultBase:
 
     def test_double_activate_is_noop(self):
         count = [0]
+
         class F(Fault):
-            def _do_activate(self): count[0] += 1
-            def _do_deactivate(self): pass
+            def _do_activate(self):
+                count[0] += 1
+
+            def _do_deactivate(self):
+                pass
+
         f = F()
         f.activate()
         f.activate()
@@ -52,8 +67,12 @@ class TestFaultBase:
 
     def test_reset_deactivates(self):
         class F(Fault):
-            def _do_activate(self): pass
-            def _do_deactivate(self): pass
+            def _do_activate(self):
+                pass
+
+            def _do_deactivate(self):
+                pass
+
         f = F()
         f.activate()
         f.reset()
@@ -61,8 +80,12 @@ class TestFaultBase:
 
     def test_repr(self):
         class F(Fault):
-            def _do_activate(self): pass
-            def _do_deactivate(self): pass
+            def _do_activate(self):
+                pass
+
+            def _do_deactivate(self):
+                pass
+
         f = F(name="my_fault")
         assert "my_fault" in repr(f)
         assert "OFF" in repr(f)
@@ -88,6 +111,7 @@ class TestPatchFault:
         def make_wrapper(original):
             def wrapper(*args, **kwargs):
                 return -1
+
             return wrapper
 
         target = f"{__name__}.sample_function"
@@ -147,6 +171,7 @@ class TestIOFaults:
 
         # Patch at module level
         import tests.test_faults as mod
+
         mod.string_fn = string_fn
 
         fault = truncate_output("tests.test_faults.string_fn", fraction=0.5)
@@ -169,6 +194,7 @@ class TestNumericalFaults:
             return 0.95
 
         import tests.test_faults as mod
+
         mod._predict = predict
 
         fault = nan_injection("tests.test_faults._predict")
@@ -185,6 +211,7 @@ class TestNumericalFaults:
             return 1.0
 
         import tests.test_faults as mod
+
         mod._score = score
 
         fault = inf_injection("tests.test_faults._score")

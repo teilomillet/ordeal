@@ -1,14 +1,13 @@
 """Tests for ordeal.chaos — ChaosTest stateful testing."""
-import math
 
 from hypothesis import settings
-from hypothesis.stateful import rule, invariant
+from hypothesis.stateful import invariant, rule
 
 from ordeal.chaos import ChaosTest
 from ordeal.faults import LambdaFault
 
-
 # -- A simple system under test ---------------------------------------------
+
 
 class Counter:
     """Trivial system to chaos-test."""
@@ -57,6 +56,7 @@ class OverflowFault(LambdaFault):
 
 # -- ChaosTest definition ---------------------------------------------------
 
+
 class CounterChaos(ChaosTest):
     faults = [OverflowFault()]
 
@@ -96,6 +96,7 @@ TestCounterChaos.settings = settings(
 
 
 # -- Test that ChaosTest works without faults --------------------------------
+
 
 class NoFaultsChaos(ChaosTest):
     """ChaosTest with no faults — should still work."""

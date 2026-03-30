@@ -19,6 +19,7 @@ This is ordeal's answer to Antithesis's exploration engine.  It:
     result = explorer.run(max_time=60)
     print(result.summary())
 """
+
 from __future__ import annotations
 
 import copy
@@ -31,7 +32,8 @@ from typing import TYPE_CHECKING, Any, Callable
 
 import hypothesis.strategies as st
 
-from ordeal.trace import Trace, TraceFailure, TraceStep, shrink as _shrink_trace
+from ordeal.trace import Trace, TraceFailure, TraceStep
+from ordeal.trace import shrink as _shrink_trace
 
 if TYPE_CHECKING:
     from ordeal.chaos import ChaosTest
@@ -40,6 +42,7 @@ if TYPE_CHECKING:
 # ============================================================================
 # Coverage collection (AFL-style edge hashing)
 # ============================================================================
+
 
 class CoverageCollector:
     """Track edge coverage via ``sys.settrace``.
@@ -83,6 +86,7 @@ class CoverageCollector:
 # Rule introspection
 # ============================================================================
 
+
 @dataclass
 class _RuleInfo:
     """Metadata about a single @rule method."""
@@ -95,6 +99,7 @@ class _RuleInfo:
 # ============================================================================
 # Data proxy — lets the explorer call @rule(data=st.data()) methods
 # ============================================================================
+
 
 class _DataProxy:
     """Stand-in for Hypothesis's ``data`` object.
@@ -139,6 +144,7 @@ class Checkpoint:
 # Progress reporting
 # ============================================================================
 
+
 @dataclass
 class ProgressSnapshot:
     """Live stats emitted during exploration."""
@@ -155,6 +161,7 @@ class ProgressSnapshot:
 # ============================================================================
 # Results
 # ============================================================================
+
 
 @dataclass
 class Failure:
@@ -199,8 +206,7 @@ class ExplorationResult:
         lines = [
             f"Exploration: {self.total_runs} runs, "
             f"{self.total_steps} steps, {self.duration_seconds:.1f}s",
-            f"Coverage: {self.unique_edges} edges, "
-            f"{self.checkpoints_saved} checkpoints",
+            f"Coverage: {self.unique_edges} edges, {self.checkpoints_saved} checkpoints",
         ]
         if self.failures:
             lines.append(f"Failures found: {len(self.failures)}")
@@ -214,6 +220,7 @@ class ExplorationResult:
 # ============================================================================
 # Explorer
 # ============================================================================
+
 
 def _qualified_name(cls: type) -> str:
     return f"{cls.__module__}:{cls.__qualname__}"
@@ -295,18 +302,21 @@ class Explorer:
                 # Detect data=st.data() parameter
                 for param_name, strat in strategies.items():
                     strat_repr = repr(strat).lower()
-                    if param_name == "data" or "dataobject" in strat_repr or "data()" in strat_repr:
+                    is_data = "dataobject" in strat_repr or "data()" in strat_repr
+                    if param_name == "data" or is_data:
                         has_data = True
 
                 # Skip Bundle-consuming rules (can't execute outside Hypothesis)
                 if hasattr(rule_meta, "bundles") and rule_meta.bundles:
                     continue
 
-                self._rules.append(_RuleInfo(
-                    name=name,
-                    strategies=strategies,
-                    has_data=has_data,
-                ))
+                self._rules.append(
+                    _RuleInfo(
+                        name=name,
+                        strategies=strategies,
+                        has_data=has_data,
+                    )
+                )
 
             # Invariants
             if hasattr(attr, "hypothesis_stateful_invariant"):
@@ -314,9 +324,7 @@ class Explorer:
 
     # -- Execution ----------------------------------------------------------
 
-    def _execute_rule(
-        self, machine: ChaosTest, rule: _RuleInfo
-    ) -> dict[str, Any]:
+    def _execute_rule(self, machine: ChaosTest, rule: _RuleInfo) -> dict[str, Any]:
         """Execute a rule, drawing parameters from strategies. Returns drawn params."""
         params: dict[str, Any] = {}
 
@@ -388,26 +396,27 @@ class Explorer:
         else:
             cp.energy = max(_ENERGY_MIN, cp.energy * _ENERGY_DECAY)
 
-    def _save_checkpoint(
-        self, machine: ChaosTest, new_count: int, step: int, run_id: int
-    ) -> None:
+    def _save_checkpoint(self, machine: ChaosTest, new_count: int, step: int, run_id: int) -> None:
         """Save a checkpoint. Evicts lowest-energy checkpoint if at capacity."""
         if len(self._checkpoints) >= self.max_checkpoints:
             if self.checkpoint_strategy == "energy":
                 # Evict lowest energy
-                min_idx = min(range(len(self._checkpoints)),
-                              key=lambda i: self._checkpoints[i].energy)
+                min_idx = min(
+                    range(len(self._checkpoints)), key=lambda i: self._checkpoints[i].energy
+                )
                 self._checkpoints.pop(min_idx)
             else:
                 idx = self.rng.randint(0, max(0, len(self._checkpoints) - 2))
                 self._checkpoints.pop(idx)
 
-        self._checkpoints.append(Checkpoint(
-            machine_copy=copy.deepcopy(machine),
-            new_edge_count=new_count,
-            step=step,
-            run_id=run_id,
-        ))
+        self._checkpoints.append(
+            Checkpoint(
+                machine_copy=copy.deepcopy(machine),
+                new_edge_count=new_count,
+                step=step,
+                run_id=run_id,
+            )
+        )
 
     # -- Main loop ----------------------------------------------------------
 
@@ -479,13 +488,15 @@ class Explorer:
                     if machine._faults and self.rng.random() < self.fault_toggle_prob:
                         toggle_name = self._toggle_fault(machine)
                         rule_log.append(toggle_name)
-                        trace_steps.append(TraceStep(
-                            kind="fault_toggle",
-                            name=toggle_name,
-                            active_faults=[f.name for f in machine.active_faults],
-                            edge_count=len(self._total_edges) + new_edges_this_run,
-                            timestamp_offset=ts_offset,
-                        ))
+                        trace_steps.append(
+                            TraceStep(
+                                kind="fault_toggle",
+                                name=toggle_name,
+                                active_faults=[f.name for f in machine.active_faults],
+                                edge_count=len(self._total_edges) + new_edges_this_run,
+                                timestamp_offset=ts_offset,
+                            )
+                        )
                     else:
                         rule_info = self.rng.choice(self._rules)
                         params = self._execute_rule(machine, rule_info)
@@ -493,17 +504,18 @@ class Explorer:
 
                         # Record serializable params (skip _DataProxy)
                         serializable_params = {
-                            k: v for k, v in params.items()
-                            if not isinstance(v, _DataProxy)
+                            k: v for k, v in params.items() if not isinstance(v, _DataProxy)
                         }
-                        trace_steps.append(TraceStep(
-                            kind="rule",
-                            name=rule_info.name,
-                            params=serializable_params,
-                            active_faults=[f.name for f in machine.active_faults],
-                            edge_count=len(self._total_edges) + new_edges_this_run,
-                            timestamp_offset=ts_offset,
-                        ))
+                        trace_steps.append(
+                            TraceStep(
+                                kind="rule",
+                                name=rule_info.name,
+                                params=serializable_params,
+                                active_faults=[f.name for f in machine.active_faults],
+                                edge_count=len(self._total_edges) + new_edges_this_run,
+                                timestamp_offset=ts_offset,
+                            )
+                        )
 
                     # Invariants
                     self._check_invariants(machine)
@@ -533,28 +545,32 @@ class Explorer:
                     edges_discovered=new_edges_this_run,
                     duration=_time.monotonic() - run_start,
                 )
-                result.failures.append(Failure(
-                    error=e,
-                    step=step,
-                    run_id=run_id,
-                    active_faults=[f.name for f in machine.active_faults],
-                    rule_log=rule_log,
-                    trace=trace,
-                ))
+                result.failures.append(
+                    Failure(
+                        error=e,
+                        step=step,
+                        run_id=run_id,
+                        active_faults=[f.name for f in machine.active_faults],
+                        rule_log=rule_log,
+                        trace=trace,
+                    )
+                )
                 if self.record_traces:
                     result.traces.append(trace)
 
             else:
                 if self.record_traces:
-                    result.traces.append(Trace(
-                        run_id=run_id,
-                        seed=self.seed,
-                        test_class=class_name,
-                        from_checkpoint=source_cp.run_id if source_cp else None,
-                        steps=trace_steps,
-                        edges_discovered=new_edges_this_run,
-                        duration=_time.monotonic() - run_start,
-                    ))
+                    result.traces.append(
+                        Trace(
+                            run_id=run_id,
+                            seed=self.seed,
+                            test_class=class_name,
+                            from_checkpoint=source_cp.run_id if source_cp else None,
+                            steps=trace_steps,
+                            edges_discovered=new_edges_this_run,
+                            duration=_time.monotonic() - run_start,
+                        )
+                    )
             finally:
                 if collector:
                     collector.stop()
@@ -569,15 +585,17 @@ class Explorer:
             # Progress callback
             if progress:
                 elapsed_now = _time.monotonic() - start
-                progress(ProgressSnapshot(
-                    elapsed=elapsed_now,
-                    total_runs=result.total_runs,
-                    total_steps=result.total_steps,
-                    unique_edges=len(self._total_edges),
-                    checkpoints=len(self._checkpoints),
-                    failures=len(result.failures),
-                    runs_per_second=result.total_runs / max(elapsed_now, 0.001),
-                ))
+                progress(
+                    ProgressSnapshot(
+                        elapsed=elapsed_now,
+                        total_runs=result.total_runs,
+                        total_steps=result.total_steps,
+                        unique_edges=len(self._total_edges),
+                        checkpoints=len(self._checkpoints),
+                        failures=len(result.failures),
+                        runs_per_second=result.total_runs / max(elapsed_now, 0.001),
+                    )
+                )
 
         # -- Post-exploration: shrink failures --
         if shrink:

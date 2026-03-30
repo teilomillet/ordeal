@@ -1,4 +1,5 @@
 """Tests for ordeal.assertions — Antithesis-style property assertions."""
+
 import pytest
 
 from ordeal.assertions import (

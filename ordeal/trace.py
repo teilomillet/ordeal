@@ -14,10 +14,10 @@ and what coverage was observed.  Traces enable:
     failure = replay(trace)          # does it reproduce?
     minimal = shrink(trace, MyTest)  # find the smallest version
 """
+
 from __future__ import annotations
 
 import base64
-import copy
 import json
 import time as _time
 from dataclasses import asdict, dataclass, field
@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 # ============================================================================
 # Trace data structures
 # ============================================================================
+
 
 @dataclass
 class TraceStep:
@@ -108,12 +109,14 @@ class Trace:
 # JSON encoder/decoder for non-standard types
 # ============================================================================
 
+
 class _TraceEncoder(json.JSONEncoder):
     def default(self, obj: Any) -> Any:
         if isinstance(obj, bytes):
             return {"__bytes__": base64.b64encode(obj).decode()}
         if isinstance(obj, (set, frozenset)):
-            return {"__set__": sorted(obj) if all(isinstance(x, (int, float, str)) for x in obj) else list(obj)}
+            sortable = all(isinstance(x, (int, float, str)) for x in obj)
+            return {"__set__": sorted(obj) if sortable else list(obj)}
         if isinstance(obj, Exception):
             return {"__error__": str(obj), "__type__": type(obj).__name__}
         try:
@@ -138,6 +141,7 @@ class _TraceDecoder(json.JSONDecoder):
 # ============================================================================
 # Replay
 # ============================================================================
+
 
 def replay(
     trace: Trace,
@@ -202,6 +206,7 @@ def _replay_rule(machine: ChaosTest, name: str, params: dict[str, Any]) -> None:
     clean_params = {k: v for k, v in params.items() if k != "data"}
     if "data" in params:
         from ordeal.explore import _DataProxy
+
         clean_params["data"] = _DataProxy()
     try:
         method(**clean_params)
@@ -220,6 +225,7 @@ def _check_invariants(machine: ChaosTest) -> None:
 def _import_class(class_path: str) -> type:
     """Import 'module.path:ClassName'."""
     import importlib
+
     module_path, class_name = class_path.rsplit(":", 1)
     module = importlib.import_module(module_path)
     return getattr(module, class_name)
@@ -228,6 +234,7 @@ def _import_class(class_path: str) -> type:
 # ============================================================================
 # Shrinking
 # ============================================================================
+
 
 def shrink(
     trace: Trace,
@@ -287,7 +294,7 @@ def _shrink_ddmin(steps: list[TraceStep], test_class: type) -> list[TraceStep]:
         i = 0
         removed_any = False
         while i < len(steps):
-            candidate = steps[:i] + steps[i + chunk_size:]
+            candidate = steps[:i] + steps[i + chunk_size :]
             if _replay_steps(candidate, test_class) is not None:
                 steps = candidate
                 removed_any = True
@@ -304,7 +311,7 @@ def _shrink_one_by_one(steps: list[TraceStep], test_class: type) -> list[TraceSt
     """Try removing each step individually."""
     i = 0
     while i < len(steps):
-        candidate = steps[:i] + steps[i + 1:]
+        candidate = steps[:i] + steps[i + 1 :]
         if _replay_steps(candidate, test_class) is not None:
             steps = candidate
         else:
@@ -314,13 +321,10 @@ def _shrink_one_by_one(steps: list[TraceStep], test_class: type) -> list[TraceSt
 
 def _shrink_faults(steps: list[TraceStep], test_class: type) -> list[TraceStep]:
     """Remove all toggles for each fault and check if failure still reproduces."""
-    fault_names = {
-        s.name.lstrip("+-") for s in steps if s.kind == "fault_toggle"
-    }
+    fault_names = {s.name.lstrip("+-") for s in steps if s.kind == "fault_toggle"}
     for fname in fault_names:
         candidate = [
-            s for s in steps
-            if not (s.kind == "fault_toggle" and s.name.lstrip("+-") == fname)
+            s for s in steps if not (s.kind == "fault_toggle" and s.name.lstrip("+-") == fname)
         ]
         if _replay_steps(candidate, test_class) is not None:
             steps = candidate

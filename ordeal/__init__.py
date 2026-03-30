@@ -29,11 +29,11 @@ Integrations::
     ordeal.integrations.atheris_engine   # coverage-guided fuzzing
     ordeal.integrations.schemathesis_ext # API chaos testing
 """
+
 from __future__ import annotations
 
-from ordeal.assertions import always, sometimes, reachable, unreachable
-from ordeal.buggify import buggify, buggify_value
-from ordeal.chaos import ChaosTest
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _get_version
 
 # Re-export Hypothesis stateful testing API for convenience
 from hypothesis.stateful import (
@@ -44,7 +44,9 @@ from hypothesis.stateful import (
     rule,
 )
 
-from importlib.metadata import PackageNotFoundError, version as _get_version
+from ordeal.assertions import always, reachable, sometimes, unreachable
+from ordeal.buggify import buggify, buggify_value
+from ordeal.chaos import ChaosTest
 
 try:
     __version__ = _get_version("ordeal")

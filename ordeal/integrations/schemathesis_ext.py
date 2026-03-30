@@ -33,6 +33,7 @@ Or use the decorator for more control::
         response = case.call()
         case.validate_response(response)
 """
+
 from __future__ import annotations
 
 import functools
@@ -113,8 +114,7 @@ def chaos_api_test(
         import schemathesis
     except ImportError:
         raise ImportError(
-            "schemathesis is required for API chaos testing. "
-            "Install with: pip install ordeal[api]"
+            "schemathesis is required for API chaos testing. Install with: pip install ordeal[api]"
         ) from None
 
     schema = schemathesis.from_uri(schema_url, base_url=base_url)
@@ -141,9 +141,7 @@ def chaos_api_test(
 
     # Run via Schemathesis engine
     if stateful:
-        schema.as_state_machine().run(
-            settings={"max_examples": max_examples}
-        )
+        schema.as_state_machine().run(settings={"max_examples": max_examples})
     else:
         # Parametrized mode — run each endpoint
         _test()

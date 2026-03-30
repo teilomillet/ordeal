@@ -1,5 +1,10 @@
 # ordeal
 
+[![CI](https://github.com/teilomillet/ordeal/actions/workflows/ci.yml/badge.svg)](https://github.com/teilomillet/ordeal/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/ordeal)](https://pypi.org/project/ordeal/)
+[![Python 3.12+](https://img.shields.io/pypi/pyversions/ordeal)](https://pypi.org/project/ordeal/)
+[![License](https://img.shields.io/github/license/teilomillet/ordeal)](LICENSE)
+
 Automated chaos testing for Python. Fault injection, property assertions, coverage-guided exploration, and stateful testing — in one library.
 
 ordeal snaps together ideas from [Antithesis](https://antithesis.com) (deterministic exploration + checkpointing), [FoundationDB](https://apple.github.io/foundationdb/testing.html) (BUGGIFY inline faults), [Jepsen](https://jepsen.io) (nemesis interleaving), [Hypothesis](https://hypothesis.works) (stateful property testing), [Jane Street's QuickCheck](https://blog.janestreet.com/quickcheck-for-core/) (boundary-biased generation), and [Meta's ACH](https://engineering.fb.com) (mutation validation) into a single Python toolkit.

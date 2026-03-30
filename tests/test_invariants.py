@@ -1,5 +1,4 @@
 """Tests for ordeal.invariants — named, composable invariant assertions."""
-import math
 
 import pytest
 

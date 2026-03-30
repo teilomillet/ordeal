@@ -25,6 +25,7 @@ often empty or singleton.  Strings hit unicode edge cases.  This catches
 more bugs per test run because implementation boundaries (off-by-one, empty
 input, overflow) are explored with higher probability.
 """
+
 from __future__ import annotations
 
 import functools
@@ -36,10 +37,10 @@ from typing import Any, Callable, Union, get_args, get_origin, get_type_hints
 import hypothesis.strategies as st
 from hypothesis import given, settings
 
-
 # ============================================================================
 # Boundary-biased strategies
 # ============================================================================
+
 
 class biased:
     """Namespace for boundary-biased strategies."""
@@ -52,22 +53,39 @@ class biased:
         """Integers biased toward 0, +/-1, range endpoints, powers of 2."""
         base = st.integers(min_value=min_value, max_value=max_value)
         boundaries = [
-            0, 1, -1, 2, -2, 10, -10, 100, -100,
-            255, 256, -256,
-            2**15 - 1, 2**15, -(2**15),
-            2**31 - 1, 2**31, -(2**31),
-            2**63 - 1, -(2**63),
+            0,
+            1,
+            -1,
+            2,
+            -2,
+            10,
+            -10,
+            100,
+            -100,
+            255,
+            256,
+            -256,
+            2**15 - 1,
+            2**15,
+            -(2**15),
+            2**31 - 1,
+            2**31,
+            -(2**31),
+            2**63 - 1,
+            -(2**63),
         ]
         if min_value is not None:
             boundaries.extend([min_value, min_value + 1])
         if max_value is not None:
             boundaries.extend([max_value, max_value - 1])
 
-        valid = sorted(set(
-            b for b in boundaries
-            if (min_value is None or b >= min_value)
-            and (max_value is None or b <= max_value)
-        ))
+        valid = sorted(
+            set(
+                b
+                for b in boundaries
+                if (min_value is None or b >= min_value) and (max_value is None or b <= max_value)
+            )
+        )
         if valid:
             return st.one_of(st.sampled_from(valid), base)
         return base
@@ -93,13 +111,16 @@ class biased:
         if max_value is not None:
             boundaries.append(max_value)
 
-        valid = sorted(set(
-            b for b in boundaries
-            if (min_value is None or b >= min_value)
-            and (max_value is None or b <= max_value)
-            and not (not allow_nan and math.isnan(b))
-            and not (not allow_infinity and math.isinf(b))
-        ))
+        valid = sorted(
+            set(
+                b
+                for b in boundaries
+                if (min_value is None or b >= min_value)
+                and (max_value is None or b <= max_value)
+                and not (not allow_nan and math.isnan(b))
+                and not (not allow_infinity and math.isinf(b))
+            )
+        )
         if valid:
             return st.one_of(st.sampled_from(valid), base)
         return base
@@ -129,10 +150,12 @@ class biased:
             parts.append(st.just(b""))
         parts.append(st.binary(min_size=1, max_size=1))
         if max_size > 0:
-            parts.extend([
-                st.just(b"\x00" * min(max_size, 64)),
-                st.just(b"\xff" * min(max_size, 64)),
-            ])
+            parts.extend(
+                [
+                    st.just(b"\x00" * min(max_size, 64)),
+                    st.just(b"\xff" * min(max_size, 64)),
+                ]
+            )
         return st.one_of(*parts)
 
     @staticmethod
@@ -157,6 +180,7 @@ class biased:
 # ============================================================================
 # Type-driven strategy derivation
 # ============================================================================
+
 
 def strategy_for_type(tp: type, *, _depth: int = 0) -> st.SearchStrategy:
     """Derive a boundary-biased strategy from a type hint.
@@ -207,27 +231,19 @@ def strategy_for_type(tp: type, *, _depth: int = 0) -> st.SearchStrategy:
     if origin is tuple:
         if args:
             if len(args) == 2 and args[1] is Ellipsis:
-                return st.lists(
-                    strategy_for_type(args[0], _depth=next_depth)
-                ).map(tuple)
-            return st.tuples(
-                *(strategy_for_type(a, _depth=next_depth) for a in args)
-            )
+                return st.lists(strategy_for_type(args[0], _depth=next_depth)).map(tuple)
+            return st.tuples(*(strategy_for_type(a, _depth=next_depth) for a in args))
         return st.tuples()
 
     # set[T]
     if origin is set:
         elem = args[0] if args else Any
-        return st.frozensets(
-            strategy_for_type(elem, _depth=next_depth), max_size=10
-        ).map(set)
+        return st.frozensets(strategy_for_type(elem, _depth=next_depth), max_size=10).map(set)
 
     # frozenset[T]
     if origin is frozenset:
         elem = args[0] if args else Any
-        return st.frozensets(
-            strategy_for_type(elem, _depth=next_depth), max_size=10
-        )
+        return st.frozensets(strategy_for_type(elem, _depth=next_depth), max_size=10)
 
     # Union[T, U] or T | U  (Python 3.10+)
     if origin is Union or origin is pytypes.UnionType:
@@ -260,6 +276,7 @@ def strategy_for_type(tp: type, *, _depth: int = 0) -> st.SearchStrategy:
 # ============================================================================
 # @quickcheck decorator
 # ============================================================================
+
 
 def quickcheck(
     fn: Callable | None = None,

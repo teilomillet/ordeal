@@ -3,6 +3,7 @@
 Each function returns a ``hypothesis.strategies.SearchStrategy`` that can be
 used in ``@rule()``, ``@given()``, or ``data.draw()``.
 """
+
 from __future__ import annotations
 
 import hypothesis.strategies as st
@@ -65,8 +66,8 @@ def nan_floats() -> st.SearchStrategy[float]:
         st.just(float("-inf")),
         st.just(0.0),
         st.just(-0.0),
-        st.just(1.7976931348623157e308),   # sys.float_info.max
-        st.just(5e-324),                    # min positive subnormal
+        st.just(1.7976931348623157e308),  # sys.float_info.max
+        st.just(5e-324),  # min positive subnormal
         st.floats(allow_nan=True, allow_infinity=True),
     )
 

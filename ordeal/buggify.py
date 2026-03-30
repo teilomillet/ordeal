@@ -17,6 +17,7 @@ Activate via the pytest plugin (``--chaos``) or manually:
     buggify.activate(probability=0.1)
     buggify.set_seed(42)
 """
+
 from __future__ import annotations
 
 import random
@@ -27,6 +28,7 @@ _state = threading.local()
 
 
 # -- Configuration ----------------------------------------------------------
+
 
 def activate(probability: float = 0.1) -> None:
     """Enable buggify for the current thread."""
@@ -52,6 +54,7 @@ def is_active() -> bool:
 
 
 # -- Public API -------------------------------------------------------------
+
 
 def buggify(probability: float | None = None) -> bool:
     """Return ``True`` during chaos testing, with configurable probability.

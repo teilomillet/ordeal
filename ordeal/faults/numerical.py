@@ -8,10 +8,10 @@ Target a function and corrupt its numeric output while the fault is active.
         wrong_shape("model.predict", expected=(1, 512), actual=(1, 256)),
     ]
 """
+
 from __future__ import annotations
 
 import functools
-import math
 from typing import Any
 
 from . import Fault, PatchFault
@@ -22,14 +22,9 @@ def _corrupt_numeric(value: Any, corrupt: float) -> Any:
     if isinstance(value, (int, float)):
         return corrupt
     if isinstance(value, (list, tuple)):
-        return type(value)(
-            corrupt if isinstance(v, (int, float)) else v for v in value
-        )
+        return type(value)(corrupt if isinstance(v, (int, float)) else v for v in value)
     if isinstance(value, dict):
-        return {
-            k: corrupt if isinstance(v, (int, float)) else v
-            for k, v in value.items()
-        }
+        return {k: corrupt if isinstance(v, (int, float)) else v for k, v in value.items()}
     # numpy-like (duck-typed)
     if hasattr(value, "copy") and hasattr(value, "flat") and hasattr(value, "shape"):
         result = value.copy()
@@ -97,9 +92,7 @@ def wrong_shape(
 
         return reshaped
 
-    return PatchFault(
-        target, wrapper, name=f"wrong_shape({target}, {expected}->{actual})"
-    )
+    return PatchFault(target, wrapper, name=f"wrong_shape({target}, {expected}->{actual})")
 
 
 class _CorruptedFloatsFault(Fault):

@@ -1,4 +1,5 @@
 """Tests for ordeal.strategies — adversarial data generation."""
+
 import math
 
 from hypothesis import given, settings

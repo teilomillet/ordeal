@@ -31,6 +31,7 @@ Operators:
     negate       if cond → if not cond
     return_none  return x → return None
 """
+
 from __future__ import annotations
 
 import ast
@@ -42,14 +43,14 @@ import textwrap
 import types
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Callable
 
 from ordeal.faults import PatchFault
-
 
 # ============================================================================
 # Data structures
 # ============================================================================
+
 
 @dataclass
 class Mutant:
@@ -106,6 +107,7 @@ class MutationResult:
 # ============================================================================
 # AST mutation operators
 # ============================================================================
+
 
 class _Applicator(ast.NodeTransformer):
     """Apply exactly the Nth possible mutation of a specific type."""
@@ -218,6 +220,7 @@ class _ReturnNoneApplicator(_Applicator):
 
 # -- Counters (same traversal logic, just counting) --
 
+
 class _Counter(ast.NodeVisitor):
     def __init__(self) -> None:
         self.count = 0
@@ -267,6 +270,7 @@ OPERATORS: dict[str, tuple[type[_Counter], type[_Applicator]]] = {
 # Mutant generation
 # ============================================================================
 
+
 def generate_mutants(
     source: str,
     operators: list[str] | None = None,
@@ -308,6 +312,7 @@ def generate_mutants(
 # ============================================================================
 # Module-level mutation testing
 # ============================================================================
+
 
 @contextmanager
 def _mutated_module(module_name: str, mutated_tree: ast.Module):
@@ -376,6 +381,7 @@ def mutate_and_test(
 # ============================================================================
 # Function-level mutation testing (recommended)
 # ============================================================================
+
 
 def mutate_function_and_test(
     target: str,

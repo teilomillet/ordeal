@@ -10,6 +10,7 @@ CLI flags:
 Markers:
     @pytest.mark.chaos      Mark a test for chaos mode (collected only with --chaos)
 """
+
 from __future__ import annotations
 
 from collections.abc import Generator
@@ -17,7 +18,9 @@ from collections.abc import Generator
 import pytest
 
 from ordeal import assertions
-from ordeal.buggify import activate as _buggify_activate, deactivate as _buggify_deactivate, set_seed as _buggify_set_seed
+from ordeal.buggify import activate as _buggify_activate
+from ordeal.buggify import deactivate as _buggify_deactivate
+from ordeal.buggify import set_seed as _buggify_set_seed
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -80,6 +83,7 @@ def pytest_collection_modifyitems(
 
 # -- Fixtures ---------------------------------------------------------------
 
+
 @pytest.fixture
 def chaos_enabled() -> Generator[None, None, None]:
     """Activate chaos mode (assertions + buggify) for a single test."""
@@ -92,6 +96,7 @@ def chaos_enabled() -> Generator[None, None, None]:
 
 
 # -- Terminal report --------------------------------------------------------
+
 
 def pytest_terminal_summary(
     terminalreporter: pytest.TerminalReporter,
@@ -119,10 +124,6 @@ def pytest_terminal_summary(
 
     total = len(results)
     if failed:
-        terminalreporter.line(
-            f"\n  {len(failed)}/{total} properties FAILED", red=True
-        )
+        terminalreporter.line(f"\n  {len(failed)}/{total} properties FAILED", red=True)
     else:
-        terminalreporter.line(
-            f"\n  {total}/{total} properties passed", green=True
-        )
+        terminalreporter.line(f"\n  {total}/{total} properties passed", green=True)

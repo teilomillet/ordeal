@@ -1,4 +1,5 @@
 """Tests for ordeal.buggify — FoundationDB-style inline fault injection."""
+
 from ordeal.buggify import activate, buggify, buggify_value, deactivate, is_active, set_seed
 
 

@@ -10,10 +10,11 @@ Four assertion types, keyed by name (message string):
 In production (tracker inactive), these are zero-cost no-ops.
 In testing, they accumulate results and raise on violation (always/unreachable).
 """
+
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 

@@ -1,4 +1,5 @@
 """Tests for ordeal.quickcheck — type-driven, boundary-biased property testing."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ class _Outer:
 # ============================================================================
 # @quickcheck decorator
 # ============================================================================
+
 
 @quickcheck
 def test_sort_idempotent(xs: list[int]):
@@ -83,6 +85,7 @@ def test_optional_is_int_or_none(x: int | None):
 # @quickcheck with overrides
 # ============================================================================
 
+
 @quickcheck(xs=st.lists(st.integers(min_value=0, max_value=10), max_size=5))
 def test_with_override(xs: list[int]):
     assert all(0 <= x <= 10 for x in xs)
@@ -92,6 +95,7 @@ def test_with_override(xs: list[int]):
 # ============================================================================
 # @quickcheck on class methods
 # ============================================================================
+
 
 class TestClassMethods:
     @quickcheck
@@ -107,6 +111,7 @@ class TestClassMethods:
 # Boundary-biased strategies
 # ============================================================================
 
+
 class TestBiasedIntegers:
     def test_includes_zero(self):
         result = find(biased.integers(), lambda x: x == 0)
@@ -121,6 +126,7 @@ class TestBiasedIntegers:
         @settings(max_examples=200)
         def check(x):
             assert 5 <= x <= 15
+
         check()
 
 
@@ -134,6 +140,7 @@ class TestBiasedFloats:
         @settings(max_examples=200)
         def check(x):
             assert 0.0 <= x <= 1.0
+
         check()
 
 
@@ -150,6 +157,7 @@ class TestBiasedLists:
 # ============================================================================
 # strategy_for_type
 # ============================================================================
+
 
 class TestStrategyForType:
     def test_int(self):
@@ -201,6 +209,7 @@ class TestStrategyForType:
         @settings(max_examples=50)
         def check(x):
             assert isinstance(x, (int, str))
+
         check()
 
     def test_dataclass(self):
@@ -217,4 +226,5 @@ class TestStrategyForType:
             assert isinstance(x, _Outer)
             assert isinstance(x.inner, _Inner)
             assert isinstance(x.inner.value, int)
+
         check()

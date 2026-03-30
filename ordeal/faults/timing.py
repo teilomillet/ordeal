@@ -1,11 +1,12 @@
 """Timing fault injections.
 
-    from ordeal.faults.timing import timeout, slow, intermittent_crash
-    faults = [
-        timeout("api.call", delay=30),
-        intermittent_crash("worker.process", every_n=3),
-    ]
+from ordeal.faults.timing import timeout, slow, intermittent_crash
+faults = [
+    timeout("api.call", delay=30),
+    intermittent_crash("worker.process", every_n=3),
+]
 """
+
 from __future__ import annotations
 
 import functools
@@ -64,9 +65,7 @@ class _IntermittentCrashFault(PatchFault):
             def crashing(*args: Any, **kwargs: Any) -> Any:
                 self._call_count += 1
                 if self._call_count % self._every_n == 0:
-                    raise self._error(
-                        f"Simulated crash in {target} (call #{self._call_count})"
-                    )
+                    raise self._error(f"Simulated crash in {target} (call #{self._call_count})")
                 return original(*args, **kwargs)
 
             return crashing

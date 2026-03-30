@@ -10,6 +10,7 @@ Environment faults (system-wide, use with caution):
     from ordeal.faults.io import disk_full, permission_denied
     faults = [disk_full()]
 """
+
 from __future__ import annotations
 
 import errno
@@ -19,10 +20,10 @@ from typing import Any
 
 from . import Fault, PatchFault
 
-
 # ---------------------------------------------------------------------------
 # Targeted faults (safe — scope to a single function)
 # ---------------------------------------------------------------------------
+
 
 def error_on_call(
     target: str,
@@ -95,6 +96,7 @@ def truncate_output(target: str, fraction: float = 0.5) -> PatchFault:
 # ---------------------------------------------------------------------------
 # Environment faults (system-wide — use carefully)
 # ---------------------------------------------------------------------------
+
 
 class _DiskFullFault(Fault):
     """Simulates disk full by making write-mode ``open()`` and ``os.write()`` fail."""

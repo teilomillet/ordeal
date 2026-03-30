@@ -74,7 +74,7 @@ When ordeal passes, it means something. Not "the tests pass" — but that the co
 
 -   **[Explorer](guides/explorer.md)** — Run and configure coverage-guided exploration
 -   **[Writing Tests](guides/writing-tests.md)** — Patterns for effective chaos tests
--   **[Auto Testing](guides/auto.md)** — Zero-boilerplate: scan_module, fuzz, chaos_for
+-   **[Auto Testing](guides/auto.md)** — Zero-boilerplate: scan_module, fuzz, mine, diff, chaos_for
 -   **[Simulation](guides/simulate.md)** — Deterministic Clock and FileSystem
 -   **[Mutations](guides/mutations.md)** — Validate that your tests catch real bugs
 -   **[Integrations](guides/integrations.md)** — Atheris fuzzing, Schemathesis API testing
@@ -102,6 +102,8 @@ When ordeal passes, it means something. Not "the tests pass" — but that the co
 | Inline fault injection | `buggify()` — no-op in production, fault in testing | [FoundationDB](https://apple.github.io/foundationdb/testing.html) |
 | Boundary-biased generation | Test at 0, -1, empty, max — where bugs cluster | [Jane Street](https://blog.janestreet.com/quickcheck-for-core/) |
 | Mutation testing | Verify tests catch real code changes | [Meta ACH](https://engineering.fb.com) |
+| Differential testing | Compare two implementations on random inputs | Regression testing |
+| Property mining | Discover invariants from execution traces | Specification mining |
 
 ## Install
 

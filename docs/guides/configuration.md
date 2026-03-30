@@ -45,6 +45,28 @@ One file, checked into your repo, that anyone (or anything) can read and modify.
 | `traces_dir` | `str` | `".ordeal/traces"` | Trace output directory |
 | `verbose` | `bool` | `false` | Live progress to stderr |
 
+### `[[scan]]`
+
+Declare modules for auto-scan testing. The pytest plugin auto-collects these and runs `scan_module()` on each.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `module` | `str` | required | Dotted module path to scan |
+| `max_examples` | `int` | `50` | Hypothesis examples per function |
+| `fixtures` | `dict` | `{}` | Strategy overrides for untyped parameters |
+
+```toml
+[[scan]]
+module = "myapp.scoring"
+max_examples = 100
+
+[[scan]]
+module = "myapp.pipeline"
+fixtures = { model = "sampled_from(['gpt-4', 'claude'])" }
+```
+
+When you run `pytest --chaos`, ordeal auto-discovers these entries and smoke-tests every public function in each module. Functions without type hints are skipped unless fixtures are provided.
+
 ## Tuning guide
 
 The defaults are reasonable for a first run. Once you have something working, the parameters below are the ones worth adjusting.

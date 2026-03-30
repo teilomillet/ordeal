@@ -938,6 +938,64 @@ Lower bound of the Wilson score confidence interval. For mined properties: 500/5
 
 ---
 
+## Diff
+
+```python
+from ordeal.diff import diff, DiffResult, Mismatch
+```
+
+Differential testing — compare two implementations on the same random inputs.
+
+### diff
+
+```python
+diff(
+    fn_a: Callable,                             # reference function
+    fn_b: Callable,                             # function to compare
+    *,
+    max_examples: int = 100,
+    rtol: float | None = None,                  # relative tolerance
+    atol: float | None = None,                  # absolute tolerance
+    compare: Callable[[Any, Any], bool] | None = None,  # custom comparator
+    **fixtures: SearchStrategy | Any,
+) -> DiffResult
+```
+
+Compare two functions for equivalence. Infers strategies from `fn_a`'s type hints. Both functions must accept the same parameters.
+
+```python
+# Exact comparison
+result = diff(score_v1, score_v2)
+assert result.equivalent
+
+# Floating-point tolerance
+result = diff(compute_old, compute_new, rtol=1e-6)
+
+# Custom comparator
+result = diff(fn_a, fn_b, compare=lambda a, b: a.status == b.status)
+```
+
+### DiffResult
+
+| Attribute | Type | Description |
+|---|---|---|
+| `function_a` | `str` | Name of reference function |
+| `function_b` | `str` | Name of compared function |
+| `total` | `int` | Examples tested |
+| `mismatches` | `list[Mismatch]` | Inputs where outputs differed |
+| `equivalent` | `bool` | True if no mismatches |
+| `summary()` | `str` | Human-readable report |
+
+### Mismatch
+
+| Attribute | Type | Description |
+|---|---|---|
+| `args` | `dict` | Input arguments that caused divergence |
+| `output_a` | `Any` | Output from `fn_a` |
+| `output_b` | `Any` | Output from `fn_b` |
+
+---
+
 ## Scaling
 
 ```python

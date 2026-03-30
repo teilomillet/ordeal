@@ -61,6 +61,8 @@ Ordeal automates this. It brings ideas from the most rigorous engineering cultur
 | Inline fault injection | `buggify()` — no-op in production, probabilistic fault in testing | [FoundationDB](https://apple.github.io/foundationdb/testing.html) |
 | Boundary-biased generation | Test at 0, -1, empty, max-length — where bugs actually cluster | [Jane Street QuickCheck](https://blog.janestreet.com/quickcheck-for-core/) |
 | Mutation testing | Flip `+` to `-`, `<` to `<=` — verify your tests actually catch real bugs | [Meta ACH](https://engineering.fb.com) |
+| Differential testing | Compare two implementations on random inputs — catches regressions | Equivalence testing |
+| Property mining | Discover invariants from execution traces — type, bounds, monotonicity | Specification mining |
 
 **Read the full [philosophy](https://docs.byordeal.com/philosophy) to understand why this matters.**
 
@@ -246,6 +248,18 @@ fs = FileSystem()
 
 clock.advance(3600)                      # instant — no real waiting
 fs.inject_fault("/data.json", "corrupt") # reads return random bytes
+```
+
+### Differential testing
+
+Compare two implementations on the same random inputs — catches regressions and validates refactors:
+
+```python
+from ordeal.diff import diff
+
+result = diff(score_v1, score_v2, rtol=1e-6)
+assert result.equivalent, result.summary()
+# diff(score_v1, score_v2): 100 examples, EQUIVALENT
 ```
 
 ### Mutation testing

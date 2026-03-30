@@ -85,6 +85,31 @@ Properties are probabilistic — the confidence is stated, not assumed. `500/500
 
 `ordeal audit` uses `mine()` internally to generate migrated test files with mined property descriptions.
 
+## diff — compare two implementations
+
+Differential testing: run two functions on the same random inputs and check their outputs match. Catches regressions, validates refactors, and verifies backend ports:
+
+```python
+from ordeal.diff import diff
+
+# Exact comparison — are v1 and v2 identical?
+result = diff(score_v1, score_v2, max_examples=200)
+assert result.equivalent, result.summary()
+
+# Floating-point tolerance — are old and new close enough?
+result = diff(compute_old, compute_new, rtol=1e-6)
+
+# Custom comparator — only care about specific fields
+result = diff(api_v1, api_v2, compare=lambda a, b: a.status == b.status)
+```
+
+When outputs differ, `result.mismatches` contains the exact inputs and both outputs so you can debug the divergence. Strategies are inferred from `fn_a`'s type hints — both functions must accept the same parameters.
+
+Use cases:
+- **Refactoring**: verify the new implementation matches the old
+- **Porting**: compare a Python prototype against a Rust/C extension
+- **Regression testing**: ensure a bugfix doesn't change other outputs
+
 ## How it works
 
 All three primitives (`scan_module`, `fuzz`, `chaos_for`):

@@ -15,6 +15,30 @@ class TestCLI:
     def test_replay_missing_file(self):
         assert main(["replay", "/nonexistent/trace.json"]) == 1
 
+    # -- ordeal mine --
+
+    def test_mine_single_function(self, capsys):
+        assert main(["mine", "ordeal.invariants.bounded", "-n", "30"]) == 0
+        out = capsys.readouterr().out
+        assert "mine(bounded)" in out
+
+    def test_mine_module(self, capsys):
+        assert main(["mine", "ordeal.invariants", "-n", "30"]) == 0
+        out = capsys.readouterr().out
+        assert "mine(" in out
+
+    def test_mine_bad_import(self):
+        assert main(["mine", "nonexistent.module.func"]) == 1
+
+    def test_mine_bad_dotted_path(self):
+        assert main(["mine", "nodot"]) == 1
+
+    def test_mine_default_examples(self, capsys):
+        """Default -n is 500 — just verify the flag is wired correctly."""
+        assert main(["mine", "ordeal.invariants.bounded", "-n", "10"]) == 0
+        out = capsys.readouterr().out
+        assert "mine(bounded)" in out
+
     def test_explore_with_real_config(self, tmp_path):
         """End-to-end: write a config, run explore, check exit code."""
         config = tmp_path / "ordeal.toml"

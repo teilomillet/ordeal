@@ -1,6 +1,6 @@
 # Configuration
 
-All exploration settings live in `ordeal.toml`. Copy from [`ordeal.toml.example`](../ordeal.toml.example) and edit.
+All exploration settings live in `ordeal.toml`. Copy from [`ordeal.toml.example`](https://github.com/teilomillet/ordeal/blob/main/ordeal.toml.example) and edit.
 
 ## Schema
 

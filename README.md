@@ -1,6 +1,7 @@
 # ordeal
 
 [![CI](https://github.com/teilomillet/ordeal/actions/workflows/ci.yml/badge.svg)](https://github.com/teilomillet/ordeal/actions/workflows/ci.yml)
+[![Docs](https://github.com/teilomillet/ordeal/actions/workflows/docs.yml/badge.svg)](https://docs.byordeal.com/)
 [![PyPI](https://img.shields.io/pypi/v/ordeal)](https://pypi.org/project/ordeal/)
 [![Python 3.12+](https://img.shields.io/pypi/pyversions/ordeal)](https://pypi.org/project/ordeal/)
 [![License](https://img.shields.io/github/license/teilomillet/ordeal)](LICENSE)

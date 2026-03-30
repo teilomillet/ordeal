@@ -27,6 +27,26 @@ uv run ordeal explore -c demo.toml  # run explorer (needs PYTHONPATH if tests/ i
 - No emojis in code or docs.
 - Keep docs under 130 lines each. Example-first, minimal prose.
 
+## Design principle: simple core, depth through parameters
+
+Every function must be simple to call by default. Complexity is unlocked through optional parameters on the SAME function — never by adding a second function.
+
+**Do this:**
+```python
+sometimes(condition, "name")                              # simple, deferred
+sometimes(lambda: fn(), "name", attempts=100)             # depth: immediate retry
+```
+
+**Not this:**
+```python
+sometimes(condition, "name")           # one function for simple case
+check_sometimes(fn, "name", attempts=100)  # separate function for advanced case
+```
+
+The rule: if you're about to add a new function that does "the same thing but more", add a parameter to the existing function instead. One name, one import, discoverable depth.
+
+This applies everywhere: faults, assertions, invariants, strategies. The user should never need to learn a second API to do more with the same concept.
+
 ## Architecture decisions
 
 - `ChaosTest` extends Hypothesis's `RuleBasedStateMachine`. The nemesis rule is auto-injected.

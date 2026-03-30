@@ -9,6 +9,11 @@ Four assertion types, keyed by name (message string):
 
 In production (tracker inactive), these are zero-cost no-ops.
 In testing, they accumulate results and raise on violation (always/unreachable).
+
+Each function is simple by default and unlocks depth through parameters:
+
+    sometimes(is_cached, "cache hit")                          # deferred
+    sometimes(lambda: cache.hit_rate() > 0, "cache", attempts=100)  # immediate
 """
 
 from __future__ import annotations
@@ -134,47 +139,44 @@ def always(condition: bool, name: str, **details: Any) -> None:
         raise AssertionError(msg)
 
 
-def sometimes(condition: bool, name: str, **details: Any) -> None:
-    """Assert *condition* is ``True`` at least once across the entire run.
+def sometimes(
+    condition: bool | Callable[[], bool],
+    name: str,
+    *,
+    attempts: int | None = None,
+    **details: Any,
+) -> None:
+    """Assert *condition* is ``True`` at least once.
 
-    Never raises — checked at the end of the test session via the property
-    report.  Use to verify that interesting situations actually occur during
-    chaos testing.
+    Simple — deferred, checked at session end::
 
-    For a simpler, standalone version that doesn't require tracker setup,
-    use :func:`check_sometimes` instead.
+        sometimes(score > 0.5, "high scores exist")
+
+    With ``attempts`` — immediate, standalone, no tracker needed::
+
+        sometimes(lambda: cache.hit_rate() > 0, "cache warms up", attempts=100)
+
+    When *attempts* is set and *condition* is callable, the function is
+    called up to *attempts* times.  Succeeds on the first ``True``.
+    Raises ``AssertionError`` immediately if never ``True``.
     """
-    tracker.record(name, "sometimes", condition, details or None)
+    if attempts is not None and callable(condition):
+        for _ in range(attempts):
+            if condition():
+                tracker.record(name, "sometimes", True, details or None)
+                return
+        raise AssertionError(
+            f"sometimes: never true in {attempts} attempts: {name}"
+        )
+
+    cond = condition() if callable(condition) else condition
+    tracker.record(name, "sometimes", cond, details or None)
+
 
 
 def reachable(name: str, **details: Any) -> None:
     """Assert this code path executes at least once during the run."""
     tracker.record_hit(name, "reachable")
-
-
-def check_sometimes(
-    fn: Callable[[], bool],
-    name: str,
-    attempts: int = 200,
-) -> None:
-    """Assert *fn* returns ``True`` at least once in *attempts* calls.
-
-    Simple, standalone — no tracker, no setup, no deferred checking.
-    Raises immediately if the predicate never fires.  Use this to detect
-    dead code paths and broken features::
-
-        check_sometimes(
-            lambda: score_text("hack exploit") != [],
-            "taxonomy detects harm keywords",
-        )
-    """
-    for _ in range(attempts):
-        if fn():
-            return
-    msg = (
-        f"'sometimes' never fired in {attempts} attempts: {name}"
-    )
-    raise AssertionError(msg)
 
 
 def unreachable(name: str, **details: Any) -> None:

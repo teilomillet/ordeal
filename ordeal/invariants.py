@@ -225,7 +225,9 @@ def unit_normalized(*, tol: float = 1e-6) -> Invariant:
                         f"Invariant '{name}' violated: row {i} norm={n:.8f}, expected ~1.0"
                     )
         else:
-            raise AssertionError(f"Invariant '{name}': expected 1-D or 2-D array, got {arr.ndim}-D")
+            raise AssertionError(
+                f"Invariant '{name}': expected 1-D or 2-D array, got {arr.ndim}-D"
+            )
 
     return Invariant("unit_normalized", check)
 

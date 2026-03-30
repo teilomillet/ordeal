@@ -28,7 +28,6 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from hypothesis import given, settings
-from hypothesis import strategies as st
 
 
 @dataclass(frozen=True)

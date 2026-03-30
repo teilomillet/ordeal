@@ -4,7 +4,6 @@ import pytest
 
 from ordeal.metamorphic import Relation, RelationSet, metamorphic
 
-
 # ---------------------------------------------------------------------------
 # Relation construction
 # ---------------------------------------------------------------------------

@@ -315,7 +315,18 @@ class _ConstantCounter(_Counter):
 
 
 class _DeleteStatementApplicator(_Applicator):
-    """Replace a statement with ``pass``."""
+    """Replace a statement with ``pass``.
+
+    Skips docstrings (``Expr(Constant(str))``) to avoid equivalent mutants.
+    """
+
+    @staticmethod
+    def _is_docstring(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        )
 
     def _try_delete(self, node: ast.AST) -> ast.AST:
         if not self.applied:
@@ -336,6 +347,8 @@ class _DeleteStatementApplicator(_Applicator):
 
     def visit_Expr(self, node: ast.Expr) -> ast.AST:
         self.generic_visit(node)
+        if self._is_docstring(node):
+            return node  # skip docstrings — always equivalent
         return self._try_delete(node)
 
     def visit_AugAssign(self, node: ast.AugAssign) -> ast.AST:
@@ -350,7 +363,8 @@ class _DeleteStatementCounter(_Counter):
 
     def visit_Expr(self, node: ast.Expr) -> None:
         self.generic_visit(node)
-        self.count += 1
+        if not _DeleteStatementApplicator._is_docstring(node):
+            self.count += 1
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
         self.generic_visit(node)
@@ -502,6 +516,73 @@ class _ArgumentSwapCounter(_Counter):
             self.count += 1
 
 
+# -- Break/continue swap: break <-> continue --
+
+
+class _BreakContinueSwapApplicator(_Applicator):
+    """Swap ``break`` ↔ ``continue`` in loops."""
+
+    def visit_Break(self, node: ast.Break) -> ast.AST:
+        if not self.applied:
+            if self.current_idx == self.target_idx:
+                new_node = ast.Continue()
+                ast.copy_location(node, new_node)
+                self.description = "break -> continue"
+                self.line = node.lineno
+                self.col = node.col_offset
+                self.applied = True
+                return new_node
+            self.current_idx += 1
+        return node
+
+    def visit_Continue(self, node: ast.Continue) -> ast.AST:
+        if not self.applied:
+            if self.current_idx == self.target_idx:
+                new_node = ast.Break()
+                ast.copy_location(node, new_node)
+                self.description = "continue -> break"
+                self.line = node.lineno
+                self.col = node.col_offset
+                self.applied = True
+                return new_node
+            self.current_idx += 1
+        return node
+
+
+class _BreakContinueSwapCounter(_Counter):
+    def visit_Break(self, node: ast.Break) -> None:
+        self.count += 1
+
+    def visit_Continue(self, node: ast.Continue) -> None:
+        self.count += 1
+
+
+# -- Unary negate: -x -> x --
+
+
+class _UnaryNegateApplicator(_Applicator):
+    """Remove unary minus: ``-x`` → ``x``."""
+
+    def visit_UnaryOp(self, node: ast.UnaryOp) -> ast.AST:
+        self.generic_visit(node)
+        if isinstance(node.op, ast.USub) and not self.applied:
+            if self.current_idx == self.target_idx:
+                self.description = "-x -> x"
+                self.line = node.lineno
+                self.col = node.col_offset
+                self.applied = True
+                return node.operand
+            self.current_idx += 1
+        return node
+
+
+class _UnaryNegateCounter(_Counter):
+    def visit_UnaryOp(self, node: ast.UnaryOp) -> None:
+        self.generic_visit(node)
+        if isinstance(node.op, ast.USub):
+            self.count += 1
+
+
 OPERATORS: dict[str, tuple[type[_Counter], type[_Applicator]]] = {
     "arithmetic": (_ArithmeticCounter, _ArithmeticApplicator),
     "comparison": (_ComparisonCounter, _ComparisonApplicator),
@@ -515,6 +596,8 @@ OPERATORS: dict[str, tuple[type[_Counter], type[_Applicator]]] = {
     "remove_not": (_RemoveNotCounter, _RemoveNotApplicator),
     "exception_swallow": (_ExceptionSwallowCounter, _ExceptionSwallowApplicator),
     "argument_swap": (_ArgumentSwapCounter, _ArgumentSwapApplicator),
+    "break_continue_swap": (_BreakContinueSwapCounter, _BreakContinueSwapApplicator),
+    "unary_negate": (_UnaryNegateCounter, _UnaryNegateApplicator),
 }
 
 

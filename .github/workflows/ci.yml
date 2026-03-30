@@ -84,6 +84,7 @@ jobs:
       - name: Bump patch version
         run: |
           git fetch --tags
+          git pull --rebase origin main
           CURRENT=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)"/\1/')
           MAJOR=$(echo "$CURRENT" | cut -d. -f1)
           MINOR=$(echo "$CURRENT" | cut -d. -f2)

@@ -80,18 +80,22 @@ verbose = false
 # ============================================================================
 
 # Valid dotted paths that should succeed
-_VALID_TARGETS = st.sampled_from([
-    "ordeal.invariants.bounded",
-    "ordeal.invariants.unique",
-    "ordeal.invariants",
-])
+_VALID_TARGETS = st.sampled_from(
+    [
+        "ordeal.invariants.bounded",
+        "ordeal.invariants.unique",
+        "ordeal.invariants",
+    ]
+)
 
 # Invalid paths that should fail with exit code 1
-_INVALID_TARGETS = st.sampled_from([
-    "nodot",
-    "nonexistent.module.func",
-    "also.nonexistent",
-])
+_INVALID_TARGETS = st.sampled_from(
+    [
+        "nodot",
+        "nonexistent.module.func",
+        "also.nonexistent",
+    ]
+)
 
 
 @quickcheck

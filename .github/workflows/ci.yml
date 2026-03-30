@@ -83,11 +83,17 @@ jobs:
 
       - name: Bump patch version
         run: |
+          git fetch --tags
           CURRENT=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)"/\1/')
           MAJOR=$(echo "$CURRENT" | cut -d. -f1)
           MINOR=$(echo "$CURRENT" | cut -d. -f2)
           PATCH=$(echo "$CURRENT" | cut -d. -f3)
           NEW="$MAJOR.$MINOR.$((PATCH + 1))"
+          # Skip if this version was already tagged (e.g. re-run)
+          while git tag -l "v$NEW" | grep -q .; do
+            PATCH=$((PATCH + 1))
+            NEW="$MAJOR.$MINOR.$((PATCH + 1))"
+          done
           sed -i "s/^version = \"$CURRENT\"/version = \"$NEW\"/" pyproject.toml
           echo "NEW_VERSION=$NEW" >> "$GITHUB_ENV"
 

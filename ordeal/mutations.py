@@ -357,6 +357,151 @@ class _DeleteStatementCounter(_Counter):
         self.count += 1
 
 
+# -- Logical operator swap: and <-> or --
+
+
+class _LogicalApplicator(_Applicator):
+    """Swap ``and`` with ``or`` and vice versa."""
+
+    SWAPS: dict[type, tuple[type, str, str]] = {
+        ast.And: (ast.Or, "and", "or"),
+        ast.Or: (ast.And, "or", "and"),
+    }
+
+    def visit_BoolOp(self, node: ast.BoolOp) -> ast.AST:
+        self.generic_visit(node)
+        entry = self.SWAPS.get(type(node.op))
+        if entry and not self.applied:
+            if self.current_idx == self.target_idx:
+                new_cls, old_sym, new_sym = entry
+                node = copy.deepcopy(node)
+                node.op = new_cls()
+                self.description = f"{old_sym} -> {new_sym}"
+                self.line = node.lineno
+                self.col = node.col_offset
+                self.applied = True
+            self.current_idx += 1
+        return node
+
+
+class _LogicalCounter(_Counter):
+    def visit_BoolOp(self, node: ast.BoolOp) -> None:
+        self.generic_visit(node)
+        if type(node.op) in _LogicalApplicator.SWAPS:
+            self.count += 1
+
+
+# -- Swap if/else branches --
+
+
+class _SwapIfElseApplicator(_Applicator):
+    """Swap the if-body and else-body of an if statement."""
+
+    def visit_If(self, node: ast.If) -> ast.AST:
+        self.generic_visit(node)
+        if node.orelse and not self.applied:
+            if self.current_idx == self.target_idx:
+                node = copy.deepcopy(node)
+                node.body, node.orelse = node.orelse, node.body
+                self.description = "swap if/else branches"
+                self.line = node.lineno
+                self.col = node.col_offset
+                self.applied = True
+            self.current_idx += 1
+        return node
+
+
+class _SwapIfElseCounter(_Counter):
+    def visit_If(self, node: ast.If) -> None:
+        self.generic_visit(node)
+        if node.orelse:
+            self.count += 1
+
+
+# -- Remove not: ``not x`` -> ``x`` --
+
+
+class _RemoveNotApplicator(_Applicator):
+    """Remove ``not`` from unary-not expressions."""
+
+    def visit_UnaryOp(self, node: ast.UnaryOp) -> ast.AST:
+        self.generic_visit(node)
+        if isinstance(node.op, ast.Not) and not self.applied:
+            if self.current_idx == self.target_idx:
+                self.description = "remove not"
+                self.line = node.lineno
+                self.col = node.col_offset
+                self.applied = True
+                return node.operand  # unwrap: not x -> x
+            self.current_idx += 1
+        return node
+
+
+class _RemoveNotCounter(_Counter):
+    def visit_UnaryOp(self, node: ast.UnaryOp) -> None:
+        self.generic_visit(node)
+        if isinstance(node.op, ast.Not):
+            self.count += 1
+
+
+# -- Exception swallow: replace except body with pass --
+
+
+class _ExceptionSwallowApplicator(_Applicator):
+    """Replace except handler body with ``pass`` (swallow the exception)."""
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> ast.AST:
+        self.generic_visit(node)
+        if not self.applied:
+            # Skip handlers that already just contain pass
+            if len(node.body) == 1 and isinstance(node.body[0], ast.Pass):
+                return node
+            if self.current_idx == self.target_idx:
+                node = copy.deepcopy(node)
+                node.body = [ast.Pass()]
+                ast.fix_missing_locations(node)
+                self.description = "swallow exception"
+                self.line = node.lineno
+                self.col = node.col_offset
+                self.applied = True
+            self.current_idx += 1
+        return node
+
+
+class _ExceptionSwallowCounter(_Counter):
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        self.generic_visit(node)
+        if not (len(node.body) == 1 and isinstance(node.body[0], ast.Pass)):
+            self.count += 1
+
+
+# -- Argument swap: f(a, b) -> f(b, a) --
+
+
+class _ArgumentSwapApplicator(_Applicator):
+    """Swap the first two arguments of a function call."""
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        self.generic_visit(node)
+        if len(node.args) >= 2 and not self.applied:
+            if self.current_idx == self.target_idx:
+                node = copy.deepcopy(node)
+                node.args[0], node.args[1] = node.args[1], node.args[0]
+                self.description = "swap arguments"
+                self.line = node.lineno
+                self.col = node.col_offset
+                self.applied = True
+            self.current_idx += 1
+        return node
+
+
+class _ArgumentSwapCounter(_Counter):
+    def visit_Call(self, node: ast.Call) -> None:
+        self.generic_visit(node)
+        if len(node.args) >= 2:
+            self.count += 1
+
+
 OPERATORS: dict[str, tuple[type[_Counter], type[_Applicator]]] = {
     "arithmetic": (_ArithmeticCounter, _ArithmeticApplicator),
     "comparison": (_ComparisonCounter, _ComparisonApplicator),
@@ -365,6 +510,11 @@ OPERATORS: dict[str, tuple[type[_Counter], type[_Applicator]]] = {
     "boundary": (_BoundaryCounter, _BoundaryApplicator),
     "constant": (_ConstantCounter, _ConstantApplicator),
     "delete_statement": (_DeleteStatementCounter, _DeleteStatementApplicator),
+    "logical": (_LogicalCounter, _LogicalApplicator),
+    "swap_if_else": (_SwapIfElseCounter, _SwapIfElseApplicator),
+    "remove_not": (_RemoveNotCounter, _RemoveNotApplicator),
+    "exception_swallow": (_ExceptionSwallowCounter, _ExceptionSwallowApplicator),
+    "argument_swap": (_ArgumentSwapCounter, _ArgumentSwapApplicator),
 }
 
 

@@ -21,6 +21,7 @@ from ordeal.audit import (
     _count_lines_in_file,
     _count_tests_in_file,
     _find_test_files,
+    _group_mined_properties,
     _suggest_tests,
     _verify_consistency,
     wilson_lower,
@@ -305,6 +306,37 @@ class TestModuleAuditSummary:
             error="timeout",
         )
         assert not a.coverage_preserved
+
+    def test_mined_grouped_in_summary(self):
+        a = ModuleAudit(module="myapp.scoring")
+        a.mined_properties = [
+            "add: commutative (30/30, >=89% CI)",
+            "mul: commutative (30/30, >=89% CI)",
+            "add: deterministic (30/30, >=89% CI)",
+        ]
+        s = a.summary()
+        assert "commutative(add, mul)" in s
+        assert "deterministic(add)" in s
+
+
+class TestGroupMinedProperties:
+    def test_groups_by_property(self):
+        raw = [
+            "add: commutative (30/30, >=89% CI)",
+            "mul: commutative (30/30, >=89% CI)",
+            "add: deterministic (30/30, >=89% CI)",
+        ]
+        result = _group_mined_properties(raw)
+        assert "commutative(add, mul)" in result
+        assert "deterministic(add)" in result
+
+    def test_empty(self):
+        assert _group_mined_properties([]) == ""
+
+    def test_single(self):
+        raw = ["bounded: never None (50/50, >=93% CI)"]
+        result = _group_mined_properties(raw)
+        assert "never None(bounded)" in result
 
 
 # ============================================================================

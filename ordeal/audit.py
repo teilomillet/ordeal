@@ -219,6 +219,37 @@ def wilson_lower(successes: int, total: int, z: float = 1.96) -> float:
 # ============================================================================
 
 
+def _group_mined_properties(raw: list[str]) -> str:
+    """Group ``"func: prop (stats)"`` entries by property kind.
+
+    Input:  ``["add: commutative (...)", "add: deterministic (...)",
+              "mul: commutative (...)", "mul: associative (...)"]``
+
+    Output: ``"commutative(add, mul), deterministic(add), associative(mul)"``
+
+    This is more scannable than the raw list when many functions share
+    the same property.
+    """
+    from collections import defaultdict
+
+    by_prop: dict[str, list[str]] = defaultdict(list)
+    for entry in raw:
+        # Format: "func_name: prop_name (holds/total, >=CI)"
+        colon = entry.find(": ")
+        if colon == -1:
+            continue
+        func = entry[:colon]
+        rest = entry[colon + 2 :]
+        paren = rest.find(" (")
+        prop = rest[:paren] if paren != -1 else rest
+        by_prop[prop].append(func)
+
+    parts = []
+    for prop, funcs in by_prop.items():
+        parts.append(f"{prop}({', '.join(funcs)})")
+    return ", ".join(parts[:DISPLAY_CAP]) if parts else ""
+
+
 @dataclass
 class ModuleAudit:
     """Audit result for one module.
@@ -313,7 +344,8 @@ class ModuleAudit:
             )
 
         if self.mined_properties:
-            lines.append(f"    mined:    {', '.join(self.mined_properties[:DISPLAY_CAP])}")
+            grouped = _group_mined_properties(self.mined_properties)
+            lines.append(f"    mined:    {grouped}")
 
         if self.gap_functions:
             lines.append(

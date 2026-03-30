@@ -35,6 +35,7 @@ Each function is simple by default and unlocks depth through parameters::
 from __future__ import annotations
 
 import threading
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -214,12 +215,24 @@ def sometimes(
         raise AssertionError(f"sometimes: never true in {attempts} attempts: {name}")
 
     cond = condition() if callable(condition) else condition
-    tracker.record(name, "sometimes", cond, details or None)
+    was_active = tracker.record(name, "sometimes", cond, details or None)
+    if not was_active:
+        warnings.warn(
+            f"sometimes({name!r}) called but tracker is inactive — this is a no-op. "
+            f"Run with --chaos or call auto_configure() to enable property tracking.",
+            stacklevel=2,
+        )
 
 
 def reachable(name: str, **details: Any) -> None:
     """Assert this code path executes at least once during the run."""
-    tracker.record_hit(name, "reachable")
+    was_active = tracker.record_hit(name, "reachable")
+    if not was_active:
+        warnings.warn(
+            f"reachable({name!r}) called but tracker is inactive — this is a no-op. "
+            f"Run with --chaos or call auto_configure() to enable property tracking.",
+            stacklevel=2,
+        )
 
 
 def unreachable(name: str, *, mute: bool = False, **details: Any) -> None:

@@ -27,6 +27,23 @@ from hypothesis import given, settings
 
 from ordeal.auto import _infer_strategies
 
+_REL_TOL = 1e-9
+_ABS_TOL = 1e-12
+
+
+def _approx_equal(a: Any, b: Any) -> bool:
+    """Equality that tolerates float rounding.
+
+    Uses exact ``==`` for non-float types.  For floats, applies
+    ``math.isclose`` with tight tolerances so only rounding noise is
+    forgiven — genuinely different values still compare as unequal.
+    """
+    if isinstance(a, float) and isinstance(b, float):
+        if math.isnan(a) or math.isnan(b):
+            return False
+        return math.isclose(a, b, rel_tol=_REL_TOL, abs_tol=_ABS_TOL)
+    return a == b
+
 
 @dataclass
 class MinedProperty:
@@ -217,7 +234,7 @@ def _check_deterministic(
             out1 = fn(**kwargs)
             out2 = fn(**kwargs)
             total += 1
-            if out1 == out2:
+            if _approx_equal(out1, out2):
                 holds += 1
         except Exception:
             pass
@@ -254,7 +271,7 @@ def _check_idempotent(
             kwargs2[first_param] = output
             out2 = fn(**kwargs2)
             total += 1
-            if out2 == output:
+            if _approx_equal(out2, output):
                 holds += 1
         except (TypeError, ValueError, AttributeError):
             pass  # output type doesn't fit as input — skip
@@ -290,7 +307,7 @@ def _check_involution(
             kwargs2[first_param] = output
             out2 = fn(**kwargs2)
             total += 1
-            if out2 == kwargs[first_param]:
+            if _approx_equal(out2, kwargs[first_param]):
                 holds += 1
         except (TypeError, ValueError, AttributeError):
             pass
@@ -421,7 +438,7 @@ def _check_commutative(
             swapped = {a_name: kwargs[b_name], b_name: kwargs[a_name]}
             out_swapped = fn(**swapped)
             total += 1
-            if out == out_swapped:
+            if _approx_equal(out, out_swapped):
                 holds += 1
         except Exception:
             pass
@@ -456,7 +473,7 @@ def _check_associative(
             ab = fn(**{a_name: a, b_name: b})
             right = fn(**{a_name: ab, b_name: c})
             total += 1
-            if left == right:
+            if _approx_equal(left, right):
                 holds += 1
         except Exception:
             pass

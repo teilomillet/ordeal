@@ -70,6 +70,14 @@ def subtract(a: int, b: int) -> int:
     return a - b
 
 
+def float_add(a: float, b: float) -> float:
+    return a + b
+
+
+def float_negate(x: float) -> float:
+    return -x
+
+
 class TestMine:
     def test_discovers_bounded_01(self):
         result = mine(clamp, max_examples=100)
@@ -213,6 +221,26 @@ class TestMine:
         inv = next((p for p in result.properties if p.name == "involution"), None)
         assert inv is not None
         assert inv.universal  # -(-x) == x
+
+    def test_float_commutativity(self):
+        result = mine(float_add, max_examples=200)
+        comm = next((p for p in result.properties if p.name == "commutative"), None)
+        assert comm is not None
+        assert comm.universal  # a + b ≈ b + a for floats
+
+    def test_float_associativity(self):
+        result = mine(float_add, max_examples=200)
+        assoc = next((p for p in result.properties if p.name == "associative"), None)
+        # Float addition is NOT strictly associative, but with approx
+        # equality it should hold for most sampled triples
+        if assoc is not None:
+            assert assoc.confidence > 0.8
+
+    def test_float_involution(self):
+        result = mine(float_negate, max_examples=200)
+        inv = next((p for p in result.properties if p.name == "involution"), None)
+        assert inv is not None
+        assert inv.universal  # -(-x) ≈ x for floats
 
     def test_discovers_non_involution(self):
         result = mine(always_positive, max_examples=100)

@@ -1241,26 +1241,6 @@ Things mine() fundamentally cannot discover from random sampling — these requi
 | `confidence` | `float` | `holds / total` |
 | `universal` | `bool` | True if held on every example |
 
-### mine_pair
-
-```python
-mine_pair(
-    f: Callable,
-    g: Callable,
-    *,
-    max_examples: int = 200,
-    **fixtures: SearchStrategy | Any,
-) -> MineResult
-```
-
-Discover relational properties between two functions: roundtrip (`g(f(x)) == x`), reverse roundtrip (`f(g(x)) == x`), and commutative composition (`f(g(x)) == g(f(x))`). Strategies inferred from `f`'s type hints.
-
-```python
-from ordeal.mine import mine_pair
-result = mine_pair(json.dumps, json.loads)
-# discovers: roundtrip g(f(x)) == x
-```
-
 ### validate_mined_properties
 
 ```python

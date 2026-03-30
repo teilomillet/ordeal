@@ -727,3 +727,52 @@ class TestMutationBattle:
         )
         assert result.total > 0
         assert result.score > 0, result.summary()
+
+
+# ============================================================================
+# Level 1d: Equivalence filtering — dead mutant detection
+# ============================================================================
+
+
+class TestEquivalenceFiltering:
+    def test_filters_add_zero_identity(self):
+        """x + 0 mutated to x - 0 is equivalent — should be filtered."""
+        source = "def f(x):\n    return x + 0\n"
+        mutants = generate_mutants(source, operators=["arithmetic"])
+        # x + 0 -> x - 0 is equivalent (both == x), should be filtered
+        descs = [m.description for m, _ in mutants]
+        assert "+ -> -" not in descs, f"Equivalent mutant not filtered: {descs}"
+
+    def test_filters_multiply_by_one_identity(self):
+        """x * 1 mutated to x / 1 is equivalent — should be filtered."""
+        source = "def f(x):\n    return x * 1\n"
+        mutants = generate_mutants(source, operators=["arithmetic"])
+        descs = [m.description for m, _ in mutants]
+        assert "* -> /" not in descs, f"Equivalent mutant not filtered: {descs}"
+
+    def test_preserves_real_arithmetic_mutants(self):
+        """x + y (non-identity) should still generate mutants."""
+        source = "def add(a, b):\n    return a + b\n"
+        mutants = generate_mutants(source, operators=["arithmetic"])
+        assert len(mutants) >= 1
+        assert any("+ -> -" in m.description for m, _ in mutants)
+
+    def test_filters_zero_plus_x_commutative(self):
+        """0 + x mutated to 0 - x: left-side identity for commutative ops."""
+        source = "def f(x):\n    return 0 + x\n"
+        mutants = generate_mutants(source, operators=["arithmetic"])
+        descs = [m.description for m, _ in mutants]
+        assert "+ -> -" not in descs, f"Equivalent mutant not filtered: {descs}"
+
+    def test_filters_bytecode_identical(self):
+        """Mutants that compile to identical bytecode should be filtered."""
+        # return_none on a function that already returns None
+        source = "def f():\n    return None\n"
+        mutants = generate_mutants(source, operators=["return_none"])
+        assert len(mutants) == 0, "return None -> return None is equivalent"
+
+    def test_real_mutants_survive_filtering(self):
+        """Filtering should not remove mutants on code with real operations."""
+        source = "def compute(a, b):\n    return a * b + a\n"
+        mutants = generate_mutants(source, operators=["arithmetic"])
+        assert len(mutants) >= 2, f"Real mutants should not be filtered: {len(mutants)}"

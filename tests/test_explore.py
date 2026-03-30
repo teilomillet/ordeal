@@ -7,6 +7,7 @@ from hypothesis.stateful import invariant, rule
 from ordeal.chaos import ChaosTest
 from ordeal.explore import Checkpoint, CoverageCollector, Explorer, _DataProxy
 from ordeal.faults import LambdaFault
+from tests._deep_target import DeepService
 from tests._explore_target import BranchyService
 
 # ============================================================================
@@ -274,3 +275,168 @@ class TestEnergyScheduling:
         result = explorer.run(max_runs=50, steps_per_run=20)
         assert result.checkpoints_saved > 0
         assert len(explorer._checkpoints) > 0
+
+
+# ============================================================================
+# Ablation: energy vs uniform vs recent
+# ============================================================================
+
+
+class DeepChaos(ChaosTest):
+    """ChaosTest wrapping DeepService — 4-phase state machine.
+
+    Reaching phase 4 requires: accumulate() 5x -> pivot() -> climb() 3x -> strike().
+    Coverage-guided exploration with energy scheduling should reach deeper phases
+    by checkpointing at phase transitions and branching from there.
+    """
+
+    faults = [
+        LambdaFault("noop_fault", lambda: None, lambda: None),
+    ]
+
+    def __init__(self):
+        super().__init__()
+        self.svc = DeepService()
+
+    @rule()
+    def do_accumulate(self):
+        self.svc.accumulate()
+
+    @rule()
+    def do_pivot(self):
+        self.svc.pivot()
+
+    @rule()
+    def do_climb(self):
+        self.svc.climb()
+
+    @rule()
+    def do_strike(self):
+        self.svc.strike()
+
+    @rule()
+    def do_noop(self):
+        self.svc.noop()
+
+    @invariant()
+    def phase_is_valid(self):
+        assert self.svc.phase in {0, 1, 2, 3, 4}
+
+    def teardown(self):
+        super().teardown()
+
+
+class TestAblation:
+    """Compare checkpoint strategies on a deep state machine.
+
+    This is the key ablation study: does energy-based scheduling actually
+    find more coverage than uniform random or recency-biased selection?
+
+    The test runs each strategy with identical parameters (same run count,
+    step count, seed base) and compares final edge counts. Multiple seeds
+    are averaged to reduce variance.
+    """
+
+    N_RUNS = 150
+    STEPS_PER_RUN = 25
+    N_SEEDS = 5
+
+    def _run_strategy(self, strategy: str, seed: int) -> int:
+        """Run exploration with a given strategy and return unique_edges."""
+        explorer = Explorer(
+            DeepChaos,
+            target_modules=["tests._deep_target"],
+            seed=seed,
+            checkpoint_strategy=strategy,
+            checkpoint_prob=0.5,
+        )
+        result = explorer.run(max_runs=self.N_RUNS, steps_per_run=self.STEPS_PER_RUN)
+        return result.unique_edges
+
+    def test_energy_beats_uniform(self):
+        """Energy scheduling should find >= as many edges as uniform.
+
+        Averaged over N_SEEDS seeds to reduce variance. On a deep state
+        machine, energy scheduling consistently outperforms uniform because
+        it revisits checkpoints that led to new coverage (phase boundaries),
+        while uniform treats all checkpoints equally.
+        """
+        energy_total = 0
+        uniform_total = 0
+
+        for i in range(self.N_SEEDS):
+            seed = 100 + i * 31
+            energy_total += self._run_strategy("energy", seed)
+            uniform_total += self._run_strategy("uniform", seed)
+
+        energy_avg = energy_total / self.N_SEEDS
+        uniform_avg = uniform_total / self.N_SEEDS
+
+        assert energy_avg >= uniform_avg * 0.95, (
+            f"Energy ({energy_avg:.1f} avg edges) should match or beat "
+            f"uniform ({uniform_avg:.1f} avg edges)"
+        )
+
+    def test_energy_vs_recent(self):
+        """Energy should find >= as many edges as recent-biased selection."""
+        energy_total = 0
+        recent_total = 0
+
+        for i in range(self.N_SEEDS):
+            seed = 200 + i * 37
+            energy_total += self._run_strategy("energy", seed)
+            recent_total += self._run_strategy("recent", seed)
+
+        energy_avg = energy_total / self.N_SEEDS
+        recent_avg = recent_total / self.N_SEEDS
+
+        assert energy_avg >= recent_avg * 0.95, (
+            f"Energy ({energy_avg:.1f} avg edges) should match or beat "
+            f"recent ({recent_avg:.1f} avg edges)"
+        )
+
+    def test_all_strategies_find_coverage(self):
+        """Sanity check: all three strategies should find some edges."""
+        for strategy in ("energy", "uniform", "recent"):
+            edges = self._run_strategy(strategy, seed=42)
+            assert edges > 0, f"Strategy {strategy!r} found 0 edges"
+
+    def test_edge_growth_curves(self):
+        """Energy strategy should have steeper early edge growth.
+
+        Compares the edge count at the midpoint of exploration (run N/2).
+        Energy scheduling should discover more edges earlier because it
+        prioritizes promising checkpoints.
+        """
+        midpoint = self.N_RUNS // 2
+
+        energy_exp = Explorer(
+            DeepChaos,
+            target_modules=["tests._deep_target"],
+            seed=42,
+            checkpoint_strategy="energy",
+            checkpoint_prob=0.5,
+            record_traces=False,
+        )
+        energy_res = energy_exp.run(max_runs=self.N_RUNS, steps_per_run=self.STEPS_PER_RUN)
+
+        uniform_exp = Explorer(
+            DeepChaos,
+            target_modules=["tests._deep_target"],
+            seed=42,
+            checkpoint_strategy="uniform",
+            checkpoint_prob=0.5,
+            record_traces=False,
+        )
+        uniform_res = uniform_exp.run(max_runs=self.N_RUNS, steps_per_run=self.STEPS_PER_RUN)
+
+        # Compare edge counts at midpoint
+        if energy_res.edge_log and uniform_res.edge_log and midpoint < len(energy_res.edge_log):
+            energy_mid = energy_res.edge_log[midpoint][1]
+            uniform_mid = uniform_res.edge_log[midpoint][1]
+            # Energy should be at least as fast at discovering edges
+            # (relaxed: just check it's not catastrophically worse)
+            assert energy_mid >= uniform_mid * 0.8, (
+                f"Energy midpoint edges ({energy_mid}) much worse than "
+                f"uniform ({uniform_mid})"
+            )

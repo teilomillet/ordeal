@@ -240,6 +240,147 @@ def bench_json_encoder() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Ablation: edges-over-time for energy vs uniform vs recent
+# ---------------------------------------------------------------------------
+
+
+def bench_ablation() -> dict:
+    """Compare checkpoint strategies on real targets.
+
+    Runs energy, uniform, and recent on 2 targets (BranchyService,
+    DeepService) and prints edge counts at 25%, 50%, 75%, and 100%
+    of the run budget.  This is the "show me the ablation" benchmark.
+    """
+    from hypothesis.stateful import invariant, rule
+
+    from ordeal import ChaosTest
+    from ordeal.explore import Explorer
+    from ordeal.faults import LambdaFault
+    from tests._deep_target import DeepService
+    from tests._explore_target import BranchyService
+
+    class _BranchyChaos(ChaosTest):
+        faults = [LambdaFault("noop", lambda: None, lambda: None)]
+
+        def __init__(self):
+            super().__init__()
+            self.svc = BranchyService()
+
+        @rule()
+        def do_a(self):
+            self.svc.step_a()
+
+        @rule()
+        def do_b(self):
+            self.svc.step_b()
+
+        @rule()
+        def do_c(self):
+            self.svc.step_c()
+
+        @invariant()
+        def ok(self):
+            assert self.svc.state in {"init", "a", "b", "ab", "c", "deep"}
+
+        def teardown(self):
+            self.svc.reset()
+            super().teardown()
+
+    class _DeepChaos(ChaosTest):
+        faults = [LambdaFault("noop", lambda: None, lambda: None)]
+
+        def __init__(self):
+            super().__init__()
+            self.svc = DeepService()
+
+        @rule()
+        def do_acc(self):
+            self.svc.accumulate()
+
+        @rule()
+        def do_pivot(self):
+            self.svc.pivot()
+
+        @rule()
+        def do_climb(self):
+            self.svc.climb()
+
+        @rule()
+        def do_strike(self):
+            self.svc.strike()
+
+        @rule()
+        def do_noop(self):
+            self.svc.noop()
+
+        @invariant()
+        def ok(self):
+            assert self.svc.phase in {0, 1, 2, 3, 4}
+
+        def teardown(self):
+            super().teardown()
+
+    targets = [
+        ("branchy", _BranchyChaos, ["tests._explore_target"]),
+        ("deep", _DeepChaos, ["tests._deep_target"]),
+    ]
+    strategies = ["energy", "uniform", "recent"]
+    n_runs = 200
+    n_seeds = 3
+    quartiles = [n_runs // 4, n_runs // 2, 3 * n_runs // 4, n_runs - 1]
+
+    print(f"\n{'':>14}", end="")
+    for q in quartiles:
+        print(f"  run {q + 1:>3}", end="")
+    print("    final")
+    print("-" * 70)
+
+    all_results: dict = {}
+    for target_name, test_cls, modules in targets:
+        for strategy in strategies:
+            edges_at_q: list[list[int]] = [[] for _ in quartiles]
+            final_edges: list[int] = []
+
+            for s in range(n_seeds):
+                seed = 42 + s * 97
+                explorer = Explorer(
+                    test_cls,
+                    target_modules=modules,
+                    seed=seed,
+                    checkpoint_strategy=strategy,
+                    checkpoint_prob=0.5,
+                )
+                result = explorer.run(
+                    max_runs=n_runs, steps_per_run=25
+                )
+
+                for i, q in enumerate(quartiles):
+                    if q < len(result.edge_log):
+                        edges_at_q[i].append(result.edge_log[q][1])
+                    else:
+                        edges_at_q[i].append(result.unique_edges)
+                final_edges.append(result.unique_edges)
+
+            label = f"{target_name}/{strategy}"
+            avgs = [
+                statistics.mean(eq) if eq else 0 for eq in edges_at_q
+            ]
+            final_avg = statistics.mean(final_edges)
+            print(f"{label:>14}", end="")
+            for a in avgs:
+                print(f"  {a:>6.1f}", end="")
+            print(f"  {final_avg:>6.1f}")
+
+            all_results[label] = {
+                "quartiles": avgs,
+                "final": final_avg,
+            }
+
+    print()
+    return {"name": "ablation", "results": all_results}
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -251,6 +392,7 @@ ALL_BENCHMARKS = {
     "strategy": bench_strategy_cache,
     "trace": bench_trace_to_dict,
     "encoder": bench_json_encoder,
+    "ablation": bench_ablation,
 }
 
 

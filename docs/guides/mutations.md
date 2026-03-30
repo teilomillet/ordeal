@@ -133,6 +133,30 @@ This means: on line 42, column 8, the `+` operator was changed to `-`, and all t
 
 **Delete survivors** (`delete statement`): A statement can be removed with no test impact. Either it is dead code (remove it) or the test does not observe its effect (add an assertion for the side effect).
 
+## validate_mined_properties — close the loop with mine()
+
+`mine()` discovers properties. Mutation testing checks whether those properties actually catch bugs. `validate_mined_properties` does both in one call:
+
+```python
+from ordeal.mutations import validate_mined_properties
+
+result = validate_mined_properties("myapp.scoring.compute", max_examples=100)
+print(result.summary())
+# Mutation score: 8/10 (80%)
+#   SURVIVED  L42:8 + -> -
+#   SURVIVED  L67:4 negate if-condition
+```
+
+It mines the original function, then mutates it and re-mines each mutant. If a mined property no longer holds on the mutant, the mutant is killed. Surviving mutants mean the mined properties are too weak to detect that class of bug.
+
+`ordeal audit` runs this automatically and reports the score in the summary:
+
+```
+  mutation: 14/18 (78%)
+```
+
+This answers the question: "are the properties mine() found strong enough to be useful as tests?"
+
 ## Workflow
 
 Mutation testing fits into a validation loop:

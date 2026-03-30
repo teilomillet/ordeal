@@ -467,7 +467,11 @@ Decrease `fault_toggle_prob` to 0.1. The system runs longer without fault interf
 
 By default, `ordeal explore` uses all CPU cores (`workers = 0` means auto-detect). Each worker explores independently with a unique seed. Results are aggregated: runs and steps are summed, edges are unioned for the true unique count.
 
-Workers collaborate through a **shared edge bitmap** (AFL-style, enabled by default): a 64KB shared-memory buffer where each byte marks a discovered edge hash. When worker 3 finds edge `0xAB12`, workers 1-8 see it immediately and skip it. Single-byte writes are atomic — zero locks needed. This causes workers to naturally diverge into different regions of the state space instead of duplicating each other's work.
+Workers collaborate through two mechanisms, both enabled by default:
+
+**Shared edge bitmap** (AFL-style): a 64KB shared-memory buffer where each byte marks a discovered edge hash. When worker 3 finds edge `0xAB12`, workers 1-8 see it immediately and skip it. Single-byte writes are atomic — zero locks needed.
+
+**Shared checkpoint pool**: when a worker discovers a significant new state (2+ new edges), it publishes the machine state as a pickle file to a shared temporary directory. Other workers load these checkpoints and branch from states they would never have reached independently. This is the difference between "8 independent explorers" and "8 explorers collaborating on the same search."
 
 ### Usage
 

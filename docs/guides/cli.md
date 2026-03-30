@@ -10,6 +10,27 @@ uv run ordeal explore      # inside project venv
 
 ## Commands
 
+### `ordeal mine-pair`
+
+Discover relational properties between two functions — roundtrip (`g(f(x)) == x`), reverse roundtrip, and commutative composition:
+
+```bash
+ordeal mine-pair mymod.encode mymod.decode
+ordeal mine-pair json.dumps json.loads -n 500
+```
+
+```
+mine_pair(encode, decode): 200 examples
+  ALWAYS  roundtrip g(f(x)) == x (200/200)
+  ALWAYS  roundtrip f(g(x)) == x (200/200)
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `f` | required | First function (dotted path) |
+| `g` | required | Second function (dotted path) |
+| `--max-examples`, `-n` | `200` | Examples to sample |
+
 ### `ordeal audit`
 
 Measure your existing tests vs what ordeal auto-scan achieves — verified numbers, not estimates:
@@ -28,13 +49,14 @@ ordeal audit
     current:   33 tests |   343 lines | 98% coverage [verified]
     migrated:  12 tests |   130 lines | 96% coverage [verified]
     saving:   64% fewer tests | 62% less code | same coverage
-    mined:    compute: output in [0, 1] (500/500, >=99% CI)
+    mined:    deterministic(compute, normalize), output in [0, 1](compute)
+    mutation: 14/18 (78%)
     suggest:
       - L42 in compute(): test when x < 0
       - L67 in normalize(): test that ValueError is raised
 ```
 
-Every number is `[verified]` (measured via coverage.py JSON, cross-checked for consistency) or `FAILED: reason`. Mined properties include Wilson score confidence intervals.
+Every number is `[verified]` (measured via coverage.py JSON, cross-checked for consistency) or `FAILED: reason`. Mined properties are grouped by kind. The mutation score shows how many code mutations the mined properties catch — if it's below 100%, the surviving mutants reveal property gaps.
 
 The "migrated" column shows what a real ordeal test file looks like: `fuzz()` for crash safety plus explicitly mined properties (bounds, determinism, type checks). It generates the test file a developer would write after adopting ordeal.
 
@@ -81,6 +103,32 @@ Use this to understand a function before writing tests. The `ALWAYS` properties 
 |---|---|---|
 | `target` | required | Dotted path: `mymod.func` or `mymod` (positional) |
 | `--max-examples`, `-n` | `500` | Examples to sample |
+
+### `ordeal mine-pair`
+
+Discover relational properties between two functions: roundtrip (`g(f(x)) == x`), reverse roundtrip (`f(g(x)) == x`), and commutative composition (`f(g(x)) == g(f(x))`).
+
+```bash
+ordeal mine-pair myapp.encode myapp.decode           # roundtrip?
+ordeal mine-pair myapp.serialize myapp.parse -n 500  # more examples
+```
+
+Output:
+
+```
+mine(encode <-> decode): 200 examples
+  ALWAYS  roundtrip decode(encode(x)) == x (48/48)
+  ALWAYS  roundtrip encode(decode(x)) == x (45/45)
+     52%  commutative composition (26/50)
+```
+
+Use this when you have function pairs that should be inverses (encode/decode, serialize/parse, compress/decompress) or that should commute.
+
+| Flag | Default | Description |
+|---|---|---|
+| `f` | required | First function (positional) |
+| `g` | required | Second function (positional) |
+| `--max-examples`, `-n` | `200` | Examples to sample |
 
 ### `ordeal explore`
 

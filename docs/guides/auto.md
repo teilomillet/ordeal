@@ -112,6 +112,32 @@ def test_compute_properties(x: float):
 
 Functions without type hints fall back to informational comments with confidence bounds.
 
+## mine_pair — discover cross-function properties
+
+Check if two functions are inverses, roundtrip-safe, or commutative under composition:
+
+```python
+from ordeal.mine import mine_pair
+
+result = mine_pair(encode, decode, max_examples=200)
+for p in result.universal:
+    print(p)
+# ALWAYS  roundtrip decode(encode(x)) == x (48/48)
+# ALWAYS  roundtrip encode(decode(x)) == x (45/45)
+```
+
+Properties checked:
+
+- **Roundtrip**: `g(f(x)) == x` — the composition is the identity
+- **Reverse roundtrip**: `f(g(x)) == x` — the other direction
+- **Commutative composition**: `f(g(x)) == g(f(x))` — order doesn't matter
+
+Strategies are inferred from `f`'s type hints. Both functions must accept each other's output as input for roundtrip checks to apply.
+
+```bash
+ordeal mine-pair myapp.encode myapp.decode    # CLI equivalent
+```
+
 ## diff — compare two implementations
 
 Differential testing: run two functions on the same random inputs and check their outputs match. Catches regressions, validates refactors, and verifies backend ports:

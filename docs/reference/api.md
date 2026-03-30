@@ -712,8 +712,20 @@ FileSystem()
 ## Mutations
 
 ```python
-from ordeal.mutations import mutate_function_and_test, mutate_and_test, generate_mutants, MutationResult, Mutant
+from ordeal.mutations import mutate_function_and_test, mutate_and_test, validate_mined_properties, generate_mutants, MutationResult, Mutant
 ```
+
+### validate_mined_properties
+
+```python
+validate_mined_properties(
+    target: str,                                # dotted path: "myapp.scoring.compute"
+    max_examples: int = 100,                    # examples for mine()
+    operators: list[str] | None = None,         # None = all operators
+) -> MutationResult
+```
+
+Mine properties of `target`, then mutate it and check the properties catch the mutations. Bridges mine() and mutation testing. Surviving mutants reveal properties too weak to detect real bugs. Used automatically by `ordeal audit`.
 
 ### mutate_function_and_test
 
@@ -1140,7 +1152,7 @@ print(analysis.summary())
 ## Mine
 
 ```python
-from ordeal.mine import mine, MineResult, MinedProperty
+from ordeal.mine import mine, mine_pair, MineResult, MinedProperty
 ```
 
 ### mine
@@ -1165,6 +1177,25 @@ for p in result.universal:
 # ALWAYS  output type is float (500/500)
 # ALWAYS  deterministic (50/50)
 # ALWAYS  output in [0, 1] (500/500)
+```
+
+### mine_pair
+
+```python
+mine_pair(
+    f: Callable,
+    g: Callable,
+    *,
+    max_examples: int = 200,
+    **fixtures: SearchStrategy | Any,
+) -> MineResult
+```
+
+Discover relational properties between two functions. Checks roundtrip (`g(f(x)) == x`), reverse roundtrip (`f(g(x)) == x`), and commutative composition (`f(g(x)) == g(f(x))`). Strategies are inferred from `f`'s signature.
+
+```python
+result = mine_pair(encode, decode)
+# roundtrip decode(encode(x)) == x: ALWAYS
 ```
 
 ### MineResult

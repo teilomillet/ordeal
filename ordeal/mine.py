@@ -53,13 +53,44 @@ class MinedProperty:
         return f"  {status:>6}  {self.name} ({self.holds}/{self.total})"
 
 
+# Properties that mine() structurally cannot check.
+# These are always "unknown unknowns" from mine()'s perspective.
+# Stating them explicitly turns them into "known unknowns" for the user.
+STRUCTURAL_LIMITATIONS: list[str] = [
+    "output value correctness (fuzz checks crash safety, not behavior)",
+    "cross-function consistency (e.g., batch == map of individual)",
+    "domain-specific invariants (e.g., weighted sum, refusal detection)",
+    "error handling for intentionally invalid inputs",
+    "performance and resource usage",
+    "concurrency and thread safety",
+    "state mutation and side effects",
+]
+"""Things mine() fundamentally cannot discover from random sampling.
+
+These are not bugs in mine() — they require domain knowledge that
+no automated tool can infer.  Stating them explicitly helps the
+developer know what manual tests to write.
+"""
+
+
 @dataclass
 class MineResult:
-    """All properties discovered for a function."""
+    """All properties discovered for a function.
+
+    Separates what was checked into three categories:
+
+    - ``properties``: checked and applicable (total > 0)
+    - ``not_applicable``: checked but not relevant to this function
+      (e.g., "bounded [0,1]" for a function returning strings)
+    - ``not_checked``: structural limitations — things mine()
+      fundamentally cannot verify (always the same list)
+    """
 
     function: str
     examples: int
     properties: list[MinedProperty] = field(default_factory=list)
+    not_applicable: list[str] = field(default_factory=list)
+    not_checked: list[str] = field(default_factory=lambda: list(STRUCTURAL_LIMITATIONS))
 
     @property
     def universal(self) -> list[MinedProperty]:
@@ -293,18 +324,25 @@ def mine(
         pass  # some inputs may crash — that's fine, we analyze what we got
 
     # Run all property checks
-    props: list[MinedProperty] = []
-    props.append(_check_type_consistent(outputs))
-    props.append(_check_never_none(outputs))
-    props.append(_check_no_nan(outputs))
-    props.append(_check_non_negative(outputs))
-    props.append(_check_bounded_01(outputs))
-    props.append(_check_never_empty(outputs))
-    props.append(_check_deterministic(fn, inputs))
-    props.append(_check_idempotent(fn, outputs, inputs))
+    all_props: list[MinedProperty] = [
+        _check_type_consistent(outputs),
+        _check_never_none(outputs),
+        _check_no_nan(outputs),
+        _check_non_negative(outputs),
+        _check_bounded_01(outputs),
+        _check_never_empty(outputs),
+        _check_deterministic(fn, inputs),
+        _check_idempotent(fn, outputs, inputs),
+    ]
 
-    # Filter out properties with 0 observations (not applicable)
-    props = [p for p in props if p.total > 0]
+    # Separate applicable (total > 0) from not-applicable (total == 0)
+    props = [p for p in all_props if p.total > 0]
+    not_applicable = [p.name for p in all_props if p.total == 0]
 
     name = getattr(fn, "__name__", str(fn))
-    return MineResult(function=name, examples=len(outputs), properties=props)
+    return MineResult(
+        function=name,
+        examples=len(outputs),
+        properties=props,
+        not_applicable=not_applicable,
+    )

@@ -249,6 +249,9 @@ class ModuleAudit:
     gap_functions: list[str] = field(default_factory=list)
     suggestions: list[str] = field(default_factory=list)
 
+    # Known unknowns — what ordeal structurally cannot verify
+    not_checked: list[str] = field(default_factory=list)
+
     # Audit health — every problem is visible here
     warnings: list[str] = field(default_factory=list)
 
@@ -322,6 +325,11 @@ class ModuleAudit:
             lines.append("    suggest:")
             for s in self.suggestions:
                 lines.append(f"      - {s}")
+
+        if self.not_checked:
+            lines.append("    NOT verified (write these tests manually):")
+            for item in self.not_checked:
+                lines.append(f"      - {item}")
 
         if self.warnings:
             lines.append(f"    warnings: {len(self.warnings)}")
@@ -901,7 +909,12 @@ def audit(
         result.migrated_coverage.missing_lines,
     )
 
-    # -- 5. Self-verify --
+    # -- 5. State known unknowns --
+    from ordeal.mine import STRUCTURAL_LIMITATIONS
+
+    result.not_checked = list(STRUCTURAL_LIMITATIONS)
+
+    # -- 6. Self-verify --
     _verify_consistency(
         result.current_coverage,
         result.migrated_coverage,

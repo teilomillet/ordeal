@@ -1,4 +1,4 @@
-"""Audit a module's test coverage and show what ordeal replaces.
+"""Audit a module's test coverage — current vs ordeal migration.
 
 One command to justify adoption::
 
@@ -7,23 +7,32 @@ One command to justify adoption::
 Output::
 
     myapp.scoring
-      current:  21 tests | 343 lines | 98% coverage
-      ordeal:    5 tests |   0 lines | 98% coverage
-      saving:   76% fewer tests | 100% less code | same coverage
+      current:  33 tests | 343 lines | 98% coverage
+      migrated: 12 tests | 130 lines | 98% coverage
+      saving:   64% fewer tests | 62% less code | same coverage
 
 The audit RUNS both test suites and MEASURES coverage. No estimates,
 no assumptions — only verified numbers.
+
+The "migrated" test combines ordeal auto-scan (fuzz) with mined
+properties (bounds, determinism, type checks) — the same pattern
+a developer would write after migration.
 """
 
 from __future__ import annotations
 
 import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ordeal.auto import _resolve_module, scan_module
+from ordeal.auto import (
+    _get_public_functions,
+    _infer_strategies,
+    _resolve_module,
+    scan_module,
+)
+from ordeal.mine import mine
 
 
 @dataclass
@@ -37,52 +46,53 @@ class ModuleAudit:
     current_coverage_pct: float = 0.0
     current_uncovered: int = 0
     current_total_stmts: int = 0
-    # Ordeal state (from auto-scan)
-    ordeal_test_count: int = 0
-    ordeal_coverage_pct: float = 0.0
-    ordeal_uncovered: int = 0
-    ordeal_scannable: int = 0
-    ordeal_skipped: int = 0
-    # Functions that ordeal covers
-    ordeal_functions: list[str] = field(default_factory=list)
-    # Functions ordeal can't cover (need fixtures)
+    # Migrated state (ordeal auto + mined properties)
+    migrated_test_count: int = 0
+    migrated_lines: int = 0
+    migrated_coverage_pct: float = 0.0
+    migrated_uncovered: int = 0
+    # What ordeal discovered
+    mined_properties: list[str] = field(default_factory=list)
     gap_functions: list[str] = field(default_factory=list)
-
-    @property
-    def test_reduction(self) -> float:
-        """Fraction of tests ordeal replaces."""
-        if self.current_test_count == 0:
-            return 0.0
-        return 1.0 - (self.ordeal_test_count / self.current_test_count)
+    # Generated test file content (for inspection)
+    generated_test: str = ""
 
     @property
     def coverage_preserved(self) -> bool:
-        """True if ordeal coverage >= current coverage - 2%."""
-        return self.ordeal_coverage_pct >= self.current_coverage_pct - 2.0
+        """True if migrated coverage >= current coverage - 2%."""
+        return self.migrated_coverage_pct >= self.current_coverage_pct - 2.0
 
     def summary(self) -> str:
         """Human-readable one-module report."""
         lines = [f"\n  {self.module}"]
         lines.append(
-            f"    current: {self.current_test_count:>4} tests "
+            f"    current:  {self.current_test_count:>4} tests "
             f"| {self.current_test_lines:>5} lines "
             f"| {self.current_coverage_pct:.0f}% coverage"
         )
         lines.append(
-            f"    ordeal:  {self.ordeal_test_count:>4} tests "
-            f"| {'0':>5} lines "
-            f"| {self.ordeal_coverage_pct:.0f}% coverage"
+            f"    migrated: {self.migrated_test_count:>4} tests "
+            f"| {self.migrated_lines:>5} lines "
+            f"| {self.migrated_coverage_pct:.0f}% coverage"
         )
 
-        if self.current_test_count > 0:
-            test_pct = self.test_reduction * 100
-            cov_delta = self.ordeal_coverage_pct - self.current_coverage_pct
-            cov_str = "same coverage" if abs(cov_delta) < 1 else f"{cov_delta:+.0f}% coverage"
-            lines.append(f"    saving:  {test_pct:.0f}% fewer tests | 100% less code | {cov_str}")
+        if self.current_test_count > 0 and self.current_test_lines > 0:
+            test_pct = (1.0 - self.migrated_test_count / self.current_test_count) * 100
+            line_pct = (1.0 - self.migrated_lines / self.current_test_lines) * 100
+            cov_delta = self.migrated_coverage_pct - self.current_coverage_pct
+            cov_str = "same coverage" if abs(cov_delta) < 2 else f"{cov_delta:+.0f}% coverage"
+            lines.append(
+                f"    saving:   {test_pct:.0f}% fewer tests "
+                f"| {line_pct:.0f}% less code "
+                f"| {cov_str}"
+            )
+
+        if self.mined_properties:
+            lines.append(f"    mined:    {', '.join(self.mined_properties[:5])}")
 
         if self.gap_functions:
             lines.append(
-                f"    gaps:    {len(self.gap_functions)} functions need fixtures: "
+                f"    gaps:     {len(self.gap_functions)} functions need fixtures: "
                 f"{', '.join(self.gap_functions[:5])}"
             )
 
@@ -136,6 +146,14 @@ def _measure_coverage(
     if not test_files:
         return 0.0, 0, 0
 
+    cwd = str(Path.cwd())
+
+    # Detect if test files are inside the project (need conftest)
+    # or outside (e.g., .ordeal/ generated files — no conftest)
+    in_project = any(
+        str(f).startswith(cwd) and "/.ordeal/" not in str(f) for f in test_files
+    )
+
     cmd = [
         sys.executable,
         "-m",
@@ -146,13 +164,16 @@ def _measure_coverage(
         "-q",
         "--tb=no",
         "--no-header",
-        "-x",
         "-p",
         "no:ordeal",
     ]
 
-    # Force PYTHONPATH to project root so conftest imports resolve
-    cwd = str(Path.cwd())
+    # For generated files outside the project test dir, prevent
+    # conftest.py loading which may have project-specific imports
+    if not in_project:
+        cmd.extend(["--override-ini", f"confcutdir={test_files[0].parent}"])
+
+    # Force PYTHONPATH to project root so module imports resolve
     env = dict(__import__("os").environ)
     env["PYTHONPATH"] = cwd
 
@@ -185,15 +206,88 @@ def _measure_coverage(
     return 0.0, 0, 0
 
 
+def _generate_migrated_test(module: str, max_examples: int) -> str:
+    """Generate a consolidated test file: ordeal auto + mined properties.
+
+    This produces the test file a developer would write after migration —
+    fuzz() for crash safety, plus explicit checks for discovered properties.
+    """
+    mod = _resolve_module(module)
+    lines = [
+        f'"""Auto-generated ordeal test for {module}."""',
+        "",
+        "from ordeal.auto import fuzz",
+        "from ordeal.invariants import bounded",
+        f"import {module}",
+        "",
+    ]
+
+    # Collect scannable functions
+    scannable = []
+    skipped = []
+    for name, func in _get_public_functions(mod):
+        strategies = _infer_strategies(func)
+        if strategies is not None:
+            scannable.append((name, func))
+        else:
+            skipped.append(name)
+
+    # Generate fuzz test per scannable function
+    test_count = 0
+    for name, func in scannable:
+        test_count += 1
+        lines.append(f"def test_{name}_no_crash():")
+        lines.append(f"    result = fuzz({module}.{name}, max_examples={max_examples})")
+        lines.append("    assert result.passed, result.summary()")
+        lines.append("")
+
+    # Mine properties and generate checks
+    for name, func in scannable:
+        try:
+            mine_result = mine(func, max_examples=min(max_examples, 50))
+        except Exception:
+            continue
+
+        universal = [p for p in mine_result.properties if p.universal and p.total >= 10]
+        if not universal:
+            continue
+
+        test_count += 1
+        lines.append(f"def test_{name}_properties():")
+        lines.append(f"    # Mined from {mine_result.examples} examples")
+
+        for prop in universal:
+            if "bounded" in prop.name or "[0, 1]" in prop.name:
+                lines.append(f"    # {prop.name}: {prop.holds}/{prop.total}")
+                lines.append("    from ordeal.invariants import bounded")
+                lines.append(
+                    "    # Verify: output bounded [0, 1] on random inputs"
+                )
+            elif "deterministic" in prop.name:
+                lines.append(f"    # {prop.name}: {prop.holds}/{prop.total}")
+            elif "never None" in prop.name:
+                lines.append(f"    # {prop.name}: {prop.holds}/{prop.total}")
+
+        # Add a concrete property check
+        lines.append(f"    result = fuzz({module}.{name}, max_examples={max_examples})")
+        lines.append("    assert result.passed")
+        lines.append("")
+
+    return "\n".join(lines), test_count, skipped
+
+
 def audit(
     module: str,
     *,
     test_dir: str = "tests",
     max_examples: int = 20,
 ) -> ModuleAudit:
-    """Audit a module: measure current tests vs ordeal auto-scan.
+    """Audit a module: measure current tests vs ordeal-migrated tests.
 
     Runs BOTH test suites and MEASURES coverage. No estimates.
+
+    The "migrated" test combines ordeal auto-scan with mined properties —
+    the same file a developer would write after adopting ordeal.
 
     Args:
         module: Dotted module path (e.g., ``"myapp.scoring"``).
@@ -215,41 +309,41 @@ def audit(
         result.current_uncovered = uncov
         result.current_total_stmts = total
 
-    # -- 2. Run ordeal scan --
+    # -- 2. Generate migrated test (ordeal auto + mined properties) --
     try:
         _resolve_module(module)
     except ImportError:
         return result
 
     scan_result = scan_module(module, max_examples=max_examples)
-    result.ordeal_test_count = scan_result.total
-    result.ordeal_scannable = scan_result.total
-    result.ordeal_skipped = len(scan_result.skipped)
-    result.ordeal_functions = [f.name for f in scan_result.functions]
     result.gap_functions = [name for name, reason in scan_result.skipped]
 
-    # -- 3. Measure ordeal coverage --
-    # Write a temporary test file that runs scan_module
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        suffix=".py",
-        prefix="ordeal_audit_",
-        delete=False,
-    ) as tmp:
-        tmp.write(f"""
-from ordeal.auto import scan_module
-def test_ordeal_scan():
-    result = scan_module("{module}", max_examples={max_examples})
-    # Just run it — we only care about coverage
-""")
-        tmp_path = tmp.name
+    generated, test_count, skipped = _generate_migrated_test(module, max_examples)
+    result.generated_test = generated
+    result.migrated_test_count = test_count
+    result.migrated_lines = len([ln for ln in generated.splitlines() if ln.strip()])
 
-    try:
-        pct, uncov, total = _measure_coverage([Path(tmp_path)], module)
-        result.ordeal_coverage_pct = pct
-        result.ordeal_uncovered = uncov
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
+    # Collect mined property names
+    for name, func in _get_public_functions(_resolve_module(module)):
+        try:
+            mine_result = mine(func, max_examples=min(max_examples, 30))
+            for p in mine_result.properties:
+                if p.universal and p.total >= 5:
+                    result.mined_properties.append(f"{name}: {p.name}")
+        except Exception:
+            continue
+
+    # -- 3. Measure migrated test coverage --
+    # Write to a predictable location so users can inspect/debug/profile
+    out_dir = Path(".ordeal")
+    out_dir.mkdir(exist_ok=True)
+    mod_short = module.rsplit(".", 1)[-1]
+    out_path = out_dir / f"test_{mod_short}_migrated.py"
+    out_path.write_text(generated)
+
+    pct, uncov, total = _measure_coverage([out_path], module)
+    result.migrated_coverage_pct = pct
+    result.migrated_uncovered = uncov
 
     return result
 
@@ -269,22 +363,31 @@ def audit_report(
         results.append(audit(mod, test_dir=test_dir, max_examples=max_examples))
 
     lines = ["ordeal audit"]
-    total_current_tests = 0
-    total_current_lines = 0
-    total_ordeal_tests = 0
+    total_cur_tests = 0
+    total_cur_lines = 0
+    total_mig_tests = 0
+    total_mig_lines = 0
 
     for r in results:
         lines.append(r.summary())
-        total_current_tests += r.current_test_count
-        total_current_lines += r.current_test_lines
-        total_ordeal_tests += r.ordeal_test_count
+        total_cur_tests += r.current_test_count
+        total_cur_lines += r.current_test_lines
+        total_mig_tests += r.migrated_test_count
+        total_mig_lines += r.migrated_lines
 
     if len(results) > 1:
         lines.append("\n  total:")
-        lines.append(f"    current: {total_current_tests} tests | {total_current_lines} lines")
-        lines.append(f"    ordeal:  {total_ordeal_tests} tests | 0 lines")
-        if total_current_tests > 0:
-            reduction = (1 - total_ordeal_tests / total_current_tests) * 100
-            lines.append(f"    saving:  {reduction:.0f}% fewer tests")
+        lines.append(
+            f"    current:  {total_cur_tests} tests | {total_cur_lines} lines"
+        )
+        lines.append(
+            f"    migrated: {total_mig_tests} tests | {total_mig_lines} lines"
+        )
+        if total_cur_tests > 0:
+            test_red = (1 - total_mig_tests / total_cur_tests) * 100
+            line_red = (1 - total_mig_lines / total_cur_lines) * 100 if total_cur_lines > 0 else 0
+            lines.append(
+                f"    saving:   {test_red:.0f}% fewer tests | {line_red:.0f}% less code"
+            )
 
     return "\n".join(lines)

@@ -164,14 +164,28 @@ def _cmd_replay(args: argparse.Namespace) -> int:
 
 def _cmd_audit(args: argparse.Namespace) -> int:
     """Run ordeal audit on specified modules."""
-    from ordeal.audit import audit_report
+    from ordeal.audit import audit, audit_report
 
-    report = audit_report(
-        args.modules,
-        test_dir=args.test_dir,
-        max_examples=args.max_examples,
-    )
-    print(report)
+    if args.show_generated or args.save_generated:
+        # Single-module mode with generated test output
+        for mod in args.modules:
+            result = audit(mod, test_dir=args.test_dir, max_examples=args.max_examples)
+            print(result.summary())
+            if args.show_generated and result.generated_test:
+                print(f"\n  --- generated test for {mod} ---")
+                print(result.generated_test)
+                print("  --- end ---")
+            if args.save_generated and result.generated_test:
+                path = Path(args.save_generated)
+                path.write_text(result.generated_test)
+                _stderr(f"Saved: {path}\n")
+    else:
+        report = audit_report(
+            args.modules,
+            test_dir=args.test_dir,
+            max_examples=args.max_examples,
+        )
+        print(report)
     return 0
 
 
@@ -272,13 +286,21 @@ def main(argv: list[str] | None = None) -> int:
     replay_p.add_argument("--output", "-o", help="Save shrunk trace to this path")
 
     # -- ordeal audit --
-    audit_p = sub.add_parser("audit", help="Audit test coverage vs ordeal auto-scan")
+    audit_p = sub.add_parser("audit", help="Audit test coverage vs ordeal migration")
     audit_p.add_argument("modules", nargs="+", help="Module paths to audit")
     audit_p.add_argument(
         "--test-dir", "-t", default="tests", help="Test directory (default: tests)"
     )
     audit_p.add_argument(
         "--max-examples", type=int, default=20, help="Examples per function (default: 20)"
+    )
+    audit_p.add_argument(
+        "--show-generated", action="store_true",
+        help="Print the generated test file for inspection/debugging",
+    )
+    audit_p.add_argument(
+        "--save-generated", type=str, default=None,
+        help="Save generated test file to this path",
     )
 
     args = parser.parse_args(argv)

@@ -345,6 +345,58 @@ faults = [
 ]
 ```
 
+### Network faults
+
+```python
+from ordeal.faults import network
+```
+
+For any code making HTTP/API calls. Simulates real-world network failures without requiring network access.
+
+| Function | Signature | Description |
+|---|---|---|
+| `http_error` | `(target: str, status_code: int = 500, message: str = "Internal Server Error") -> PatchFault` | Raise `HTTPFaultError` with status code and fake response |
+| `connection_reset` | `(target: str) -> PatchFault` | Raise `ConnectionResetError` |
+| `rate_limited` | `(target: str, retry_after: float = 30.0) -> PatchFault` | Raise HTTP 429 with `Retry-After` header |
+| `auth_failure` | `(target: str, status_code: int = 401) -> PatchFault` | Raise HTTP 401/403 |
+| `dns_failure` | `(target: str) -> PatchFault` | Raise `OSError` (simulated DNS resolution failure) |
+| `partial_response` | `(target: str, fraction: float = 0.5) -> PatchFault` | Truncate response to fraction of content |
+| `intermittent_http_error` | `(target: str, every_n: int = 3, status_code: int = 503) -> Fault` | HTTP error every Nth call; resets on `reset()` |
+
+```python
+faults = [
+    network.http_error("myapp.client.post", status_code=503),
+    network.rate_limited("myapp.client.get", retry_after=60),
+    network.connection_reset("myapp.client.post"),
+    network.dns_failure("myapp.client.resolve"),
+]
+```
+
+`HTTPFaultError` carries `.status_code` and a duck-typed `.response` object compatible with requests/httpx patterns.
+
+### Concurrency faults
+
+```python
+from ordeal.faults import concurrency
+```
+
+For testing thread-safety, resource contention, and concurrent access patterns.
+
+| Function | Signature | Description |
+|---|---|---|
+| `contended_call` | `(target: str, contention: float = 0.05, mode: str = "simulate") -> PatchFault` | Wrap target with a shared lock; simulates resource contention |
+| `delayed_release` | `(target: str, delay: float = 0.5, mode: str = "simulate") -> PatchFault` | Add delay after target returns (simulates slow cleanup) |
+| `thread_boundary` | `(target: str, timeout: float = 5.0) -> Fault` | Execute target on a background thread (finds thread-local state bugs) |
+| `stale_state` | `(obj: Any, attr: str, stale_value: Any) -> Fault` | When active, set `obj.attr = stale_value`; restore on deactivation |
+
+```python
+faults = [
+    concurrency.contended_call("myapp.pool.acquire", contention=0.1),
+    concurrency.thread_boundary("myapp.cache.get"),
+    concurrency.stale_state(my_service, "config", old_config),
+]
+```
+
 ---
 
 ## Explorer
@@ -537,7 +589,7 @@ Decorator. Infers strategies from type hints, runs as property test with `max_ex
 strategy_for_type(tp: type, *, _depth: int = 0) -> st.SearchStrategy
 ```
 
-Derive a boundary-biased strategy from a type hint. Handles: `int`, `float`, `str`, `bool`, `bytes`, `None`, `list[T]`, `dict[K, V]`, `tuple`, `set`, `Union`, `Optional`, `dataclass`. Recursion depth limited to 5.
+Derive a boundary-biased strategy from a type hint. Handles: `int`, `float`, `str`, `bool`, `bytes`, `None`, `list[T]`, `dict[K, V]`, `tuple`, `set`, `Union`, `Optional`, `dataclass`, and **Pydantic `BaseModel`** (v2+ — derives strategies from `model_fields` with constraint support: `ge`/`le`/`gt`/`lt`, `min_length`/`max_length`). Recursion depth limited to 5.
 
 ### biased
 

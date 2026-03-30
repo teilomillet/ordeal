@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.18
+
+- **Network faults** — `faults.network`: `http_error`, `connection_reset`, `rate_limited`, `auth_failure`, `dns_failure`, `partial_response`, `intermittent_http_error`. Duck-typed `HTTPFaultError` compatible with requests/httpx
+- **Concurrency faults** — `faults.concurrency`: `contended_call`, `delayed_release`, `thread_boundary`, `stale_state`. For thread-safety and resource contention testing
+- **Pydantic strategy support** — `strategy_for_type` and `@quickcheck` now derive strategies from Pydantic `BaseModel` (v2+) with constraint support (`ge`/`le`/`gt`/`lt`, `min_length`/`max_length`)
+
 ## 0.1.17
 
 - **Schemathesis swarm mode** — `chaos_api_test(swarm=True)` and `@with_chaos(swarm=True)` pick a random fault subset per session, matching ChaosTest's swarm design

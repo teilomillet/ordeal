@@ -279,7 +279,7 @@ print(result.summary())
 ### Fault library
 
 ```python
-from ordeal.faults import io, numerical, timing
+from ordeal.faults import io, numerical, timing, network, concurrency
 
 # I/O faults
 io.error_on_call("mod.func")            # raise IOError
@@ -297,6 +297,17 @@ timing.timeout("mod.func")              # raise TimeoutError
 timing.slow("mod.func", delay=2.0)      # add delay
 timing.intermittent_crash("mod.func", every_n=3)
 timing.jitter("mod.func", magnitude=0.01)
+
+# Network faults
+network.http_error("mod.client.post", status_code=503)
+network.connection_reset("mod.client.post")
+network.rate_limited("mod.client.get", retry_after=60)
+network.dns_failure("mod.client.resolve")
+
+# Concurrency faults
+concurrency.contended_call("mod.pool.acquire", contention=0.1)
+concurrency.thread_boundary("mod.cache.get")
+concurrency.stale_state(service, "config", old_config)
 ```
 
 ### Integrations
@@ -368,7 +379,7 @@ ordeal/
 ├── cli.py             ordeal explore / replay
 ├── plugin.py          pytest --chaos
 ├── strategies.py      Adversarial data generation
-├── faults/            io, numerical, timing
+├── faults/            io, numerical, timing, network, concurrency
 └── integrations/      atheris, schemathesis
 ```
 

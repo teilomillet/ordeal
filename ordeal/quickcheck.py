@@ -266,6 +266,10 @@ def strategy_for_type(tp: type, *, _depth: int = 0) -> st.SearchStrategy:
                 field_strats[fname] = strategy_for_type(resolved[fname], _depth=next_depth)
         return st.builds(tp, **field_strats)
 
+    # Pydantic BaseModel — derive strategies from model_fields
+    if _is_pydantic_model(tp):
+        return _strategy_for_pydantic(tp, _depth=next_depth)
+
     # Fallback: Hypothesis from_type
     try:
         return st.from_type(tp)
@@ -331,6 +335,145 @@ def quickcheck(
     if fn is not None:
         return decorator(fn)
     return decorator
+
+
+# ============================================================================
+# Pydantic BaseModel support
+# ============================================================================
+
+
+def _is_pydantic_model(tp: type) -> bool:
+    """Check if *tp* is a Pydantic BaseModel subclass (v2+)."""
+    try:
+        from pydantic import BaseModel
+
+        return isinstance(tp, type) and issubclass(tp, BaseModel) and tp is not BaseModel
+    except ImportError:
+        return False
+
+
+def _strategy_for_pydantic(tp: type, *, _depth: int = 0) -> st.SearchStrategy:
+    """Derive a boundary-biased strategy from a Pydantic model's fields.
+
+    Handles Pydantic v2 ``model_fields``.  Fields with defaults are
+    optionally generated (50/50 default vs. random).  Constrained
+    fields (``ge``, ``le``, ``min_length``, ``max_length``, ``pattern``)
+    are respected where possible.
+
+    Requires ``pydantic >= 2.0``.
+    """
+    from pydantic.fields import FieldInfo
+
+    model_fields: dict[str, FieldInfo] = tp.model_fields  # type: ignore[attr-defined]
+    field_strats: dict[str, st.SearchStrategy] = {}
+
+    for fname, field_info in model_fields.items():
+        annotation = field_info.annotation
+        if annotation is None:
+            field_strats[fname] = st.just(None)
+            continue
+
+        # Derive base strategy from the annotation
+        base = strategy_for_type(annotation, _depth=_depth)
+
+        # Apply numeric constraints (ge, le, gt, lt)
+        base = _apply_pydantic_constraints(base, field_info, annotation)
+
+        # If field has a real default (not PydanticUndefined), sometimes use it
+        if _has_real_default(field_info):
+            base = st.one_of(st.just(field_info.default), base)
+
+        field_strats[fname] = base
+
+    return st.builds(tp, **field_strats)
+
+
+def _has_real_default(field_info: Any) -> bool:
+    """Check if a Pydantic field has a real default (not PydanticUndefined)."""
+    default = field_info.default
+    if default is None:
+        return False
+    # Pydantic v2 uses PydanticUndefined for required fields
+    type_name = type(default).__name__
+    if "Undefined" in type_name or "PydanticUndefined" in type_name:
+        return False
+    # Ellipsis is also used as a sentinel
+    if default is ...:
+        return False
+    return True
+
+
+def _apply_pydantic_constraints(
+    base: st.SearchStrategy,
+    field_info: Any,
+    annotation: type,
+) -> st.SearchStrategy:
+    """Narrow a strategy based on Pydantic field metadata constraints.
+
+    Pydantic v2 stores constraints as annotated_types objects in
+    ``field_info.metadata``, e.g. ``[Ge(ge=0), Le(le=100)]``.
+    """
+    metadata = getattr(field_info, "metadata", [])
+    if not metadata:
+        return base
+
+    # Extract annotated_types constraints (Pydantic v2 uses these)
+    ge = gt = le = lt = None
+    min_length = max_length = None
+
+    for m in metadata:
+        val = getattr(m, "ge", None)
+        if val is not None:
+            ge = val
+        val = getattr(m, "gt", None)
+        if val is not None:
+            gt = val
+        val = getattr(m, "le", None)
+        if val is not None:
+            le = val
+        val = getattr(m, "lt", None)
+        if val is not None:
+            lt = val
+        val = getattr(m, "min_length", None)
+        if val is not None:
+            min_length = val
+        val = getattr(m, "max_length", None)
+        if val is not None:
+            max_length = val
+
+    # Apply numeric constraints
+    if annotation is int or annotation is float:
+        min_val = None
+        max_val = None
+        if ge is not None:
+            min_val = ge
+        elif gt is not None:
+            min_val = gt + (1 if annotation is int else 1e-10)
+        if le is not None:
+            max_val = le
+        elif lt is not None:
+            max_val = lt - (1 if annotation is int else 1e-10)
+
+        if min_val is not None or max_val is not None:
+            if annotation is int:
+                return biased.integers(
+                    min_value=int(min_val) if min_val is not None else None,
+                    max_value=int(max_val) if max_val is not None else None,
+                )
+            else:
+                return biased.floats(
+                    min_value=float(min_val) if min_val is not None else None,
+                    max_value=float(max_val) if max_val is not None else None,
+                )
+
+    # Apply string length constraints
+    if annotation is str and (min_length is not None or max_length is not None):
+        return biased.strings(
+            min_size=min_length or 0,
+            max_size=max_length or 100,
+        )
+
+    return base
 
 
 # ============================================================================

@@ -7,6 +7,13 @@ Three built-in fault types:
 - PatchFault: wraps a target function with fault-injecting behavior
 - LambdaFault: custom activate/deactivate callables
 - Subclass Fault directly for full control
+
+Fault modules:
+- timing: timeout, slow, intermittent_crash, jitter
+- io: error_on_call, disk_full, permission_denied, corrupt/truncate output
+- numerical: nan_injection, inf_injection, wrong_shape, corrupted_floats
+- network: http_error, connection_reset, rate_limited, auth_failure, dns_failure
+- concurrency: contended_call, delayed_release, thread_boundary, stale_state
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 [project]
 name = "ordeal"
-dynamic = ["version"]
+version = "0.1.0"
 description = "Automated chaos testing for Python — fault injection, property assertions, and stateful exploration."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -57,13 +57,11 @@ Issues = "https://github.com/teilomillet/ordeal/issues"
 Changelog = "https://github.com/teilomillet/ordeal/releases"
 
 [build-system]
-requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
+requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.package-data]
 ordeal = ["py.typed"]
-
-[tool.setuptools-scm]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

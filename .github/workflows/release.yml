@@ -12,22 +12,8 @@ jobs:
     environment: pypi
     permissions:
       id-token: write
-    env:
-      # Strip 'v' prefix at job level so all steps see it.
-      # github.ref_name = "v0.1.0" → version = "0.1.0"
-      SETUPTOOLS_SCM_PRETEND_VERSION: ${{ vars.VERSION_OVERRIDE || '' }}
     steps:
       - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-
-      - name: Set version from tag
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          VERSION="${TAG#v}"
-          echo "SETUPTOOLS_SCM_PRETEND_VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "Building ordeal $VERSION from tag $TAG"
 
       - uses: actions/setup-python@v6
         with:
@@ -41,9 +27,11 @@ jobs:
 
       - name: Verify package version
         run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "Expected version: $TAG"
           ls dist/
-          if ls dist/ | grep -q "0.0.0"; then
-            echo "ERROR: Package built as 0.0.0"
+          if ! ls dist/ | grep -q "$TAG"; then
+            echo "ERROR: dist/ does not contain $TAG"
             exit 1
           fi
 

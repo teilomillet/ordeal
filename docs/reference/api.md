@@ -788,6 +788,22 @@ Generate all possible mutants from source. Returns list of `(Mutant, modified_as
 
 **Available operators:** `arithmetic`, `comparison`, `negate`, `return_none`, `boundary`, `constant`, `delete`
 
+### mutation_faults
+
+```python
+mutation_faults(
+    target: str,                    # dotted path: "myapp.scoring.compute"
+    operators: list[str] | None = None,
+) -> list[tuple[Mutant, PatchFault]]
+```
+
+Generate `PatchFault` objects for each mutant. When activated, each fault replaces the target function with a mutated version. Use with ChaosTest to let the nemesis toggle mutations during exploration.
+
+```python
+from ordeal.mutations import mutation_faults
+faults = [mf for _, mf in mutation_faults("myapp.scoring.compute")]
+```
+
 ---
 
 ## Auto

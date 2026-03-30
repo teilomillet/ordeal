@@ -2,13 +2,35 @@
 
 ## Why mutation testing
 
-Your chaos tests found zero bugs. That is either very good news or very bad news. Mutation testing tells you which.
+Your chaos tests found zero bugs. That's either very good news or very bad news. Mutation testing tells you which.
 
 The idea is simple: change the code (mutate it) and run the tests. If the tests still pass after the change, they have a blind spot. That surviving mutant represents a class of real bugs your tests would not catch.
 
-This is how Meta validates test quality at scale. Write the tests, then prove they work by checking that they fail when the code is wrong. If they do not fail, the tests are incomplete.
+This is how Meta validates test quality at scale. Write the tests, then prove they work by checking that they fail when the code is wrong. If they don't fail, the tests are incomplete.
 
-Mutation testing answers a question that code coverage cannot: "If this line were wrong, would any test notice?" A line can have 100% coverage and still have zero meaningful assertions checking its output.
+### The question coverage can't answer
+
+Code coverage tells you "this line ran." Mutation testing tells you "if this line were wrong, would any test notice?" A line can have 100% coverage and still have zero meaningful assertions checking its output. Consider:
+
+```python
+def compute(a, b):
+    return a + b
+
+def test_compute():
+    compute(3, 4)  # 100% coverage, 0% checking
+```
+
+The test runs the function — coverage says 100%. But swap `+` to `-` and the test still passes. The mutation reveals: nobody checks the result.
+
+### Where it fits in the ordeal standard
+
+Ordeal's goal is certification: when ordeal passes, the code works. But that only holds if the tests themselves are trustworthy. Mutation testing is the meta-test — it validates the validators:
+
+```
+Code ← tested by → Chaos tests ← validated by → Mutation testing
+```
+
+If your chaos tests have a 95%+ mutation score, you can trust them. If not, the surviving mutants tell you exactly where to add assertions.
 
 ## Quick start
 
@@ -156,6 +178,48 @@ It mines the original function, then mutates it and re-mines each mutant. If a m
 ```
 
 This answers the question: "are the properties mine() found strong enough to be useful as tests?"
+
+## mutation_faults — mutations as faults for the Explorer
+
+`mutation_faults()` bridges mutation testing with the Explorer. Instead of running mutations in a loop, it generates PatchFault objects — one per mutant. You can add these to a ChaosTest's fault list, and the nemesis will toggle them during exploration:
+
+```python
+from ordeal.mutations import mutation_faults
+
+# Generate faults from mutants
+mutant_faults = mutation_faults("myapp.scoring.compute", operators=["arithmetic", "comparison"])
+
+# Each entry is (Mutant, PatchFault)
+for mutant, fault in mutant_faults:
+    print(f"{mutant.location} {mutant.description} -> {fault.name}")
+# L42:8 + -> - -> mutant(arithmetic@L42:+ -> -)
+# L67:4 < -> <= -> mutant(comparison@L67:< -> <=)
+```
+
+Use these faults in a ChaosTest to let the Explorer's nemesis toggle mutations during coverage-guided exploration:
+
+```python
+from ordeal import ChaosTest, rule, always
+from ordeal.mutations import mutation_faults
+
+class ScoreChaos(ChaosTest):
+    faults = [mf for _, mf in mutation_faults("myapp.scoring.compute")]
+    swarm = True  # random subset of mutants per run
+
+    @rule()
+    def score(self):
+        result = self.service.compute(3, 4)
+        always(result == 7, "compute is correct")
+```
+
+This is powerful: instead of testing mutants one at a time, the Explorer combines mutation faults with your normal faults, exploring which mutation + fault combinations break invariants. It turns mutation testing from a validation step into an exploration strategy.
+
+### When to use mutation_faults vs mutate_function_and_test
+
+| Approach | Speed | Depth | Use when |
+|---|---|---|---|
+| `mutate_function_and_test` | Fast (one mutant at a time) | Shallow (each mutant tested in isolation) | Quick validation, CI gate |
+| `mutation_faults` + Explorer | Slower (coverage-guided) | Deep (mutations combined with faults + interleavings) | Pre-release, finding subtle interaction bugs |
 
 ## Workflow
 

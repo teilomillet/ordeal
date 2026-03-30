@@ -182,7 +182,10 @@ class TestCoverageMeasurement:
 
 class TestVerifyConsistency:
     def _make_coverage(
-        self, percent: float, stmts: int, missing: frozenset[int],
+        self,
+        percent: float,
+        stmts: int,
+        missing: frozenset[int],
     ) -> CoverageMeasurement:
         return CoverageMeasurement(
             Status.VERIFIED,
@@ -215,7 +218,8 @@ class TestVerifyConsistency:
         warnings: list[str] = []
         # generated has 2 test defs, but we claim 1
         _verify_consistency(
-            cur, mig,
+            cur,
+            mig,
             "def test_a(): pass\ndef test_b(): pass\n",
             1,
             warnings,
@@ -250,7 +254,8 @@ class TestModuleAuditSummary:
     def test_failed_shows_reason(self):
         a = ModuleAudit(module="myapp.scoring")
         a.current_coverage = CoverageMeasurement(
-            Status.FAILED, error="timed out after 120s",
+            Status.FAILED,
+            error="timed out after 120s",
         )
         s = a.summary()
         assert "FAILED" in s
@@ -296,7 +301,8 @@ class TestModuleAuditSummary:
     def test_coverage_not_preserved_when_failed(self):
         a = ModuleAudit(module="x")
         a.current_coverage = CoverageMeasurement(
-            Status.FAILED, error="timeout",
+            Status.FAILED,
+            error="timeout",
         )
         assert not a.coverage_preserved
 
@@ -316,8 +322,8 @@ class TestSuggestTests:
         # Migrated misses line 17 that current covers
         result = _suggest_tests(
             "tests._auto_target",
-            frozenset(),          # current covers everything
-            frozenset({17}),      # migrated misses line 17
+            frozenset(),  # current covers everything
+            frozenset({17}),  # migrated misses line 17
         )
         assert len(result) >= 1
         assert "L17" in result[0]
@@ -361,8 +367,7 @@ class TestAuditIntegration:
 
         # Should have found and measured the test file
         assert result.current_test_count == 2, (
-            f"expected 2 tests, got {result.current_test_count}. "
-            f"warnings: {result.warnings}"
+            f"expected 2 tests, got {result.current_test_count}. warnings: {result.warnings}"
         )
         assert result.module == "tests._auto_target"
 

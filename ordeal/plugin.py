@@ -1,14 +1,38 @@
 """Pytest plugin for ordeal.
 
-Registers automatically via the ``pytest11`` entry point.
+Registers automatically via the ``pytest11`` entry point.  No
+configuration needed — pytest discovers it on import.
 
-CLI flags:
-    --chaos                 Enable chaos testing mode (activates assertions + buggify)
+**What ``--chaos`` activates (3 things):**
+
+1. ``PropertyTracker`` — ``always()``/``sometimes()``/``reachable()``/
+   ``unreachable()`` results are recorded for the property report.
+   (Note: ``always()`` and ``unreachable()`` raise on violation
+   regardless of ``--chaos`` — violations are never silent.)
+2. ``buggify()`` — returns ``True`` probabilistically instead of
+   always returning ``False``.
+3. ``@pytest.mark.chaos`` tests — collected instead of skipped.
+
+**What works WITHOUT ``--chaos``:**
+
+- ``ChaosTest.TestCase`` — Hypothesis drives rule/nemesis exploration.
+- ``@invariant()`` with ``assert`` — standard Python assertions.
+- ``always()`` / ``unreachable()`` — raise on violation (always).
+- Faults — the nemesis toggles them regardless.
+
+CLI flags::
+
+    --chaos                 Enable chaos testing mode
     --chaos-seed SEED       Seed for reproducible chaos
     --buggify-prob FLOAT    Probability for buggify() calls (default 0.1)
 
-Markers:
-    @pytest.mark.chaos      Mark a test for chaos mode (collected only with --chaos)
+Markers::
+
+    @pytest.mark.chaos      Mark a test for chaos mode (skipped without --chaos)
+
+Fixtures::
+
+    chaos_enabled           Activate chaos for a single test (no --chaos needed)
 """
 
 from __future__ import annotations

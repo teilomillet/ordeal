@@ -46,7 +46,7 @@ class ExplorerConfig:
     checkpoint_strategy: str = "energy"  # "energy" | "uniform" | "recent"
     steps_per_run: int = 50
     fault_toggle_prob: float = 0.3
-    workers: int = 0  # 0 = auto (cpu_count)
+    workers: int = 0  # 0 = auto (os.cpu_count())
 
 
 @dataclass

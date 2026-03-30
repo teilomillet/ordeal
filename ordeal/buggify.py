@@ -1,7 +1,8 @@
 """FoundationDB-style inline fault injection.
 
-Place ``buggify()`` calls in the code under test.  They are no-ops in
-production and probabilistically return ``True`` during chaos testing.
+Place ``buggify()`` calls in the code under test.  They return ``False``
+in production (zero cost) and probabilistically return ``True`` during
+chaos testing::
 
     from ordeal.buggify import buggify, buggify_value
 
@@ -11,11 +12,18 @@ production and probabilistically return ``True`` during chaos testing.
         result = compute(data)
         return buggify_value(result, float('nan'))  # sometimes return NaN
 
-Activate via the pytest plugin (``--chaos``) or manually:
+**Activation:** buggify is inactive by default.  Three ways to activate:
 
-    from ordeal import buggify
-    buggify.activate(probability=0.1)
-    buggify.set_seed(42)
+1. ``pytest --chaos`` — the plugin calls ``activate()`` automatically
+2. ``auto_configure()`` — programmatic activation
+3. ``activate(probability=0.1)`` — manual, per-thread
+
+**Thread safety:** all state is thread-local (``threading.local``).
+Each thread has its own RNG, active flag, and probability.  Safe for
+free-threaded Python 3.13+.
+
+**When inactive:** ``buggify()`` always returns ``False``, ``buggify_value()``
+always returns the normal value.  No overhead beyond a thread-local lookup.
 """
 
 from __future__ import annotations

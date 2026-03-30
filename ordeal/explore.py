@@ -24,12 +24,10 @@ from __future__ import annotations
 
 import copy
 import importlib
-import math
 import multiprocessing as mp
 import os
 import pickle
 import random
-import shutil
 import sys
 import tempfile
 import threading
@@ -162,7 +160,6 @@ class _DataProxy:
 _ENERGY_REWARD = 2.0
 _ENERGY_DECAY = 0.95
 _ENERGY_MIN = 0.01
-_UCB_C = 1.0  # exploration constant for UCB1 term
 
 # Shared-memory edge bitmap: one byte per 16-bit edge hash.
 # Single-byte writes are atomic — no locks needed.
@@ -179,7 +176,6 @@ class Checkpoint:
     run_id: int
     energy: float = 1.0
     times_selected: int = 0
-    edges: frozenset[int] = field(default_factory=frozenset)
 
 
 # ============================================================================
@@ -242,38 +238,20 @@ class ExplorationResult:
     duration_seconds: float = 0.0
     edge_log: list[tuple[int, int]] = field(default_factory=list)
     traces: list[Trace] = field(default_factory=list)
-    last_new_edge_run: int = 0
-    runs_since_new_edge: int = 0
-    saturated: bool = False
-    stopped_reason: str = ""
 
     def summary(self) -> str:
-        """Human-readable exploration summary with saturation status."""
+        """Human-readable exploration summary."""
         lines = [
             f"Exploration: {self.total_runs} runs, "
             f"{self.total_steps} steps, {self.duration_seconds:.1f}s",
             f"Coverage: {self.unique_edges} edges, {self.checkpoints_saved} checkpoints",
         ]
-        if self.unique_edges > 0 and self.total_runs > 0:
-            if self.saturated:
-                lines.append(
-                    f"Saturated: no new edges for {self.runs_since_new_edge} runs "
-                    f"(last discovery at run {self.last_new_edge_run})"
-                )
-            elif self.runs_since_new_edge > self.total_runs * 0.5:
-                lines.append(
-                    f"Coverage stale: {self.runs_since_new_edge} runs since last new edge"
-                )
         if self.failures:
             lines.append(f"Failures found: {len(self.failures)}")
             for f in self.failures[:5]:
                 lines.append(f"  {f}")
-        elif self.saturated:
-            lines.append("No failures found \u2014 all reachable paths explored.")
         else:
             lines.append("No failures found.")
-        if self.stopped_reason:
-            lines.append(f"Stopped: {self.stopped_reason}")
         return "\n".join(lines)
 
 
@@ -341,22 +319,20 @@ class Explorer:
         self.share_edges = share_edges
 
         # Shared-memory edge bitmap (set by _run_parallel / _worker_fn)
+        # 65536 bytes — one byte per possible 16-bit edge hash.
+        # Single-byte writes are atomic on all architectures.
         self._shared_bitmap: memoryview | None = None
 
-        # Shared checkpoint pool (set by _run_parallel / _worker_fn)
-        self._pool_dir: Path | None = None
+        # Shared checkpoint pool directory (set by _run_parallel / _worker_fn)
+        self._checkpoint_pool_dir: Path | None = None
         self._worker_id: int = 0
-        self._pool_loaded: set[str] = set()
+        self._pool_loaded: set[str] = set()  # filenames already loaded
         self._pool_publish_count: int = 0
         self._last_pool_sync: float = 0.0
-        _pool_sync_interval: float = 2.0  # seconds between pool scans
-        self._pool_sync_interval = _pool_sync_interval
-        self._max_pool_publish: int = 20  # max checkpoints to publish per worker
 
         # Internal state
         self._total_edges: set[int] = set()
         self._checkpoints: list[Checkpoint] = []
-        self._edge_frequency: dict[int, int] = {}  # edge -> count of checkpoints with it
         self._rules: list[_RuleInfo] = []
         self._invariant_names: list[str] = []
 
@@ -457,28 +433,15 @@ class Explorer:
         return self.rng.choice(self._checkpoints)  # uniform
 
     def _select_energy(self) -> Checkpoint:
-        """Energy + UCB1 selection: balance exploitation and exploration.
-
-        Adds ``_UCB_C * sqrt(ln(N) / n_i)`` to each checkpoint's energy
-        so that under-selected checkpoints get a chance to be explored.
-        """
-        total_sel = sum(cp.times_selected for cp in self._checkpoints) + 1
-        log_n = math.log(total_sel)
-
-        weights: list[float] = []
-        for cp in self._checkpoints:
-            ucb = _UCB_C * math.sqrt(log_n / max(1, cp.times_selected))
-            weights.append(cp.energy + ucb)
-
-        total = sum(weights)
+        """Energy-weighted selection: favor checkpoints that led to discoveries."""
+        total = sum(cp.energy for cp in self._checkpoints)
         r = self.rng.random() * total
         cumulative = 0.0
-        for cp, w in zip(self._checkpoints, weights):
-            cumulative += w
+        for cp in self._checkpoints:
+            cumulative += cp.energy
             if cumulative >= r:
                 cp.times_selected += 1
                 return cp
-        self._checkpoints[-1].times_selected += 1
         return self._checkpoints[-1]
 
     def _select_recent(self) -> Checkpoint:
@@ -487,121 +450,25 @@ class Explorer:
         weights = list(range(1, n + 1))
         return self.rng.choices(self._checkpoints, weights=weights, k=1)[0]
 
-    def _update_checkpoint_energy(
-        self, cp: Checkpoint, new_edges: int, new_edge_set: frozenset[int] | None = None
-    ) -> None:
-        """Reward checkpoints that led to new discoveries, decay others.
-
-        When *new_edge_set* is provided the reward is weighted by edge
-        rarity: edges that appear in fewer checkpoints contribute more
-        energy, which promotes coverage diversity.
-        """
+    def _update_checkpoint_energy(self, cp: Checkpoint, new_edges: int) -> None:
+        """Reward checkpoints that led to new discoveries, decay others."""
         if new_edges > 0:
-            if new_edge_set and self._edge_frequency:
-                # Rare-edge bonus: 1/freq per edge, so novel edges count more
-                rarity = sum(1.0 / self._edge_frequency.get(e, 1) for e in new_edge_set)
-                cp.energy += rarity * _ENERGY_REWARD
-            else:
-                cp.energy += new_edges * _ENERGY_REWARD
+            cp.energy += new_edges * _ENERGY_REWARD
         else:
             cp.energy = max(_ENERGY_MIN, cp.energy * _ENERGY_DECAY)
 
-    def _pool_publish(self, machine: ChaosTest, new_count: int, step: int, run_id: int) -> None:
-        """Publish a checkpoint to the shared pool directory.
-
-        Pickles only the instance ``__dict__`` (not the class) because
-        Hypothesis-decorated methods break pickle's identity check.
-        The subscriber reconstructs via ``cls()`` + ``__dict__.update()``.
-        """
-        if (
-            self._pool_dir is None
-            or self._pool_publish_count >= self._max_pool_publish
-            or new_count < 2  # only publish significant discoveries
-        ):
-            return
-        fname = f"cp-w{self._worker_id}-r{run_id}-s{step}.pkl"
-        try:
-            # Deep-copy first, then extract picklable state
-            snapshot = copy.deepcopy(machine)
-            state = {}
-            for k, v in snapshot.__dict__.items():
-                try:
-                    pickle.dumps(v)
-                    state[k] = v
-                except Exception:
-                    pass  # skip unpicklable attrs
-            tmp = self._pool_dir / f".tmp-{fname}"
-            with open(tmp, "wb") as f:
-                pickle.dump(state, f)
-            tmp.rename(self._pool_dir / fname)  # atomic on POSIX
-            self._pool_publish_count += 1
-            self._pool_loaded.add(fname)
-        except Exception:
-            pass  # skip on any error
-
-    def _pool_subscribe(self) -> None:
-        """Load new checkpoints from other workers.
-
-        Reconstructs machines by creating a fresh instance (proper
-        Hypothesis init) then overlaying the saved state dict.
-        """
-        if self._pool_dir is None:
-            return
-        now = _time.monotonic()
-        if now - self._last_pool_sync < self._pool_sync_interval:
-            return
-        self._last_pool_sync = now
-        try:
-            for path in self._pool_dir.glob("cp-*.pkl"):
-                if path.name in self._pool_loaded:
-                    continue
-                self._pool_loaded.add(path.name)
-                try:
-                    with open(path, "rb") as f:
-                        state = pickle.load(f)
-                    machine = self.test_class()
-                    machine.__dict__.update(state)
-                    self._checkpoints.append(
-                        Checkpoint(
-                            machine_copy=machine,
-                            new_edge_count=0,
-                            step=0,
-                            run_id=-1,
-                            energy=_ENERGY_REWARD,
-                        )
-                    )
-                except Exception:
-                    continue
-        except Exception:
-            pass
-
-    def _save_checkpoint(
-        self,
-        machine: ChaosTest,
-        new_count: int,
-        step: int,
-        run_id: int,
-        new_edges: frozenset[int] | None = None,
-    ) -> None:
+    def _save_checkpoint(self, machine: ChaosTest, new_count: int, step: int, run_id: int) -> None:
         """Save a checkpoint. Evicts lowest-energy checkpoint if at capacity."""
         if len(self._checkpoints) >= self.max_checkpoints:
             if self.checkpoint_strategy == "energy":
-                # Evict lowest energy — decrement edge frequency for evicted edges
+                # Evict lowest energy
                 min_idx = min(
                     range(len(self._checkpoints)), key=lambda i: self._checkpoints[i].energy
                 )
-                evicted = self._checkpoints.pop(min_idx)
-                for e in evicted.edges:
-                    self._edge_frequency[e] = max(0, self._edge_frequency.get(e, 1) - 1)
+                self._checkpoints.pop(min_idx)
             else:
                 idx = self.rng.randint(0, max(0, len(self._checkpoints) - 2))
-                evicted = self._checkpoints.pop(idx)
-                for e in evicted.edges:
-                    self._edge_frequency[e] = max(0, self._edge_frequency.get(e, 1) - 1)
-
-        edges = new_edges or frozenset()
-        for e in edges:
-            self._edge_frequency[e] = self._edge_frequency.get(e, 0) + 1
+                self._checkpoints.pop(idx)
 
         self._checkpoints.append(
             Checkpoint(
@@ -609,7 +476,6 @@ class Explorer:
                 new_edge_count=new_count,
                 step=step,
                 run_id=run_id,
-                edges=edges,
             )
         )
 
@@ -623,7 +489,6 @@ class Explorer:
         steps_per_run: int = 50,
         shrink: bool = True,
         max_shrink_time: float = 30.0,
-        patience: int = 0,
         progress: Callable[[ProgressSnapshot], None] | None = None,
     ) -> ExplorationResult:
         """Run the coverage-guided exploration loop.
@@ -634,7 +499,6 @@ class Explorer:
             steps_per_run: Max rule steps per run.
             shrink: If True, shrink failing traces after exploration.
             max_shrink_time: Time limit for shrinking each failure.
-            patience: Stop after N consecutive runs without new edges. 0=disabled.
             progress: Optional callback for live progress updates.
         """
         if self.workers > 1:
@@ -644,7 +508,6 @@ class Explorer:
                 steps_per_run=steps_per_run,
                 shrink=shrink,
                 max_shrink_time=max_shrink_time,
-                patience=patience,
                 progress=progress,
             )
 
@@ -654,32 +517,15 @@ class Explorer:
 
         result = ExplorationResult()
         use_coverage = bool(self.target_paths)
-        if not use_coverage:
-            warnings.warn(
-                "Explorer running without target_modules — coverage guidance "
-                "is disabled.  Set target_modules=['your_app'] to enable it.",
-                stacklevel=2,
-            )
         start = _time.monotonic()
         class_name = _qualified_name(self.test_class)
-
-        _runs_since_new: int = 0
 
         while True:
             elapsed = _time.monotonic() - start
             if elapsed >= max_time:
-                result.stopped_reason = "time"
                 break
             if max_runs is not None and result.total_runs >= max_runs:
-                result.stopped_reason = "max_runs"
                 break
-            if patience > 0 and _runs_since_new >= patience and use_coverage:
-                result.saturated = True
-                result.stopped_reason = "saturated"
-                break
-
-            # Pull checkpoints from other workers
-            self._pool_subscribe()
 
             result.total_runs += 1
             run_id = result.total_runs
@@ -704,7 +550,6 @@ class Explorer:
 
             step = 0
             new_edges_this_run = 0
-            new_edge_set_this_run: set[int] = set()
             try:
                 for step in range(n_steps):
                     result.total_steps += 1
@@ -755,14 +600,12 @@ class Explorer:
                             new = {e for e in new if not self._shared_bitmap[e]}
                         if new:
                             new_edges_this_run += len(new)
-                            new_edge_set_this_run |= new
                             self._total_edges |= new
                             # Publish to shared bitmap
                             if self._shared_bitmap is not None:
                                 for e in new:
                                     self._shared_bitmap[e] = 1
-                            self._save_checkpoint(machine, len(new), step, run_id, frozenset(new))
-                            self._pool_publish(machine, len(new), step, run_id)
+                            self._save_checkpoint(machine, len(new), step, run_id)
                             result.checkpoints_saved += 1
 
             except Exception as e:
@@ -813,19 +656,9 @@ class Explorer:
 
             # Update checkpoint energy
             if source_cp is not None:
-                self._update_checkpoint_energy(
-                    source_cp, new_edges_this_run, frozenset(new_edge_set_this_run) or None
-                )
+                self._update_checkpoint_energy(source_cp, new_edges_this_run)
 
             result.edge_log.append((run_id, len(self._total_edges)))
-
-            # Saturation tracking
-            if new_edges_this_run > 0:
-                _runs_since_new = 0
-                result.last_new_edge_run = run_id
-            else:
-                _runs_since_new += 1
-            result.runs_since_new_edge = _runs_since_new
 
             # Progress callback
             if progress:
@@ -854,14 +687,6 @@ class Explorer:
 
         result.unique_edges = len(self._total_edges)
         result.duration_seconds = _time.monotonic() - start
-
-        if use_coverage and result.unique_edges == 0 and result.total_runs > 0:
-            warnings.warn(
-                f"Explorer ran {result.total_runs} runs but discovered 0 edges. "
-                f"Check that target_modules matches your code.",
-                stacklevel=2,
-            )
-
         return result
 
     # -- Parallel execution -------------------------------------------------
@@ -874,7 +699,6 @@ class Explorer:
         steps_per_run: int,
         shrink: bool,
         max_shrink_time: float,
-        patience: int,
         progress: Callable[[ProgressSnapshot], None] | None,
     ) -> ExplorationResult:
         """Run exploration across multiple worker processes.
@@ -899,9 +723,6 @@ class Explorer:
             shm.buf[:] = b"\x00" * _EDGE_BITMAP_SIZE
             shm_name = shm.name
 
-        # Create shared checkpoint pool directory
-        pool_dir = tempfile.mkdtemp(prefix="ordeal-pool-")
-
         try:
             worker_args = []
             for i in range(self.workers):
@@ -920,10 +741,7 @@ class Explorer:
                         "record_traces": self.record_traces,
                         "shrink": shrink,
                         "max_shrink_time": max_shrink_time,
-                        "patience": patience,
                         "shared_edges_name": shm_name,
-                        "pool_dir": pool_dir,
-                        "worker_id": i,
                     }
                 )
 
@@ -961,7 +779,6 @@ class Explorer:
             if shm is not None:
                 shm.close()
                 shm.unlink()
-            shutil.rmtree(pool_dir, ignore_errors=True)
 
 
 def _worker_fn(args: dict[str, Any]) -> dict[str, Any]:
@@ -997,12 +814,6 @@ def _worker_fn(args: dict[str, Any]) -> dict[str, Any]:
         shm = SharedMemory(name=shm_name, create=False)
         explorer._shared_bitmap = shm.buf
 
-    # Attach to shared checkpoint pool
-    pool_dir = args.get("pool_dir")
-    if pool_dir:
-        explorer._pool_dir = Path(pool_dir)
-        explorer._worker_id = args.get("worker_id", 0)
-
     try:
         result = explorer.run(
             max_time=args["max_time"],
@@ -1010,7 +821,6 @@ def _worker_fn(args: dict[str, Any]) -> dict[str, Any]:
             steps_per_run=args["steps_per_run"],
             shrink=args.get("shrink", True),
             max_shrink_time=args.get("max_shrink_time", 30.0),
-            patience=args.get("patience", 0),
         )
 
         # Serialize — exceptions and traces don't pickle cleanly across processes

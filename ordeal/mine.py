@@ -573,3 +573,145 @@ def mine(
         properties=props,
         not_applicable=not_applicable,
     )
+
+
+def mine_pair(
+    f: Callable[..., Any],
+    g: Callable[..., Any],
+    *,
+    max_examples: int = 200,
+    **fixtures: st.SearchStrategy[Any] | Any,
+) -> MineResult:
+    """Discover relational properties between two functions.
+
+    Checks roundtrip (``g(f(x)) == x``), the reverse (``f(g(x)) == x``),
+    and commutative composition (``f(g(x)) == g(f(x))``).  Strategies
+    are inferred from *f*'s signature.
+
+    Example::
+
+        result = mine_pair(json.dumps, json.loads)
+        # discovers: roundtrip g(f(x)) == x
+
+        result = mine_pair(encode, decode)
+        # discovers: roundtrip g(f(x)) == x, roundtrip f(g(x)) == x
+    """
+    import inspect
+
+    # Normalize fixtures
+    normalized: dict[str, st.SearchStrategy[Any]] | None = None
+    if fixtures:
+        normalized = {}
+        for k, v in fixtures.items():
+            normalized[k] = v if isinstance(v, st.SearchStrategy) else st.just(v)
+
+    strategies = _infer_strategies(f, normalized)
+    if strategies is None:
+        fname = getattr(f, "__name__", str(f))
+        raise ValueError(f"Cannot infer strategies for {fname}.")
+
+    # Get first param name for feeding output back
+    sig_f = inspect.signature(f)
+    params_f = [n for n in sig_f.parameters if n not in ("self", "cls")]
+    sig_g = inspect.signature(g)
+    params_g = [n for n in sig_g.parameters if n not in ("self", "cls")]
+    first_f = params_f[0] if params_f else None
+    first_g = params_g[0] if params_g else None
+
+    # Collect inputs and outputs of f
+    inputs: list[dict[str, Any]] = []
+    outputs_f: list[Any] = []
+
+    try:
+
+        @given(**strategies)
+        @settings(max_examples=max_examples, database=None)
+        def collect(**kwargs: Any) -> None:
+            out = f(**kwargs)
+            outputs_f.append(out)
+            inputs.append(dict(kwargs))
+
+        collect()
+    except Exception:
+        pass
+
+    fname = getattr(f, "__name__", str(f))
+    gname = getattr(g, "__name__", str(g))
+    pair_name = f"{fname} <-> {gname}"
+    cap = min(len(inputs), 50)
+
+    # -- roundtrip: g(f(x)) == x --
+    rt_holds = rt_total = 0
+    for kwargs, out_f in zip(inputs[:cap], outputs_f[:cap]):
+        if out_f is None or first_g is None:
+            continue
+        try:
+            back = g(**{first_g: out_f})
+            rt_total += 1
+            if _approx_equal(back, kwargs[first_f]):
+                rt_holds += 1
+        except Exception:
+            pass
+
+    # -- reverse roundtrip: f(g(x)) == x --
+    # Generate inputs for g, then feed through f
+    rr_holds = rr_total = 0
+    strategies_g = _infer_strategies(g, normalized)
+    if strategies_g and first_f and first_g:
+        g_inputs: list[dict[str, Any]] = []
+        g_outputs: list[Any] = []
+        try:
+
+            @given(**strategies_g)
+            @settings(max_examples=max_examples, database=None)
+            def collect_g(**kwargs: Any) -> None:
+                out = g(**kwargs)
+                g_outputs.append(out)
+                g_inputs.append(dict(kwargs))
+
+            collect_g()
+        except Exception:
+            pass
+
+        for kwargs_g, out_g in zip(g_inputs[:cap], g_outputs[:cap]):
+            if out_g is None:
+                continue
+            try:
+                back = f(**{first_f: out_g})
+                rr_total += 1
+                if _approx_equal(back, kwargs_g[first_g]):
+                    rr_holds += 1
+            except Exception:
+                pass
+
+    # -- commutative composition: f(g(x)) == g(f(x)) --
+    cc_holds = cc_total = 0
+    if first_f and first_g:
+        for kwargs, out_f in zip(inputs[:cap], outputs_f[:cap]):
+            if out_f is None:
+                continue
+            try:
+                fg = g(**{first_g: out_f})  # g(f(x))
+                gx = g(**{first_g: kwargs[first_f]})  # g(x)
+                gf = f(**{first_f: gx})  # f(g(x))
+                cc_total += 1
+                if _approx_equal(fg, gf):
+                    cc_holds += 1
+            except Exception:
+                pass
+
+    all_props = [
+        MinedProperty(f"roundtrip {gname}({fname}(x)) == x", rt_holds, rt_total),
+        MinedProperty(f"roundtrip {fname}({gname}(x)) == x", rr_holds, rr_total),
+        MinedProperty("commutative composition", cc_holds, cc_total),
+    ]
+
+    props = [p for p in all_props if p.total > 0]
+    not_applicable = [p.name for p in all_props if p.total == 0]
+
+    return MineResult(
+        function=pair_name,
+        examples=max(len(inputs), 0),
+        properties=props,
+        not_applicable=not_applicable,
+    )

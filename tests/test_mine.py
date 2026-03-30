@@ -13,6 +13,7 @@ from ordeal.mine import (
     _check_monotonic,
     _check_observed_bounds,
     mine,
+    mine_pair,
 )
 from ordeal.quickcheck import quickcheck
 
@@ -76,6 +77,14 @@ def float_add(a: float, b: float) -> float:
 
 def float_negate(x: float) -> float:
     return -x
+
+
+def encode(x: int) -> str:
+    return str(x)
+
+
+def decode(s: str) -> int:
+    return int(s)
 
 
 class TestMine:
@@ -247,6 +256,32 @@ class TestMine:
         inv = next((p for p in result.properties if p.name == "involution"), None)
         if inv is not None:
             assert not inv.universal  # (x²+1)²+1 != x
+
+
+class TestMinePair:
+    def test_roundtrip_encode_decode(self):
+        result = mine_pair(encode, decode, max_examples=100)
+        rt = next((p for p in result.properties if "decode(encode" in p.name), None)
+        assert rt is not None
+        assert rt.universal  # int(str(x)) == x
+
+    def test_roundtrip_negate(self):
+        result = mine_pair(negate_int, negate_int, max_examples=100)
+        rt = next((p for p in result.properties if "roundtrip" in p.name), None)
+        assert rt is not None
+        assert rt.universal  # -(-x) == x
+
+    def test_non_roundtrip(self):
+        result = mine_pair(clamp, identity, max_examples=100)
+        # clamp then identity: identity(clamp(x)) == x only if x in [0,1]
+        rt = next((p for p in result.properties if "roundtrip" in p.name), None)
+        if rt is not None:
+            assert not rt.universal
+
+    def test_pair_summary(self):
+        result = mine_pair(encode, decode, max_examples=50)
+        assert "encode" in result.function
+        assert "decode" in result.function
 
 
 # ============================================================================

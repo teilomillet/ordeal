@@ -104,6 +104,27 @@ class ChaosTest(RuleBasedStateMachine):
         """Currently active faults (useful for debugging / logging)."""
         return [f for f in self._faults if f.active]
 
+    def state_hash(self) -> int:
+        """Override to enable state-aware coverage.
+
+        Return a hash of the *qualitatively* different states — not every
+        possible value, but categories that matter for bug-finding.
+        The explorer treats a new state hash as a discovery (saves a
+        checkpoint, resets saturation counter).
+
+        Example::
+
+            def state_hash(self):
+                return hash((
+                    self.service.state,        # enum-like: "idle", "active"
+                    self.balance > 0,           # sign matters, not exact value
+                    len(self.pending) > 10,     # "many" vs "few"
+                ))
+
+        Return 0 (default) to disable state-aware coverage.
+        """
+        return 0
+
     def teardown(self) -> None:
         """Deactivate all faults (including those not in the swarm subset)."""
         for f in self.__class__.faults:

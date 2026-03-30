@@ -243,6 +243,9 @@ class ExplorationResult:
     runs_since_new_edge: int = 0
     saturated: bool = False
     stopped_reason: str = ""
+    adaptation_phase: int = 0
+    unique_states: int = 0
+    properties_satisfied: int = 0
 
     def summary(self) -> str:
         """Human-readable exploration summary."""
@@ -251,6 +254,12 @@ class ExplorationResult:
             f"{self.total_steps} steps, {self.duration_seconds:.1f}s",
             f"Coverage: {self.unique_edges} edges, {self.checkpoints_saved} checkpoints",
         ]
+        if self.unique_states > 0:
+            lines.append(f"States: {self.unique_states} unique state hashes")
+        if self.properties_satisfied > 0:
+            lines.append(f"Properties: {self.properties_satisfied} sometimes-properties satisfied")
+        if self.adaptation_phase > 0:
+            lines.append(f"Adapted: {self.adaptation_phase} phase(s) of escalation")
         if self.unique_edges > 0 and self.total_runs > 0:
             if self.saturated:
                 lines.append(
@@ -353,6 +362,8 @@ class Explorer:
 
         # Internal state
         self._total_edges: set[int] = set()
+        self._total_states: set[int] = set()
+        self._satisfied_properties: set[str] = set()
         self._checkpoints: list[Checkpoint] = []
         self._rules: list[_RuleInfo] = []
         self._invariant_names: list[str] = []
@@ -606,6 +617,12 @@ class Explorer:
             )
 
         self._discover()
+
+        # Activate property tracker for property-guided search
+        from ordeal import assertions as _assertions
+
+        _tracker_was_active = _assertions.tracker.active
+        _assertions.tracker.active = True
         if not self._rules:
             raise ValueError(f"No callable rules found on {self.test_class.__name__}")
 
@@ -615,6 +632,9 @@ class Explorer:
         class_name = _qualified_name(self.test_class)
 
         _runs_since_new: int = 0
+        _adapt_phase: int = 0
+        _orig_fault_prob = self.fault_toggle_prob
+        _orig_cp_strategy = self.checkpoint_strategy
 
         while True:
             elapsed = _time.monotonic() - start
@@ -625,9 +645,19 @@ class Explorer:
                 result.stopped_reason = "max_runs"
                 break
             if patience > 0 and _runs_since_new >= patience and use_coverage:
-                result.saturated = True
-                result.stopped_reason = "saturated"
-                break
+                if _adapt_phase < 3:
+                    # Escalate: go deeper before giving up
+                    _adapt_phase += 1
+                    _runs_since_new = 0
+                    steps_per_run = min(steps_per_run * 2, 500)
+                    self.fault_toggle_prob = min(0.5, self.fault_toggle_prob + 0.1)
+                    if _adapt_phase == 2:
+                        self.checkpoint_strategy = "uniform"
+                    result.adaptation_phase = _adapt_phase
+                else:
+                    result.saturated = True
+                    result.stopped_reason = "saturated"
+                    break
 
             # Pull checkpoints from other workers
             self._pool_subscribe()
@@ -714,6 +744,31 @@ class Explorer:
                             self._pool_publish(machine, len(new), step, run_id)
                             result.checkpoints_saved += 1
 
+                    # State-aware coverage (per-step, inside step loop)
+                    if hasattr(machine, "state_hash"):
+                        sh = machine.state_hash()
+                        if sh and sh not in self._total_states:
+                            self._total_states.add(sh)
+                            new_edges_this_run += 1
+                            if use_coverage:
+                                self._save_checkpoint(machine, 1, step, run_id)
+                                self._pool_publish(machine, 1, step, run_id)
+                                result.checkpoints_saved += 1
+
+                    # Property-guided search (per-step)
+                    for p in _assertions.tracker.results:
+                        if (
+                            p.type == "sometimes"
+                            and p.passes > 0
+                            and p.name not in self._satisfied_properties
+                        ):
+                            self._satisfied_properties.add(p.name)
+                            result.properties_satisfied += 1
+                            new_edges_this_run += 1
+                            if use_coverage:
+                                self._save_checkpoint(machine, 1, step, run_id)
+                                result.checkpoints_saved += 1
+
             except Exception as e:
                 trace = Trace(
                     run_id=run_id,
@@ -788,6 +843,12 @@ class Explorer:
                         runs_per_second=result.total_runs / max(elapsed_now, 0.001),
                     )
                 )
+
+        # Restore tracker and original params after exploration
+        _assertions.tracker.active = _tracker_was_active
+        self.fault_toggle_prob = _orig_fault_prob
+        self.checkpoint_strategy = _orig_cp_strategy
+        result.unique_states = len(self._total_states)
 
         # -- Post-exploration: shrink failures --
         if shrink:

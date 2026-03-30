@@ -1,0 +1,46 @@
+site_name: ordeal
+site_url: https://docs.byordeal.com/
+site_description: Automated chaos testing for Python — fault injection, property assertions, and stateful exploration.
+repo_url: https://github.com/teilomillet/ordeal
+repo_name: teilomillet/ordeal
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - content.code.copy
+    - navigation.sections
+    - search.highlight
+    - search.suggest
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - toc:
+      permalink: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/teilomillet/ordeal
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/ordeal/
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Core Concepts: core-concepts.md
+  - Guides:
+      - Configuration: configuration.md
+      - Explorer: explorer.md
+      - CLI: cli.md
+      - Mutations: mutations.md
+      - Simulation: simulate.md
+      - Integrations: integrations.md
+  - API Reference: api-reference.md

@@ -239,6 +239,10 @@ class ExplorationResult:
     duration_seconds: float = 0.0
     edge_log: list[tuple[int, int]] = field(default_factory=list)
     traces: list[Trace] = field(default_factory=list)
+    last_new_edge_run: int = 0
+    runs_since_new_edge: int = 0
+    saturated: bool = False
+    stopped_reason: str = ""
 
     def summary(self) -> str:
         """Human-readable exploration summary."""
@@ -247,12 +251,26 @@ class ExplorationResult:
             f"{self.total_steps} steps, {self.duration_seconds:.1f}s",
             f"Coverage: {self.unique_edges} edges, {self.checkpoints_saved} checkpoints",
         ]
+        if self.unique_edges > 0 and self.total_runs > 0:
+            if self.saturated:
+                lines.append(
+                    f"Saturated: no new edges for {self.runs_since_new_edge} runs "
+                    f"(last discovery at run {self.last_new_edge_run})"
+                )
+            elif self.runs_since_new_edge > self.total_runs * 0.5:
+                lines.append(
+                    f"Coverage stale: {self.runs_since_new_edge} runs since last new edge"
+                )
         if self.failures:
             lines.append(f"Failures found: {len(self.failures)}")
             for f in self.failures[:5]:
                 lines.append(f"  {f}")
+        elif self.saturated:
+            lines.append("No failures found \u2014 all reachable paths explored.")
         else:
             lines.append("No failures found.")
+        if self.stopped_reason:
+            lines.append(f"Stopped: {self.stopped_reason}")
         return "\n".join(lines)
 
 
@@ -562,6 +580,7 @@ class Explorer:
         steps_per_run: int = 50,
         shrink: bool = True,
         max_shrink_time: float = 30.0,
+        patience: int = 0,
         progress: Callable[[ProgressSnapshot], None] | None = None,
     ) -> ExplorationResult:
         """Run the coverage-guided exploration loop.
@@ -572,6 +591,7 @@ class Explorer:
             steps_per_run: Max rule steps per run.
             shrink: If True, shrink failing traces after exploration.
             max_shrink_time: Time limit for shrinking each failure.
+            patience: Stop after N consecutive runs without new edges. 0=disabled.
             progress: Optional callback for live progress updates.
         """
         if self.workers > 1:
@@ -581,6 +601,7 @@ class Explorer:
                 steps_per_run=steps_per_run,
                 shrink=shrink,
                 max_shrink_time=max_shrink_time,
+                patience=patience,
                 progress=progress,
             )
 
@@ -593,11 +614,19 @@ class Explorer:
         start = _time.monotonic()
         class_name = _qualified_name(self.test_class)
 
+        _runs_since_new: int = 0
+
         while True:
             elapsed = _time.monotonic() - start
             if elapsed >= max_time:
+                result.stopped_reason = "time"
                 break
             if max_runs is not None and result.total_runs >= max_runs:
+                result.stopped_reason = "max_runs"
+                break
+            if patience > 0 and _runs_since_new >= patience and use_coverage:
+                result.saturated = True
+                result.stopped_reason = "saturated"
                 break
 
             # Pull checkpoints from other workers
@@ -737,6 +766,14 @@ class Explorer:
 
             result.edge_log.append((run_id, len(self._total_edges)))
 
+            # Saturation tracking
+            if new_edges_this_run > 0:
+                _runs_since_new = 0
+                result.last_new_edge_run = run_id
+            else:
+                _runs_since_new += 1
+            result.runs_since_new_edge = _runs_since_new
+
             # Progress callback
             if progress:
                 elapsed_now = _time.monotonic() - start
@@ -776,6 +813,7 @@ class Explorer:
         steps_per_run: int,
         shrink: bool,
         max_shrink_time: float,
+        patience: int,
         progress: Callable[[ProgressSnapshot], None] | None,
     ) -> ExplorationResult:
         """Run exploration across multiple worker processes.
@@ -821,6 +859,7 @@ class Explorer:
                         "record_traces": self.record_traces,
                         "shrink": shrink,
                         "max_shrink_time": max_shrink_time,
+                        "patience": patience,
                         "shared_edges_name": shm_name,
                         "pool_dir": pool_dir,
                         "worker_id": i,
@@ -910,6 +949,7 @@ def _worker_fn(args: dict[str, Any]) -> dict[str, Any]:
             steps_per_run=args["steps_per_run"],
             shrink=args.get("shrink", True),
             max_shrink_time=args.get("max_shrink_time", 30.0),
+            patience=args.get("patience", 0),
         )
 
         # Serialize — exceptions and traces don't pickle cleanly across processes

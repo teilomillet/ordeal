@@ -263,6 +263,42 @@ def _check_idempotent(
     return MinedProperty("idempotent", holds, total)
 
 
+def _check_involution(
+    fn: Callable[..., Any],
+    outputs: list[Any],
+    inputs: list[dict[str, Any]],
+) -> MinedProperty:
+    """f(f(x)) == x — only when input and output types align."""
+    if not outputs or not inputs:
+        return MinedProperty("involution", 0, 0)
+
+    import inspect
+
+    sig = inspect.signature(fn)
+    params = [n for n in sig.parameters if n not in ("self", "cls")]
+    if not params:
+        return MinedProperty("involution", 0, 0)
+
+    first_param = params[0]
+    total = 0
+    holds = 0
+    for output, kwargs in zip(outputs[:30], inputs[:30]):
+        if output is None:
+            continue
+        try:
+            kwargs2 = dict(kwargs)
+            kwargs2[first_param] = output
+            out2 = fn(**kwargs2)
+            total += 1
+            if out2 == kwargs[first_param]:
+                holds += 1
+        except (TypeError, ValueError, AttributeError):
+            pass
+    if total == 0:
+        return MinedProperty("involution", 0, 0)
+    return MinedProperty("involution", holds, total)
+
+
 def _check_monotonic(
     inputs: list[dict[str, Any]],
     outputs: list[Any],
@@ -500,6 +536,7 @@ def mine(
         _check_never_empty(outputs),
         _check_deterministic(fn, inputs),
         _check_idempotent(fn, outputs, inputs),
+        _check_involution(fn, outputs, inputs),
         _check_observed_bounds(outputs),
     ]
     all_props.extend(_check_monotonic(inputs, outputs))

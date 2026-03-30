@@ -1,10 +1,12 @@
-"""CLI entry point: ``ordeal explore`` and ``ordeal replay``.
+"""CLI entry point for ordeal commands.
 
 $ ordeal explore                    # reads ordeal.toml
 $ ordeal explore -c ci.toml         # custom config
 $ ordeal explore --max-time 300     # override time
 $ ordeal replay .ordeal/traces/run-42.json
 $ ordeal replay --shrink trace.json
+$ ordeal mine mymod.func            # discover properties
+$ ordeal mine mymod.func -n 1000    # more examples
 """
 
 from __future__ import annotations
@@ -189,6 +191,61 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             max_examples=args.max_examples,
         )
         print(report)
+    return 0
+
+
+def _cmd_mine(args: argparse.Namespace) -> int:
+    """Discover properties of a function or all public functions in a module."""
+    from importlib import import_module
+
+    from ordeal.mine import mine
+
+    target = args.target
+    max_examples = args.max_examples
+
+    # Split target into module path and optional function name
+    parts = target.rsplit(".", 1)
+    if len(parts) < 2:
+        _stderr(f"Target must be dotted path (e.g. mymod.func): {target}\n")
+        return 1
+
+    mod_path, attr = parts
+    try:
+        mod = import_module(mod_path)
+    except ImportError:
+        # Maybe the whole target is a module (no function specified)
+        try:
+            mod = import_module(target)
+            attr = None
+        except ImportError:
+            _stderr(f"Cannot import: {target}\n")
+            return 1
+
+    if attr and hasattr(mod, attr) and callable(getattr(mod, attr)):
+        # Single function
+        funcs = [(attr, getattr(mod, attr))]
+    else:
+        # Module — mine all public functions
+        from ordeal.auto import _get_public_functions
+
+        mod = import_module(target if attr is None else mod_path)
+        funcs = _get_public_functions(mod)
+        if not funcs:
+            _stderr(f"No public functions found in {target}\n")
+            return 1
+
+    for name, func in funcs:
+        try:
+            result = mine(func, max_examples=max_examples)
+        except (ValueError, TypeError) as e:
+            _stderr(f"  skip {name}: {e}\n")
+            continue
+
+        print(result.summary())
+        if result.not_applicable:
+            print(f"    n/a: {', '.join(result.not_applicable)}")
+        print()
+
     return 0
 
 
@@ -410,6 +467,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Save generated test file to this path",
     )
 
+    # -- ordeal mine --
+    mine_p = sub.add_parser("mine", help="Discover properties of a function or module")
+    mine_p.add_argument("target", help="Dotted path: mymod.func or mymod")
+    mine_p.add_argument(
+        "--max-examples", "-n", type=int, default=500, help="Examples to sample (default: 500)"
+    )
+
     # -- ordeal benchmark --
     bench_p = sub.add_parser("benchmark", help="Measure parallel scaling (USL analysis)")
     bench_p.add_argument(
@@ -436,6 +500,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_replay(args)
     elif args.command == "audit":
         return _cmd_audit(args)
+    elif args.command == "mine":
+        return _cmd_mine(args)
     elif args.command == "benchmark":
         return _cmd_benchmark(args)
     else:

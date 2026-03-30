@@ -753,6 +753,12 @@ def _property_to_assertion(
         if len(param_names) >= 2:
             rest = ", ".join(param_names[1:])
             return f"assert {call}(result, {rest}) == result"
+    if prop_name == "involution":
+        if len(param_names) == 1:
+            return f"assert {call}(result) == {param_names[0]}"
+        if len(param_names) >= 2:
+            rest = ", ".join(param_names[1:])
+            return f"assert {call}(result, {rest}) == {param_names[0]}"
     if prop_name == "commutative" and len(param_names) == 2:
         return f"assert {call}({param_names[1]}, {param_names[0]}) == result"
     for op in ("==", "<=", ">="):

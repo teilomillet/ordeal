@@ -8,6 +8,7 @@ from ordeal.assertions import tracker
 from ordeal.mine import (
     _check_associative,
     _check_commutative,
+    _check_involution,
     _check_length_relationship,
     _check_monotonic,
     _check_observed_bounds,
@@ -55,6 +56,10 @@ def sort_list(xs: list[int]) -> list[int]:
 
 def first_half(xs: list[int]) -> list[int]:
     return xs[: len(xs) // 2]
+
+
+def negate_int(x: int) -> int:
+    return -x
 
 
 def add(a: int, b: int) -> int:
@@ -202,6 +207,18 @@ class TestMine:
         assoc = next((p for p in result.properties if p.name == "associative"), None)
         if assoc is not None:
             assert not assoc.universal
+
+    def test_discovers_involution(self):
+        result = mine(negate_int, max_examples=100)
+        inv = next((p for p in result.properties if p.name == "involution"), None)
+        assert inv is not None
+        assert inv.universal  # -(-x) == x
+
+    def test_discovers_non_involution(self):
+        result = mine(always_positive, max_examples=100)
+        inv = next((p for p in result.properties if p.name == "involution"), None)
+        if inv is not None:
+            assert not inv.universal  # (x²+1)²+1 != x
 
 
 # ============================================================================
@@ -363,6 +380,15 @@ def test_qc_associative_add(a: int, b: int, c: int):
     _add = lambda a, b: a + b  # noqa: E731
     inputs = [{"a": a, "b": b}, {"a": b, "b": c}, {"a": c, "b": a}]
     prop = _check_associative(_add, inputs)
+    if prop.total > 0:
+        assert prop.universal
+
+
+@quickcheck
+def test_qc_involution_negate(x: int):
+    """Negation is an involution: -(-x) == x."""
+    _neg = lambda x: -x  # noqa: E731
+    prop = _check_involution(_neg, [-x], [{"x": x}])
     if prop.total > 0:
         assert prop.universal
 

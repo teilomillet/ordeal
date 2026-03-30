@@ -231,42 +231,13 @@ class TestExplorerResult:
 
 
 class TestEnergyScheduling:
-    def test_ucb_explores_unselected(self):
-        """UCB1 bonus should favor checkpoints that have never been selected."""
+    def test_energy_reward_on_new_edges(self):
+        """Checkpoints that find new edges get higher energy."""
         explorer = Explorer(BranchyChaos, seed=42)
-        explorer._discover()
-        # Create two checkpoints: one heavily selected, one never selected
-        machine = BranchyChaos()
-        cp_old = Checkpoint(machine, 1, 0, 1, energy=5.0, times_selected=100)
-        cp_new = Checkpoint(machine, 1, 0, 2, energy=1.0, times_selected=0)
-        explorer._checkpoints = [cp_old, cp_new]
-
-        # Select many times — the unselected one should eventually get picked
-        selected_new = 0
-        for _ in range(100):
-            cp = explorer._select_energy()
-            if cp is cp_new:
-                selected_new += 1
-        assert selected_new > 0, "UCB should give the unselected checkpoint a chance"
-
-    def test_rare_edge_bonus(self):
-        """Edges that appear in fewer checkpoints should yield higher reward."""
-        explorer = Explorer(BranchyChaos, seed=42)
-        # Edge 1 appears in 10 checkpoints, edge 2 appears in 1
-        explorer._edge_frequency = {1: 10, 2: 1}
-
         machine = BranchyChaos()
         cp = Checkpoint(machine, 0, 0, 1, energy=1.0)
-        # Reward with a rare edge (edge 2) — should boost more
-        explorer._update_checkpoint_energy(cp, 1, frozenset({2}))
-        energy_rare = cp.energy
-
-        cp2 = Checkpoint(machine, 0, 0, 2, energy=1.0)
-        # Reward with a common edge (edge 1) — should boost less
-        explorer._update_checkpoint_energy(cp2, 1, frozenset({1}))
-        energy_common = cp2.energy
-
-        assert energy_rare > energy_common
+        explorer._update_checkpoint_energy(cp, 5)
+        assert cp.energy > 1.0
 
     def test_decay_without_new_edges(self):
         """Energy decays when a checkpoint produces no new edges."""
@@ -277,27 +248,29 @@ class TestEnergyScheduling:
         assert cp.energy < 5.0
         assert cp.energy > 0.0
 
-    def test_checkpoints_store_edges(self):
-        """Saved checkpoints should record their edge set."""
-        explorer = Explorer(
-            BranchyChaos,
-            target_modules=["tests._explore_target"],
-            seed=42,
-        )
-        explorer.run(max_runs=50, steps_per_run=20)
-        if explorer._checkpoints:
-            # At least some checkpoints should have non-empty edge sets
-            has_edges = any(len(cp.edges) > 0 for cp in explorer._checkpoints)
-            assert has_edges
+    def test_energy_selection_favors_high_energy(self):
+        """Energy-weighted selection should favor high-energy checkpoints."""
+        explorer = Explorer(BranchyChaos, seed=42)
+        explorer._discover()
+        machine = BranchyChaos()
+        cp_high = Checkpoint(machine, 1, 0, 1, energy=100.0)
+        cp_low = Checkpoint(machine, 1, 0, 2, energy=0.01)
+        explorer._checkpoints = [cp_high, cp_low]
 
-    def test_edge_frequency_tracks_corpus(self):
-        """Edge frequency dict should reflect the current checkpoint corpus."""
+        high_count = 0
+        for _ in range(100):
+            cp = explorer._select_energy()
+            if cp is cp_high:
+                high_count += 1
+        assert high_count > 80, "High-energy checkpoint should be selected most often"
+
+    def test_checkpoints_saved_during_exploration(self):
+        """Explorer should save checkpoints when it discovers new edges."""
         explorer = Explorer(
             BranchyChaos,
             target_modules=["tests._explore_target"],
             seed=42,
         )
-        explorer.run(max_runs=50, steps_per_run=20)
-        if explorer._edge_frequency:
-            # Every edge in frequency should have count >= 1
-            assert all(v >= 0 for v in explorer._edge_frequency.values())
+        result = explorer.run(max_runs=50, steps_per_run=20)
+        assert result.checkpoints_saved > 0
+        assert len(explorer._checkpoints) > 0

@@ -249,6 +249,40 @@ def _cmd_mine(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_mine_pair(args: argparse.Namespace) -> int:
+    """Discover relational properties between two functions."""
+    from importlib import import_module
+
+    from ordeal.mine import mine_pair
+
+    def _resolve_func(path: str):
+        parts = path.rsplit(".", 1)
+        if len(parts) < 2:
+            return None
+        mod = import_module(parts[0])
+        return getattr(mod, parts[1], None)
+
+    f = _resolve_func(args.f)
+    g = _resolve_func(args.g)
+    if f is None:
+        _stderr(f"Cannot resolve: {args.f}\n")
+        return 1
+    if g is None:
+        _stderr(f"Cannot resolve: {args.g}\n")
+        return 1
+
+    try:
+        result = mine_pair(f, g, max_examples=args.max_examples)
+    except (ValueError, TypeError) as e:
+        _stderr(f"Error: {e}\n")
+        return 1
+
+    print(result.summary())
+    if result.not_applicable:
+        print(f"    n/a: {', '.join(result.not_applicable)}")
+    return 0
+
+
 def _cmd_benchmark(args: argparse.Namespace) -> int:
     """Measure parallel scaling and fit USL parameters."""
     import os
@@ -474,6 +508,14 @@ def main(argv: list[str] | None = None) -> int:
         "--max-examples", "-n", type=int, default=500, help="Examples to sample (default: 500)"
     )
 
+    # -- ordeal mine-pair --
+    mp_p = sub.add_parser("mine-pair", help="Discover relational properties between two functions")
+    mp_p.add_argument("f", help="First function: mymod.func_a")
+    mp_p.add_argument("g", help="Second function: mymod.func_b")
+    mp_p.add_argument(
+        "--max-examples", "-n", type=int, default=200, help="Examples to sample (default: 200)"
+    )
+
     # -- ordeal benchmark --
     bench_p = sub.add_parser("benchmark", help="Measure parallel scaling (USL analysis)")
     bench_p.add_argument(
@@ -502,6 +544,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_audit(args)
     elif args.command == "mine":
         return _cmd_mine(args)
+    elif args.command == "mine-pair":
+        return _cmd_mine_pair(args)
     elif args.command == "benchmark":
         return _cmd_benchmark(args)
     else:

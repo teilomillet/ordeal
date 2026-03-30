@@ -307,6 +307,17 @@ class TestModuleAuditSummary:
         )
         assert not a.coverage_preserved
 
+    def test_mutation_score_in_summary(self):
+        a = ModuleAudit(module="myapp.scoring")
+        a.mutation_score = "8/10 (80%)"
+        s = a.summary()
+        assert "mutation: 8/10 (80%)" in s
+
+    def test_mutation_score_absent_when_empty(self):
+        a = ModuleAudit(module="myapp.scoring")
+        s = a.summary()
+        assert "mutation:" not in s
+
     def test_mined_grouped_in_summary(self):
         a = ModuleAudit(module="myapp.scoring")
         a.mined_properties = [

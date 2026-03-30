@@ -277,6 +277,7 @@ class ModuleAudit:
 
     # What ordeal discovered (with confidence bounds)
     mined_properties: list[str] = field(default_factory=list)
+    mutation_score: str = ""  # e.g. "8/10 (80%)" or "" if not run
     gap_functions: list[str] = field(default_factory=list)
     suggestions: list[str] = field(default_factory=list)
 
@@ -346,6 +347,9 @@ class ModuleAudit:
         if self.mined_properties:
             grouped = _group_mined_properties(self.mined_properties)
             lines.append(f"    mined:    {grouped}")
+
+        if self.mutation_score:
+            lines.append(f"    mutation: {self.mutation_score}")
 
         if self.gap_functions:
             lines.append(
@@ -1052,6 +1056,26 @@ def audit(
             result.warnings.append(
                 f"mining failed for {name}: {type(exc).__name__}: {exc}",
             )
+
+    # Validate mined properties against mutations (lightweight: arithmetic + comparison only)
+    from ordeal.mutations import validate_mined_properties
+
+    total_killed = total_mutants = 0
+    for name, func in _get_public_functions(_resolve_module(module)):
+        target_path = f"{module}.{name}"
+        try:
+            mr = validate_mined_properties(
+                target_path,
+                max_examples=min(max_examples, 20),
+                operators=["arithmetic", "comparison"],
+            )
+            total_killed += mr.killed
+            total_mutants += mr.total
+        except Exception:
+            pass  # skip functions that can't be mutated
+    if total_mutants > 0:
+        pct = total_killed / total_mutants
+        result.mutation_score = f"{total_killed}/{total_mutants} ({pct:.0%})"
 
     # -- 3. Measure migrated test coverage --
     out_dir = Path(".ordeal")

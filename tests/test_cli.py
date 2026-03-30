@@ -45,6 +45,17 @@ class TestCLI:
         out = capsys.readouterr().out
         assert "mine(bounded)" in out
 
+    # -- ordeal mine-pair --
+
+    def test_mine_pair_roundtrip(self, capsys):
+        target = "tests._mutation_target.add"
+        assert main(["mine-pair", target, target, "-n", "30"]) == 0
+        out = capsys.readouterr().out
+        assert "add" in out
+
+    def test_mine_pair_bad_target(self):
+        assert main(["mine-pair", "nodot", "json.loads"]) == 1
+
     def test_explore_with_real_config(self, tmp_path):
         """End-to-end: write a config, run explore, check exit code."""
         config = tmp_path / "ordeal.toml"
@@ -111,8 +122,8 @@ def test_qc_mine_valid_always_succeeds(target: str):
 @quickcheck
 def test_qc_mine_invalid_always_fails(target: str):
     """Bare words (no dot) must always return exit code 1."""
-    if "." in target:
-        return
+    if "." in target or not target or target.startswith("-"):
+        return  # skip strings that look like flags or contain dots
     code = main(["mine", target])
     assert code == 1
 

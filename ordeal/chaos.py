@@ -69,20 +69,19 @@ class ChaosTest(RuleBasedStateMachine):
     def _swarm_init(self, data):  # type: ignore[override]
         """In swarm mode, randomly select a fault subset for this test case.
 
-        Each fault is independently included or excluded.  Hypothesis
-        controls the booleans, so shrinking finds minimal fault sets.
+        Uses an integer bitmask (1 bit per fault) instead of a boolean
+        list — smaller, faster to draw and filter.  The range
+        ``[1, (1 << n) - 1]`` guarantees at least one fault is kept.
+        Hypothesis controls the integer, so shrinking finds minimal sets.
         """
         if not self.__class__.swarm or len(self._faults) <= 1:
             return
+        n = len(self._faults)
         mask = data.draw(
-            st.lists(
-                st.booleans(),
-                min_size=len(self._faults),
-                max_size=len(self._faults),
-            ).filter(any),  # at least one fault
+            st.integers(min_value=1, max_value=(1 << n) - 1),
             label="swarm_mask",
         )
-        self._faults = [f for f, keep in zip(self._faults, mask) if keep]
+        self._faults = [f for i, f in enumerate(self._faults) if mask & (1 << i)]
 
     # -- Nemesis rule -------------------------------------------------------
 

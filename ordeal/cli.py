@@ -114,6 +114,8 @@ def _cmd_explore(args: argparse.Namespace) -> int:
             steps_per_run=test_cfg.steps_per_run or cfg.explorer.steps_per_run,
             shrink=not args.no_shrink,
             progress=_ProgressPrinter() if verbose else None,
+            resume_from=args.resume,
+            save_state_to=args.save_state,
         )
 
         if verbose:
@@ -490,6 +492,20 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         metavar="PATH",
         help="Generate pytest tests from exploration traces (e.g. tests/test_generated.py)",
+    )
+    explore_p.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Resume from a saved state file (e.g. .ordeal/state.pkl)",
+    )
+    explore_p.add_argument(
+        "--save-state",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Save exploration state on completion (e.g. .ordeal/state.pkl)",
     )
 
     # -- ordeal replay --

@@ -20,6 +20,7 @@ and what coverage was observed.  Traces enable:
 from __future__ import annotations
 
 import base64
+import functools
 import json
 import time as _time
 from dataclasses import asdict, dataclass, field
@@ -82,11 +83,23 @@ class Trace:
         return _sanitize(asdict(self))
 
     def save(self, path: str | Path) -> None:
-        """Write trace to a JSON file."""
+        """Write trace to a JSON file.
+
+        If *path* ends with ``.gz`` (e.g. ``trace.json.gz``), the
+        output is gzip-compressed — typically 5-10x smaller than
+        plain JSON, useful for long exploration runs.
+        """
+        import gzip as _gzip
+
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "w") as f:
-            json.dump(asdict(self), f, cls=_TraceEncoder, indent=2)
+        data = json.dumps(asdict(self), cls=_TraceEncoder, indent=2)
+        if p.suffix == ".gz":
+            with _gzip.open(p, "wt", encoding="utf-8") as f:
+                f.write(data)
+        else:
+            with open(p, "w") as f:
+                f.write(data)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Trace:
@@ -107,9 +120,19 @@ class Trace:
 
     @classmethod
     def load(cls, path: str | Path) -> Trace:
-        """Load a trace from a JSON file."""
-        with open(path) as f:
-            data = json.load(f, cls=_TraceDecoder)
+        """Load a trace from a JSON file.
+
+        Automatically detects gzip-compressed files (``.gz`` suffix).
+        """
+        import gzip as _gzip
+
+        p = Path(path)
+        if p.suffix == ".gz":
+            with _gzip.open(p, "rt", encoding="utf-8") as f:
+                data = json.load(f, cls=_TraceDecoder)
+        else:
+            with open(p) as f:
+                data = json.load(f, cls=_TraceDecoder)
         return cls.from_dict(data)
 
 
@@ -219,14 +242,17 @@ def _replay_steps(
 ) -> Exception | None:
     """Replay a step sequence on a fresh machine. Returns exception or None."""
     machine = test_class()
+    invariant_methods = _get_invariant_methods(type(machine))
+    fault_index = {f.name: f for f in machine._faults}
     try:
         for step in steps:
             if step.kind == "fault_toggle":
-                _replay_fault_toggle(machine, step.name)
+                _replay_fault_toggle(fault_index, step.name)
             elif step.kind == "rule":
                 _replay_rule(machine, step.name, step.params)
             # Check invariants after every step
-            _check_invariants(machine)
+            for method in invariant_methods:
+                method(machine)
     except Exception as e:
         return e
     finally:
@@ -234,20 +260,20 @@ def _replay_steps(
     return None
 
 
-def _replay_fault_toggle(machine: ChaosTest, name: str) -> None:
-    """Toggle a fault by its signed name ('+fault' or '-fault')."""
+def _replay_fault_toggle(fault_index: dict[str, Any], name: str) -> None:
+    """Toggle a fault by its signed name ('+fault' or '-fault').
+
+    Uses a pre-built ``{name: fault}`` dict for O(1) lookup instead
+    of scanning the fault list on every toggle.
+    """
     if name.startswith("+"):
-        fault_name = name[1:]
-        for f in machine._faults:
-            if f.name == fault_name:
-                f.activate()
-                return
+        f = fault_index.get(name[1:])
+        if f is not None:
+            f.activate()
     elif name.startswith("-"):
-        fault_name = name[1:]
-        for f in machine._faults:
-            if f.name == fault_name:
-                f.deactivate()
-                return
+        f = fault_index.get(name[1:])
+        if f is not None:
+            f.deactivate()
 
 
 def _replay_rule(machine: ChaosTest, name: str, params: dict[str, Any]) -> None:
@@ -265,12 +291,20 @@ def _replay_rule(machine: ChaosTest, name: str, params: dict[str, Any]) -> None:
         method()  # fallback: call with no args
 
 
-def _check_invariants(machine: ChaosTest) -> None:
-    """Run all @invariant methods on the machine."""
-    for name in dir(type(machine)):
-        attr = getattr(type(machine), name, None)
+@functools.lru_cache(maxsize=32)
+def _get_invariant_methods(cls: type) -> tuple[Callable, ...]:
+    """Return unbound invariant methods for *cls*, cached per class.
+
+    Avoids walking ``dir()`` on every step during replay and shrinking.
+    The tuple of unbound methods is built once per class and reused
+    across all subsequent replays of that class.
+    """
+    methods: list[Callable] = []
+    for name in dir(cls):
+        attr = getattr(cls, name, None)
         if attr is not None and hasattr(attr, "hypothesis_stateful_invariant"):
-            getattr(machine, name)()
+            methods.append(attr)
+    return tuple(methods)
 
 
 def _import_class(class_path: str) -> type:

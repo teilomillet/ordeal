@@ -725,6 +725,8 @@ def mutate_and_test(
     target: str,
     test_fn: Callable[[], None],
     operators: list[str] | None = None,
+    *,
+    workers: int = 1,
 ) -> MutationResult:
     """Apply mutations to an entire module and run *test_fn* against each.
 
@@ -734,6 +736,12 @@ def mutate_and_test(
     Note: this swaps ``sys.modules[target]``.  Code that cached individual
     functions via ``from target import func`` will not see the mutant.
     Prefer :func:`mutate_function_and_test` for precise single-function targeting.
+
+    Args:
+        target: Module path (e.g. ``"myapp.scoring"``).
+        test_fn: Zero-arg callable; should raise on failure.
+        operators: Mutation operators to use (default: all).
+        workers: Parallel workers for testing mutants. Default ``1``.
     """
     module = importlib.import_module(target)
     source_file = getattr(module, "__file__", None)
@@ -809,6 +817,8 @@ def mutate_function_and_test(
     target: str,
     test_fn: Callable[[], None],
     operators: list[str] | None = None,
+    *,
+    workers: int = 1,
 ) -> MutationResult:
     """Mutate a single function and run *test_fn* against each mutant.
 
@@ -819,6 +829,9 @@ def mutate_function_and_test(
         target: Dotted path to the function (e.g. ``"myapp.scoring.compute"``).
         test_fn: Zero-arg callable; should raise on failure.
         operators: Mutation operators to use (default: all).
+        workers: Number of parallel worker processes. ``1`` (default)
+            runs sequentially.  Higher values give near-linear speedup
+            since each mutant is tested independently.
     """
     module_path, func_name = target.rsplit(".", 1)
     module = importlib.import_module(module_path)
@@ -826,6 +839,12 @@ def mutate_function_and_test(
     source = textwrap.dedent(inspect.getsource(func))
 
     mutant_pairs = generate_mutants(source, operators)
+
+    if workers > 1:
+        return _parallel_function_test(
+            target, test_fn, mutant_pairs, module, func_name, workers
+        )
+
     result = MutationResult(target=target)
 
     for mutant, mutated_tree in mutant_pairs:
@@ -852,6 +871,68 @@ def mutate_function_and_test(
         finally:
             fault.deactivate()
 
+        result.mutants.append(mutant)
+
+    return result
+
+
+def _parallel_function_test(
+    target: str,
+    test_fn: Callable[[], None],
+    mutant_pairs: list[tuple[Mutant, ast.Module]],
+    module: types.ModuleType,
+    func_name: str,
+    workers: int,
+) -> MutationResult:
+    """Run mutant tests in parallel using a process pool.
+
+    Pre-compiles all mutants, then distributes the test execution
+    across *workers* processes.  Each worker activates one mutant
+    via PatchFault, runs test_fn, and returns the result.
+    """
+    import multiprocessing as mp
+
+    # Pre-compile mutants into (Mutant, callable) — filter out failures
+    compiled: list[tuple[Mutant, Callable]] = []
+    for mutant, mutated_tree in mutant_pairs:
+        try:
+            code = compile(mutated_tree, f"<mutant:{mutant.description}>", "exec")
+            namespace = dict(module.__dict__)
+            exec(code, namespace)
+            mutated_func = namespace.get(func_name)
+            if mutated_func is None:
+                continue
+            compiled.append((mutant, mutated_func))
+        except Exception:
+            continue
+
+    # Worker function: test one mutant
+    def _test_one(args: tuple[int, str, str]) -> tuple[int, bool, str | None]:
+        idx, op, desc = args
+        _, mf = compiled[idx]
+        fault = PatchFault(target, lambda orig, mf=mf: mf)
+        fault.activate()
+        try:
+            test_fn()
+            return (idx, False, None)
+        except Exception as e:
+            return (idx, True, str(e)[:200])
+        finally:
+            fault.deactivate()
+
+    # Build work items
+    work = [(i, m.operator, m.description) for i, (m, _) in enumerate(compiled)]
+
+    # Execute in pool (use fork to share compiled state)
+    ctx = mp.get_context("fork" if sys.platform != "win32" else "spawn")
+    with ctx.Pool(workers) as pool:
+        outcomes = pool.map(_test_one, work)
+
+    result = MutationResult(target=target)
+    for idx, killed, error in outcomes:
+        mutant, _ = compiled[idx]
+        mutant.killed = killed
+        mutant.error = error
         result.mutants.append(mutant)
 
     return result

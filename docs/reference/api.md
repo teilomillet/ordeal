@@ -518,9 +518,9 @@ from ordeal.trace import Trace, TraceStep, TraceFailure, replay, shrink
 | Method | Returns | Description |
 |---|---|---|
 | `to_dict()` | `dict` | JSON-serializable dict |
-| `save(path)` | `None` | Write to JSON file |
+| `save(path)` | `None` | Write to JSON file (use `.json.gz` extension for gzip compression) |
 | `Trace.from_dict(data)` | `Trace` | Reconstruct from dict |
-| `Trace.load(path)` | `Trace` | Load from JSON file |
+| `Trace.load(path)` | `Trace` | Load from JSON file (auto-detects `.gz` compression) |
 
 ### TraceStep
 
@@ -756,10 +756,12 @@ mutate_function_and_test(
     target: str,                                # dotted path: "myapp.scoring.compute"
     test_fn: Callable[[], None],                # test to run against each mutant
     operators: list[str] | None = None,         # None = all operators
+    *,
+    workers: int = 1,                           # parallel workers (1 = sequential)
 ) -> MutationResult
 ```
 
-Mutate a single function via PatchFault. Safer than module-level. Recommended.
+Mutate a single function via PatchFault. Safer than module-level. Recommended. Set `workers > 1` for parallel mutant testing — each mutant is independent, giving near-linear speedup.
 
 ### mutate_and_test
 
@@ -768,6 +770,8 @@ mutate_and_test(
     target: str,                                # module path: "myapp.scoring"
     test_fn: Callable[[], None],
     operators: list[str] | None = None,
+    *,
+    workers: int = 1,                           # parallel workers (1 = sequential)
 ) -> MutationResult
 ```
 

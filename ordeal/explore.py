@@ -77,6 +77,11 @@ class CoverageCollector:
 
     def __init__(self, target_paths: list[str]) -> None:
         self._targets = target_paths
+        # Pre-split target paths into tuples of segments once at init.
+        # Avoids repeated string splitting on every _is_target call.
+        self._target_tuples: list[tuple[str, ...]] = [
+            tuple(t.replace(".", "/").split("/")) for t in target_paths
+        ]
         self._edges: set[int] = set()
         self._edges_lock = threading.Lock()
         self._tls = threading.local()
@@ -90,18 +95,18 @@ class CoverageCollector:
         Uses path-segment matching so ``"app"`` matches ``app/foo.py``
         but not ``myapp/foo.py``.  Handles both directory segments
         and filename segments (stripping ``.py`` extension).
+
+        Target paths are pre-split into tuples at ``__init__`` time
+        so this method only splits the filename (once per unique file,
+        cached by the caller).
         """
         normalized = filename.replace("\\", "/")
-        # Build segments, stripping .py from the last one
         segments = normalized.split("/")
         bare_segments = [s.removesuffix(".py") if s.endswith(".py") else s for s in segments]
-        for target in self._targets:
-            # Convert dotted module path to slash-separated segments
-            target_parts = target.replace(".", "/").split("/")
+        for target_parts in self._target_tuples:
             n = len(target_parts)
-            # Check if target_parts appear as a contiguous subsequence
             for i in range(len(bare_segments) - n + 1):
-                if bare_segments[i : i + n] == target_parts:
+                if tuple(bare_segments[i : i + n]) == target_parts:
                     return True
         return False
 
@@ -486,6 +491,102 @@ class Explorer:
                 f.deactivate()
         return machine
 
+    # -- Resumable state persistence ----------------------------------------
+
+    def save_state(self, path: str | Path) -> None:
+        """Save exploration state to disk for later resumption.
+
+        Persists the checkpoint corpus, discovered edges, state hashes,
+        satisfied properties, and RNG state.  The file is a pickle — not
+        intended for cross-version portability, but reliable for
+        resume-after-interrupt on the same codebase.
+        """
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+
+        # Filter checkpoints to picklable snapshots
+        cp_data: list[dict[str, Any]] = []
+        for cp in self._checkpoints:
+            try:
+                # Filter state_dict to only picklable values
+                safe_state: dict[str, Any] = {}
+                for k, v in cp.snapshot.state_dict.items():
+                    try:
+                        pickle.dumps(v)
+                        safe_state[k] = v
+                    except Exception:
+                        pass
+                if not safe_state:
+                    continue
+                cp_data.append(
+                    {
+                        "state_dict": safe_state,
+                        "fault_active": cp.snapshot.fault_active,
+                        "new_edge_count": cp.new_edge_count,
+                        "step": cp.step,
+                        "run_id": cp.run_id,
+                        "energy": cp.energy,
+                        "times_selected": cp.times_selected,
+                    }
+                )
+            except Exception:
+                continue
+
+        payload = {
+            "version": 1,
+            "total_edges": self._total_edges,
+            "total_states": self._total_states,
+            "satisfied_properties": self._satisfied_properties,
+            "checkpoints": cp_data,
+            "rng_state": self.rng.getstate(),
+            "seed": self.seed,
+        }
+
+        tmp = p.with_suffix(".tmp")
+        with open(tmp, "wb") as f:
+            pickle.dump(payload, f)
+        tmp.rename(p)  # atomic on POSIX
+
+    def load_state(self, path: str | Path) -> dict[str, Any]:
+        """Load saved exploration state, restoring checkpoints and edges.
+
+        Returns a dict of counters (``total_runs``, ``total_steps``, etc.)
+        that the caller should seed into the ``ExplorationResult``.
+        """
+        with open(path, "rb") as f:
+            payload = pickle.load(f)
+
+        self._total_edges = set(payload.get("total_edges", set()))
+        self._total_states = set(payload.get("total_states", set()))
+        self._satisfied_properties = set(payload.get("satisfied_properties", set()))
+
+        rng_state = payload.get("rng_state")
+        if rng_state is not None:
+            self.rng.setstate(rng_state)
+
+        # Reconstruct checkpoints
+        self._checkpoints.clear()
+        for cpd in payload.get("checkpoints", []):
+            snap = _MachineSnapshot(
+                state_dict=cpd["state_dict"],
+                fault_active=cpd.get("fault_active", {}),
+            )
+            self._checkpoints.append(
+                Checkpoint(
+                    snapshot=snap,
+                    new_edge_count=cpd.get("new_edge_count", 0),
+                    step=cpd.get("step", 0),
+                    run_id=cpd.get("run_id", 0),
+                    energy=cpd.get("energy", 1.0),
+                    times_selected=cpd.get("times_selected", 0),
+                )
+            )
+
+        return {
+            "total_edges": len(self._total_edges),
+            "checkpoints": len(self._checkpoints),
+        }
+
     # -- Discovery ----------------------------------------------------------
 
     def _discover(self) -> None:
@@ -716,6 +817,8 @@ class Explorer:
         max_shrink_time: float = 30.0,
         patience: int = 0,
         progress: Callable[[ProgressSnapshot], None] | None = None,
+        resume_from: str | Path | None = None,
+        save_state_to: str | Path | None = None,
     ) -> ExplorationResult:
         """Run the coverage-guided exploration loop.
 
@@ -727,6 +830,12 @@ class Explorer:
             max_shrink_time: Time limit for shrinking each failure.
             patience: Stop after N consecutive runs without new edges. 0=disabled.
             progress: Optional callback for live progress updates.
+            resume_from: Path to a saved state file from a previous run.
+                Restores checkpoints, edges, and RNG state so exploration
+                continues where it left off.
+            save_state_to: Path to save exploration state on completion
+                (and on interrupt).  Use with ``resume_from`` on the next
+                run to continue exploration across sessions.
         """
         if self.workers > 1:
             return self._run_parallel(
@@ -750,6 +859,13 @@ class Explorer:
             raise ValueError(f"No callable rules found on {self.test_class.__name__}")
 
         result = ExplorationResult()
+
+        # Resume from saved state if provided
+        if resume_from is not None:
+            restored = self.load_state(resume_from)
+            result.unique_edges = restored["total_edges"]
+            result.checkpoints_saved = restored["checkpoints"]
+
         use_coverage = bool(self.target_paths)
         start = _time.monotonic()
         class_name = _qualified_name(self.test_class)
@@ -1016,6 +1132,11 @@ class Explorer:
 
         result.unique_edges = len(self._total_edges)
         result.duration_seconds = _time.monotonic() - start
+
+        # Save state for future resumption
+        if save_state_to is not None:
+            self.save_state(save_state_to)
+
         return result
 
     # -- Parallel execution -------------------------------------------------

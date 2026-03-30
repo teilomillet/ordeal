@@ -71,6 +71,16 @@ Override settings from the command line without editing the TOML:
 ordeal explore --max-time 300 --seed 99 -v
 ```
 
+Save exploration state for later resumption:
+
+```bash
+ordeal explore -v --save-state .ordeal/state.pkl
+# ... interrupt or let it finish, then resume:
+ordeal explore -v --resume .ordeal/state.pkl --save-state .ordeal/state.pkl
+```
+
+Resuming restores the checkpoint corpus, discovered edges, and RNG state so exploration continues where it left off instead of starting from scratch.
+
 
 ## Configuration reference
 
@@ -311,7 +321,7 @@ traces = true
 traces_dir = ".ordeal/traces"
 ```
 
-Failure traces are saved as `fail-run-{run_id}.json` in the traces directory.
+Failure traces are saved as `fail-run-{run_id}.json` in the traces directory. For compact storage, use a `.json.gz` suffix — traces are gzip-compressed automatically (typically 10-40x smaller).
 
 ### Replaying a trace
 

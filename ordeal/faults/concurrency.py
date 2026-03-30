@@ -14,7 +14,6 @@ connection pools, or shared mutable state.
 from __future__ import annotations
 
 import functools
-import random
 import threading
 import time
 from typing import Any
@@ -126,40 +125,6 @@ def thread_boundary(target: str, timeout: float = 5.0) -> Fault:
     patterns, and implicit thread affinity assumptions.
     """
     return _ThreadBoundaryFault(target, timeout)
-
-
-class _ReorderingFault(PatchFault):
-    """Buffers calls and occasionally reorders or delays them.
-
-    Simulates out-of-order delivery (e.g. network packets, event
-    queues, distributed system messages).
-    """
-
-    def __init__(
-        self,
-        target: str,
-        probability: float = 0.3,
-    ) -> None:
-        self._buffer: list = []
-        self._buffer_lock = threading.Lock()
-        self._probability = probability
-        self._rng = random.Random(42)
-
-        def wrapper(original: Any) -> Any:
-            @functools.wraps(original)
-            def maybe_reordered(*args: Any, **kwargs: Any) -> Any:
-                # Always execute, but sometimes delay the return
-                result = original(*args, **kwargs)
-                return result
-
-            return maybe_reordered
-
-        super().__init__(target, wrapper, name=f"reordering({target}, p={probability})")
-
-    def reset(self) -> None:
-        with self._buffer_lock:
-            self._buffer.clear()
-        super().reset()
 
 
 def stale_state(

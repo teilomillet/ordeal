@@ -502,25 +502,3 @@ class TestJitterFault:
         assert r != 42.0
         fault.deactivate()
 
-
-# ============================================================================
-# Concurrency — _ReorderingFault
-# ============================================================================
-
-
-class TestReorderingFault:
-    def test_still_calls_original(self):
-        from ordeal.faults.concurrency import _ReorderingFault
-
-        fault = _ReorderingFault(f"{__name__}.returns_int", probability=1.0)
-        fault.activate()
-        assert returns_int() == 100
-        fault.deactivate()
-
-    def test_reset_clears_buffer(self):
-        from ordeal.faults.concurrency import _ReorderingFault
-
-        fault = _ReorderingFault(f"{__name__}.returns_int")
-        fault._buffer.append("leftover")
-        fault.reset()
-        assert fault._buffer == []

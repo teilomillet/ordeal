@@ -389,7 +389,7 @@ def fuzz(
     *,
     max_examples: int = 1000,
     check_return_type: bool = False,
-    **fixtures: st.SearchStrategy,
+    **fixtures: st.SearchStrategy[Any] | Any,
 ) -> FuzzResult:
     """Deep-fuzz a single function with auto-inferred strategies.
 
@@ -398,20 +398,31 @@ def fuzz(
         result = fuzz(myapp.scoring.compute)
         assert result.passed
 
-    With fixture overrides::
+    With fixture overrides (strategies or plain values)::
 
         result = fuzz(myapp.scoring.compute, model=model_strategy)
+        result = fuzz(myapp.scoring.compute, max_tokens=5)  # auto-wrapped
 
     Args:
         fn: The function to fuzz.
         max_examples: Number of random inputs to try.
         check_return_type: Verify return type annotation.
-        **fixtures: Strategy overrides for specific parameters.
+        **fixtures: Strategy overrides or plain values (auto-wrapped in st.just).
     """
-    strategies = _infer_strategies(fn, fixtures or None)
+    # Auto-wrap plain values in st.just()
+    normalized: dict[str, st.SearchStrategy[Any]] | None = None
+    if fixtures:
+        normalized = {}
+        for k, v in fixtures.items():
+            if isinstance(v, st.SearchStrategy):
+                normalized[k] = v
+            else:
+                normalized[k] = st.just(v)
+    strategies = _infer_strategies(fn, normalized)
     if strategies is None:
         raise ValueError(
-            f"Cannot infer strategies for {fn.__name__}. Provide fixtures for untyped parameters."
+            f"Cannot infer strategies for {fn.__name__}. "
+            f"Provide fixtures for untyped parameters."
         )
 
     try:

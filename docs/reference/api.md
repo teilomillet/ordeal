@@ -964,6 +964,7 @@ Audit multiple modules and produce a formatted summary report. Every number labe
 | `mined_properties` | `list[str]` | Properties with Wilson CI bounds |
 | `gap_functions` | `list[str]` | Functions needing fixtures |
 | `suggestions` | `list[str]` | Actionable suggestions for uncovered lines |
+| `mutation_score` | `str` | e.g. `"8/10 (80%)"` — how many mutations mined properties catch |
 | `not_checked` | `list[str]` | Known unknowns — what ordeal structurally cannot verify |
 | `warnings` | `list[str]` | Every problem visible here |
 | `generated_test` | `str` | Full generated test file content |
@@ -1239,6 +1240,40 @@ Things mine() fundamentally cannot discover from random sampling — these requi
 | `counterexample` | `dict | None` | First counterexample if not universal |
 | `confidence` | `float` | `holds / total` |
 | `universal` | `bool` | True if held on every example |
+
+### mine_pair
+
+```python
+mine_pair(
+    f: Callable,
+    g: Callable,
+    *,
+    max_examples: int = 200,
+    **fixtures: SearchStrategy | Any,
+) -> MineResult
+```
+
+Discover relational properties between two functions: roundtrip (`g(f(x)) == x`), reverse roundtrip (`f(g(x)) == x`), and commutative composition (`f(g(x)) == g(f(x))`). Strategies inferred from `f`'s type hints.
+
+```python
+from ordeal.mine import mine_pair
+result = mine_pair(json.dumps, json.loads)
+# discovers: roundtrip g(f(x)) == x
+```
+
+### validate_mined_properties
+
+```python
+from ordeal.mutations import validate_mined_properties
+
+validate_mined_properties(
+    target: str,                    # dotted path: "myapp.scoring.compute"
+    max_examples: int = 100,
+    operators: list[str] | None = None,
+) -> MutationResult
+```
+
+Mine properties of `target`, then mutate the code and check whether the mined properties catch the mutations. Surviving mutants reveal properties that are too weak. Used by `ordeal audit` to report mutation scores.
 
 ---
 

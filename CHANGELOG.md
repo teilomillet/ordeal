@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.19
+
+- **Mutation score in audit** — audit now runs `validate_mined_properties()` and reports how many mutations the mined properties catch: `"mutation: 14/18 (78%)"`
+- **`ordeal mine-pair`** — CLI command to discover relational properties (roundtrip, reverse, composition) between two functions: `ordeal mine-pair mymod.encode mymod.decode`
+- **Shared checkpoint pool restored** — parallel workers publish high-energy checkpoints to a shared temp directory; other workers load and branch from them
+
 ## 0.1.18
 
 - **Network faults** — `faults.network`: `http_error`, `connection_reset`, `rate_limited`, `auth_failure`, `dns_failure`, `partial_response`, `intermittent_http_error`. Duck-typed `HTTPFaultError` compatible with requests/httpx

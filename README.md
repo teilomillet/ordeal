@@ -334,6 +334,7 @@ myapp.scoring
   migrated:  12 tests |   130 lines | 96% coverage [verified]
   saving:   64% fewer tests | 62% less code | same coverage
   mined:    compute: output in [0, 1] (500/500, >=99% CI)
+  mutation: 14/18 (78%)
   suggest:
     - L42 in compute(): test when x < 0
     - L67 in normalize(): test that ValueError is raised

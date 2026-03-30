@@ -320,9 +320,8 @@ class Explorer:
             checkpoint_strategy: ``"energy"`` | ``"uniform"`` | ``"recent"``.
             fault_toggle_prob: Probability of nemesis action per step.
             record_traces: If True, keep full traces in the result.
-            workers: Number of parallel worker processes. Each gets a unique
-                seed for independent state-space exploration. Default 1
-                (sequential). Use ``os.cpu_count()`` for full utilization.
+            workers: Number of parallel worker processes. ``0`` means auto
+                (uses ``os.cpu_count()``). Default ``1`` (sequential).
             share_edges: When ``workers > 1``, use a shared-memory edge
                 bitmap so workers skip edges already found by others.
                 AFL-style: one byte per edge hash, single-byte atomic

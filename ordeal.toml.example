@@ -1,0 +1,63 @@
+# ordeal.toml — Configuration for ordeal's coverage-guided explorer.
+#
+# This file is the single source of truth for an exploration run.
+# Shareable, versionable, usable by both humans and AI agents.
+#
+# Run with:  ordeal explore
+# Override:  ordeal explore --max-time 300 --seed 99 -v
+
+[explorer]
+# Python modules to track for edge coverage.  The explorer checkpoints
+# when new control-flow edges are discovered in these modules.
+target_modules = ["myapp"]
+
+# Wall-clock time limit for the exploration run.
+max_time = 60
+
+# RNG seed — same seed + same code = same exploration.
+seed = 42
+
+# Maximum saved checkpoints.  Older/lower-energy ones are evicted.
+max_checkpoints = 256
+
+# Probability that a new run starts from a checkpoint (vs fresh).
+checkpoint_prob = 0.4
+
+# Checkpoint selection strategy:
+#   "energy"  — favor checkpoints that led to new discoveries (default)
+#   "uniform" — pick uniformly at random
+#   "recent"  — favor recently created checkpoints
+checkpoint_strategy = "energy"
+
+# Max rule steps per exploration run.
+steps_per_run = 50
+
+# Probability of a nemesis action (fault toggle) per step.
+fault_toggle_prob = 0.3
+
+
+# Each [[tests]] entry is a ChaosTest class to explore.
+# Format: "module.path:ClassName"
+
+[[tests]]
+class = "tests.test_chaos:MyServiceChaos"
+# steps_per_run = 30   # override per test (optional)
+# swarm = true          # enable swarm fault selection (optional)
+
+# [[tests]]
+# class = "tests.test_chaos:AnotherChaos"
+
+
+[report]
+# Output format: "text" (stdout), "json" (file), or "both".
+format = "both"
+
+# Path for the JSON report.
+output = "ordeal-report.json"
+
+# Save full traces for replay with `ordeal replay`.
+traces = true
+traces_dir = ".ordeal/traces"
+
+# Print live progress to stderr during exploration.
+verbose = true

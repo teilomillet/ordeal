@@ -1,0 +1,48 @@
+name: Bug Report
+description: Report a bug in ordeal
+labels: [bug]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Smallest code snippet or steps that trigger the bug.
+      render: python
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened instead?
+
+  - type: input
+    id: ordeal-version
+    attributes:
+      label: ordeal version
+      placeholder: "0.1.0"
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: "3.12.0"
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "Ubuntu 24.04 / macOS 15 / Windows 11"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      render: text

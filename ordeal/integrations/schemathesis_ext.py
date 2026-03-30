@@ -49,6 +49,7 @@ def with_chaos(
     *,
     fault_probability: float = 0.3,
     seed: int | None = None,
+    swarm: bool = False,
 ) -> Callable:
     """Decorator that wraps a Schemathesis test with fault injection.
 
@@ -59,8 +60,16 @@ def with_chaos(
         faults: Fault instances to inject.
         fault_probability: Probability of each fault being active per request.
         seed: Random seed for reproducibility.
+        swarm: Use swarm mode — pick a random subset of faults once, then
+            toggle only those for the lifetime of the wrapper. Better
+            aggregate coverage than all-faults-always-eligible.
     """
     rng = random.Random(seed)
+    if swarm and faults:
+        k = max(1, rng.randint(1, len(faults)))
+        eligible = set(rng.sample(faults, k))
+    else:
+        eligible = set(faults)
 
     def decorator(test_fn: Callable) -> Callable:
         @functools.wraps(test_fn)
@@ -68,7 +77,7 @@ def with_chaos(
             tracker.active = True
             # Randomly activate faults
             for fault in faults:
-                if rng.random() < fault_probability:
+                if fault in eligible and rng.random() < fault_probability:
                     fault.activate()
                 else:
                     fault.deactivate()
@@ -165,15 +174,21 @@ class ChaosAPIHook:
         faults: list[Fault],
         fault_probability: float = 0.3,
         seed: int | None = None,
+        swarm: bool = False,
     ):
         self.faults = faults
         self.probability = fault_probability
         self.rng = random.Random(seed)
+        if swarm and faults:
+            k = max(1, self.rng.randint(1, len(faults)))
+            self.eligible: set[Fault] = set(self.rng.sample(faults, k))
+        else:
+            self.eligible = set(faults)
 
     def before_call(self, context: Any, case: Any) -> None:
         """Randomly activate/deactivate faults before each API call."""
         for fault in self.faults:
-            if self.rng.random() < self.probability:
+            if fault in self.eligible and self.rng.random() < self.probability:
                 fault.activate()
             else:
                 fault.deactivate()

@@ -447,6 +447,67 @@ Increase `fault_toggle_prob` from 0.3 to 0.5. This means faults toggle more freq
 **Want deeper fault-free exploration?**
 Decrease `fault_toggle_prob` to 0.1. The system runs longer without fault interference, building up more complex state before faults are injected.
 
+## Parallel exploration
+
+The Explorer can run across multiple worker processes. Each worker gets a unique seed (base + i*7919) for independent state-space exploration. Results are aggregated: runs and steps are summed, edges are unioned for the true unique count.
+
+### From the CLI
+
+```bash
+ordeal explore -w 4                     # 4 workers
+ordeal explore -w $(nproc)              # use all CPUs
+```
+
+### From Python
+
+```python
+explorer = Explorer(
+    MyServiceChaos,
+    target_modules=["myapp"],
+    workers=4,
+)
+result = explorer.run(max_time=60)
+```
+
+### From ordeal.toml
+
+```toml
+[explorer]
+target_modules = ["myapp"]
+max_time = 300
+workers = 8
+```
+
+### When to use parallel
+
+- **Long pre-release runs.** 8 workers for 5 minutes covers more state space than 1 worker for 40 minutes, because each worker explores independently from a different seed.
+- **CI with available cores.** If your CI runners have 4+ cores, use them.
+- **Diminishing returns.** Each worker has its own checkpoint corpus and coverage set. They don't share discoveries, so edge coverage may overlap. Use `ordeal.scaling.benchmark()` to measure actual scaling efficiency for your test.
+
+### Measuring scaling efficiency
+
+The `ordeal.scaling` module provides Universal Scaling Law (USL) analysis to predict how throughput scales with worker count:
+
+```python
+from ordeal.scaling import benchmark
+
+analysis = benchmark(MyServiceChaos, target_modules=["myapp"])
+print(analysis.summary())
+# Scaling Analysis (Universal Scaling Law)
+#   sigma (contention):  0.032000
+#   kappa (coherence):   0.000400
+#   Optimal workers:     15.5
+#   Peak throughput:     9.42x
+#
+#   Predicted scaling:
+#     N=  1:   1.00x throughput (100.0% efficient)
+#     N=  4:   3.62x throughput ( 90.6% efficient)
+#     N=  8:   6.28x throughput ( 78.5% efficient)
+#     N= 16:   9.38x throughput ( 58.6% efficient) <-- peak
+```
+
+If `n_optimal` is low (< 4), your test has high contention — reduce shared state before adding workers. If it's high (> 16), you're scaling well.
+
 ---
 
 **Related pages:**

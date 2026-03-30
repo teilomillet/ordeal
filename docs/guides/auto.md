@@ -64,9 +64,30 @@ TestScoring = chaos_for(
 
 Returns a pytest-discoverable `TestCase`. Run with `pytest`.
 
+## mine — discover properties automatically
+
+`mine()` runs a function many times with random inputs and observes patterns in outputs — type consistency, boundedness, determinism, idempotency. You confirm which are real and turn them into tested invariants:
+
+```python
+from ordeal.mine import mine
+
+result = mine(myapp.scoring.compute, max_examples=500)
+for p in result.universal:
+    print(p)
+# ALWAYS  output type is float (500/500)
+# ALWAYS  deterministic (50/50)
+# ALWAYS  output in [0, 1] (500/500)
+```
+
+Properties are probabilistic — the confidence is stated, not assumed. `500/500` doesn't mean "always holds"; it means "holds with >= 99.4% probability at 95% CI" (Wilson score interval).
+
+`mine()` also tells you what it *cannot* check — see `result.not_checked` for structural limitations (correctness, concurrency, domain-specific invariants). These are the tests you need to write manually.
+
+`ordeal audit` uses `mine()` internally to generate migrated test files with mined property descriptions.
+
 ## How it works
 
-All three primitives:
+All three primitives (`scan_module`, `fuzz`, `chaos_for`):
 
 1. Scan the module for public, non-class callables
 2. Infer strategies from type hints (via `ordeal.quickcheck.strategy_for_type`)

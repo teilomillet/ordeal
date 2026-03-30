@@ -115,6 +115,19 @@ The maximum number of checkpoints kept in the corpus. When the limit is reached,
 
 256 is generous for most use cases. Increase it if you have long runs where many distinct interesting states accumulate. Decrease it if checkpoint `deepcopy` is expensive for your machine state.
 
+### `workers`
+
+Number of parallel worker processes. Default 1 (sequential). Each worker gets a unique seed (`base + i*7919`) and explores independently.
+
+Set to the number of available CPU cores for maximum throughput. In CI, match your runner's core count. Locally, leave headroom for other work (e.g., `workers = 6` on an 8-core machine).
+
+Workers don't share checkpoints or coverage — they explore independently and results are aggregated at the end (runs summed, edges unioned). This means some edge discovery may overlap. Use `ordeal.scaling.benchmark()` to measure actual efficiency for your test.
+
+```toml
+[explorer]
+workers = 4    # 4 parallel processes
+```
+
 ## Examples
 
 ### Local development (quick iteration)

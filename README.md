@@ -179,6 +179,12 @@ print(result.summary())
 
 Failures are **shrunk** — delta debugging removes unnecessary steps, then fault simplification removes unnecessary faults. You get the minimal sequence that reproduces the bug.
 
+Scale with `workers` — each process gets a unique seed for independent exploration, results are aggregated:
+
+```python
+explorer = Explorer(MyServiceChaos, target_modules=["myapp"], workers=8)
+```
+
 ### Configuration
 
 ```toml

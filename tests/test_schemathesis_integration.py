@@ -333,7 +333,7 @@ class TestChaosApiTestASGI:
 
 class TestWithChaosIntegration:
     def test_decorator_with_real_schema(self):
-        from hypothesis import given
+        from hypothesis import HealthCheck, given
         from hypothesis import settings as h_settings
 
         schema = schemathesis.openapi.from_asgi("/openapi.json", asgi_app)
@@ -346,7 +346,11 @@ class TestWithChaosIntegration:
             case.call_and_validate()
 
         @given(case=schema.as_strategy())
-        @h_settings(max_examples=3, database=None)
+        @h_settings(
+            max_examples=3,
+            database=None,
+            suppress_health_check=[HealthCheck.too_slow, HealthCheck.filter_too_much],
+        )
         def run(case):
             chaos_fn(case)
 
@@ -354,7 +358,7 @@ class TestWithChaosIntegration:
         assert len(calls) > 0
 
     def test_faults_reset_after_each_call(self):
-        from hypothesis import given
+        from hypothesis import HealthCheck, given
         from hypothesis import settings as h_settings
 
         schema = schemathesis.openapi.from_asgi("/openapi.json", asgi_app)
@@ -366,7 +370,11 @@ class TestWithChaosIntegration:
             case.call_and_validate()
 
         @given(case=schema.as_strategy())
-        @h_settings(max_examples=3, database=None)
+        @h_settings(
+            max_examples=3,
+            database=None,
+            suppress_health_check=[HealthCheck.too_slow, HealthCheck.filter_too_much],
+        )
         def run(case):
             chaos_fn(case)
 
@@ -381,7 +389,7 @@ class TestWithChaosIntegration:
 
 class TestChaosAPIHookIntegration:
     def test_hook_registration(self):
-        from hypothesis import given
+        from hypothesis import HealthCheck, given
         from hypothesis import settings as h_settings
 
         faults = _make_faults(2)
@@ -392,7 +400,11 @@ class TestChaosAPIHookIntegration:
             schema = schemathesis.openapi.from_asgi("/openapi.json", asgi_app)
 
             @given(case=schema.as_strategy())
-            @h_settings(max_examples=3, database=None)
+            @h_settings(
+                max_examples=3,
+                database=None,
+                suppress_health_check=[HealthCheck.too_slow, HealthCheck.filter_too_much],
+            )
             def run(case):
                 case.call_and_validate()
 

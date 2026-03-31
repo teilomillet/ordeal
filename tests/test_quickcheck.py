@@ -228,3 +228,29 @@ class TestStrategyForType:
             assert isinstance(x.inner.value, int)
 
         check()
+
+    def test_literal_type(self):
+        """Literal types generate sampled_from strategy."""
+        from typing import Literal
+
+        strat = strategy_for_type(Literal["alpha", "beta", "gamma"])
+
+        @given(x=strat)
+        @settings(max_examples=30)
+        def check(x):
+            assert x in ("alpha", "beta", "gamma")
+
+        check()
+
+    def test_literal_int(self):
+        """Literal with int values."""
+        from typing import Literal
+
+        strat = strategy_for_type(Literal[1, 2, 3])
+
+        @given(x=strat)
+        @settings(max_examples=30)
+        def check(x):
+            assert x in (1, 2, 3)
+
+        check()

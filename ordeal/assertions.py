@@ -192,7 +192,7 @@ def report() -> dict[str, list[dict[str, Any]]]:
             "passes": p.passes,
             "failures": p.failures,
             "status": "PASS" if p.passed else "FAIL",
-            "summary": p.summary(),
+            "summary": p.summary,
         }
         if p.passed:
             passed.append(entry)

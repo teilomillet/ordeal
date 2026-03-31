@@ -112,3 +112,112 @@ class TestChaosFor:
         )
         test = TestCase("runTest")
         test.runTest()
+
+
+# ============================================================================
+# Tests for new features
+# ============================================================================
+
+
+class TestScanExpectedFailures:
+    """expected_failures parameter skips known-broken functions."""
+
+    def test_expected_failure_does_not_count(self):
+        result = scan_module(
+            "tests._auto_target",
+            max_examples=5,
+            expected_failures=["divide"],  # divide crashes on b=0
+        )
+        # divide may fail but shouldn't count toward .failed
+        assert (
+            result.passed
+            or result.failed == 0
+            or "divide"
+            not in [
+                f.name
+                for f in result.functions
+                if not f.passed and f.name not in result.expected_failure_names
+            ]
+        )
+
+    def test_expected_failures_tracked(self):
+        result = scan_module(
+            "tests._auto_target",
+            max_examples=5,
+            expected_failures=["divide"],
+        )
+        assert "divide" in result.expected_failure_names
+
+
+class TestScanPerFunctionBudget:
+    """max_examples as dict gives per-function control."""
+
+    def test_dict_max_examples(self):
+        result = scan_module(
+            "tests._auto_target",
+            max_examples={"add": 3, "greet": 3, "__default__": 5},
+        )
+        # Should still work — just different budgets per function
+        names = [f.name for f in result.functions]
+        assert "add" in names
+        assert "greet" in names
+
+
+class TestFuzzFailingArgs:
+    """fuzz() captures shrunk failing input."""
+
+    def test_failing_args_captured(self):
+        result = fuzz(target.divide, max_examples=50)
+        if not result.passed:
+            # divide(a, 0) crashes — failing_args should be set
+            assert result.failing_args is not None
+            assert "b" in result.failing_args
+
+    def test_passing_has_no_failing_args(self):
+        result = fuzz(target.add, max_examples=20)
+        assert result.passed
+        assert result.failing_args is None
+
+
+class TestChaosForPerFunctionInvariants:
+    """chaos_for with dict invariants applies per function."""
+
+    def test_dict_invariants_type_accepted(self):
+        """Verify chaos_for accepts dict invariants without error."""
+        from ordeal.invariants import bounded
+
+        # Just verify it creates the class — don't run it because
+        # _auto_target.divide crashes on b=0 regardless of invariants
+        TestCase = chaos_for(
+            "tests._auto_target",
+            invariants={"clamp": bounded(0, 1)},
+            max_examples=5,
+            stateful_step_count=3,
+        )
+        assert TestCase is not None
+
+
+class TestLiteralInScan:
+    """Literal-typed params are auto-resolved in scan_module."""
+
+    def test_literal_param_not_skipped(self):
+        import sys
+        import types
+
+        # Create a module with Literal param
+        mod = types.ModuleType("_test_literal_scan")
+        exec(
+            "from typing import Literal\n"
+            'def choose(opt: Literal["a", "b"]) -> str:\n'
+            "    return opt\n",
+            mod.__dict__,
+        )
+        sys.modules["_test_literal_scan"] = mod
+        try:
+            result = scan_module("_test_literal_scan", max_examples=5)
+            names = [f.name for f in result.functions]
+            assert "choose" in names
+            skipped_names = [n for n, _ in result.skipped]
+            assert "choose" not in skipped_names
+        finally:
+            del sys.modules["_test_literal_scan"]

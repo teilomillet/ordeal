@@ -3,7 +3,7 @@
 from hypothesis import settings
 from hypothesis.stateful import invariant, rule
 
-from ordeal.chaos import ChaosTest
+from ordeal.chaos import ChaosTest, chaos_test
 from ordeal.faults import LambdaFault
 
 # -- A simple system under test ---------------------------------------------
@@ -116,3 +116,28 @@ class NoFaultsChaos(ChaosTest):
 
 TestNoFaultsChaos = NoFaultsChaos.TestCase
 TestNoFaultsChaos.settings = settings(max_examples=10, stateful_step_count=8)
+
+
+# ============================================================================
+# @chaos_test decorator — no TestCase boilerplate
+# ============================================================================
+
+
+@chaos_test
+class DecoratedChaos(ChaosTest):
+    """ChaosTest via @chaos_test — directly discoverable by pytest."""
+
+    def __init__(self):
+        super().__init__()
+        self.counter = 0
+
+    @rule()
+    def increment(self):
+        self.counter += 1
+
+    @invariant()
+    def non_negative(self):
+        assert self.counter >= 0
+
+
+DecoratedChaos.settings = settings(max_examples=10, stateful_step_count=5)

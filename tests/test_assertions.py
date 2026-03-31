@@ -133,6 +133,64 @@ class TestSometimes:
         assert tracker.results[0].passes == 0
 
 
+class TestSometimesWarn:
+    """Test sometimes(warn=True) — visible without --chaos."""
+
+    def setup_method(self):
+        tracker.active = False  # explicitly inactive
+        tracker.reset()
+
+    def test_warn_true_prints_pass(self, capsys):
+        sometimes(True, "ratio check", warn=True)
+        captured = capsys.readouterr()
+        assert "PASS" in captured.out
+        assert "ratio check" in captured.out
+
+    def test_warn_true_prints_observe(self, capsys):
+        sometimes(False, "low ratio", warn=True)
+        captured = capsys.readouterr()
+        assert "OBSERVE" in captured.out
+        assert "low ratio" in captured.out
+
+    def test_warn_false_does_not_print(self, capsys):
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            sometimes(True, "silent", warn=False)
+        captured = capsys.readouterr()
+        assert captured.out == ""
+
+
+class TestReport:
+    """Test report() structured summary."""
+
+    def setup_method(self):
+        tracker.active = True
+        tracker.reset()
+
+    def teardown_method(self):
+        tracker.active = False
+
+    def test_report_returns_passed_and_failed(self):
+        from ordeal.assertions import report
+
+        always(True, "good-prop")
+        sometimes(False, "never-seen")
+        r = report()
+        assert "passed" in r
+        assert "failed" in r
+        assert len(r["passed"]) == 1
+        assert r["passed"][0]["name"] == "good-prop"
+        assert r["passed"][0]["status"] == "PASS"
+
+    def test_report_empty_when_nothing_tracked(self):
+        from ordeal.assertions import report
+
+        r = report()
+        assert r == {"passed": [], "failed": []}
+
+
 class TestReachable:
     def setup_method(self):
         tracker.active = True

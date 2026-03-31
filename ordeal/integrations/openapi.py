@@ -1151,51 +1151,97 @@ def _validate_response(
     endpoint: _Endpoint,
     active_faults: list[str],
 ) -> dict[str, Any] | None:
-    """Return a failure dict if the response indicates an error, else None.
+    """Return a failure dict if the response violates HTTP semantics.
 
-    Checks both application-level errors (5xx) and HTTP protocol violations
-    (Content-Length mismatch, which causes uvicorn RuntimeError when
-    middleware modifies the response after headers are set).
+    Validates at three layers:
+
+    1. **Application**: 5xx status codes.
+    2. **Protocol**: Content-Length mismatch, Transfer-Encoding conflict,
+       body on 204/304, JSON Content-Type with non-JSON body.
+    3. **Security**: missing security headers on non-fault responses.
+
+    Each check catches a class of bug that is invisible at the application
+    layer but crashes or misbehaves at the transport/browser layer.
     """
-    # 5xx is always a failure
-    if response.status_code >= 500:
+    prefix = f"{endpoint.method} {endpoint.path}"
+    headers = {k.lower(): v for k, v in response.headers.items()}
+    status = response.status_code
+
+    def _fail(fail_type: str, msg: str, **extra: Any) -> dict[str, Any]:
         return {
-            "type": "server_error",
-            "error": f"{endpoint.method} {endpoint.path} returned {response.status_code}",
+            "type": fail_type,
+            "error": msg,
             "endpoint": endpoint.path,
             "method": endpoint.method,
-            "status_code": response.status_code,
+            "status_code": status,
             "active_faults": active_faults,
+            **extra,
         }
 
-    # HTTP protocol: Content-Length must match actual body length.
-    # Middleware chains (e.g. CORS) can modify the response body after
-    # Content-Length is set, causing "Response content longer than
-    # Content-Length" at the transport layer (uvicorn/hypercorn).
-    cl = response.headers.get("content-length")
+    # -- Application layer --
+
+    if status >= 500:
+        return _fail("server_error", f"{prefix} returned {status}")
+
+    # -- Protocol layer --
+
+    # Content-Length must match actual body length.
+    # Middleware (CORS, compression) can modify the body after headers are
+    # set, causing "Response content longer than Content-Length" at the
+    # transport layer (uvicorn/hypercorn).
+    cl = headers.get("content-length")
     if cl is not None:
         try:
             declared = int(cl)
             actual = len(response.body)
             if declared != actual:
-                return {
-                    "type": "content_length_mismatch",
-                    "error": (
-                        f"{endpoint.method} {endpoint.path}: "
-                        f"Content-Length={declared} but body is {actual} bytes. "
-                        "This causes RuntimeError at the transport layer "
-                        "(uvicorn/hypercorn). Likely a middleware modifying "
-                        "the response after headers were finalized."
-                    ),
-                    "endpoint": endpoint.path,
-                    "method": endpoint.method,
-                    "status_code": response.status_code,
-                    "declared_length": declared,
-                    "actual_length": actual,
-                    "active_faults": active_faults,
-                }
+                return _fail(
+                    "content_length_mismatch",
+                    f"{prefix}: Content-Length={declared} but body is {actual} bytes. "
+                    "Causes RuntimeError at the transport layer. "
+                    "Likely middleware modifying the response after headers were set.",
+                    declared_length=declared,
+                    actual_length=actual,
+                )
         except (ValueError, TypeError):
             pass
+
+    # Content-Length + Transfer-Encoding: chunked is a protocol violation.
+    # RFC 7230 §3.3.3: "A sender MUST NOT send a Content-Length header
+    # field in any message that contains a Transfer-Encoding header field."
+    te = headers.get("transfer-encoding", "")
+    if cl is not None and "chunked" in te.lower():
+        return _fail(
+            "conflicting_transfer_headers",
+            f"{prefix}: has both Content-Length and Transfer-Encoding: chunked. "
+            "RFC 7230 §3.3.3 forbids this. Proxies may drop the connection.",
+        )
+
+    # 204 No Content and 304 Not Modified MUST NOT have a body.
+    # Frameworks sometimes return a body anyway (e.g. error middleware).
+    # Proxies and browsers may reject or misinterpret the response.
+    if status in (204, 304) and len(response.body) > 0:
+        return _fail(
+            "body_on_no_content",
+            f"{prefix}: status {status} with {len(response.body)}-byte body. "
+            f"HTTP {status} MUST NOT contain a message body (RFC 7230). "
+            "Proxies may close the connection or misframe subsequent requests.",
+        )
+
+    # JSON Content-Type with non-JSON body.
+    # Common when error middleware replaces a JSON response with HTML/plain
+    # text but preserves the original Content-Type header.
+    ct = headers.get("content-type", "")
+    if "application/json" in ct and response.body:
+        try:
+            json.loads(response.body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return _fail(
+                "invalid_json_body",
+                f"{prefix}: Content-Type is application/json but body is not valid JSON. "
+                "Clients calling .json() will crash. "
+                "Likely an error handler returning plain text with the wrong Content-Type.",
+            )
 
     return None
 

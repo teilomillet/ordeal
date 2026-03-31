@@ -1243,7 +1243,107 @@ def _validate_response(
                 "Likely an error handler returning plain text with the wrong Content-Type.",
             )
 
+    # Non-empty body with no Content-Type.
+    # Browsers guess the type (MIME sniffing), which is a security risk
+    # (XSS via type confusion). Servers should always declare Content-Type.
+    if response.body and not ct and status not in (204, 304):
+        return _fail(
+            "missing_content_type",
+            f"{prefix}: {len(response.body)}-byte body with no Content-Type header. "
+            "Browsers will MIME-sniff the content, which can lead to XSS. "
+            "Add a Content-Type header to every response with a body.",
+        )
+
+    # CORS headers disappear under faults.
+    # When faults are active and the response has no Access-Control-Allow-Origin,
+    # but the request is likely cross-origin, the browser blocks the response.
+    # This is the #1 fault-induced regression: error handlers skip CORS middleware.
+    if active_faults and "access-control-allow-origin" not in headers and status < 500:
+        acao_expected = any(
+            h in headers for h in ("access-control-allow-methods", "access-control-max-age")
+        )
+        if acao_expected:
+            return _fail(
+                "cors_header_lost",
+                f"{prefix}: CORS response headers partially present but "
+                "Access-Control-Allow-Origin is missing (faults active: "
+                f"{', '.join(active_faults)}). "
+                "Error/fault handlers often bypass CORS middleware, "
+                "causing browsers to block the response entirely.",
+            )
+
     return None
+
+
+def _analyze_cross_request(
+    responses: list[tuple[_Endpoint, _Response, list[str]]],
+) -> list[dict[str, Any]]:
+    """Post-run analysis of cross-request patterns.
+
+    Detects bugs that only appear when comparing multiple responses:
+    - Error format inconsistency (some endpoints return JSON, others HTML)
+    - CORS disappearing on fault responses vs normal responses
+    """
+    findings: list[dict[str, Any]] = []
+
+    # Track error response formats per endpoint
+    error_formats: dict[str, set[str]] = {}  # endpoint -> set of content-types
+    normal_cors: dict[str, bool] = {}  # endpoint -> has CORS on normal response
+    fault_cors: dict[str, bool] = {}  # endpoint -> has CORS on fault response
+
+    for ep, resp, faults in responses:
+        key = f"{ep.method} {ep.path}"
+        hdrs = {k.lower(): v for k, v in resp.headers.items()}
+        has_cors = "access-control-allow-origin" in hdrs
+
+        if 400 <= resp.status_code < 600:
+            ct = hdrs.get("content-type", "none")
+            # Normalize to base type
+            base_ct = ct.split(";")[0].strip().lower()
+            error_formats.setdefault(key, set()).add(base_ct)
+
+        if faults:
+            fault_cors[key] = has_cors
+        else:
+            normal_cors[key] = has_cors
+
+    # Error format inconsistency: same endpoint returns different Content-Types
+    # for errors. Clients parsing JSON errors will crash on HTML errors.
+    for ep_key, formats in error_formats.items():
+        if len(formats) > 1:
+            findings.append(
+                {
+                    "type": "inconsistent_error_format",
+                    "error": (
+                        f"{ep_key}: error responses use mixed Content-Types: "
+                        f"{', '.join(sorted(formats))}. "
+                        "Clients expecting JSON errors will crash on non-JSON responses. "
+                        "Ensure all error handlers return the same format."
+                    ),
+                    "endpoint": ep_key,
+                    "formats": sorted(formats),
+                }
+            )
+
+    # CORS present on normal responses but missing on fault responses.
+    # This means faults bypass the CORS middleware chain.
+    for ep_key, has_normal in normal_cors.items():
+        has_fault = fault_cors.get(ep_key, True)
+        if has_normal and not has_fault:
+            findings.append(
+                {
+                    "type": "cors_lost_under_faults",
+                    "error": (
+                        f"{ep_key}: CORS headers present on normal responses "
+                        "but missing when faults are active. "
+                        "Error/fault code paths bypass the CORS middleware, "
+                        "causing browsers to block fault responses entirely."
+                    ),
+                    "endpoint": ep_key,
+                }
+            )
+
+    return findings
 
 
 # ---------------------------------------------------------------------------
@@ -1385,6 +1485,7 @@ def chaos_api_test(
 
     collector = _TraceCollector() if record_traces else None
     failures: list[dict[str, Any]] = []
+    all_responses: list[tuple[_Endpoint, _Response, list[str]]] = []
     extra_headers = headers or {}
     t0 = time.monotonic()
     first_exc: Exception | None = None
@@ -1427,6 +1528,7 @@ def chaos_api_test(
                 # Validate
                 ep = ep_map.get(case.endpoint_path)
                 if ep is not None:
+                    all_responses.append((ep, response, list(active)))
                     fail = _validate_response(response, ep, active)
                     if fail is not None:
                         failures.append(fail)
@@ -1449,6 +1551,10 @@ def chaos_api_test(
     deferred_ok = len(new_failures) == 0
     for prop in new_failures:
         failures.append({"type": "deferred_assertion", "error": prop.summary})
+
+    # Cross-request analysis — patterns only visible across multiple responses
+    if all_responses:
+        failures.extend(_analyze_cross_request(all_responses))
 
     # Build trace if requested
     traces: tuple = ()

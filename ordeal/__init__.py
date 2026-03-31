@@ -106,9 +106,9 @@ from hypothesis.stateful import (
     rule,
 )
 
-from ordeal.assertions import always, reachable, sometimes, unreachable
+from ordeal.assertions import always, reachable, report, sometimes, unreachable
 from ordeal.buggify import buggify, buggify_value
-from ordeal.chaos import ChaosTest
+from ordeal.chaos import ChaosTest, chaos_test
 from ordeal.mutations import (
     OPERATORS,
     PRESETS,
@@ -128,11 +128,13 @@ except PackageNotFoundError:
 __all__ = [
     # Core
     "ChaosTest",
+    "chaos_test",
     # Assertions
     "always",
     "sometimes",
     "reachable",
     "unreachable",
+    "report",
     # Buggify
     "buggify",
     "buggify_value",

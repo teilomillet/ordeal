@@ -169,3 +169,38 @@ class ChaosTest(RuleBasedStateMachine):
         for f in self.__class__.faults:
             f.reset()
         super().teardown()
+
+
+def chaos_test(cls: type | None = None, *, faults: list | None = None):
+    """Decorator that turns a ChaosTest subclass into a pytest-runnable test.
+
+    Removes the need for the ``TestCase = MyChaos.TestCase`` boilerplate::
+
+        @chaos_test
+        class MyServiceChaos(ChaosTest):
+            faults = [timing.timeout("myapp.api")]
+
+            @rule()
+            def call_service(self):
+                ...
+
+    Also works as a factory for inline declaration::
+
+        @chaos_test(faults=[timing.timeout("myapp.api")])
+        class MyServiceChaos(ChaosTest):
+            @rule()
+            def call_service(self):
+                ...
+
+    The returned object is the ``TestCase`` class, directly discoverable
+    by pytest without any extra wiring.
+    """
+
+    def _wrap(klass: type) -> type:
+        if faults is not None:
+            klass.faults = faults
+        return klass.TestCase
+
+    if cls is not None:
+        return _wrap(cls)
+    return _wrap

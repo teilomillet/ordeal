@@ -162,6 +162,45 @@ class PropertyTracker:
 tracker = PropertyTracker()
 
 
+def _stderr(msg: str) -> None:
+    import sys
+
+    sys.stderr.write(msg)
+    sys.stderr.flush()
+
+
+def report() -> dict[str, list[dict[str, Any]]]:
+    """Structured summary of all tracked property assertions.
+
+    Returns a dict with ``passed`` and ``failed`` lists.  Each entry
+    has ``name``, ``type``, ``hits``, ``status``, and ``summary``.
+
+    Call at the end of a test session for a preflight checklist::
+
+        from ordeal.assertions import report
+        r = report()
+        for p in r["failed"]:
+            print(p["summary"])
+    """
+    passed = []
+    failed = []
+    for p in tracker.results:
+        entry = {
+            "name": p.name,
+            "type": p.type,
+            "hits": p.hits,
+            "passes": p.passes,
+            "failures": p.failures,
+            "status": "PASS" if p.passed else "FAIL",
+            "summary": p.summary(),
+        }
+        if p.passed:
+            passed.append(entry)
+        else:
+            failed.append(entry)
+    return {"passed": passed, "failed": failed}
+
+
 def always(condition: bool, name: str, *, mute: bool = False, **details: Any) -> None:
     """Assert *condition* every time — raises immediately on violation.
 
@@ -191,6 +230,7 @@ def sometimes(
     name: str,
     *,
     attempts: int | None = None,
+    warn: bool = False,
     **details: Any,
 ) -> None:
     """Assert *condition* at least once — deferred, checked at session end.
@@ -199,13 +239,18 @@ def sometimes(
 
         sometimes(score > 0.5, "high scores exist")
 
+    With ``warn=True`` — visible in normal pytest (no --chaos needed)::
+
+        sometimes(score > 0.5, "high scores exist", warn=True)
+
     With ``attempts`` — immediate, standalone, no tracker needed::
 
         sometimes(lambda: cache.hit_rate() > 0, "cache warms up", attempts=100)
 
-    When *attempts* is set and *condition* is callable, the function is
-    called up to *attempts* times.  Succeeds on the first ``True``.
-    Raises ``AssertionError`` immediately if never ``True``.
+    Args:
+        warn: If True, print to stderr even when tracker is inactive.
+            Useful for pre-flight checklists where findings should be
+            visible in normal test runs.
     """
     if attempts is not None and callable(condition):
         for _ in range(attempts):
@@ -217,11 +262,15 @@ def sometimes(
     cond = condition() if callable(condition) else condition
     was_active = tracker.record(name, "sometimes", cond, details or None)
     if not was_active:
-        warnings.warn(
-            f"sometimes({name!r}) called but tracker is inactive — this is a no-op. "
-            f"Run with --chaos or call auto_configure() to enable property tracking.",
-            stacklevel=2,
-        )
+        if warn:
+            status = "PASS" if cond else "OBSERVE"
+            _stderr(f"  sometimes({name!r}): {status}\n")
+        else:
+            warnings.warn(
+                f"sometimes({name!r}) called but tracker is inactive — this is a no-op. "
+                "Run with --chaos or call auto_configure() to enable property tracking.",
+                stacklevel=2,
+            )
 
 
 def reachable(name: str, **details: Any) -> None:
@@ -265,7 +314,7 @@ def catalog() -> list[dict[str, str]]:
     mod = sys.modules[__name__]
     entries: list[dict[str, str]] = []
     for attr_name in sorted(dir(mod)):
-        if attr_name.startswith("_") or attr_name == "catalog":
+        if attr_name.startswith("_") or attr_name in ("catalog", "report"):
             continue
         obj = getattr(mod, attr_name)
         if not callable(obj) or _inspect.isclass(obj):

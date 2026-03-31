@@ -180,3 +180,64 @@ def permission_denied() -> Fault:
     **Warning**: patches ``builtins.open`` globally.
     """
     return _PermissionDeniedFault()
+
+
+# ---------------------------------------------------------------------------
+# Subprocess / FFI boundary faults
+# ---------------------------------------------------------------------------
+
+
+def subprocess_timeout(target: str, *, timeout_sec: float = 0.001) -> PatchFault:
+    """Make ``subprocess.run``/``subprocess.check_output`` calls matching *target* time out.
+
+    Patches ``subprocess.run`` — when the command string contains *target*,
+    raises ``subprocess.TimeoutExpired`` instead of running the process.
+    Useful for testing Python↔Rust/C/Go bridges under chaos::
+
+        faults = [subprocess_timeout("cargo run")]
+
+    Args:
+        target: Substring to match in the command (e.g. ``"cargo run"``).
+        timeout_sec: Fake timeout duration for the error.
+    """
+    import subprocess as _sp
+
+    def _factory(original: object) -> object:
+        def _timeout_run(*args: object, **kwargs: object) -> object:
+            cmd = args[0] if args else kwargs.get("args", "")
+            cmd_str = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+            if target in cmd_str:
+                raise _sp.TimeoutExpired(cmd_str, timeout_sec)
+            return original(*args, **kwargs)  # type: ignore[operator]
+
+        return _timeout_run
+
+    return PatchFault("subprocess.run", _factory, name=f"subprocess_timeout({target!r})")
+
+
+def corrupt_stdout(target: str) -> PatchFault:
+    """Replace the stdout of subprocess calls matching *target* with random bytes.
+
+    Replaces ``stdout`` in the ``CompletedProcess`` with random bytes,
+    simulating garbled FFI output::
+
+        faults = [corrupt_stdout("my_binary")]
+
+    Args:
+        target: Substring to match in the command.
+    """
+    import os as _os
+
+    def _factory(original: object) -> object:
+        def _corrupt_run(*args: object, **kwargs: object) -> object:
+            result = original(*args, **kwargs)  # type: ignore[operator]
+            cmd = args[0] if args else kwargs.get("args", "")
+            cmd_str = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+            if target in cmd_str and hasattr(result, "stdout") and result.stdout:
+                n = len(result.stdout)
+                result.stdout = _os.urandom(n)
+            return result
+
+        return _corrupt_run
+
+    return PatchFault("subprocess.run", _factory, name=f"corrupt_stdout({target!r})")

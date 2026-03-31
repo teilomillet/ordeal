@@ -10,7 +10,8 @@ Built on ideas from Antithesis (deterministic exploration), FoundationDB (BUGGIF
 
 ```bash
 uv sync                          # install dependencies
-uv run pytest                    # run all tests (~456 tests)
+uv run pytest                    # run all tests (~854 tests, parallel via xdist)
+uv run pytest -m "not slow"      # fast loop — skip ablation tests (~15s)
 uv run pytest tests/test_X.py    # single module
 uv run pytest -x                 # stop on first failure
 uv run pytest --chaos            # enable chaos mode in tests
@@ -18,11 +19,14 @@ uv run pytest --chaos-seed 42    # reproducible chaos
 uv run ruff check .              # lint
 uv run ruff format --check .     # check formatting
 uv run ruff format .             # auto-format
+uv run ordeal init               # bootstrap tests for untested modules (auto-detects package)
+uv run ordeal init <package>     # bootstrap tests for a specific package
 uv run ordeal explore            # run coverage-guided explorer (reads ordeal.toml)
 uv run ordeal mutate <target>    # mutation testing (preset="standard" by default)
 uv run ordeal audit <module>     # audit test coverage for a module
 uv run ordeal mine <target>      # discover properties of a function
 uv run ordeal replay <trace>     # replay a failure trace
+uv run ordeal benchmark          # USL scaling analysis (reads ordeal.toml)
 ```
 
 ## Discovery
@@ -94,12 +98,13 @@ ordeal/
   - `ordeal[atheris]` — coverage-guided fuzzing via Google Atheris
   - `ordeal[all]` — everything including numpy
 - **API chaos testing** is built-in (no extra install)
-- **Dev**: ruff, pytest-cov (`pip install ordeal[dev]`)
+- **Dev**: ruff, pytest-cov, pytest-xdist (`pip install ordeal[dev]`)
 
 ## Using ordeal
 
 Quick reference — match what the developer wants to the right tool:
 
+- **"I have no tests yet"** → `ordeal init` (auto-detects package, generates smoke tests, verifies they pass)
 - **"Are my tests good enough?"** → `mutate("myapp.func", preset="standard")`
 - **"Fix my test gaps"** → `result.generate_test_stubs()` or `ordeal mutate --generate-stubs`
 - **"Test under failure conditions"** → `ChaosTest` with `faults = [...]`
@@ -107,6 +112,11 @@ Quick reference — match what the developer wants to the right tool:
 - **"Explore all reachable states"** → `ordeal explore`
 - **"Audit test coverage"** → `ordeal audit myapp.scoring`
 - **"Discover properties"** → `ordeal mine myapp.scoring.compute`
+- **"Smoke-test a whole module"** → `scan_module("myapp.scoring")`
+- **"Does my refactor change behavior?"** → `diff(old_fn, new_fn)`
+- **"Test algebraic relations"** → `@metamorphic(Relation(...))`
+- **"How does my system scale?"** → `ordeal benchmark` or `fit_usl(measurements)`
+- **"What can ordeal do?"** → `from ordeal import catalog; catalog()`
 
 ### Mutation testing — `mutate()`
 

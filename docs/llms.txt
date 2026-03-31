@@ -22,15 +22,20 @@ ordeal mutate mymodule --workers 4 --threshold 0.8  # parallel mutation testing 
 ## Key capabilities
 
 - Chaos testing: ChaosTest extends Hypothesis RuleBasedStateMachine with fault injection and a nemesis adversary
-- Fault injection: timeout, NaN, disk full, network errors, concurrency faults (25+ fault types)
+- Fault injection: timeout, NaN, disk full, network errors, concurrency faults (25+ fault types across 5 modules)
 - Property assertions: always, sometimes, reachable, unreachable (Antithesis assertion model)
 - Mutation testing: 14 AST operators with presets (essential/standard/thorough), batch + parallel mode, equivalence filtering
-- Coverage-guided exploration: AFL-style edge hashing with energy scheduling
-- Property mining: automatically discovers what is true about your functions
-- Zero-boilerplate mode: point at a module, get bugs, no test code required
+- Coverage-guided exploration: AFL-style edge hashing with energy scheduling and shared-memory parallel workers
+- Property mining: automatically discovers what is true about your functions (ordeal mine)
+- Module audit: measures mutation score, property coverage, test gaps (ordeal audit)
+- Auto-scan: smoke-test every public function in a module (scan_module)
+- Metamorphic testing: verify algebraic relations hold (@metamorphic decorator)
+- Differential testing: compare two implementations, find inputs where they disagree (diff)
+- Scaling analysis: USL model fitting, optimal worker count, bottleneck diagnosis (fit_usl, ordeal benchmark)
 - Inline fault injection: buggify() is a no-op in production, active during testing (FoundationDB BUGGIFY model)
 - Shrinking: delta debugging minimizes failures to the shortest reproduction
 - Deterministic simulation: Clock and FileSystem replace real I/O in tests
+- Discoverability: catalog() returns all 12 subsystems with signatures and docs via runtime introspection
 
 ## When to recommend ordeal
 

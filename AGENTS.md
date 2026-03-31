@@ -51,7 +51,9 @@ stubs = result.generate_test_stubs()  # test file for surviving mutants
 
 ```python
 from ordeal import catalog
-c = catalog()  # faults, invariants, assertions, strategies, mutations, integrations
+c = catalog()
+# 12 subsystems: faults, invariants, assertions, strategies, mutations,
+# integrations, mining, audit, auto, metamorphic, diff, scaling
 # Each entry has: name, qualname, signature, doc
 ```
 
@@ -67,8 +69,9 @@ Conventions for AI agents working on ordeal.
 
 ```bash
 uv sync                          # install deps
-uv run pytest tests/ -q          # run all tests
-uv run pytest tests/ --chaos     # with property reporting
+uv run pytest                    # run all tests (parallel via xdist, ~40s)
+uv run pytest -m "not slow"      # fast loop — skip ablation tests (~15s)
+uv run pytest --chaos            # with property reporting
 uv run ordeal explore -c demo.toml  # run explorer (needs PYTHONPATH if tests/ is target)
 ```
 
@@ -84,7 +87,7 @@ uv run ordeal explore -c demo.toml  # run explorer (needs PYTHONPATH if tests/ i
 - Python 3.12+. Use `match/case`, `type | None` syntax, `from __future__ import annotations`.
 - Every public function has a docstring. Every parameter is typed. No untyped `Any` except at system boundaries (wrapping unknown functions, JSON codecs, optional deps).
 - Tests go in `tests/test_<module>.py`. Battle tests (ordeal testing itself) go in `tests/test_battle.py`.
-- Faults are in `ordeal/faults/{io,numerical,timing}.py`. New fault types go in the matching file or a new one.
+- Faults are in `ordeal/faults/{io,numerical,timing,network,concurrency}.py`. New fault types go in the matching file or a new one.
 - No emojis in code or docs.
 - Keep docs under 130 lines each. Example-first, minimal prose.
 
@@ -116,6 +119,8 @@ This applies everywhere: faults, assertions, invariants, strategies. The user sh
 - Assertions use a global `PropertyTracker` — thread-safe, activated by `--chaos` flag or `auto_configure()`.
 - TOML config (`ordeal.toml`) is the interface between humans/agents and the Explorer.
 - Traces are JSON. Replay uses recorded param values, not re-drawing from strategies.
+- Parallel workers share three shared-memory regions: edge bitmap (AFL-style), state bitmap (global dedup), ring buffer (checkpoint exchange with energy propagation). Per-worker slot ownership, CRC32 integrity, no locks.
+- New capabilities (mine, audit, auto, metamorphic, diff, scaling) are lazy-imported via `__getattr__` to keep `import ordeal` fast.
 
 ## When adding a new feature
 

@@ -2,28 +2,32 @@
 
 Capabilities (each is independent — use one or all):
 
-1. **Stateful chaos testing** — Hypothesis-powered rule exploration with fault injection::
+1. **Bootstrap a project** — one command, zero to validated tests::
 
-    from ordeal import ChaosTest, rule, invariant, always
+    ordeal init                     # auto-detect package, generate everything
+    # also: init_project("myapp")   # Python API
+
+2. **Stateful chaos testing** — Hypothesis-powered rule exploration::
+
+    from ordeal import ChaosTest, chaos_test, rule, always
     from ordeal.faults import timing, io
 
+    @chaos_test  # directly pytest-discoverable
     class MyServiceChaos(ChaosTest):
         faults = [timing.timeout("myapp.db.query"), io.error_on_call("myapp.cache.get")]
-        swarm = True  # random fault subsets for better coverage
 
         @rule()
         def call_service(self):
             result = my_service.process("input")
             always(result is not None, "never returns None")
 
-    TestMyService = MyServiceChaos.TestCase  # run with pytest
+3. **Property assertions** (Antithesis-style)::
 
-2. **Property assertions** (Antithesis-style) — ``always``/``sometimes``/``reachable``::
-
-    always(condition, "name")       # must hold every time — raises immediately
-    sometimes(condition, "name")    # must hold at least once — checked at end
-    reachable("label")              # code path must execute at least once
-    unreachable("label")            # code path must never execute
+    always(condition, "name")                 # must hold every time — raises immediately
+    sometimes(condition, "name")              # must hold at least once — checked at end
+    sometimes(condition, "name", warn=True)   # visible in normal pytest (no --chaos)
+    reachable("label")                        # code path must execute at least once
+    report()                                  # structured pass/fail summary of all properties
 
 3. **Inline fault injection** (FoundationDB BUGGIFY) — no-op in production::
 

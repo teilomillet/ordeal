@@ -102,6 +102,10 @@ verbose = true
 # [[scan]]
 # module = "myapp.validation"
 # max_examples = 100
+#
+# # Functions that are expected to fail (e.g. input validation that raises).
+# # These are skipped during scanning, so known failures don't break the suite.
+# expected_failures = ["validate_input", "check_permissions"]
 
 
 # API chaos testing — built-in OpenAPI engine, no extra deps.

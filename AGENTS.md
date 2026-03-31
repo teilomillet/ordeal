@@ -6,7 +6,17 @@ When a user asks you to run ordeal on their code — not to develop ordeal itsel
 
 **What ordeal does:** Finds bugs your tests miss by exploring thousands of scenarios with realistic failures (timeouts, corrupted data, crashes). When something breaks, it shows the shortest sequence that reproduces the failure.
 
-**Commands:**
+**Start here — bootstrap tests for any project:**
+
+```bash
+ordeal init                      # auto-detect package, generate tests, validate with mutations
+ordeal init mypackage            # explicit target
+ordeal init --dry-run            # preview without writing
+```
+
+This generates tests with pinned values (machine-discovered via mine/Hypothesis), property assertions, a stateful ChaosTest, and an ordeal.toml — then validates with mutation testing.
+
+**Other commands:**
 
 ```bash
 ordeal mine mymodule            # discover what functions actually do
@@ -38,7 +48,24 @@ stubs = result.generate_test_stubs()  # test file for surviving mutants
 - `filter_equivalent=True` (default) — skips mutants that produce identical outputs on random inputs.
 - Works with `@ray.remote`, `@functools.wraps`, and other decorators (auto-unwrapped).
 - Runs pytest with `--chaos` so ChaosTest assertions count toward the score.
-- Raises `NoTestsFoundError` if no tests match (instead of misleading 0%).
+- Raises `NoTestsFoundError` if no tests match (suggests `ordeal init` and `generate_starter_tests()`).
+- `result.kill_attribution()` — which tests killed which mutants (test strength analysis).
+- `generate_test_stubs()` now suggests invariants by name/type (score→bounded, float→finite).
+
+**New features:**
+
+- `@chaos_test` decorator — no `TestCase = MyChaos.TestCase` boilerplate
+- `sometimes(cond, name, warn=True)` — visible in normal pytest without `--chaos`
+- `report()` — structured pass/fail summary of all property assertions
+- `subprocess_timeout("cargo run")` / `corrupt_stdout("binary")` — subprocess/FFI faults
+- `Literal["a", "b"]` types auto-generate `sampled_from` strategies
+- `scan_module(expected_failures=["known_broken"])` — skip known failures
+- `scan_module(max_examples={"expensive_fn": 3, "__default__": 30})` — per-function depth
+- `chaos_for(invariants={"compute": bounded(0, 1)})` — per-function invariants
+- Invariant `&` composition: `bounded(0, 1) & finite` — user-facing API
+- ML arrays (MLX/JAX/PyTorch) auto-converted in invariants and registered as strategies
+- `fuzz().failing_args` — shrunk failing input captured
+- Invariant violations show actual value, expected bound, index, and deviation
 
 **Reading output:**
 - `ALWAYS property (N/N)` — held every time. Strong guarantee.

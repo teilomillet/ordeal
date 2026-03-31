@@ -104,18 +104,20 @@ ordeal/
 
 Quick reference — match what the developer wants to the right tool:
 
-- **"I have no tests yet"** → `ordeal init` (auto-detects package, generates smoke tests, verifies they pass)
-- **"Are my tests good enough?"** → `mutate("myapp.func", preset="standard")`
-- **"Fix my test gaps"** → `result.generate_test_stubs()` or `ordeal mutate --generate-stubs`
-- **"Test under failure conditions"** → `ChaosTest` with `faults = [...]`
+- **"I have no tests yet"** → `ordeal init` (discovers inputs via mine, pins values, asserts properties, validates with mutations, generates ordeal.toml)
+- **"Are my tests good enough?"** → `mutate("myapp.func", preset="standard")` + `result.kill_attribution()` for test strength analysis
+- **"Fix my test gaps"** → `result.generate_test_stubs()` or `ordeal mutate --generate-stubs` (now suggests invariants by name/type)
+- **"Test under failure conditions"** → `@chaos_test` decorator or `ChaosTest` with `faults = [...]`
 - **"What if this call fails?"** → `buggify()`
+- **"What if a subprocess fails?"** → `faults.io.subprocess_timeout("cargo run")` or `corrupt_stdout("my_binary")`
 - **"Explore all reachable states"** → `ordeal explore`
 - **"Audit test coverage"** → `ordeal audit myapp.scoring`
 - **"Discover properties"** → `ordeal mine myapp.scoring.compute`
-- **"Smoke-test a whole module"** → `scan_module("myapp.scoring")`
+- **"Smoke-test a whole module"** → `scan_module("myapp.scoring", expected_failures=["known_broken"])`
 - **"Does my refactor change behavior?"** → `diff(old_fn, new_fn)`
 - **"Test algebraic relations"** → `@metamorphic(Relation(...))`
 - **"How does my system scale?"** → `ordeal benchmark` or `fit_usl(measurements)`
+- **"Get a preflight report"** → `from ordeal import report; report()` (structured pass/fail summary)
 - **"What can ordeal do?"** → `from ordeal import catalog; catalog()`
 
 ### Mutation testing — `mutate()`
@@ -133,9 +135,10 @@ stubs = result.generate_test_stubs()  # Python test file with real signatures
 - `workers`: Parallel mutant testing. Module-level uses batched parallel (one pytest session per worker).
 - `filter_equivalent`: Skip mutants that produce identical outputs on random inputs (default `True`).
 - `result.survived` — list of gaps, each with `.operator`, `.source_line`, `.remediation`.
-- `result.generate_test_stubs()` — test file with real param names and typed examples.
+- `result.generate_test_stubs()` — test file with real param names, typed examples, and invariant suggestions (score→bounded, float→finite).
+- `result.kill_attribution()` — `dict[str, list[Mutant]]` mapping test names to mutants they killed. Shows which tests carry their weight.
 - `result.score` — kill ratio (0.0–1.0). CLI prints `Score: X/Y (Z%)` for CI parsing.
-- `NoTestsFoundError` — raised when auto-discovery finds no tests (instead of misleading 0%).
+- `NoTestsFoundError` — raised when auto-discovery finds no tests. Message includes `generate_starter_tests()` and `ordeal init` guidance.
 - Works with decorated functions: `@ray.remote`, `@functools.wraps`, etc. are auto-unwrapped.
 - CLI: `uv run ordeal mutate myapp.scoring.compute --preset standard --generate-stubs tests/test_gaps.py`
 - CLI: `uv run ordeal mutate myapp.scoring --workers 4 --threshold 0.8`
@@ -147,9 +150,10 @@ stubs = result.generate_test_stubs()  # Python test file with real signatures
 Stateful chaos testing with fault injection.
 
 ```python
-from ordeal import ChaosTest, rule, invariant, always
+from ordeal import ChaosTest, chaos_test, rule, always
 from ordeal.faults import timing, io
 
+@chaos_test  # directly pytest-discoverable, no TestCase boilerplate
 class MyServiceChaos(ChaosTest):
     faults = [timing.timeout("myapp.db.query"), io.error_on_call("myapp.cache.get")]
 
@@ -157,9 +161,10 @@ class MyServiceChaos(ChaosTest):
     def call_service(self):
         result = my_service.process("input")
         always(result is not None, "never returns None")
-
-TestMyService = MyServiceChaos.TestCase  # run with: pytest --chaos
 ```
+
+Also works as a factory: `@chaos_test(faults=[timing.timeout("myapp.api")])`.
+For auto-generated chaos tests: `chaos_for("myapp.scoring", invariants={"compute": bounded(0, 1)})`.
 
 ### "Inject faults inline" / "What if this call fails?"
 
@@ -195,6 +200,53 @@ Property mining — automatically discovers what's true about a function.
 ```bash
 uv run ordeal mine myapp.scoring.compute
 ```
+
+### "Bootstrap tests for a new project" / `ordeal init`
+
+One command: zero tests to validated test suite.
+
+```bash
+ordeal init                    # auto-detect package, generate everything
+ordeal init myapp              # explicit target
+ordeal init --dry-run          # preview without writing
+```
+
+What it does (discovery-driven, no hand-crafted values):
+- `mine()` runs each function with Hypothesis random inputs, discovers (input, output) pairs + properties
+- `scan_module` smoke-tests with 30 random inputs, finds crashes
+- Pins diverse machine-discovered values (simplest inputs, diverse outputs)
+- Asserts discovered properties via `@quickcheck` (commutativity, bounds, idempotence, involution)
+- Generates `chaos_for()` stateful ChaosTest
+- Validates with mutation testing (up to 3 auto-fix rounds)
+- Runs 10s coverage-guided explore
+- Generates `ordeal.toml` for explore/mutate/audit
+- JSON to stdout for AI assistants, quality report to stderr for humans
+
+### "Get a preflight report" / `report()`
+
+Structured summary of all tracked `always`/`sometimes`/`reachable` assertions:
+
+```python
+from ordeal import report
+r = report()  # {"passed": [...], "failed": [...]}
+for p in r["failed"]:
+    print(p["summary"])  # "FAIL high scores (sometimes: never true in 50 hits)"
+```
+
+### New in recent versions
+
+- **`@chaos_test`** — decorator that replaces `TestCase = MyChaos.TestCase` boilerplate
+- **`sometimes(..., warn=True)`** — visible in normal pytest without `--chaos`
+- **`result.kill_attribution()`** — which tests kill which mutations
+- **`subprocess_timeout(target)`** / **`corrupt_stdout(target)`** — subprocess/FFI fault injection
+- **`Literal["a", "b"]`** — auto-generates `sampled_from` strategy
+- **`scan_module(expected_failures=["broken_fn"])`** — skip known failures
+- **`scan_module(max_examples={"expensive_fn": 3, "__default__": 30})`** — per-function depth
+- **`chaos_for(invariants={"compute": bounded(0, 1)})`** — per-function invariants
+- **Invariant `&` composition** — `bounded(0, 1) & finite` builds compound checks
+- **ML array support** — invariants auto-convert MLX/JAX/PyTorch arrays via `np.asarray`
+- **`fuzz().failing_args`** — shrunk input captured on failure
+- **Invariant diffs** — violations show actual value, expected bound, index, deviation
 
 ## Extending ordeal
 

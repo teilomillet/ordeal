@@ -108,6 +108,21 @@ def test_preset_essential_limits_operators():
         )
 
 
+def test_result_carries_preset_and_operators_metadata():
+    result = mutate_function_and_test(
+        f"{__name__}._add",
+        _test_add,
+        preset="essential",
+        filter_equivalent=False,
+    )
+    assert result.preset_used == "essential"
+    assert result.operators_used == PRESETS["essential"]
+    # summary includes metadata for AI consumption
+    s = result.summary()
+    assert "preset: essential" in s
+    assert f"operators: {len(PRESETS['essential'])}" in s
+
+
 def test_preset_thorough_produces_more_mutants():
     result_essential = mutate_function_and_test(
         f"{__name__}._add",

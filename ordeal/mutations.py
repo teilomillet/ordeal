@@ -1,35 +1,65 @@
-"""Mutation testing — validate that your chaos tests catch real bugs.
+"""Mutation testing — validate that your tests catch real bugs.
 
 Generates mutated versions of target code and runs tests against each.
 If a mutant survives (tests still pass), the tests are missing something.
 
-Two entry points:
+Quick start
+-----------
 
-1. **Module-level** — mutate an entire module::
+Pick a preset and go::
 
-       from ordeal.mutations import mutate_and_test
+    from ordeal import mutate_function_and_test
 
-       result = mutate_and_test(
-           target="myapp.scoring",
-           test_fn=lambda: run_tests(),
-       )
-       print(result.summary())
+    result = mutate_function_and_test(
+        "myapp.scoring.compute",
+        test_fn=lambda: assert compute(1, 2) == 3,
+        preset="standard",    # "essential" | "standard" | "thorough"
+    )
+    print(result.summary())   # shows surviving mutants + how to fix them
 
-2. **Function-level** (recommended) — mutate a single function, uses
-   PatchFault for reliable replacement::
+Or from the command line::
 
-       from ordeal.mutations import mutate_function_and_test
+    ordeal mutate myapp.scoring.compute                # standard preset
+    ordeal mutate myapp.scoring.compute -p essential    # fast check (4 operators)
+    ordeal mutate myapp.scoring.compute -p thorough     # all 14 operators
 
-       result = mutate_function_and_test(
-           target="myapp.scoring.compute",
-           test_fn=lambda: assert compute(1, 2) == 3,
-       )
+Presets
+-------
 
-Operators:
-    arithmetic   +↔-  *↔/  %→*
-    comparison   <↔<=  >↔>=  ==↔!=
-    negate       if cond → if not cond
-    return_none  return x → return None
+Each preset is a curated set of mutation operators — pick the level
+that matches your situation:
+
+- ``"essential"`` (4 ops) — arithmetic, comparison, negate, return_none.
+  Catches wrong math, wrong comparisons, flipped conditions, and missing
+  return values. Fast; good for first-time use and quick feedback loops.
+
+- ``"standard"`` (8 ops) — essential + boundary, constant, logical,
+  delete_statement. Adds off-by-one errors, magic numbers, and/or logic,
+  and dead code detection. **Recommended default for CI.**
+
+- ``"thorough"`` (14 ops) — every operator. Adds exception swallowing,
+  argument swaps, break/continue swaps, and more. Use before releases
+  or when you want comprehensive validation.
+
+You can also pass ``operators=["arithmetic", "comparison"]`` for full
+control — but ``preset`` and ``operators`` are mutually exclusive.
+
+Entry points
+------------
+
+1. **Function-level** (recommended) — ``mutate_function_and_test()``
+2. **Module-level** — ``mutate_and_test()``
+3. **CLI** — ``ordeal mutate <target>``
+4. **Config** — ``[mutations]`` section in ``ordeal.toml``
+
+Reading the output
+------------------
+
+``result.summary()`` prints each surviving mutant with:
+
+- **Location** — file line and column of the mutation.
+- **Description** — what was changed (e.g. ``+ -> -``).
+- **Fix guidance** — exactly what test to write to kill this mutant.
 """
 
 from __future__ import annotations
@@ -160,10 +190,28 @@ class Mutant:
 
 @dataclass
 class MutationResult:
-    """Aggregated mutation testing results."""
+    """Aggregated mutation testing results.
+
+    Access structured data for AI consumption::
+
+        result.target           # "myapp.scoring.compute"
+        result.score            # 0.625 (kill ratio)
+        result.survived         # list of Mutant objects that tests missed
+        result.operators_used   # ["arithmetic", "comparison", ...] or None
+        result.preset_used      # "standard" or None
+
+        for m in result.survived:
+            print(m.operator)     # "arithmetic"
+            print(m.description)  # "+ -> -"
+            print(m.location)     # "L12:4"
+            print(m.source_line)  # "return a + b"
+            print(m.remediation)  # actionable fix guidance
+    """
 
     target: str
     mutants: list[Mutant] = field(default_factory=list)
+    operators_used: list[str] | None = None
+    preset_used: str | None = None
 
     @property
     def total(self) -> int:
@@ -186,19 +234,37 @@ class MutationResult:
         return self.killed / self.total if self.total > 0 else 1.0
 
     def summary(self, remediation: bool = True) -> str:
-        """Human-readable report with surviving mutants listed.
+        """Report with test gaps and per-gap fix guidance.
+
+        Each surviving mutant is a **test gap** — a real code change
+        that the test suite fails to detect.  The output names each gap,
+        shows the affected source line, and explains the specific fix
+        (what kind of test would close the gap).
 
         Args:
-            remediation: If True (default), include actionable guidance
-                for each surviving mutant explaining what test to write.
+            remediation: If True (default), include per-gap fix guidance
+                explaining what test to write.
         """
-        lines = [f"Mutation score: {self.killed}/{self.total} ({self.score:.0%})"]
+        parts = [f"target: {self.target}"]
+        if self.preset_used:
+            parts.append(f"preset: {self.preset_used}")
+        if self.operators_used:
+            parts.append(f"operators: {len(self.operators_used)}/{len(OPERATORS)}")
+        meta = ", ".join(parts)
+
+        lines = [f"Mutation score: {self.killed}/{self.total} ({self.score:.0%})  [{meta}]"]
+        if self.survived:
+            lines.append(
+                f"  {len(self.survived)} test gap(s) — "
+                "each is a code change your tests fail to catch:"
+            )
         for m in self.survived:
-            header = f"  SURVIVED  {m.location} {m.description}"
+            header = f"  GAP {m.location} [{m.operator}] {m.description}"
             if m.source_line:
                 header += f"  |  {m.source_line}"
             lines.append(header)
             if remediation:
+                lines.append(f"    Cause: mutant changes {m.description} and tests still pass.")
                 lines.append(f"    Fix: {m.remediation}")
         return "\n".join(lines)
 
@@ -724,7 +790,11 @@ OPERATORS: dict[str, tuple[type[_Counter], type[_Applicator]]] = {
 
 
 PRESETS: dict[str, list[str]] = {
+    # Fast feedback — catches wrong math, wrong comparisons,
+    # flipped conditions, and missing return values.
     "essential": ["arithmetic", "comparison", "negate", "return_none"],
+    # Good CI default — adds off-by-one, magic numbers, and/or logic,
+    # and dead code detection on top of essential.
     "standard": [
         "arithmetic",
         "comparison",
@@ -735,6 +805,7 @@ PRESETS: dict[str, list[str]] = {
         "logical",
         "delete_statement",
     ],
+    # Comprehensive — every operator. Use before releases.
     "thorough": list(OPERATORS.keys()),
 }
 
@@ -991,6 +1062,7 @@ def mutate_and_test(
             or ``"thorough"``. Mutually exclusive with *operators*.
         workers: Parallel workers for testing mutants. Default ``1``.
     """
+    used_preset = preset
     operators = _resolve_operators(operators, preset)
     module = importlib.import_module(target)
     source_file = getattr(module, "__file__", None)
@@ -1000,7 +1072,7 @@ def mutate_and_test(
         source = f.read()
 
     mutant_pairs = generate_mutants(source, operators)
-    result = MutationResult(target=target)
+    result = MutationResult(target=target, operators_used=operators, preset_used=used_preset)
 
     for mutant, mutated_tree in mutant_pairs:
         try:
@@ -1142,15 +1214,52 @@ def mutate_function_and_test(
 ) -> MutationResult:
     """Mutate a single function and run *test_fn* against each mutant.
 
-    Uses :class:`PatchFault` to swap the function, so callers that reference
-    it through the module (``mod.func()``) will see the mutant.
+    This is the **recommended** entry point for mutation testing. It uses
+    :class:`PatchFault` to swap the function at its module attribute, so any
+    code that accesses it via ``mod.func()`` will see the mutant.
+
+    Example — basic usage with a preset::
+
+        from ordeal import mutate_function_and_test
+
+        result = mutate_function_and_test(
+            "myapp.scoring.compute",
+            test_fn=lambda: assert compute(1, 2) == 3,
+            preset="standard",
+        )
+        print(result.summary())  # surviving mutants + remediation
+
+    Example — custom operator selection::
+
+        result = mutate_function_and_test(
+            "myapp.scoring.compute",
+            test_fn=run_scoring_tests,
+            operators=["arithmetic", "comparison", "boundary"],
+        )
+
+    Example — parallel execution for large codebases::
+
+        result = mutate_function_and_test(
+            "myapp.scoring.compute",
+            test_fn=run_scoring_tests,
+            preset="thorough",
+            workers=4,
+        )
 
     Args:
         target: Dotted path to the function (e.g. ``"myapp.scoring.compute"``).
         test_fn: Zero-arg callable; should raise on failure.
-        operators: Mutation operators to use (default: all).
-        preset: Named operator group: ``"essential"``, ``"standard"``,
-            or ``"thorough"``. Mutually exclusive with *operators*.
+        operators: Explicit list of operator names to apply. See
+            ``OPERATORS.keys()`` for all available operators. Mutually
+            exclusive with *preset*.
+        preset: Named operator group — pick one:
+
+            - ``"essential"`` — 4 operators, fast feedback.
+            - ``"standard"`` — 8 operators, good CI default.
+            - ``"thorough"`` — all 14 operators, comprehensive.
+
+            Mutually exclusive with *operators*. When neither is given,
+            all operators are used.
         workers: Number of parallel worker processes. ``1`` (default)
             runs sequentially.  Higher values give near-linear speedup
             since each mutant is tested independently.
@@ -1160,6 +1269,7 @@ def mutate_function_and_test(
         equivalence_samples: Number of random inputs for equivalence
             filtering.  Default ``10``.
     """
+    used_preset = preset
     operators = _resolve_operators(operators, preset)
     module_path, func_name = target.rsplit(".", 1)
     module = importlib.import_module(module_path)
@@ -1169,9 +1279,12 @@ def mutate_function_and_test(
     mutant_pairs = generate_mutants(source, operators)
 
     if workers > 1:
-        return _parallel_function_test(target, test_fn, mutant_pairs, module, func_name, workers)
+        result = _parallel_function_test(target, test_fn, mutant_pairs, module, func_name, workers)
+        result.preset_used = used_preset
+        result.operators_used = operators
+        return result
 
-    result = MutationResult(target=target)
+    result = MutationResult(target=target, operators_used=operators, preset_used=used_preset)
 
     for mutant, mutated_tree in mutant_pairs:
         # Compile the mutated function in the module's namespace

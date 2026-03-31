@@ -363,7 +363,7 @@ class ModuleAudit:
                 lines.append(f"      - {s}")
 
         if self.not_checked:
-            lines.append("    NOT verified (write these tests manually):")
+            lines.append("    NOT verified (requires manual tests):")
             for item in self.not_checked:
                 lines.append(f"      - {item}")
 

@@ -191,9 +191,9 @@ class ScalingAnalysis:
             lines.append(f"    Coherence (kappa):  {self.kappa:.6f} cross-worker sync cost.")
             if self.n_optimal < 4:
                 lines.append("    Coherence dominates — parallelism barely helps.")
-                lines.append("    Reduce cross-worker synchronization before adding workers.")
+                lines.append("    Bottleneck: cross-worker synchronization cost.")
             elif self.n_optimal < 16:
-                lines.append("    Moderate scaling — consider reducing sync frequency.")
+                lines.append("    Moderate scaling — sync frequency limits throughput.")
 
         return "\n".join(lines)
 

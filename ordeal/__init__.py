@@ -40,8 +40,15 @@ Capabilities (each is independent — use one or all):
 
 5. **Mutation testing** — verify your tests catch real bugs::
 
-    from ordeal.mutations import mutate_function_and_test
-    result = mutate_function_and_test("myapp.scoring.compute", my_test_suite)
+    from ordeal import mutate_function_and_test
+
+    result = mutate_function_and_test(
+        "mymodule.func", my_test,
+        preset="standard",    # "essential" | "standard" | "thorough"
+    )
+    print(result.summary())   # surviving mutants + how to fix them
+
+    # CLI: ordeal mutate mymodule.func --preset standard
 
 6. **Coverage-guided exploration** — deeper than random testing::
 

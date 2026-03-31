@@ -80,6 +80,29 @@ from typing import Callable, Literal
 from ordeal.faults import PatchFault
 
 # ============================================================================
+# Helpers
+# ============================================================================
+
+
+def _unwrap_func(func: object) -> object:
+    """Unwrap decorated/wrapped functions to reach the original source.
+
+    Handles ``inspect.unwrap`` (follows ``__wrapped__`` chains),
+    Ray's ``@ray.remote`` (stores the real function in ``._function``),
+    and Celery-style ``task.run`` patterns.
+    """
+    # Ray @ray.remote stores the original in ._function
+    if hasattr(func, "_function"):
+        func = func._function
+    # Standard unwrap (__wrapped__ chains from functools.wraps)
+    try:
+        func = inspect.unwrap(func)
+    except (ValueError, TypeError):
+        pass
+    return func
+
+
+# ============================================================================
 # Data structures
 # ============================================================================
 
@@ -1450,7 +1473,7 @@ def mutate_function_and_test(
     operators = _resolve_operators(operators, preset)
     module_path, func_name = target.rsplit(".", 1)
     module = importlib.import_module(module_path)
-    func = getattr(module, func_name)
+    func = _unwrap_func(getattr(module, func_name))
     source = textwrap.dedent(inspect.getsource(func))
 
     mutant_pairs = generate_mutants(source, operators)
@@ -1586,7 +1609,7 @@ def mutation_faults(
     operators = _resolve_operators(operators, preset)
     module_path, func_name = target.rsplit(".", 1)
     module = importlib.import_module(module_path)
-    func = getattr(module, func_name)
+    func = _unwrap_func(getattr(module, func_name))
     source = textwrap.dedent(inspect.getsource(func))
 
     results: list[tuple[Mutant, PatchFault]] = []

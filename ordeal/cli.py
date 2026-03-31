@@ -527,12 +527,14 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
             stubs_path.write_text("\n\n".join(all_stubs))
             _stderr(f"Test stubs written: {stubs_path}\n")
 
-    # Overall summary for multiple targets
-    if len(all_results) > 1:
+    # Final score line — always printed for CI parseability
+    if all_results:
         total_mutants = sum(r.total for _, r in all_results)
         total_killed = sum(r.killed for _, r in all_results)
         overall = total_killed / total_mutants if total_mutants > 0 else 1.0
-        print(f"Overall: {total_killed}/{total_mutants} ({overall:.0%})")
+        if len(all_results) > 1:
+            print(f"Overall: {total_killed}/{total_mutants} ({overall:.0%})")
+        print(f"Score: {total_killed}/{total_mutants} ({overall:.0%})")
         if threshold > 0.0:
             status = "PASS" if overall >= threshold else "FAIL"
             print(f"Threshold: {threshold:.0%} — {status}")

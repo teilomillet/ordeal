@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.26
+
+**Features:**
+
+- client feedback — sometimes warn, chaos_test, report, subprocess faults
+- mutation kill attribution — which tests catch which mutations
+- wire expected_failures from ordeal.toml through to scan_module
+
+**Fixes:**
+
+- changelog generation uses python instead of sed
+- add expected_failures to ScanConfig dataclass and TOML parser
+- client feedback items 13-17
+- address client feedback items 7-12
+- address 4 client-reported bugs
+
+
 ## 0.2.0
 
 **Breaking changes:**

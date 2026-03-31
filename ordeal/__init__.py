@@ -114,6 +114,8 @@ from ordeal.mutations import (
     PRESETS,
     MutationResult,
     NoTestsFoundError,
+    generate_starter_tests,
+    init_project,
     mutate,
     mutate_function_and_test,
 )
@@ -151,6 +153,8 @@ __all__ = [
     "PRESETS",
     "OPERATORS",
     "NoTestsFoundError",
+    "generate_starter_tests",
+    "init_project",
     # Property mining
     "mine",
     "MineResult",
@@ -199,6 +203,11 @@ def __getattr__(name: str) -> object:
         globals()[name] = val  # cache for subsequent access
         return val
     raise AttributeError(f"module 'ordeal' has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    """Include lazy imports in dir() so help(ordeal) and tab completion find them."""
+    return list(set(globals().keys()) | set(_LAZY_IMPORTS.keys()))
 
 
 def catalog() -> dict[str, list]:

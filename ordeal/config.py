@@ -83,6 +83,8 @@ class ScanConfig:
     max_examples: int = 50
     fixtures: dict[str, str] = field(default_factory=dict)
     # fixture values are sampled_from specs like "violence,cyber,sexual"
+    expected_failures: list[str] = field(default_factory=list)
+    # function names where failure is correct behavior (e.g. input validation)
 
 
 @dataclass
@@ -294,6 +296,7 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
                 module=s["module"],
                 max_examples=int(s.get("max_examples", 50)),
                 fixtures=s.get("fixtures", {}),
+                expected_failures=s.get("expected_failures", []),
             )
         )
 

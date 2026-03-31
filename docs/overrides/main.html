@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+
+{% block extrahead %}
+{{ super() }}
+
+<!-- Google Tag Manager -->
+<script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+})(window,document,'script','dataLayer','GTM-TXTPQ4K4');</script>
+<!-- End Google Tag Manager -->
+
+{% if page %}
+{# --- Open Graph meta tags for social sharing --- #}
+{% set og_title = page.meta.get("title", page.title) | default(config.site_name, true) %}
+{% set og_description = page.meta.get("description", "") | default(config.site_description, true) %}
+{% set og_url = page.canonical_url | default(config.site_url, true) %}
+<meta property="og:type" content="website">
+<meta property="og:title" content="{{ og_title }} - {{ config.site_name }}">
+<meta property="og:description" content="{{ og_description }}">
+<meta property="og:url" content="{{ og_url }}">
+<meta property="og:site_name" content="{{ config.site_name }}">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="{{ og_title }} - {{ config.site_name }}">
+<meta name="twitter:description" content="{{ og_description }}">
+
+{# --- JSON-LD structured data (homepage only) --- #}
+{% if page.is_homepage %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "ordeal",
+  "alternateName": "ordeal chaos testing",
+  "description": "Automated chaos testing for Python. Fault injection, property assertions, mutation testing, and coverage-guided exploration. Find the bugs your tests miss.",
+  "url": "https://docs.byordeal.com/",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Cross-platform",
+  "programmingLanguage": "Python",
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD"
+  },
+  "license": "https://opensource.org/licenses/Apache-2.0",
+  "codeRepository": "https://github.com/teilomillet/ordeal",
+  "author": {
+    "@type": "Person",
+    "name": "Teilo Millet",
+    "url": "https://github.com/teilomillet"
+  }
+}
+</script>
+{% endif %}
+{% endif %}
+{% endblock %}
+
+{% block announce %}
+<!-- Google Tag Manager (noscript) -->
+<noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-TXTPQ4K4"
+height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
+<!-- End Google Tag Manager (noscript) -->
+{{ super() }}
+{% endblock %}

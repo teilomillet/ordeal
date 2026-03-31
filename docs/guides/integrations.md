@@ -1,3 +1,10 @@
+---
+description: >-
+  Extend ordeal with Atheris coverage-guided fuzzing and built-in OpenAPI
+  chaos testing. Integrate specialized testing engines into your Python
+  test suite.
+---
+
 # Integrations
 
 !!! quote "In plain English"

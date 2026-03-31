@@ -1,3 +1,10 @@
+---
+description: >-
+  Ordeal CLI: explore, replay, mine, audit, mutate. Run chaos testing,
+  mutation testing, and property mining from the command line. Full
+  command reference.
+---
+
 # CLI
 
 !!! quote "In plain English"

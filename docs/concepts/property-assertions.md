@@ -1,3 +1,10 @@
+---
+description: >-
+  Property assertions for Python testing: always, sometimes, reachable,
+  unreachable. The Antithesis assertion model for chaos testing with
+  ordeal.
+---
+
 # Property Assertions
 
 !!! quote "In plain English"

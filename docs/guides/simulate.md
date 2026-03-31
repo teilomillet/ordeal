@@ -1,3 +1,10 @@
+---
+description: >-
+  Deterministic simulation for Python tests: Clock controls time
+  instantly, FileSystem replaces real I/O. No mocks, fully reproducible,
+  built into ordeal.
+---
+
 # Simulation Primitives
 
 !!! quote "In plain English"

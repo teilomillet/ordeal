@@ -1,3 +1,10 @@
+---
+description: >-
+  Fix common ordeal issues: explorer finds 0 failures, buggify always
+  returns False, mutation testing problems, CI failures. Solutions with
+  examples.
+---
+
 # Troubleshooting
 
 !!! quote "Find your symptom, follow the fix"

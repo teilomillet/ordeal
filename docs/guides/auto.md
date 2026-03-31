@@ -1,3 +1,10 @@
+---
+description: >-
+  Zero-boilerplate Python testing: ordeal mine discovers properties,
+  fuzz finds crashes, scan_module smoke-tests every function. No test
+  code required.
+---
+
 # Auto — Zero-Boilerplate Testing
 
 Point ordeal at your code. Get tests. No scaffolding.

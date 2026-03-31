@@ -1,3 +1,10 @@
+---
+description: >-
+  Complete ordeal API reference: ChaosTest, always, sometimes, buggify,
+  faults, invariants, Explorer, quickcheck. Every function, parameter,
+  and type.
+---
+
 # API Reference
 
 !!! quote "In plain English"

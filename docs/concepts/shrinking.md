@@ -1,3 +1,9 @@
+---
+description: >-
+  How ordeal shrinks test failures: delta debugging removes unnecessary
+  steps, fault simplification isolates root causes. From 100 steps to 3.
+---
+
 # Shrinking
 
 !!! quote "In plain English"

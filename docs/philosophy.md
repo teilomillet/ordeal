@@ -1,3 +1,10 @@
+---
+description: >-
+  Why chaos testing matters. Ordeal combines ideas from Antithesis,
+  FoundationDB, Jepsen, and Hypothesis into one Python library. The testing
+  pyramid has a missing layer.
+---
+
 # Philosophy
 
 !!! quote "In plain English"

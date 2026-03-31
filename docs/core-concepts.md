@@ -1,3 +1,10 @@
+---
+description: >-
+  Core concepts behind ordeal: ChaosTest, property assertions, fault
+  injection, buggify, coverage-guided exploration, and shrinking. Quick
+  reference for Python chaos testing.
+---
+
 # Core Concepts
 
 !!! quote "How it all fits together"

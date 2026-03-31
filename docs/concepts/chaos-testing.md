@@ -1,3 +1,10 @@
+---
+description: >-
+  What is chaos testing? How ChaosTest works in Python: faults, rules,
+  invariants, the nemesis adversary, and swarm mode. Stateful testing
+  with ordeal and Hypothesis.
+---
+
 # Chaos Testing
 
 !!! quote "In plain English"

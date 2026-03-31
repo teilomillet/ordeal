@@ -1,3 +1,10 @@
+---
+description: >-
+  Fault injection for Python: timeouts, NaN, disk full, network errors.
+  PatchFault for external faults, BUGGIFY for inline faults. The
+  FoundationDB model in ordeal.
+---
+
 # Fault Injection
 
 !!! quote "In plain English"

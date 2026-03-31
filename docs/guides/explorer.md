@@ -1,3 +1,10 @@
+---
+description: >-
+  Run ordeal's coverage-guided Explorer to find deep bugs. Configure
+  ordeal.toml, launch parallel workers, checkpoint interesting states,
+  generate regression tests.
+---
+
 # Explorer
 
 !!! quote "The big picture"

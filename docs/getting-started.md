@@ -1,3 +1,10 @@
+---
+description: >-
+  Write your first Python chaos test in 5 minutes with ordeal. Fault
+  injection, property assertions, automatic shrinking. From install to
+  your first bug.
+---
+
 # Getting Started
 
 From zero to your first chaos test in 5 minutes. By the end, you'll understand not just *how* to write a chaos test, but *why* each piece exists.

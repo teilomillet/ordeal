@@ -1,3 +1,11 @@
+---
+title: Chaos Testing for Python
+description: >-
+  Ordeal: automated chaos testing for Python. Fault injection, property
+  assertions, mutation testing, and coverage-guided exploration. Find the
+  bugs your tests miss.
+---
+
 # ordeal — Chaos testing for Python
 
 Your tests pass. Your code still breaks in production. Ordeal finds what you missed.

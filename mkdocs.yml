@@ -1,20 +1,28 @@
 site_name: ordeal
 site_url: https://docs.byordeal.com/
-site_description: Automated chaos testing for Python — fault injection, property assertions, and stateful exploration.
+site_description: >-
+  Automated chaos testing for Python. Fault injection, property assertions,
+  mutation testing, and coverage-guided exploration. Find the bugs your tests miss.
 repo_url: https://github.com/teilomillet/ordeal
 repo_name: teilomillet/ordeal
 edit_uri: edit/main/docs/
+copyright: Copyright &copy; 2024 ordeal contributors
 
 theme:
   name: material
+  language: en
+  custom_dir: docs/overrides
   features:
     - content.code.copy
     - navigation.sections
+    - navigation.footer
     - search.highlight
     - search.suggest
+    - search.share
 
 plugins:
   - search
+  - tags
 
 markdown_extensions:
   - admonition
@@ -32,6 +40,10 @@ extra:
       link: https://github.com/teilomillet/ordeal
     - icon: fontawesome/brands/python
       link: https://pypi.org/project/ordeal/
+  # Uncomment and add your tracking ID when ready:
+  # analytics:
+  #   provider: google
+  #   property: G-XXXXXXXXXX
 
 nav:
   - Home: index.md

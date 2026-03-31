@@ -1,3 +1,10 @@
+---
+description: >-
+  Patterns for writing effective chaos tests in Python with ordeal.
+  ChaosTest examples, fault combinations, invariant design, and
+  real-world recipes.
+---
+
 # Writing Tests
 
 !!! quote "This page is your cookbook"

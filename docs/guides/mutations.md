@@ -1,3 +1,10 @@
+---
+description: >-
+  Mutation testing for Python with ordeal. 14 AST operators verify your
+  tests catch real bugs. Presets for fast or thorough analysis. CI-ready
+  with ordeal mutate.
+---
+
 # Mutation Testing
 
 !!! quote "In plain English"

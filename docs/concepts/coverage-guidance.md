@@ -1,3 +1,10 @@
+---
+description: >-
+  Coverage-guided exploration: how ordeal's Explorer uses AFL-style edge
+  hashing, checkpoints, and energy scheduling to find bugs random testing
+  misses.
+---
+
 # Coverage Guidance
 
 !!! quote "In plain English"

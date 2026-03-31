@@ -1,3 +1,10 @@
+---
+description: >-
+  Configure ordeal with ordeal.toml: explorer settings, test classes,
+  report format, scan targets, mutation presets. Full schema reference
+  with examples.
+---
+
 # Configuration
 
 !!! quote "In plain English"

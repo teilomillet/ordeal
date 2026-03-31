@@ -75,8 +75,13 @@ ordeal = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-n auto"
+markers = [
+    "slow: long-running ablation/integration tests (> 10s)",
+]
 filterwarnings = [
     "ignore::hypothesis.errors.NonInteractiveExampleWarning",
+    "ignore:.*use of fork.*:DeprecationWarning",
 ]
 
 [tool.ruff]

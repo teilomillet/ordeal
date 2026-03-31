@@ -10,6 +10,8 @@ import copy
 import pickle
 from typing import ClassVar
 
+import pytest
+
 from ordeal import ChaosTest, rule
 from ordeal.explore import (
     _POOL_HEADER_SIZE,
@@ -430,6 +432,7 @@ class TestParallelWithPool:
         assert result.total_steps > 0
 
 
+@pytest.mark.slow
 class TestPoolAblation:
     """Ablation: does the checkpoint pool actually help?
 

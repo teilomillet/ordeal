@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from hypothesis.stateful import invariant, rule
 
 from ordeal.chaos import ChaosTest
@@ -377,6 +378,7 @@ class HardChaos(ChaosTest):
         super().teardown()
 
 
+@pytest.mark.slow
 class TestAblation:
     """Compare checkpoint strategies on HardService.
 

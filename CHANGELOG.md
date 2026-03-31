@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.28
+
+**Features:**
+
+- audit suggests metamorphic relations from mined properties
+
+
 ## 0.2.26
 
 **Features:**

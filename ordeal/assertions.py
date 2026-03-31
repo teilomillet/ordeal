@@ -263,8 +263,10 @@ def sometimes(
     was_active = tracker.record(name, "sometimes", cond, details or None)
     if not was_active:
         if warn:
+            # Use print (stdout) so pytest captures and shows it visibly
             status = "PASS" if cond else "OBSERVE"
-            _stderr(f"  sometimes({name!r}): {status}\n")
+            detail_str = f" | {details}" if details else ""
+            print(f"  ordeal: sometimes({name!r}): {status}{detail_str}")
         else:
             warnings.warn(
                 f"sometimes({name!r}) called but tracker is inactive — this is a no-op. "

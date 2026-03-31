@@ -1,24 +1,5 @@
 """ordeal — Automated chaos testing for Python.
 
-Ordeal finds bugs your tests miss. It explores thousands of scenarios —
-including realistic failures like timeouts, corrupted data, and crashes —
-and when something breaks, it shows the shortest sequence that reproduces
-the failure. No test code required for basic usage.
-
-Quick start::
-
-    ordeal mine mymodule            # discover what your functions actually do
-    ordeal audit mymodule           # find gaps in your existing tests
-    ordeal explore                  # coverage-guided exploration (reads ordeal.toml)
-
-Discover everything available::
-
-    from ordeal import catalog
-    c = catalog()  # faults, invariants, assertions, strategies, integrations
-    # Each entry has: name, qualname, signature, doc
-
-Full documentation: https://docs.byordeal.com/
-
 Capabilities (each is independent — use one or all):
 
 1. **Stateful chaos testing** — Hypothesis-powered rule exploration with fault injection::
@@ -59,9 +40,9 @@ Capabilities (each is independent — use one or all):
 
 5. **Mutation testing** — verify your tests catch real bugs::
 
-    from ordeal import mutate
+    from ordeal import mutate_function_and_test
 
-    result = mutate("mymodule.func", preset="standard")  # function or module
+    result = mutate_function_and_test("mymodule.func", preset="standard")
     print(result.summary())   # test gaps + how to fix them
 
     # CLI: ordeal mutate mymodule.func --preset standard
@@ -74,6 +55,13 @@ Capabilities (each is independent — use one or all):
 
     from ordeal.integrations.atheris_engine import fuzz
     fuzz(my_function, max_time=60)  # requires: pip install ordeal[atheris]
+
+8. **Discoverability** — introspect all capabilities programmatically::
+
+    from ordeal import catalog
+    c = catalog()  # faults, invariants, strategies, mutations
+    for fault in c["faults"]:
+        print(f"{fault['qualname']}  -- {fault['doc']}")
 
 Running chaos tests::
 
@@ -103,7 +91,6 @@ from ordeal.mutations import (
     OPERATORS,
     PRESETS,
     MutationResult,
-    mutate,
     mutate_function_and_test,
 )
 
@@ -131,112 +118,45 @@ __all__ = [
     "Bundle",
     # Config
     "auto_configure",
+    # Discoverability
+    "catalog",
     # Mutations
-    "mutate",
     "mutate_function_and_test",
     "MutationResult",
     "PRESETS",
     "OPERATORS",
-    # Discovery
-    "catalog",
 ]
 
 
-def catalog() -> dict[str, list[dict]]:
+def catalog() -> dict[str, list]:
     """Discover all ordeal capabilities via runtime introspection.
 
-    Returns a dict keyed by category, each containing a list of entries
-    with ``name``, ``signature``, ``doc``, and category-specific fields.
-
-    Categories: ``faults``, ``invariants``, ``assertions``, ``strategies``,
-    ``integrations``.
-
-    Everything is derived from the source code via ``inspect`` — when new
-    functions are added to any module, they appear here automatically.
+    Returns a dict with one key per subsystem — each value is a list of
+    dicts describing the available items (faults, invariants, strategies,
+    mutation operators/presets).  Everything is derived from the source
+    code via ``inspect``; adding a new fault, invariant, or strategy
+    makes it appear here automatically.
 
     Example::
 
         from ordeal import catalog
         c = catalog()
-        c["faults"]       # 25 fault factories with signatures + docs
-        c["invariants"]   # 14 invariants (instances + factories)
-        c["assertions"]   # 4 assertion types with signatures
-        c["strategies"]   # adversarial data generation strategies
-        c["integrations"] # API testing, atheris fuzzing entry points
+        for fault in c["faults"]:
+            print(f"{fault['qualname']}  -- {fault['doc']}")
+        for inv in c["invariants"]:
+            print(f"{inv['name']}  -- {inv['doc']}")
     """
-    result: dict[str, list[dict]] = {}
-
-    # Faults — delegate to the submodule catalog
     from ordeal.faults import catalog as _faults_catalog
+    from ordeal.invariants import catalog as _invariants_catalog
+    from ordeal.mutations import catalog as _mutations_catalog
+    from ordeal.strategies import catalog as _strategies_catalog
 
-    result["faults"] = _faults_catalog()
-
-    # Invariants — delegate to the submodule catalog
-    from ordeal.invariants import catalog as _inv_catalog
-
-    result["invariants"] = _inv_catalog()
-
-    # Assertions — introspect the 4 public functions
-    from ordeal import assertions as _assertions_mod
-
-    result["assertions"] = _introspect_module(
-        _assertions_mod,
-        include={"always", "sometimes", "reachable", "unreachable"},
-    )
-
-    # Strategies — introspect all public functions
-    from ordeal import strategies as _strategies_mod
-
-    result["strategies"] = _introspect_module(_strategies_mod)
-
-    # Integrations — introspect key entry points
-    from ordeal.integrations import openapi as _openapi_mod
-
-    result["integrations"] = _introspect_module(
-        _openapi_mod,
-        include={"chaos_api_test", "with_chaos", "auto_faults"},
-    )
-    try:
-        from ordeal.integrations import atheris_engine as _atheris_mod
-
-        result["integrations"].extend(
-            _introspect_module(_atheris_mod, include={"fuzz", "fuzz_chaos_test"})
-        )
-    except ImportError:
-        pass
-
-    return result
-
-
-def _introspect_module(
-    mod: object,
-    include: set[str] | None = None,
-) -> list[dict]:
-    """Introspect public callables from a module."""
-    import inspect as _inspect
-
-    entries: list[dict] = []
-    for attr_name in sorted(dir(mod)):
-        if attr_name.startswith("_"):
-            continue
-        if include and attr_name not in include:
-            continue
-        obj = getattr(mod, attr_name)
-        if not callable(obj) or _inspect.isclass(obj):
-            continue
-        try:
-            sig = str(_inspect.signature(obj))
-        except (ValueError, TypeError):
-            sig = "(...)"
-        entries.append(
-            {
-                "name": attr_name,
-                "qualname": f"{mod.__name__}.{attr_name}",
-                "signature": sig,
-                "doc": (_inspect.getdoc(obj) or "").split("\n")[0],
-            }
-        )
-    return entries
+    return {
+        "faults": _faults_catalog(),
+        "invariants": _invariants_catalog(),
+        "strategies": _strategies_catalog(),
+        "mutations": _mutations_catalog(),
+    }
 
 
 def auto_configure(

@@ -2,26 +2,6 @@
 
 Conventions for AI agents working on ordeal.
 
-## Discovery
-
-Start here — `ordeal.catalog()` returns all capabilities via runtime introspection:
-
-```python
-from ordeal import catalog
-c = catalog()
-c["faults"]       # 25 fault factories with signatures + docs
-c["invariants"]   # 14 invariants (instances + factories)
-c["assertions"]   # 4 assertion types (always, sometimes, reachable, unreachable)
-c["strategies"]   # adversarial data generation strategies
-c["integrations"] # API testing, atheris fuzzing entry points
-```
-
-Submodule catalogs: `ordeal.faults.catalog()`, `ordeal.invariants.catalog()`.
-
-Result objects expose structured metadata for reasoning about what to try next:
-- `ChaosAPIResult.config_used` — which capabilities were active (swarm, auto_discover, mutation_targets, record_traces)
-- `ExplorationResult.capabilities_used` — which exploration features were active (state_hash, mutations, checkpoints, sometimes_properties)
-
 ## Build & test
 
 ```bash
@@ -84,4 +64,3 @@ This applies everywhere: faults, assertions, invariants, strategies. The user sh
 4. Export from `ordeal/__init__.py` if it's public API.
 5. Add a doc in `docs/` (under 130 lines).
 6. Update `docs/api-reference.md`.
-7. Ensure `catalog()` picks it up: public functions with type annotations in faults/invariants are auto-discovered. For other modules, add to the `include` set in `ordeal/__init__.py:catalog()`.

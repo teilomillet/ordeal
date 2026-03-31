@@ -11,9 +11,18 @@ modules are complementary: ``strategies`` is explicit chaos data,
 
 Each function returns a ``hypothesis.strategies.SearchStrategy`` that can be
 used in ``@rule()``, ``@given()``, or ``data.draw()``.
+
+Discover all available strategies programmatically::
+
+    from ordeal.strategies import catalog
+    for entry in catalog():
+        print(f"{entry['name']}  -- {entry['doc']}")
 """
 
 from __future__ import annotations
+
+import inspect
+import sys
 
 import hypothesis.strategies as st
 
@@ -110,3 +119,50 @@ def mixed_types() -> st.SearchStrategy:
         st.lists(st.integers(), max_size=8),
         st.dictionaries(st.text(max_size=8), st.integers(), max_size=4),
     )
+
+
+# ---------------------------------------------------------------------------
+# Catalog — introspect available strategies at runtime
+# ---------------------------------------------------------------------------
+
+
+def catalog() -> list[dict[str, str]]:
+    """Discover all available adversarial strategies via runtime introspection.
+
+    Returns a list of dicts with ``name``, ``doc``, ``signature``, and
+    ``parameters``.  Derived from module globals — new strategies appear
+    automatically.
+    """
+    mod = sys.modules[__name__]
+    entries: list[dict[str, str]] = []
+    for attr_name in sorted(dir(mod)):
+        if attr_name.startswith("_") or attr_name == "catalog":
+            continue
+        obj = getattr(mod, attr_name)
+        if not callable(obj) or inspect.isclass(obj):
+            continue
+        try:
+            sig = inspect.signature(obj)
+            ret = sig.return_annotation
+            if ret is inspect.Parameter.empty:
+                continue
+            ret_str = str(ret)
+            if "SearchStrategy" not in ret_str:
+                continue
+        except (ValueError, TypeError):
+            continue
+        params = {
+            p.name: getattr(p.annotation, "__name__", str(p.annotation))
+            for p in sig.parameters.values()
+            if p.annotation is not inspect.Parameter.empty
+        }
+        entries.append(
+            {
+                "name": attr_name,
+                "qualname": f"ordeal.strategies.{attr_name}",
+                "signature": str(sig),
+                "doc": (inspect.getdoc(obj) or "").split("\n")[0],
+                "parameters": params,
+            }
+        )
+    return entries

@@ -327,20 +327,10 @@ def test_no_mutations_section_returns_none(tmp_path: Path):
 
 
 def test_top_level_import():
-    from ordeal import MutationResult, mutate, mutate_function_and_test
+    from ordeal import MutationResult, mutate_function_and_test
 
-    assert callable(mutate)
     assert callable(mutate_function_and_test)
     assert MutationResult is not None
-
-
-def test_mutate_unified_auto_detects_function():
-    """mutate() auto-detects function targets and delegates correctly."""
-    from ordeal.mutations import mutate
-
-    result = mutate(f"{__name__}._add", _test_add, preset="essential", filter_equivalent=False)
-    assert result.total > 0
-    assert result.target == f"{__name__}._add"
 
 
 # ============================================================================

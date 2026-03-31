@@ -8,9 +8,9 @@ Quick start
 
 Pick a preset and go — tests are auto-discovered via pytest::
 
-    from ordeal import mutate
+    from ordeal import mutate_function_and_test
 
-    result = mutate("myapp.scoring.compute", preset="standard")
+    result = mutate_function_and_test("myapp.scoring.compute", preset="standard")
     print(result.summary())   # shows test gaps + how to fix them
 
 Or from the command line::
@@ -56,6 +56,12 @@ Reading the output
 - **Location** — file line and column of the mutation.
 - **Description** — what was changed (e.g. ``+ -> -``).
 - **Fix guidance** — exactly what test to write to kill this mutant.
+
+Discover all operators and presets programmatically::
+
+    from ordeal.mutations import catalog
+    for entry in catalog():
+        print(f"{entry['name']} ({entry['type']})  -- {entry['doc']}")
 """
 
 from __future__ import annotations
@@ -830,6 +836,41 @@ def _resolve_operators(
 
 
 # ============================================================================
+# Catalog — introspect mutation operators at runtime
+# ============================================================================
+
+
+def catalog() -> list[dict[str, str]]:
+    """Discover all mutation operators and presets via runtime introspection.
+
+    Returns a list of dicts with ``name``, ``type`` (``"operator"`` or
+    ``"preset"``), ``doc`` (remediation guidance for operators, operator
+    list for presets), and ``operators`` (list of operator names for presets).
+    Derived from :data:`OPERATORS`, :data:`PRESETS`, and :data:`_REMEDIATION`
+    — new operators appear automatically.
+    """
+    entries: list[dict[str, str]] = []
+    for name in sorted(OPERATORS):
+        entries.append(
+            {
+                "name": name,
+                "type": "operator",
+                "doc": (_REMEDIATION.get(name, "") or "").split("\n")[0],
+            }
+        )
+    for name, ops in PRESETS.items():
+        entries.append(
+            {
+                "name": name,
+                "type": "preset",
+                "doc": f"{len(ops)} operators: {', '.join(ops)}",
+                "operators": ops,
+            }
+        )
+    return entries
+
+
+# ============================================================================
 # Mutant generation
 # ============================================================================
 
@@ -1204,23 +1245,6 @@ def _is_runtime_equivalent(
     return True
 
 
-def _is_function_target(target: str) -> bool:
-    """Determine if a dotted path refers to a callable (vs a module)."""
-    try:
-        importlib.import_module(target)
-        return False
-    except ImportError:
-        pass
-    parts = target.rsplit(".", 1)
-    if len(parts) < 2:
-        return False
-    try:
-        mod = importlib.import_module(parts[0])
-        return callable(getattr(mod, parts[1], None))
-    except ImportError:
-        return False
-
-
 def _auto_test_fn(target: str) -> Callable[[], None]:
     """Create a test function that runs pytest in-process for *target*.
 
@@ -1471,64 +1495,3 @@ def mutation_faults(
         results.append((mutant, fault))
 
     return results
-
-
-# ============================================================================
-# Unified entry point
-# ============================================================================
-
-
-def mutate(
-    target: str,
-    test_fn: Callable[[], None] | None = None,
-    operators: list[str] | None = None,
-    *,
-    preset: str | None = None,
-    workers: int = 1,
-    filter_equivalent: bool = True,
-    equivalence_samples: int = 10,
-) -> MutationResult:
-    """Find test gaps by mutating *target* and checking if tests catch the changes.
-
-    Auto-detects whether *target* is a function or module and routes
-    accordingly.  When *test_fn* is omitted, tests are auto-discovered
-    via pytest in-process.
-
-    Example::
-
-        from ordeal import mutate
-
-        result = mutate("myapp.scoring.compute", preset="standard")
-        print(result.summary())
-
-    Args:
-        target: Dotted path — function (``"myapp.scoring.compute"``)
-            or module (``"myapp.scoring"``).
-        test_fn: Zero-arg callable; should raise on failure.  When ``None``
-            (default), auto-discovers tests via pytest in-process.
-        operators: Explicit operator list.  Mutually exclusive with *preset*.
-        preset: ``"essential"`` (4 ops), ``"standard"`` (8 ops, CI default),
-            or ``"thorough"`` (all 14). Mutually exclusive with *operators*.
-        workers: Parallel worker processes.  Default ``1``.
-        filter_equivalent: Skip equivalent mutants.  Default ``True``.
-            Only applies to function-level targets.
-        equivalence_samples: Samples for equivalence check.  Default ``10``.
-    """
-    if _is_function_target(target):
-        return mutate_function_and_test(
-            target,
-            test_fn,
-            operators,
-            preset=preset,
-            workers=workers,
-            filter_equivalent=filter_equivalent,
-            equivalence_samples=equivalence_samples,
-        )
-    else:
-        return mutate_and_test(
-            target,
-            test_fn,
-            operators,
-            preset=preset,
-            workers=workers,
-        )

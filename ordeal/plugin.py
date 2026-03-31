@@ -305,12 +305,14 @@ class OrdealScanCollector(pytest.Collector):
         module_name: str = "",
         max_examples: int = 50,
         fixtures: dict[str, object] | None = None,
+        expected_failures: list[str] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(name, parent, **kwargs)
         self.module_name = module_name
         self.max_examples = max_examples
         self._fixtures = fixtures
+        self._expected_failures = expected_failures or []
 
     def collect(self) -> list[pytest.Item]:
         from ordeal.auto import _get_public_functions, _infer_strategies, _resolve_module
@@ -323,6 +325,8 @@ class OrdealScanCollector(pytest.Collector):
 
         items = []
         for func_name, func in _get_public_functions(mod):
+            if func_name in self._expected_failures:
+                continue
             strategies = _infer_strategies(func, self._fixtures)
             if strategies is None:
                 continue
@@ -387,6 +391,7 @@ class _OrdealTomlCollector(pytest.File):
                 module_name=scan_cfg.module,
                 max_examples=scan_cfg.max_examples,
                 fixtures=fixtures,
+                expected_failures=scan_cfg.expected_failures,
             )
             items.extend(collector.collect())
         return items

@@ -46,12 +46,15 @@ class TraceStep:
     ``fault_toggle`` steps in the trace.
     """
 
-    kind: str  # "rule" | "fault_toggle"
-    name: str  # rule name or "+fault_name" / "-fault_name"
+    kind: str  # "rule" | "fault_toggle" | "api_call"
+    name: str  # rule name, "+fault_name"/"-fault_name", or "GET /items"
     params: dict[str, Any] = field(default_factory=dict)
     active_faults: list[str] = field(default_factory=list)
     edge_count: int = 0
     timestamp_offset: float = 0.0
+    # Populated only for kind="api_call":
+    status_code: int | None = None
+    endpoint: str | None = None
 
 
 @dataclass

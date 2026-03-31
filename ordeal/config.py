@@ -86,6 +86,46 @@ class ScanConfig:
 
 
 @dataclass
+class APIConfig:
+    """Settings for ``[api]`` OpenAPI chaos testing."""
+
+    schema_url: str | None = None
+    app: str | None = None  # "module.path:attr" for ASGI/WSGI app
+    wsgi: bool = False
+    schema_path: str = "/openapi.json"
+    base_url: str | None = None
+    faults: list[str] = field(default_factory=list)  # dotted paths to Fault factories
+    fault_probability: float = 0.3
+    seed: int = 42
+    swarm: bool = False
+    max_examples: int = 100
+    headers: dict[str, str] = field(default_factory=dict)
+
+    def resolve_app(self) -> object | None:
+        """Import and return the ASGI/WSGI app object."""
+        if self.app is None:
+            return None
+        module_path, attr_name = self.app.rsplit(":", 1)
+        module = importlib.import_module(module_path)
+        return getattr(module, attr_name)
+
+    def resolve_faults(self) -> list:
+        """Import and call each fault factory path, returning Fault instances."""
+        from ordeal.faults import _resolve_target
+
+        results = []
+        for path in self.faults:
+            parent, attr = _resolve_target(path)
+            obj = getattr(parent, attr)
+            results.append(obj() if callable(obj) else obj)
+        return results
+
+
+# Backward-compat alias
+SchemathesisConfig = APIConfig
+
+
+@dataclass
 class OrdealConfig:
     """Top-level configuration loaded from ``ordeal.toml``."""
 
@@ -93,6 +133,8 @@ class OrdealConfig:
     tests: list[TestConfig] = field(default_factory=list)
     scan: list[ScanConfig] = field(default_factory=list)
     report: ReportConfig = field(default_factory=ReportConfig)
+    api: APIConfig | None = None
+    schemathesis: APIConfig | None = None  # legacy alias for api
 
 
 # ============================================================================
@@ -102,7 +144,21 @@ class OrdealConfig:
 _VALID_CHECKPOINT_STRATEGIES = {"energy", "uniform", "recent"}
 _VALID_REPORT_FORMATS = {"json", "text", "both"}
 
-_KNOWN_SECTIONS = {"explorer", "tests", "scan", "report", "faults"}
+_KNOWN_SECTIONS = {"explorer", "tests", "scan", "report", "faults", "schemathesis", "api"}
+_KNOWN_API_KEYS = {
+    "schema_url",
+    "app",
+    "wsgi",
+    "schema_path",
+    "base_url",
+    "faults",
+    "fault_probability",
+    "seed",
+    "swarm",
+    "max_examples",
+    "headers",
+}
+_KNOWN_SCHEMATHESIS_KEYS = _KNOWN_API_KEYS | {"stateful", "mutation_targets"}
 _KNOWN_EXPLORER_KEYS = {
     "target_modules",
     "max_time",
@@ -229,4 +285,55 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
             f"Invalid report format: {report.format!r}. Must be one of: {_VALID_REPORT_FORMATS}"
         )
 
-    return OrdealConfig(explorer=explorer, tests=tests, scan=scans, report=report)
+    # -- API / Schemathesis (optional, mutually exclusive) --
+    if "api" in raw and "schemathesis" in raw:
+        raise ConfigError(
+            "Cannot have both [api] and [schemathesis] sections. "
+            "Use [api] (the [schemathesis] name is deprecated)."
+        )
+
+    api_cfg: APIConfig | None = None
+    schemathesis_cfg: APIConfig | None = None
+
+    if "api" in raw:
+        a_raw = raw["api"]
+        _warn_unknown_keys("api", a_raw, _KNOWN_API_KEYS)
+        api_cfg = APIConfig(
+            schema_url=a_raw.get("schema_url"),
+            app=a_raw.get("app"),
+            wsgi=a_raw.get("wsgi", False),
+            schema_path=a_raw.get("schema_path", "/openapi.json"),
+            base_url=a_raw.get("base_url"),
+            faults=a_raw.get("faults", []),
+            fault_probability=float(a_raw.get("fault_probability", 0.3)),
+            seed=int(a_raw.get("seed", 42)),
+            swarm=a_raw.get("swarm", False),
+            max_examples=int(a_raw.get("max_examples", 100)),
+            headers=a_raw.get("headers", {}),
+        )
+
+    if "schemathesis" in raw:
+        s_raw = raw["schemathesis"]
+        _warn_unknown_keys("schemathesis", s_raw, _KNOWN_SCHEMATHESIS_KEYS)
+        schemathesis_cfg = APIConfig(
+            schema_url=s_raw.get("schema_url"),
+            app=s_raw.get("app"),
+            wsgi=s_raw.get("wsgi", False),
+            schema_path=s_raw.get("schema_path", "/openapi.json"),
+            base_url=s_raw.get("base_url"),
+            faults=s_raw.get("faults", []),
+            fault_probability=float(s_raw.get("fault_probability", 0.3)),
+            seed=int(s_raw.get("seed", 42)),
+            swarm=s_raw.get("swarm", False),
+            max_examples=int(s_raw.get("max_examples", 100)),
+            headers=s_raw.get("headers", {}),
+        )
+
+    return OrdealConfig(
+        explorer=explorer,
+        tests=tests,
+        scan=scans,
+        report=report,
+        api=api_cfg,
+        schemathesis=schemathesis_cfg,
+    )

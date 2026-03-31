@@ -1,5 +1,6 @@
 """Optional integrations with external testing tools.
 
+- ``ordeal.integrations.openapi``: Built-in OpenAPI chaos testing (zero extra deps)
 - ``ordeal.integrations.atheris_engine``: Coverage-guided fuzzing via Google's Atheris
-- ``ordeal.integrations.schemathesis_ext``: API chaos testing via Schemathesis
+- ``ordeal.integrations.schemathesis_ext``: Backward-compat bridge + schemathesis hooks
 """

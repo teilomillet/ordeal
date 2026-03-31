@@ -158,19 +158,32 @@ class TestAtherisFuzzChaosTest:
 
 
 # ============================================================================
-# schemathesis chaos_api_test — import check
+# Built-in engine works without schemathesis
 # ============================================================================
 
 
-class TestChaosApiTest:
-    def test_raises_without_schemathesis(self):
+class TestBuiltinEngineNoSchemathesis:
+    def test_openapi_import_works_without_schemathesis(self):
+        """The built-in engine requires no optional deps."""
+        with patch.dict(sys.modules, {"schemathesis": None}):
+            from ordeal.integrations.openapi import chaos_api_test  # noqa: F811
+
+            # Should import fine — no ImportError
+            assert callable(chaos_api_test)
+
+    def test_chaos_api_hook_raises_without_schemathesis(self):
+        """ChaosAPIHook still requires schemathesis."""
         with patch.dict(sys.modules, {"schemathesis": None}):
             if "ordeal.integrations.schemathesis_ext" in sys.modules:
                 del sys.modules["ordeal.integrations.schemathesis_ext"]
-            from ordeal.integrations.schemathesis_ext import chaos_api_test
+            from ordeal.faults import LambdaFault
+            from ordeal.integrations.schemathesis_ext import ChaosAPIHook
 
+            hook = ChaosAPIHook(
+                faults=[LambdaFault("t", on_activate=lambda: None, on_deactivate=lambda: None)]
+            )
             with pytest.raises(ImportError, match="schemathesis"):
-                chaos_api_test("http://localhost/schema", faults=[])
+                hook.register()
 
 
 # ============================================================================

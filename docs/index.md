@@ -83,7 +83,26 @@ pip install ordeal           # or: uv tool install ordeal
 
 Then `ordeal mine`, `ordeal audit`, and `ordeal explore` are available directly from your terminal.
 
-## What do you want to do?
+## Find what you need
+
+Every goal maps to a starting point — a command to run, a module to import, and a page to read. Nothing is hidden.
+
+| I want to... | Start here | Learn more |
+|---|---|---|
+| Find bugs without writing tests | `ordeal mine mymodule` | [Auto Testing](guides/auto.md) |
+| Check if my tests are good enough | `ordeal audit mymodule` | [Mutations](guides/mutations.md) |
+| Write a chaos test | `from ordeal import ChaosTest` | [Getting Started](getting-started.md) |
+| Inject specific failures (timeout, NaN, ...) | `from ordeal.faults import timing` | [Fault Injection](concepts/fault-injection.md) |
+| Explore all failure combinations | `ordeal explore` | [Explorer](guides/explorer.md) |
+| Reproduce and shrink a failure | `ordeal replay trace.json` | [Shrinking](concepts/shrinking.md) |
+| Add fail-safe gates to production code | `from ordeal.buggify import buggify` | [Fault Injection](concepts/fault-injection.md) |
+| Make assertions across all runs | `from ordeal import always, sometimes` | [Assertions](concepts/property-assertions.md) |
+| Control time / filesystem in tests | `from ordeal.simulate import Clock` | [Simulation](guides/simulate.md) |
+| Compare two implementations | `ordeal mine-pair mod.fn1 mod.fn2` | [Auto Testing](guides/auto.md) |
+| Test API endpoints for faults | `from ordeal.integrations.openapi import chaos_api_test` | [Integrations](guides/integrations.md) |
+| Extend ordeal with a new fault | Follow the pattern in `ordeal/faults/*.py` | [Fault Injection](concepts/fault-injection.md) |
+| Configure reproducible runs | Create `ordeal.toml` | [Configuration](guides/configuration.md) |
+| Discover all available faults, assertions, strategies | `from ordeal import catalog; catalog()` | [API Reference](reference/api.md) |
 
 !!! quote "Pick your starting point"
     Every path leads somewhere useful. You can't pick wrong.

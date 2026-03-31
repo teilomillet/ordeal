@@ -405,6 +405,7 @@ Every goal maps to a starting point — a command to run, a module to import, an
 | Test API endpoints for faults | Schemathesis integration | `ordeal/integrations/` | [Integrations](https://docs.byordeal.com/guides/integrations) |
 | Extend ordeal with a new fault | Follow the pattern in `faults/*.py` | `ordeal/faults/` | [Fault Injection](https://docs.byordeal.com/concepts/fault-injection) |
 | Configure reproducible runs | Create `ordeal.toml` | `ordeal/config.py` | [Configuration](https://docs.byordeal.com/guides/configuration) |
+| Discover all faults, assertions, strategies | `from ordeal import catalog; catalog()` | `ordeal/__init__.py` | [API Reference](https://docs.byordeal.com/reference/api) |
 
 > **New to ordeal?** Start with `ordeal mine ordeal.demo` to see it in action, then read [Getting Started](https://docs.byordeal.com/getting-started).
 > **Have existing tests?** Run `ordeal audit mymodule --test-dir tests/` to see how they compare.

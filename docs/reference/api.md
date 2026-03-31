@@ -5,6 +5,27 @@
 
 Complete public API with signatures, parameters, and usage.
 
+## Discovery
+
+!!! quote "Find everything ordeal offers — programmatically"
+    `catalog()` returns every fault, invariant, assertion, strategy, and integration ordeal has, with names, signatures, and documentation. AI assistants and scripts can use this to discover capabilities at runtime without reading files. When new features are added to ordeal, they appear in the catalog automatically.
+
+```python
+from ordeal import catalog
+
+c = catalog()
+c["faults"]        # 25 fault factories — timeout, nan_injection, disk_full, ...
+c["invariants"]    # 14 composable checks — no_nan, bounded, finite, ...
+c["assertions"]    # 4 assertion types — always, sometimes, reachable, unreachable
+c["strategies"]    # adversarial data generation strategies
+c["integrations"]  # API testing, atheris fuzzing entry points
+
+# Each entry has: name, qualname, signature, doc
+for fault in c["faults"]:
+    print(f"{fault['name']}{fault['signature']}")
+    print(f"  {fault['doc']}")
+```
+
 ## Core
 
 !!! quote "Stateful chaos testing"

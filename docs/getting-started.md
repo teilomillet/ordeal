@@ -271,6 +271,16 @@ Three steps. That's the minimal reproduction. Now you know exactly what to fix.
 
 You've written a chaos test. Here's where to go next, depending on what you want:
 
+**Discover what's available:**
+
+```python
+from ordeal import catalog
+c = catalog()  # returns all faults, invariants, assertions, strategies, integrations
+c["faults"]    # 25 fault types with names, signatures, and docs
+```
+
+`catalog()` gives you runtime discovery of everything ordeal offers — every fault, every invariant, every strategy, with signatures and documentation. AI assistants can use this to find the right tool for any situation.
+
 **Understand the concepts:**
 
 - [Chaos Testing](concepts/chaos-testing.md) — how faults, nemesis, and swarm mode work together

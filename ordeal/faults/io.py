@@ -35,7 +35,7 @@ def error_on_call(
     error: type[Exception] = IOError,
     message: str = "Simulated I/O error",
 ) -> PatchFault:
-    """Make *target* raise *error* on every call while active."""
+    """Make *target* raise *error* on every call — simulates database/cache/service failure."""
 
     def wrapper(original):
         @functools.wraps(original)
@@ -167,7 +167,7 @@ class _PermissionDeniedFault(Fault):
 
 
 def disk_full() -> Fault:
-    """Simulate disk-full errors on write operations.
+    """Simulate disk full — all write-mode open() and os.write() fail with ENOSPC.
 
     **Warning**: patches ``builtins.open`` and ``os.write`` globally.
     """

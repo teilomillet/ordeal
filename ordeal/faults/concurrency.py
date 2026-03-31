@@ -27,7 +27,7 @@ def contended_call(
     contention: float = 0.05,
     mode: str = "simulate",
 ) -> PatchFault:
-    """Add artificial contention to *target* via a shared lock.
+    """Add lock contention to *target* — tests thread-safety and deadlock handling.
 
     Every call to *target* acquires a global lock, simulating
     resource contention.  *contention* seconds of hold time per call.
@@ -58,7 +58,7 @@ def delayed_release(
     delay: float = 0.5,
     mode: str = "simulate",
 ) -> PatchFault:
-    """Add a delay *after* *target* returns, before the caller gets the result.
+    """Add a delay after *target* returns — simulates slow resource release, GC pauses.
 
     Simulates slow resource release (e.g. connection pool return,
     lock release, file handle close).  Useful for surfacing bugs where
@@ -120,7 +120,7 @@ class _ThreadBoundaryFault(PatchFault):
 
 
 def thread_boundary(target: str, timeout: float = 5.0) -> Fault:
-    """Execute *target* on a background thread instead of the calling thread.
+    """Run *target* on a background thread — finds thread-local state bugs and race conditions.
 
     Useful for finding thread-local state bugs, non-thread-safe access
     patterns, and implicit thread affinity assumptions.

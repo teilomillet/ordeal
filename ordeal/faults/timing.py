@@ -26,7 +26,7 @@ def timeout(
     delay: float = 30.0,
     error: type[Exception] = TimeoutError,
 ) -> PatchFault:
-    """Make *target* raise ``TimeoutError`` (no actual sleep — instant failure)."""
+    """Make *target* raise ``TimeoutError`` instantly — simulates database/API/network timeout."""
 
     def wrapper(original):
         @functools.wraps(original)
@@ -43,7 +43,7 @@ def slow(
     delay: float = 1.0,
     mode: str = "simulate",
 ) -> PatchFault:
-    """Add *delay* seconds to every call of *target*.
+    """Add *delay* seconds to every call of *target* — simulates slow database/API/network.
 
     Args:
         target: Dotted path to the function to slow down.

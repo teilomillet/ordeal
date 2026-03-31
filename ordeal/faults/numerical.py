@@ -43,7 +43,7 @@ def _corrupt_numeric(value: Any, corrupt: float) -> Any:
 
 
 def nan_injection(target: str) -> PatchFault:
-    """Inject NaN into the numeric output of *target*."""
+    """Inject NaN into numeric output of *target* — catches missing NaN checks in math/ML."""
 
     def wrapper(original):
         @functools.wraps(original)
@@ -57,7 +57,7 @@ def nan_injection(target: str) -> PatchFault:
 
 
 def inf_injection(target: str) -> PatchFault:
-    """Inject Inf into the numeric output of *target*."""
+    """Inject Inf into numeric output of *target* — catches missing overflow checks in math/ML."""
 
     def wrapper(original):
         @functools.wraps(original)

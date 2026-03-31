@@ -72,7 +72,7 @@ def http_error(
     status_code: int = 500,
     message: str = "Internal Server Error",
 ) -> PatchFault:
-    """Make *target* raise an HTTP-like error with *status_code*.
+    """Make *target* raise an HTTP error (500, 502, 503, etc.) — simulates API/service failure.
 
     The raised ``HTTPFaultError`` carries a duck-typed ``response``
     attribute compatible with requests/httpx error handling patterns.
@@ -89,7 +89,7 @@ def http_error(
 
 
 def connection_reset(target: str) -> PatchFault:
-    """Simulate a connection reset / network failure on *target*."""
+    """Simulate connection reset on *target* — tests retry logic and error recovery."""
 
     def wrapper(original: Any) -> Any:
         @functools.wraps(original)
@@ -105,7 +105,7 @@ def rate_limited(
     target: str,
     retry_after: float = 30.0,
 ) -> PatchFault:
-    """Simulate HTTP 429 Too Many Requests with Retry-After."""
+    """Simulate HTTP 429 rate limiting with Retry-After — tests backoff/retry logic."""
 
     def wrapper(original: Any) -> Any:
         @functools.wraps(original)
@@ -124,7 +124,7 @@ def auth_failure(
     target: str,
     status_code: int = 401,
 ) -> PatchFault:
-    """Simulate authentication/authorization failure (HTTP 401 or 403)."""
+    """Simulate auth failure (HTTP 401/403) — tests token expiry, permission checks."""
     message = "Unauthorized" if status_code == 401 else "Forbidden"
 
     def wrapper(original: Any) -> Any:
@@ -138,7 +138,7 @@ def auth_failure(
 
 
 def dns_failure(target: str) -> PatchFault:
-    """Simulate DNS resolution failure on *target*."""
+    """Simulate DNS resolution failure on *target* — tests offline/network-down handling."""
 
     def wrapper(original: Any) -> Any:
         @functools.wraps(original)

@@ -202,25 +202,6 @@ def _introspect_module(mod: object, include: set[str] | None = None) -> list[dic
         )
     return entries
 
-    # Integrations — optional, may not be installed
-    try:
-        from ordeal.integrations.openapi import catalog as _openapi_catalog
-
-        result["integrations"] = _openapi_catalog()
-    except (ImportError, AttributeError):
-        result["integrations"] = []
-
-    try:
-        from ordeal.integrations.atheris_engine import (
-            catalog as _atheris_catalog,
-        )
-
-        result["integrations"].extend(_atheris_catalog())
-    except (ImportError, AttributeError):
-        pass
-
-    return result
-
 
 def auto_configure(
     buggify_probability: float = 0.1,

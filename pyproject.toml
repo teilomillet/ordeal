@@ -13,6 +13,12 @@ keywords = [
     "fuzzing",
     "hypothesis",
     "chaos-engineering",
+    "mutation-testing",
+    "pytest-plugin",
+    "coverage-guided",
+    "stateful-testing",
+    "resilience-testing",
+    "test-quality",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

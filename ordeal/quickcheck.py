@@ -24,6 +24,11 @@ by default.  Integers cluster near 0 and range endpoints.  Lists are more
 often empty or singleton.  Strings hit unicode edge cases.  This catches
 more bugs per test run because implementation boundaries (off-by-one, empty
 input, overflow) are explored with higher probability.
+
+For **hand-curated** adversarial values (SQL injection strings, NaN floats,
+type-confusion), see :mod:`ordeal.strategies` instead. The two modules are
+complementary: ``biased`` infers boundaries from types, ``strategies``
+provides explicit chaos data for specific attack surfaces.
 """
 
 from __future__ import annotations
@@ -50,7 +55,12 @@ class biased:
         min_value: int | None = None,
         max_value: int | None = None,
     ) -> st.SearchStrategy[int]:
-        """Integers biased toward 0, +/-1, range endpoints, powers of 2."""
+        """Integers biased toward 0, +/-1, range endpoints, powers of 2.
+
+        Built-in boundaries: 0, ±1, ±2, ±10, ±100, 255, 256, ±2^15,
+        ±2^31, ±2^63. When *min_value* or *max_value* are given, their
+        immediate neighbors are added too.
+        """
         base = st.integers(min_value=min_value, max_value=max_value)
         boundaries = [
             0,
@@ -98,7 +108,11 @@ class biased:
         allow_nan: bool = False,
         allow_infinity: bool = False,
     ) -> st.SearchStrategy[float]:
-        """Floats biased toward 0, +/-1, epsilon, range endpoints."""
+        """Floats biased toward 0, +/-1, epsilon, range endpoints.
+
+        Built-in boundaries: 0.0, -0.0, ±1.0, ±0.5, ±1e-10, ±1e10.
+        When *min_value* or *max_value* are given, they are added too.
+        """
         base = st.floats(
             min_value=min_value,
             max_value=max_value,

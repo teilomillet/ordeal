@@ -1,5 +1,14 @@
 """Hypothesis strategies for adversarial / chaos data generation.
 
+Hand-curated strategies that inject known-dangerous values: SQL injection
+strings, NaN floats, boundary integers, type-confusion values. Use these
+when you want to target specific attack surfaces or parser weaknesses.
+
+For **type-driven** boundary generation from function signatures, see
+:mod:`ordeal.quickcheck` and its ``biased`` namespace instead. The two
+modules are complementary: ``strategies`` is explicit chaos data,
+``quickcheck.biased`` is automatic boundary inference from types.
+
 Each function returns a ``hypothesis.strategies.SearchStrategy`` that can be
 used in ``@rule()``, ``@given()``, or ``data.draw()``.
 """

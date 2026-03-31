@@ -61,8 +61,11 @@ class ChaosTest(RuleBasedStateMachine):
     Class attributes:
         faults: Fault instances to inject.  A nemesis rule auto-toggles
             them during exploration — you just declare, ordeal explores.
-        swarm:  ``True`` = each test case picks a random fault subset.
-            Use when you have 3+ faults for better aggregate coverage.
+        swarm:  ``True`` = each test case picks a random *subset* of
+            faults via a bitmask (Hypothesis explores which subsets
+            matter). Different runs explore different combinations,
+            giving better aggregate coverage than always-all-faults.
+            Use when you have 3+ faults.
 
     Key methods to override:
         state_hash(): Return a hash of qualitatively different states to

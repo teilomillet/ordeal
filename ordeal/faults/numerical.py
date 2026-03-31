@@ -12,9 +12,12 @@ Target a function and corrupt its numeric output while the fault is active.
 from __future__ import annotations
 
 import functools
-from typing import Any
+from typing import Any, Literal
 
 from . import Fault, PatchFault
+
+#: Valid values for the ``corrupt_type`` parameter of :func:`corrupted_floats`.
+CorruptType = Literal["nan", "inf", "-inf", "max", "min"]
 
 
 def _corrupt_numeric(value: Any, corrupt: float) -> Any:
@@ -101,7 +104,7 @@ class _CorruptedFloatsFault(Fault):
     Use in rules via ``fault.value()`` rather than patching a target.
     """
 
-    def __init__(self, corrupt_type: str = "nan") -> None:
+    def __init__(self, corrupt_type: CorruptType = "nan") -> None:
         super().__init__(name=f"corrupted_floats({corrupt_type})")
         self._corrupt_type = corrupt_type
 
@@ -129,10 +132,15 @@ class _CorruptedFloatsFault(Fault):
         pass
 
 
-def corrupted_floats(corrupt_type: str = "nan") -> _CorruptedFloatsFault:
+def corrupted_floats(corrupt_type: CorruptType = "nan") -> _CorruptedFloatsFault:
     """Fault that provides corrupt float values when active.
 
     Unlike the ``*_injection`` faults, this doesn't patch a function.
     Instead, use ``fault.value()`` in your rules to get corrupt data.
+
+    Args:
+        corrupt_type: Kind of corruption — ``"nan"``, ``"inf"``, ``"-inf"``,
+            ``"max"`` (DBL_MAX ≈ 1.8e308), or ``"min"`` (smallest positive
+            subnormal ≈ 5e-324).
     """
     return _CorruptedFloatsFault(corrupt_type)

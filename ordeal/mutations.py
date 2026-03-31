@@ -69,7 +69,7 @@ import textwrap
 import types
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Literal
 
 from ordeal.faults import PatchFault
 
@@ -785,6 +785,9 @@ OPERATORS: dict[str, tuple[type[_Counter], type[_Applicator]]] = {
 # ============================================================================
 
 
+#: Valid preset names for the ``preset`` parameter.
+PresetName = Literal["essential", "standard", "thorough"]
+
 PRESETS: dict[str, list[str]] = {
     # Fast feedback — catches wrong math, wrong comparisons,
     # flipped conditions, and missing return values.
@@ -808,7 +811,7 @@ PRESETS: dict[str, list[str]] = {
 
 def _resolve_operators(
     operators: list[str] | None = None,
-    preset: str | None = None,
+    preset: PresetName | None = None,
 ) -> list[str] | None:
     """Resolve operators from an explicit list or a preset name.
 
@@ -1038,7 +1041,7 @@ def mutate_and_test(
     test_fn: Callable[[], None] | None = None,
     operators: list[str] | None = None,
     *,
-    preset: str | None = None,
+    preset: PresetName | None = None,
     workers: int = 1,
 ) -> MutationResult:
     """Apply mutations to an entire module and run *test_fn* against each.
@@ -1098,7 +1101,7 @@ def validate_mined_properties(
     max_examples: int = 100,
     operators: list[str] | None = None,
     *,
-    preset: str | None = None,
+    preset: PresetName | None = None,
 ) -> MutationResult:
     """Mine properties of *target*, then mutate it and check the properties catch the mutations.
 
@@ -1227,7 +1230,7 @@ def mutate_function_and_test(
     test_fn: Callable[[], None] | None = None,
     operators: list[str] | None = None,
     *,
-    preset: str | None = None,
+    preset: PresetName | None = None,
     workers: int = 1,
     filter_equivalent: bool = True,
     equivalence_samples: int = 10,
@@ -1406,7 +1409,7 @@ def mutation_faults(
     target: str,
     operators: list[str] | None = None,
     *,
-    preset: str | None = None,
+    preset: PresetName | None = None,
 ) -> list[tuple[Mutant, PatchFault]]:
     """Generate :class:`PatchFault` objects for each mutant of a function.
 

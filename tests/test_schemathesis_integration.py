@@ -167,13 +167,18 @@ async def openapi_schema(request: Request) -> JSONResponse:
     return JSONResponse(OPENAPI_SCHEMA)
 
 
+async def _not_found(request: Request) -> JSONResponse:
+    return JSONResponse({"error": "not found"}, status_code=404)
+
+
 asgi_app = Starlette(
     routes=[
         Route("/items", list_items, methods=["GET"]),
         Route("/items", create_item, methods=["POST"]),
         Route("/items/{item_id:int}", get_item),
         Route("/openapi.json", openapi_schema),
-    ]
+    ],
+    exception_handlers={404: lambda req, exc: JSONResponse({"error": "not found"}, 404)},
 )
 
 

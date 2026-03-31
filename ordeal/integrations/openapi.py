@@ -145,7 +145,13 @@ class ChaosAPIResult:
         }
 
     def summary(self) -> str:
-        """Structured summary of the run."""
+        """Structured summary with failure categorization.
+
+        Groups failures by type so the output shows what was checked:
+        application errors (5xx), protocol violations (Content-Length,
+        Transfer-Encoding, body on 204), content errors (invalid JSON,
+        missing Content-Type), security (CORS), and cross-request patterns.
+        """
         status = "PASSED" if self.passed else "FAILED"
         nfaults = len(self.fault_activations)
         lines = [
@@ -157,9 +163,14 @@ class ChaosAPIResult:
             for name, count in self.fault_activations.items():
                 lines.append(f"  {name}: activated {count}x")
         if self.failures:
+            # Group by type for clarity
+            by_type: dict[str, list[dict]] = {}
+            for f in self.failures:
+                by_type.setdefault(f.get("type", "unknown"), []).append(f)
             lines.append(f"  Failures: {len(self.failures)}")
-            for f in self.failures[:3]:
-                lines.append(f"    {f.get('type', '?')}: {f.get('error', '?')}")
+            for ftype, items in by_type.items():
+                lines.append(f"    [{ftype}] x{len(items)}")
+                lines.append(f"      {items[0].get('error', '?')}")
         unused = [k for k, v in self.config_used.items() if not v]
         if unused:
             lines.append(f"  Unused capabilities: {', '.join(unused)}")
@@ -1372,9 +1383,28 @@ def chaos_api_test(
 ) -> ChaosAPIResult:
     """Run OpenAPI chaos testing against an API with fault injection.
 
-    This is the batteries-included entry point.  Loads the OpenAPI schema,
-    generates test cases via Hypothesis, and randomly injects faults while
-    exercising every API endpoint.
+    Loads the OpenAPI schema, generates test cases via Hypothesis, and
+    randomly injects faults while exercising every API endpoint.
+
+    **What it validates automatically (no configuration needed):**
+
+    Every response is checked for HTTP protocol violations that cause
+    real production failures but are invisible at the application layer:
+
+    - **5xx status codes** — application errors under fault injection
+    - **Content-Length mismatch** — middleware modifies body after headers
+      (causes uvicorn RuntimeError)
+    - **Content-Length + Transfer-Encoding** — RFC 7230 §3.3.3 violation
+      (proxies drop the connection)
+    - **Body on 204/304** — RFC violation, proxy misframing
+    - **JSON Content-Type with non-JSON body** — clients crash on .json()
+    - **Missing Content-Type** — MIME sniffing, XSS risk
+    - **CORS headers lost under faults** — error handlers bypass middleware
+
+    After all requests, cross-request analysis detects:
+
+    - **Inconsistent error format** — same endpoint returns JSON and HTML
+    - **CORS present normally, missing under faults** — middleware bypass
 
     Supports three schema sources (exactly one of *schema_url* or *app*
     must be provided):

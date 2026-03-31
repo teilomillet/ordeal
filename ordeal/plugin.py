@@ -84,6 +84,68 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
+def _register_array_strategies() -> None:
+    """Register Hypothesis strategies for ML array types if available.
+
+    Detects MLX, JAX, and PyTorch and registers ``st.from_type``
+    strategies so ``scan_module`` and ``@quickcheck`` can auto-test
+    functions that accept array parameters without SmallSearchSpaceWarning.
+    """
+    from hypothesis import strategies as st
+
+    def _array_strategy(shape: tuple[int, ...] = (3, 4)) -> st.SearchStrategy:
+        """Generate small random arrays for property testing."""
+        import numpy as np
+
+        return st.builds(
+            lambda: np.random.default_rng(42).standard_normal(shape).astype(np.float32),
+        )
+
+    # MLX
+    try:
+        import mlx.core as mx
+
+        st.register_type_strategy(
+            mx.array,
+            _array_strategy().map(lambda a: mx.array(a)),
+        )
+    except (ImportError, Exception):
+        pass
+
+    # JAX
+    try:
+        import jax.numpy as jnp
+
+        st.register_type_strategy(
+            jnp.ndarray,
+            _array_strategy().map(lambda a: jnp.array(a)),
+        )
+    except (ImportError, Exception):
+        pass
+
+    # PyTorch
+    try:
+        import torch
+
+        st.register_type_strategy(
+            torch.Tensor,
+            _array_strategy().map(lambda a: torch.from_numpy(a)),
+        )
+    except (ImportError, Exception):
+        pass
+
+    # NumPy (explicit, avoids from_type fallback warning)
+    try:
+        import numpy as np
+
+        st.register_type_strategy(
+            np.ndarray,
+            _array_strategy(),
+        )
+    except (ImportError, Exception):
+        pass
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Activate assertions + buggify when ``--chaos`` is passed."""
     config.addinivalue_line("markers", "chaos: mark test for chaos mode")
@@ -92,6 +154,8 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         'mutate(target, preset="standard"): run mutation testing on target',
     )
+
+    _register_array_strategies()
 
     if config.getoption("chaos", default=False):
         assertions.tracker.active = True

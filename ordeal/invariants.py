@@ -1,13 +1,25 @@
 """Named, composable invariant assertions.
 
 Invariants are reusable checks with clear failure messages.
-They compose with ``&``::
+They compose with the ``&`` operator to build complex checks from
+simple building blocks::
 
-    from ordeal.invariants import no_nan, no_inf, bounded
+    from ordeal.invariants import no_nan, no_inf, bounded, finite
 
-    valid_score = no_nan & no_inf & bounded(0, 1)
-    valid_score(model_output)          # raises AssertionError on violation
-    valid_score(model_output, name="final_score")  # custom name in message
+    # Compose invariants with &
+    valid_score = bounded(0, 1) & finite      # bounded + no NaN + no Inf
+    valid_score(model_output)                  # raises AssertionError on violation
+    valid_score(model_output, name="score")    # custom name in message
+
+    # The & operator is associative — chain as many as you like
+    strict = bounded(0, 1) & finite & monotonic(strict=True)
+
+    # Built-in `finite` is itself a composition: no_nan & no_inf
+    finite(model_output)  # rejects NaN and Inf in one call
+
+Array-like values from MLX, JAX, and PyTorch are auto-converted to
+numpy arrays before checking. Numpy is optional — invariants that
+only need scalars or sequences work without it.
 
 Discover all available invariants programmatically::
 
@@ -45,7 +57,17 @@ class Invariant:
         return None
 
     def __and__(self, other: Invariant) -> Invariant:
-        """Compose two invariants: ``(a & b)(x)`` checks both ``a`` and ``b``."""
+        """Compose two invariants: ``(a & b)(x)`` checks both ``a`` and ``b``.
+
+        Use this to build domain-specific compound checks from simple
+        invariants::
+
+            check = bounded(0, 1) & finite
+            check(value)  # raises on out-of-range, NaN, or Inf
+
+        The operator is associative and flattens nested compositions,
+        so ``a & b & c`` produces a single flat check list.
+        """
         checks = []
         for inv in (self, other):
             if isinstance(inv, _Composed):
@@ -83,11 +105,13 @@ def _check_no_nan(value: Any, name: str = "no_nan") -> None:
         for i, v in enumerate(value):
             if isinstance(v, float) and math.isnan(v):
                 raise AssertionError(f"Invariant '{name}' violated: NaN at index {i}")
-    # numpy support (optional)
+    # numpy support (optional) — auto-converts MLX, JAX, PyTorch arrays
     if hasattr(value, "shape"):
         try:
             import numpy as np
 
+            if not isinstance(value, np.ndarray):
+                value = np.asarray(value)
             if np.isnan(value).any():
                 idx = tuple(np.argwhere(np.isnan(value))[0])
                 raise AssertionError(f"Invariant '{name}' violated: NaN at {idx}")
@@ -102,10 +126,13 @@ def _check_no_inf(value: Any, name: str = "no_inf") -> None:
         for i, v in enumerate(value):
             if isinstance(v, float) and math.isinf(v):
                 raise AssertionError(f"Invariant '{name}' violated: Inf at index {i}")
+    # Auto-converts MLX, JAX, PyTorch arrays
     if hasattr(value, "shape"):
         try:
             import numpy as np
 
+            if not isinstance(value, np.ndarray):
+                value = np.asarray(value)
             if np.isinf(value).any():
                 idx = tuple(np.argwhere(np.isinf(value))[0])
                 raise AssertionError(f"Invariant '{name}' violated: Inf at {idx}")
@@ -141,8 +168,10 @@ def bounded(lo: float, hi: float) -> Invariant:
                     )
         elif hasattr(value, "shape"):
             try:
-                import numpy as np  # noqa: F401
+                import numpy as np
 
+                if not isinstance(value, np.ndarray):
+                    value = np.asarray(value)
                 if (value < lo).any() or (value > hi).any():
                     raise AssertionError(
                         f"Invariant '{name}' violated: values outside [{lo}, {hi}]"

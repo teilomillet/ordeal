@@ -61,6 +61,7 @@ class ScanResult:
     module: str
     functions: list[FunctionResult] = field(default_factory=list)
     skipped: list[tuple[str, str]] = field(default_factory=list)
+    expected_failure_names: list[str] = field(default_factory=list)
 
     @property
     def results(self) -> list[FunctionResult]:
@@ -75,9 +76,16 @@ class ScanResult:
         return self.functions
 
     @property
+    def expected_failures(self) -> list[FunctionResult]:
+        """Functions that failed but were listed in *expected_failures*."""
+        return [
+            f for f in self.functions if not f.passed and f.name in self.expected_failure_names
+        ]
+
+    @property
     def passed(self) -> bool:
-        """True if every tested function passed."""
-        return all(f.passed for f in self.functions)
+        """True if every tested function passed or is an expected failure."""
+        return all(f.passed or f.name in self.expected_failure_names for f in self.functions)
 
     @property
     def total(self) -> int:
@@ -85,12 +93,19 @@ class ScanResult:
 
     @property
     def failed(self) -> int:
-        return sum(1 for f in self.functions if not f.passed)
+        return sum(
+            1 for f in self.functions if not f.passed and f.name not in self.expected_failure_names
+        )
 
     def summary(self) -> str:
         lines = [f"scan_module({self.module!r}): {self.total} functions, {self.failed} failed"]
         for f in self.functions:
-            lines.append(str(f))
+            if not f.passed and f.name in self.expected_failure_names:
+                lines.append(f"  XFAIL {f.name}: {f.error}")
+            else:
+                lines.append(str(f))
+        if self.expected_failure_names:
+            lines.append(f"  ({len(self.expected_failures)} expected failure(s))")
         if self.skipped:
             lines.append(f"  ({len(self.skipped)} skipped: no type hints)")
         return "\n".join(lines)
@@ -341,6 +356,7 @@ def scan_module(
     max_examples: int = 50,
     check_return_type: bool = True,
     fixtures: dict[str, st.SearchStrategy] | None = None,
+    expected_failures: list[str] | None = None,
 ) -> ScanResult:
     """Smoke-test every public function in *module*.
 
@@ -358,15 +374,26 @@ def scan_module(
 
         result = scan_module("myapp", fixtures={"model": model_strategy})
 
+    With expected failures for known-broken functions::
+
+        result = scan_module("myapp", expected_failures=["broken_func"])
+        assert result.passed  # broken_func failure won't count
+
     Args:
         module: Module path or object to scan.
         max_examples: Hypothesis examples per function.
         check_return_type: Verify return type annotations.
         fixtures: Strategy overrides for specific parameter names.
+        expected_failures: Function names that are expected to fail.
+            Failures from these functions are tracked separately and
+            do not cause ``result.passed`` to be ``False``.
     """
     mod = _resolve_module(module)
     mod_name = module if isinstance(module, str) else mod.__name__
-    result = ScanResult(module=mod_name)
+    result = ScanResult(
+        module=mod_name,
+        expected_failure_names=list(expected_failures) if expected_failures else [],
+    )
 
     for name, func in _get_public_functions(mod):
         strategies = _infer_strategies(func, fixtures)

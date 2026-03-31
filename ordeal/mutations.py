@@ -452,10 +452,47 @@ class MutationResult:
             lines.append(f"    {m.remediation}")
             lines.append('    """')
             lines.append(f"    result = {func_name}({call_args})")
-            lines.append("    assert result == ...  # expected value")
+            inv = _suggest_invariant(self.target, func_name)
+            if inv:
+                lines.append(f"    {inv}")
+            else:
+                lines.append("    assert result == ...  # expected value")
             lines.append("")
 
         return "\n".join(lines)
+
+
+def _suggest_invariant(target: str, func_name: str) -> str:
+    """Suggest an invariant assertion based on function name and return type."""
+    try:
+        parts = target.rsplit(".", 1)
+        if len(parts) < 2:
+            return ""
+        mod = importlib.import_module(parts[0])
+        func = getattr(mod, parts[1])
+        hints = inspect.get_annotations(func)
+        ret = hints.get("return")
+    except Exception:
+        ret = None
+
+    name_lower = func_name.lower()
+
+    # Name-based heuristics
+    if any(kw in name_lower for kw in ("score", "rate", "ratio", "prob", "confidence")):
+        return "from ordeal.invariants import bounded; bounded(0, 1)(result)"
+    if any(kw in name_lower for kw in ("distance", "norm", "magnitude", "loss")):
+        return "assert result >= 0"
+    if any(kw in name_lower for kw in ("embed", "vector", "matrix", "weight")):
+        return "from ordeal.invariants import finite; finite(result)"
+
+    # Return-type heuristics
+    ret_name = getattr(ret, "__name__", str(ret)) if ret else ""
+    if "float" in ret_name:
+        return "from ordeal.invariants import finite; finite(result)"
+    if "ndarray" in ret_name or "array" in ret_name or "Tensor" in ret_name:
+        return "from ordeal.invariants import finite; finite(result)"
+
+    return ""
 
 
 def generate_starter_tests(target: str) -> str:

@@ -1128,3 +1128,164 @@ class TestTrackerCleanup:
             max_examples=5,
         )
         assert not any(f.active for f in faults)
+
+
+# ============================================================================
+# Integration: real buggy apps that ordeal should catch
+# ============================================================================
+
+_BUGGY_SPEC = {
+    "openapi": "3.0.3",
+    "info": {"title": "Buggy", "version": "1.0"},
+    "paths": {
+        "/data": {
+            "get": {"responses": {"200": {"description": "ok"}}},
+        },
+    },
+}
+
+
+async def _buggy_app_base(scope, receive, send, *, status, headers, body):
+    """Reusable buggy ASGI app: serves spec normally, returns buggy /data."""
+    if scope["type"] != "http":
+        return
+    await receive()
+    if scope["path"] == "/openapi.json":
+        spec_body = json.dumps(_BUGGY_SPEC).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"application/json")],
+            }
+        )
+        await send({"type": "http.response.body", "body": spec_body})
+        return
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status,
+            "headers": [(k.encode(), v.encode()) for k, v in headers],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
+
+
+class TestProtocolBugDetection:
+    """Run chaos_api_test against real ASGI apps with known HTTP bugs.
+
+    Each test creates an app with a specific protocol violation and verifies
+    that ordeal's response validation catches it end-to-end.
+    """
+
+    def test_catches_content_length_mismatch(self):
+        """Simulates middleware that modifies body after Content-Length is set."""
+
+        async def app(scope, receive, send):
+            await _buggy_app_base(
+                scope,
+                receive,
+                send,
+                status=200,
+                headers=[("content-type", "application/json"), ("content-length", "2")],
+                body=b'[{"id":1}]',  # 10 bytes, declared 2
+            )
+
+        result = chaos_api_test(app=app, faults=[], max_examples=3, seed=1)
+        types = [f["type"] for f in result.failures]
+        assert "content_length_mismatch" in types
+
+    def test_catches_body_on_204(self):
+        """App returns 204 with a body — violates RFC 7230."""
+
+        async def app(scope, receive, send):
+            await _buggy_app_base(
+                scope,
+                receive,
+                send,
+                status=204,
+                headers=[("content-type", "application/json")],
+                body=b'{"deleted": true}',
+            )
+
+        result = chaos_api_test(app=app, faults=[], max_examples=3, seed=1)
+        types = [f["type"] for f in result.failures]
+        assert "body_on_no_content" in types
+
+    def test_catches_invalid_json_body(self):
+        """App declares JSON content-type but returns HTML."""
+
+        async def app(scope, receive, send):
+            await _buggy_app_base(
+                scope,
+                receive,
+                send,
+                status=200,
+                headers=[("content-type", "application/json")],
+                body=b"<html><body>Error</body></html>",
+            )
+
+        result = chaos_api_test(app=app, faults=[], max_examples=3, seed=1)
+        types = [f["type"] for f in result.failures]
+        assert "invalid_json_body" in types
+
+    def test_catches_missing_content_type(self):
+        """App returns body with no Content-Type header."""
+
+        async def app(scope, receive, send):
+            await _buggy_app_base(
+                scope,
+                receive,
+                send,
+                status=200,
+                headers=[],
+                body=b"some untyped data",
+            )
+
+        result = chaos_api_test(app=app, faults=[], max_examples=3, seed=1)
+        types = [f["type"] for f in result.failures]
+        assert "missing_content_type" in types
+
+    def test_catches_server_error_under_faults(self):
+        """App returns 500 when a fault is active."""
+        from ordeal.faults import LambdaFault
+
+        crash = False
+
+        async def app(scope, receive, send):
+            await _buggy_app_base(
+                scope,
+                receive,
+                send,
+                status=500 if crash else 200,
+                headers=[("content-type", "application/json")],
+                body=b'{"ok":true}',
+            )
+
+        fault = LambdaFault("crash", lambda: None, lambda: None)
+
+        # Patch activate/deactivate to flip the flag
+        def activate():
+            nonlocal crash
+            crash = True
+            fault._active = True
+
+        def deactivate():
+            nonlocal crash
+            crash = False
+            fault._active = False
+
+        fault.activate = activate
+        fault.deactivate = deactivate
+
+        result = chaos_api_test(
+            app=app, faults=[fault], fault_probability=1.0, max_examples=5, seed=1
+        )
+        types = [f["type"] for f in result.failures]
+        assert "server_error" in types
+
+    def test_healthy_app_passes(self):
+        """A well-behaved app produces no protocol violations."""
+        result = chaos_api_test(app=_asgi_app, faults=[], max_examples=10, seed=42)
+        assert result.passed
+        assert len(result.failures) == 0

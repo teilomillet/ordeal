@@ -214,6 +214,7 @@ class Mutant:
     killed: bool = False
     error: str | None = None
     source_line: str = ""
+    killed_by: str | None = None
 
     @property
     def location(self) -> str:
@@ -367,6 +368,22 @@ class MutationResult:
         """Mutants that the tests failed to detect — potential test gaps."""
         return [m for m in self.mutants if not m.killed]
 
+    def kill_attribution(self) -> dict[str, list[Mutant]]:
+        """Group killed mutants by the test/property that killed them.
+
+        Returns a dict mapping test names to the mutants they caught.
+        Shows which tests carry their weight and which are redundant::
+
+            attr = result.kill_attribution()
+            for test, mutants in attr.items():
+                print(f"{test}: killed {len(mutants)} mutant(s)")
+        """
+        groups: dict[str, list[Mutant]] = {}
+        for m in self.mutants:
+            if m.killed and m.killed_by:
+                groups.setdefault(m.killed_by, []).append(m)
+        return groups
+
     @property
     def score(self) -> float:
         """Kill ratio: 1.0 means every mutant was caught."""
@@ -405,6 +422,14 @@ class MutationResult:
             if remediation:
                 lines.append(f"    Cause: mutant changes {m.description} and tests still pass.")
                 lines.append(f"    Fix: {m.remediation}")
+        # Kill attribution — which tests carry their weight
+        attr = self.kill_attribution()
+        if attr:
+            lines.append("")
+            lines.append("  Kill attribution (which tests caught which mutations):")
+            for test, mutants in sorted(attr.items(), key=lambda x: -len(x[1])):
+                ops = ", ".join(sorted({m.operator for m in mutants}))
+                lines.append(f"    {test}: {len(mutants)} kill(s) [{ops}]")
         return "\n".join(lines)
 
     def generate_test_stubs(self) -> str:
@@ -2310,6 +2335,7 @@ def _batch_module_test(
                 for mutant, mutated_tree in mutant_pairs:
                     killed = False
                     error = None
+                    killer = None
                     try:
                         with _mutated_module(target, mutated_tree):
                             importlib.invalidate_caches()
@@ -2318,6 +2344,7 @@ def _batch_module_test(
                                 item.config.hook.pytest_runtest_protocol(item=item, nextitem=nxt)
                                 if item.session.testsfailed:
                                     killed = True
+                                    killer = item.nodeid
                                     error = f"{item.nodeid} failed"
                                     break
                     except Exception as e:
@@ -2325,7 +2352,7 @@ def _batch_module_test(
                         error = str(e)[:200]
                     # Reset failures for next mutant
                     session.testsfailed = 0
-                    results.append((mutant, killed, error))
+                    results.append((mutant, killed, error, killer))
             return True  # prevent default loop from running
 
     plugin = _BatchPlugin()
@@ -2450,13 +2477,17 @@ def mutate_and_test(
             batch_results = _parallel_module_test(target, mutant_pairs, workers)
         else:
             batch_results = _batch_module_test(target, mutant_pairs)
-        for mutant, killed, error in batch_results:
+        for item in batch_results:
+            mutant, killed, error = item[0], item[1], item[2]
+            killer = item[3] if len(item) > 3 else None
             mutant.killed = killed
             mutant.error = error
+            mutant.killed_by = killer
             result.mutants.append(mutant)
         return result
 
     # Fallback: serial per-mutant testing (custom test_fn)
+    test_name = getattr(test_fn, "__qualname__", getattr(test_fn, "__name__", "test_fn"))
     for mutant, mutated_tree in mutant_pairs:
         try:
             with _mutated_module(target, mutated_tree):
@@ -2466,6 +2497,7 @@ def mutate_and_test(
         except Exception as e:
             mutant.killed = True
             mutant.error = str(e)[:200]
+            mutant.killed_by = test_name
 
         result.mutants.append(mutant)
 
@@ -2720,6 +2752,7 @@ def mutate_function_and_test(
             continue
 
         # Swap via PatchFault
+        fn_name = getattr(test_fn, "__qualname__", getattr(test_fn, "__name__", "test_fn"))
         fault = PatchFault(target, lambda orig, mf=mutated_func: mf)
         fault.activate()
         try:
@@ -2728,6 +2761,7 @@ def mutate_function_and_test(
         except Exception as e:
             mutant.killed = True
             mutant.error = str(e)[:200]
+            mutant.killed_by = fn_name
         finally:
             fault.deactivate()
 

@@ -29,9 +29,12 @@ Usage::
 
 from __future__ import annotations
 
+import functools
 import math
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 # ============================================================================
 # Core formulas
@@ -298,3 +301,81 @@ def benchmark(
     normalized = [(n, t / baseline) for n, t in measurements]
 
     return analyze(normalized)
+
+
+def scales_linearly(
+    fn: Callable[..., Any] | None = None,
+    *,
+    n_range: tuple[int, int] = (1, 8),
+    max_kappa: float = 0.01,
+    max_sigma: float = 0.3,
+    samples: int = 3,
+    time_per_sample: float = 2.0,
+) -> Callable[..., Any]:
+    """Decorator: assert that a function scales linearly with concurrency.
+
+    Runs the function with increasing worker counts, fits the USL model,
+    and fails if contention (sigma) or coherence (kappa) exceed thresholds::
+
+        from ordeal.scaling import scales_linearly
+
+        @scales_linearly(n_range=(1, 8), max_kappa=0.01)
+        def process_batch(items):
+            ...
+
+    Args:
+        n_range: ``(min_workers, max_workers)`` to test.
+        max_kappa: Fail if coherence exceeds this (quadratic overhead).
+        max_sigma: Fail if contention exceeds this (serial bottleneck).
+        samples: Number of worker counts to test between min and max.
+        time_per_sample: Seconds to run at each worker count.
+    """
+    import concurrent.futures
+    import time as _time
+
+    def _decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(func)
+        def _test(*args: Any, **kwargs: Any) -> Any:
+            lo, hi = n_range
+            counts = [max(1, lo + i * (hi - lo) // max(samples - 1, 1)) for i in range(samples)]
+            counts = sorted(set(counts))
+
+            measurements: list[tuple[int, float]] = []
+            for n in counts:
+                start = _time.monotonic()
+                completed = 0
+                deadline = start + time_per_sample
+                with concurrent.futures.ThreadPoolExecutor(max_workers=n) as pool:
+                    while _time.monotonic() < deadline:
+                        futs = [pool.submit(func, *args, **kwargs) for _ in range(n)]
+                        concurrent.futures.wait(futs)
+                        completed += n
+                elapsed = _time.monotonic() - start
+                throughput = completed / elapsed if elapsed > 0 else 0
+                measurements.append((n, throughput))
+
+            if len(measurements) < 2:
+                return func(*args, **kwargs)
+
+            baseline = measurements[0][1] if measurements[0][1] > 0 else 1.0
+            normalized = [(n, t / baseline) for n, t in measurements]
+            result = analyze(normalized)
+
+            if result.kappa > max_kappa:
+                raise AssertionError(
+                    f"scales_linearly: kappa={result.kappa:.4f} exceeds "
+                    f"max_kappa={max_kappa} (quadratic coherence overhead)"
+                )
+            if result.sigma > max_sigma:
+                raise AssertionError(
+                    f"scales_linearly: sigma={result.sigma:.4f} exceeds "
+                    f"max_sigma={max_sigma} (serial contention bottleneck)"
+                )
+
+            return func(*args, **kwargs)
+
+        return _test
+
+    if fn is not None:
+        return _decorator(fn)
+    return _decorator

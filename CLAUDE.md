@@ -41,7 +41,7 @@ ordeal/
 ├── quickcheck.py       @quickcheck decorator with boundary-biased type-driven strategies
 ├── simulate.py         Deterministic simulation primitives: Clock, FileSystem
 ├── invariants.py       Composable invariants with & operator: no_nan & bounded(0, 1)
-├── mutations.py        AST-based mutation testing with 14 operators
+├── mutations.py        AST-based mutation testing with 14 operators, batch + parallel
 ├── trace.py            Trace recording, JSON serialization, replay, delta-debugging shrink
 ├── config.py           ordeal.toml loader with strict validation
 ├── cli.py              CLI: ordeal explore / mutate / audit / mine / replay
@@ -61,11 +61,12 @@ ordeal/
 
 - **ChaosTest** extends `hypothesis.stateful.RuleBasedStateMachine`. A **nemesis rule** is auto-injected to toggle faults during exploration. Hypothesis explores rule interleavings + fault schedules.
 - **Swarm mode**: Each test run uses a random subset of faults. Better aggregate coverage than all-faults-always-on.
-- **Energy scheduling**: Checkpoints that led to new edge coverage get higher selection probability. Constants: reward=2.0, decay=0.95, min=0.01.
+- **Energy scheduling**: Checkpoints that led to new edge coverage get higher selection probability. Constants: reward=2.0, decay=0.8, min=0.01. Selection combines energy, recency, and exploration bonuses to avoid over-exploiting one checkpoint.
 - **Assertions**: `always`/`unreachable` raise immediately (triggers Hypothesis shrinking). `sometimes`/`reachable` are deferred — checked at session end via PropertyTracker.
 - **buggify()**: No-op when chaos mode is inactive. Thread-local RNG, seed-controlled, negligible overhead in production.
 - **PatchFault**: Resolves a dotted path (e.g. `"myapp.api.call"`) and wraps the target function with fault behavior. Activate/deactivate cycle managed by ChaosTest.
 - **Optional deps**: atheris, numpy are behind try/except imports with helpful error messages.
+- **Mutation runner**: Auto-discovers tests via pytest with `--chaos` flag (ChaosTest classes are exercised). Batch mode runs all mutants in one pytest session. Parallel mode (`workers > N`) chunks mutants across processes. Equivalence filtering skips mutants that produce identical outputs. Decorated functions (`@ray.remote`, `functools.wraps`) are auto-unwrapped before `inspect.getsource`.
 
 ## Conventions
 
@@ -109,9 +110,15 @@ stubs = result.generate_test_stubs()  # Python test file with real signatures
 
 - `preset`: `"essential"` (4 ops, fast), `"standard"` (8, CI default), `"thorough"` (all 14).
 - `test_fn` is optional — pytest auto-discovers relevant tests when omitted.
+- `workers`: Parallel mutant testing. Module-level uses batched parallel (one pytest session per worker).
+- `filter_equivalent`: Skip mutants that produce identical outputs on random inputs (default `True`).
 - `result.survived` — list of gaps, each with `.operator`, `.source_line`, `.remediation`.
 - `result.generate_test_stubs()` — test file with real param names and typed examples.
+- `result.score` — kill ratio (0.0–1.0). CLI prints `Score: X/Y (Z%)` for CI parsing.
+- `NoTestsFoundError` — raised when auto-discovery finds no tests (instead of misleading 0%).
+- Works with decorated functions: `@ray.remote`, `@functools.wraps`, etc. are auto-unwrapped.
 - CLI: `uv run ordeal mutate myapp.scoring.compute --preset standard --generate-stubs tests/test_gaps.py`
+- CLI: `uv run ordeal mutate myapp.scoring --workers 4 --threshold 0.8`
 - Config: `[mutations]` section in `ordeal.toml` (see `ordeal.toml.example`).
 - Pytest: `@pytest.mark.mutate("myapp.func", preset="standard")` with `--mutate` flag.
 

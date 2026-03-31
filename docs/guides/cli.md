@@ -20,6 +20,39 @@ uv run ordeal explore      # inside project venv
 
 ## Commands
 
+### `ordeal mutate`
+
+Run mutation testing from the command line. Auto-discovers tests via pytest, runs them with `--chaos` enabled so ChaosTest assertions count toward the mutation score.
+
+```bash
+ordeal mutate myapp.scoring.compute                          # single function
+ordeal mutate myapp.scoring                                  # whole module
+ordeal mutate myapp.scoring --preset thorough --workers 4    # parallel, all operators
+ordeal mutate myapp.scoring --threshold 0.8                  # fail if score < 80%
+ordeal mutate myapp.scoring --generate-stubs tests/gaps.py   # write test stubs
+```
+
+Output always includes a `Score:` line for CI parsing:
+
+```
+Mutation score: 15/18 (83%)  [target: myapp.scoring.compute, preset: standard]
+  3 test gap(s) — each is a code change your tests fail to catch:
+  GAP L42:8 [arithmetic] + -> -  |  return a + b
+    Fix: Add an assertion that checks the exact numeric result...
+Score: 15/18 (83%)
+Threshold: 80% — PASS
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `targets` | required | Dotted paths (positional, one or more) |
+| `--preset` | `standard` | `"essential"`, `"standard"`, or `"thorough"` |
+| `--workers` | `1` | Parallel workers (batched pytest sessions per worker) |
+| `--threshold` | `0.0` | Minimum score; exit code 1 if below |
+| `--generate-stubs` | — | Write test stubs for surviving mutants to this path |
+| `--no-filter` | off | Disable equivalence filtering |
+| `--equivalence-samples` | `10` | Random inputs for equivalence check |
+
 ### `ordeal mine-pair`
 
 !!! quote "What this unlocks"

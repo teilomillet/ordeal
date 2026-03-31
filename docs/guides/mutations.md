@@ -99,6 +99,31 @@ ordeal ships seven mutation operators. Each targets a different class of bugs.
 
 **delete** -- Finds unnecessary or untested statements. If deleting an assignment and replacing it with `pass` survives, either the statement has no observable effect or the tests do not observe it. This catches dead code and undertested side effects.
 
+## Performance and parallelism
+
+Module-level mutation testing can be slow because each mutant needs a full test run. ordeal optimizes this in three ways:
+
+**Batch mode** (automatic): When auto-discovering tests, ordeal runs all mutants in a single pytest session instead of starting a new session per mutant. This eliminates repeated startup overhead.
+
+**Equivalence filtering** (default on): Before testing, ordeal runs each mutant on random inputs and skips mutants that produce identical outputs. These "equivalent mutants" can never be killed and waste testing time.
+
+**Parallel workers**: Distribute mutants across multiple processes. Each worker runs a batched pytest session on its chunk.
+
+```bash
+ordeal mutate myapp.scoring --workers 4           # 4 parallel workers
+ordeal mutate myapp.scoring --no-filter            # disable equivalence filtering
+```
+
+```python
+result = mutate_and_test("myapp.scoring", workers=4, filter_equivalent=True)
+```
+
+**Decorated functions**: `@ray.remote`, `@functools.wraps`, and similar decorators are auto-unwrapped — ordeal reaches the original function for source inspection.
+
+**ChaosTest visibility**: The mutation runner passes `--chaos` to pytest, so ChaosTest classes and their `always()`/`sometimes()` assertions are exercised during mutation scoring.
+
+**No tests found**: If auto-discovery finds no matching tests, ordeal raises `NoTestsFoundError` instead of reporting a misleading 0% score.
+
 ## Function-level vs module-level
 
 !!! quote "Why this matters"

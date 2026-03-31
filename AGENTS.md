@@ -14,12 +14,37 @@ ordeal audit mymodule            # find gaps in existing tests
 ordeal explore                   # coverage-guided exploration (reads ordeal.toml)
 ordeal replay trace.json         # reproduce a specific failure
 ordeal mutate mymodule.func      # verify tests catch real code changes
+ordeal mutate mymodule --workers 4 --threshold 0.8  # parallel, CI gate
 ```
+
+**Mutation testing — speed and accuracy:**
+
+```python
+from ordeal import mutate
+
+# Auto-discovers tests, runs with --chaos, filters equivalent mutants
+result = mutate("mymodule.func", preset="standard")
+
+# Parallel: batches mutants into one pytest session per worker
+result = mutate("mymodule", preset="standard", workers=4)
+
+# CI: check score and generate stubs for gaps
+print(result.score)              # 0.83
+print(result.summary())          # gaps with cause + fix guidance
+stubs = result.generate_test_stubs()  # test file for surviving mutants
+```
+
+- `workers=N` — parallel batch mode. Each worker runs one pytest session testing N/workers mutants. Much faster than serial.
+- `filter_equivalent=True` (default) — skips mutants that produce identical outputs on random inputs.
+- Works with `@ray.remote`, `@functools.wraps`, and other decorators (auto-unwrapped).
+- Runs pytest with `--chaos` so ChaosTest assertions count toward the score.
+- Raises `NoTestsFoundError` if no tests match (instead of misleading 0%).
 
 **Reading output:**
 - `ALWAYS property (N/N)` — held every time. Strong guarantee.
 - `X% property (M/N)` — failed in some cases. Fix the failing ones.
 - `SURVIVED L42:8 + -> -` — mutation your tests didn't catch. Gap at that line.
+- `Score: X/Y (Z%)` — final score line, always printed for CI parsing.
 - `suggest: L42 test when x < 0` — actionable suggestion.
 
 **Discover everything available programmatically:**

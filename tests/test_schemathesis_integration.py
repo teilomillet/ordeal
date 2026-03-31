@@ -1,15 +1,14 @@
-"""Integration tests for ordeal + schemathesis v4.
+"""Integration tests for ordeal's API chaos testing engine.
 
-These tests require ``pip install ordeal[api]`` — they are skipped otherwise.
-They exercise the full path: ASGI app -> schemathesis schema loading ->
-fault injection -> result reporting.
+These tests exercise the full path: ASGI/WSGI app -> OpenAPI schema loading ->
+fault injection -> result reporting.  No external dependencies beyond starlette
+(for the test app).
 """
 
 from __future__ import annotations
 
 import pytest
 
-schemathesis = pytest.importorskip("schemathesis", reason="schemathesis not installed")
 starlette = pytest.importorskip("starlette", reason="starlette not installed")
 
 from starlette.applications import Starlette  # noqa: E402
@@ -19,9 +18,10 @@ from starlette.routing import Route  # noqa: E402
 
 from ordeal.assertions import tracker  # noqa: E402
 from ordeal.faults import LambdaFault  # noqa: E402
-from ordeal.integrations.schemathesis_ext import (  # noqa: E402
-    ChaosAPIHook,
+from ordeal.integrations.openapi import (  # noqa: E402
     ChaosAPIResult,
+    _discover_handlers,
+    auto_faults,
     chaos_api_test,
     with_chaos,
 )
@@ -327,119 +327,38 @@ class TestChaosApiTestASGI:
 
 
 # ---------------------------------------------------------------------------
-# with_chaos + schemathesis.openapi.from_asgi
+# with_chaos + built-in engine
 # ---------------------------------------------------------------------------
 
 
 class TestWithChaosIntegration:
-    def test_decorator_with_real_schema(self):
-        from hypothesis import HealthCheck, given
-        from hypothesis import settings as h_settings
-
-        schema = schemathesis.openapi.from_asgi("/openapi.json", asgi_app)
+    def test_decorator_activates_faults(self):
+        """with_chaos should activate faults around the wrapped function."""
         faults = _make_faults(2)
         calls = []
 
         @with_chaos(faults, fault_probability=1.0, seed=42)
-        def chaos_fn(case):
+        def chaos_fn():
             calls.append(1)
-            case.call_and_validate()
+            assert any(f.active for f in faults)
 
-        @given(case=schema.as_strategy())
-        @h_settings(
-            max_examples=3,
-            database=None,
-            deadline=None,
-            suppress_health_check=[HealthCheck.too_slow, HealthCheck.filter_too_much],
-        )
-        def run(case):
-            chaos_fn(case)
-
-        run()
-        assert len(calls) > 0
+        chaos_fn()
+        assert len(calls) == 1
 
     def test_faults_reset_after_each_call(self):
-        from hypothesis import HealthCheck, given
-        from hypothesis import settings as h_settings
-
-        schema = schemathesis.openapi.from_asgi("/openapi.json", asgi_app)
         faults = _make_faults(2)
 
         @with_chaos(faults, fault_probability=1.0, seed=42)
-        def chaos_fn(case):
+        def chaos_fn():
             assert any(f.active for f in faults)
-            case.call_and_validate()
 
-        @given(case=schema.as_strategy())
-        @h_settings(
-            max_examples=3,
-            database=None,
-            deadline=None,
-            suppress_health_check=[HealthCheck.too_slow, HealthCheck.filter_too_much],
-        )
-        def run(case):
-            chaos_fn(case)
-
-        run()
+        chaos_fn()
         assert all(not f.active for f in faults)
-
-
-# ---------------------------------------------------------------------------
-# ChaosAPIHook with real schemathesis
-# ---------------------------------------------------------------------------
-
-
-class TestChaosAPIHookIntegration:
-    def test_hook_registration(self):
-        from hypothesis import HealthCheck, given
-        from hypothesis import settings as h_settings
-
-        faults = _make_faults(2)
-        hook = ChaosAPIHook(faults, fault_probability=1.0, seed=42)
-        hook.register()
-
-        try:
-            schema = schemathesis.openapi.from_asgi("/openapi.json", asgi_app)
-
-            @given(case=schema.as_strategy())
-            @h_settings(
-                max_examples=3,
-                database=None,
-                deadline=None,
-                suppress_health_check=[HealthCheck.too_slow, HealthCheck.filter_too_much],
-            )
-            def run(case):
-                case.call_and_validate()
-
-            run()
-        finally:
-            hook.unregister()
-
-        # After test, faults should be reset
-        assert all(not f.active for f in faults)
-
-
-# ---------------------------------------------------------------------------
-# _load_schema dispatch with real schemathesis
-# ---------------------------------------------------------------------------
-
-
-class TestLoadSchemaReal:
-    def test_from_asgi(self):
-        schema = schemathesis.openapi.from_asgi("/openapi.json", asgi_app)
-        assert schema is not None
-        assert hasattr(schema, "as_strategy")
-
-    def test_from_asgi_custom_path(self):
-        schema = schemathesis.openapi.from_asgi("/openapi.json", asgi_app)
-        assert schema is not None
 
 
 # ---------------------------------------------------------------------------
 # WSGI integration
 # ---------------------------------------------------------------------------
-
-werkzeug = pytest.importorskip("werkzeug", reason="werkzeug not installed")
 
 
 def _wsgi_app(environ, start_response):
@@ -510,11 +429,6 @@ class TestWSGIIntegration:
         for name, count in result.fault_activations.items():
             assert count > 0, f"{name} was never activated"
 
-    def test_wsgi_load_schema(self):
-        schema = schemathesis.openapi.from_wsgi("/openapi.json", _wsgi_app)
-        assert schema is not None
-        assert hasattr(schema, "as_strategy")
-
 
 # ---------------------------------------------------------------------------
 # Tracker cleanup
@@ -575,11 +489,6 @@ class TestFaultyFault:
 # ---------------------------------------------------------------------------
 # auto_faults + auto_discover
 # ---------------------------------------------------------------------------
-
-from ordeal.integrations.schemathesis_ext import (  # noqa: E402
-    _discover_handlers,
-    auto_faults,
-)
 
 
 class TestAutoFaults:

@@ -891,24 +891,40 @@ class TestChaosApiTestWSGI:
 
 class TestBackwardCompat:
     def test_import_chaos_api_result(self):
-        from ordeal.integrations.schemathesis_ext import ChaosAPIResult as R
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            from ordeal.integrations.schemathesis_ext import ChaosAPIResult as R
 
         assert R is ChaosAPIResult
 
     def test_import_with_chaos(self):
-        from ordeal.integrations.schemathesis_ext import with_chaos as wc
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            from ordeal.integrations.schemathesis_ext import with_chaos as wc
 
         assert wc is with_chaos
 
     def test_import_fault_scheduler(self):
-        from ordeal.integrations.schemathesis_ext import _FaultScheduler as FS
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            from ordeal.integrations.schemathesis_ext import _FaultScheduler as FS
 
         assert FS is _FaultScheduler
 
     def test_schemathesis_ext_chaos_api_test_works(self):
-        from ordeal.integrations.schemathesis_ext import (
-            chaos_api_test as schemathesis_chaos_api_test,
-        )
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            from ordeal.integrations.schemathesis_ext import (
+                chaos_api_test as schemathesis_chaos_api_test,
+            )
 
         result = schemathesis_chaos_api_test(
             app=_asgi_app,

@@ -1,14 +1,13 @@
-"""Tests for ordeal.integrations.schemathesis_ext — API chaos testing.
+"""Tests for ordeal's API chaos testing — fault toggling, tracker activation, reset.
 
-These tests exercise the ordeal-specific logic (fault toggling, tracker
-activation, reset) without requiring schemathesis or a running API server.
+These tests exercise the ordeal-specific logic without requiring a running API server.
 """
 
 from __future__ import annotations
 
 from ordeal.assertions import tracker
 from ordeal.faults import LambdaFault
-from ordeal.integrations.schemathesis_ext import ChaosAPIHook, with_chaos
+from ordeal.integrations.openapi import with_chaos
 
 
 def _make_faults(n: int = 3) -> list[LambdaFault]:
@@ -127,74 +126,4 @@ class TestWithChaos:
         for _ in range(20):
             fn()
         # Swarm picks a subset — not all 10 should be eligible
-        assert 0 < len(ever_active) < 10
-
-
-# ============================================================================
-# ChaosAPIHook
-# ============================================================================
-
-
-class TestChaosAPIHook:
-    def test_before_call_activates_faults(self):
-        faults = _make_faults(3)
-        hook = ChaosAPIHook(faults, fault_probability=1.0, seed=42)
-        hook.before_call(None, None)
-        assert all(f.active for f in faults)
-
-    def test_after_call_resets_faults(self):
-        faults = _make_faults(3)
-        hook = ChaosAPIHook(faults, fault_probability=1.0, seed=42)
-        hook.before_call(None, None)
-        hook.after_call(None, None, None)
-        assert all(not f.active for f in faults)
-
-    def test_zero_probability(self):
-        faults = _make_faults(3)
-        hook = ChaosAPIHook(faults, fault_probability=0.0, seed=42)
-        hook.before_call(None, None)
-        assert all(not f.active for f in faults)
-
-    def test_seed_reproducibility(self):
-        faults1 = _make_faults(5)
-        faults2 = _make_faults(5)
-        hook1 = ChaosAPIHook(faults1, fault_probability=0.5, seed=99)
-        hook2 = ChaosAPIHook(faults2, fault_probability=0.5, seed=99)
-
-        patterns1 = []
-        patterns2 = []
-        for _ in range(10):
-            hook1.before_call(None, None)
-            patterns1.append(tuple(f.active for f in faults1))
-            hook1.after_call(None, None, None)
-            hook2.before_call(None, None)
-            patterns2.append(tuple(f.active for f in faults2))
-            hook2.after_call(None, None, None)
-
-        assert patterns1 == patterns2
-
-    def test_multiple_cycles(self):
-        """Multiple before/after cycles should not leak fault state."""
-        faults = _make_faults(3)
-        hook = ChaosAPIHook(faults, fault_probability=0.7, seed=42)
-
-        for _ in range(20):
-            hook.before_call(None, None)
-            hook.after_call(None, None, None)
-            # After each cycle, all faults are reset
-            assert all(not f.active for f in faults)
-
-    def test_swarm_uses_subset(self):
-        """Swarm hook should only toggle a subset of faults."""
-        faults = _make_faults(10)
-        hook = ChaosAPIHook(faults, fault_probability=1.0, seed=42, swarm=True)
-        ever_active: set[str] = set()
-
-        for _ in range(20):
-            hook.before_call(None, None)
-            for f in faults:
-                if f.active:
-                    ever_active.add(f.name)
-            hook.after_call(None, None, None)
-
         assert 0 < len(ever_active) < 10

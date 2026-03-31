@@ -157,8 +157,11 @@ _KNOWN_API_KEYS = {
     "swarm",
     "max_examples",
     "headers",
+    "stateful",
+    "mutation_targets",
+    "auto_discover",
 }
-_KNOWN_SCHEMATHESIS_KEYS = _KNOWN_API_KEYS | {"stateful", "mutation_targets"}
+_KNOWN_SCHEMATHESIS_KEYS = _KNOWN_API_KEYS
 _KNOWN_EXPLORER_KEYS = {
     "target_modules",
     "max_time",
@@ -313,6 +316,13 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
         )
 
     if "schemathesis" in raw:
+        import warnings
+
+        warnings.warn(
+            "The [schemathesis] config section is deprecated. Use [api] instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         s_raw = raw["schemathesis"]
         _warn_unknown_keys("schemathesis", s_raw, _KNOWN_SCHEMATHESIS_KEYS)
         schemathesis_cfg = APIConfig(

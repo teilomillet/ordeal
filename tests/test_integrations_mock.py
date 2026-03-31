@@ -158,55 +158,27 @@ class TestAtherisFuzzChaosTest:
 
 
 # ============================================================================
-# Built-in engine works without schemathesis
+# Built-in engine has no external dependencies
 # ============================================================================
 
 
-class TestBuiltinEngineNoSchemathesis:
-    def test_openapi_import_works_without_schemathesis(self):
+class TestBuiltinEngineNoDeps:
+    def test_openapi_import_works(self):
         """The built-in engine requires no optional deps."""
-        with patch.dict(sys.modules, {"schemathesis": None}):
-            from ordeal.integrations.openapi import chaos_api_test  # noqa: F811
+        from ordeal.integrations.openapi import chaos_api_test  # noqa: F811
 
-            # Should import fine — no ImportError
-            assert callable(chaos_api_test)
+        assert callable(chaos_api_test)
 
-    def test_chaos_api_hook_raises_without_schemathesis(self):
-        """ChaosAPIHook still requires schemathesis."""
-        with patch.dict(sys.modules, {"schemathesis": None}):
-            if "ordeal.integrations.schemathesis_ext" in sys.modules:
-                del sys.modules["ordeal.integrations.schemathesis_ext"]
-            from ordeal.faults import LambdaFault
+    def test_chaos_api_hook_raises_not_implemented(self):
+        """ChaosAPIHook is removed — instantiation raises NotImplementedError."""
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
             from ordeal.integrations.schemathesis_ext import ChaosAPIHook
 
-            hook = ChaosAPIHook(
-                faults=[LambdaFault("t", on_activate=lambda: None, on_deactivate=lambda: None)]
-            )
-            with pytest.raises(ImportError, match="schemathesis"):
-                hook.register()
-
-
-# ============================================================================
-# ChaosAPIHook — edge cases
-# ============================================================================
-
-
-class TestChaosAPIHookEdgeCases:
-    def test_empty_faults(self):
-        from ordeal.integrations.schemathesis_ext import ChaosAPIHook
-
-        hook = ChaosAPIHook(faults=[], fault_probability=1.0)
-        hook.before_call(None, None)
-        hook.after_call(None, None, None)
-
-    def test_swarm_with_single_fault(self):
-        from ordeal.integrations.schemathesis_ext import ChaosAPIHook
-
-        f = LambdaFault("solo", lambda: None, lambda: None)
-        hook = ChaosAPIHook(faults=[f], fault_probability=1.0, seed=42, swarm=True)
-        hook.before_call(None, None)
-        assert f.active
-        hook.after_call(None, None, None)
+        with pytest.raises(NotImplementedError, match="removed"):
+            ChaosAPIHook(faults=[])
 
 
 # ============================================================================
@@ -216,7 +188,7 @@ class TestChaosAPIHookEdgeCases:
 
 class TestWithChaosEdgeCases:
     def test_return_value_preserved(self):
-        from ordeal.integrations.schemathesis_ext import with_chaos
+        from ordeal.integrations.openapi import with_chaos
 
         faults = [LambdaFault("f", lambda: None, lambda: None)]
 
@@ -227,7 +199,7 @@ class TestWithChaosEdgeCases:
         assert fn() == 42
 
     def test_passes_args(self):
-        from ordeal.integrations.schemathesis_ext import with_chaos
+        from ordeal.integrations.openapi import with_chaos
 
         faults = [LambdaFault("f", lambda: None, lambda: None)]
 
@@ -238,7 +210,7 @@ class TestWithChaosEdgeCases:
         assert fn(5, y=20) == 25
 
     def test_empty_faults(self):
-        from ordeal.integrations.schemathesis_ext import with_chaos
+        from ordeal.integrations.openapi import with_chaos
 
         @with_chaos([], seed=42)
         def fn():

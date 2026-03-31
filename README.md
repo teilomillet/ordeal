@@ -347,8 +347,8 @@ concurrency.stale_state(service, "config", old_config)
 from ordeal.integrations.atheris_engine import fuzz
 fuzz(my_function, max_time=60)
 
-# Schemathesis — API chaos testing
-from ordeal.integrations.schemathesis_ext import chaos_api_test
+# API chaos testing (built-in, no extra install)
+from ordeal.integrations.openapi import chaos_api_test
 chaos_api_test("http://localhost:8080/openapi.json", faults=[...])
 ```
 
@@ -412,7 +412,7 @@ ordeal/
 ├── plugin.py          pytest --chaos
 ├── strategies.py      Adversarial data generation
 ├── faults/            io, numerical, timing, network, concurrency
-└── integrations/      atheris, schemathesis
+└── integrations/      atheris, openapi
 ```
 
 ## License

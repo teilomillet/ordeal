@@ -31,7 +31,7 @@ Mutation testing::
 Integrations::
 
     ordeal.integrations.atheris_engine   # coverage-guided fuzzing
-    ordeal.integrations.schemathesis_ext # API chaos testing
+    ordeal.integrations.openapi          # API chaos testing
 """
 
 from __future__ import annotations

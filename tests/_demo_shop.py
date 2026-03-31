@@ -1,4 +1,4 @@
-"""Demo shop API for testing ordeal's schemathesis integration.
+"""Demo shop API for testing ordeal's API chaos testing.
 
 A small but realistic API with multiple handlers, shared state,
 and dependency functions. NOT pre-designed for ordeal to catch

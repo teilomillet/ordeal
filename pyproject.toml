@@ -32,10 +32,8 @@ dependencies = [
 
 [project.optional-dependencies]
 atheris = ["atheris>=2.3.0"]
-api = ["schemathesis>=3.30.0"]
 all = [
     "atheris>=2.3.0",
-    "schemathesis>=3.30.0",
     "numpy>=1.26.0",
 ]
 dev = [

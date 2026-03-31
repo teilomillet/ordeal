@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.31
+
+**Features:**
+
+- eliminate all manual registration — full auto-discovery
+- auto-discover new functions in catalog() via __module__ filtering
+
+
 ## 0.2.29
 
 **Features:**

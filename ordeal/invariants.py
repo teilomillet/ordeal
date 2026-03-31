@@ -159,12 +159,36 @@ def bounded(lo: float, hi: float) -> Invariant:
     def check(value: Any, name: str = f"bounded({lo}, {hi})") -> None:
         if isinstance(value, (int, float)):
             if not (lo <= value <= hi):
-                raise AssertionError(f"Invariant '{name}' violated: {value} not in [{lo}, {hi}]")
-        elif isinstance(value, (list, tuple)):
-            for i, v in enumerate(value):
-                if isinstance(v, (int, float)) and not (lo <= v <= hi):
+                if value < lo:
+                    deviation = lo - value
                     raise AssertionError(
-                        f"Invariant '{name}' violated: {v} at index {i} not in [{lo}, {hi}]"
+                        f"Invariant '{name}' violated: value = {value} "
+                        f"(expected >= {lo}, deviation: -{deviation})"
+                    )
+                else:
+                    deviation = value - hi
+                    raise AssertionError(
+                        f"Invariant '{name}' violated: value = {value} "
+                        f"(expected <= {hi}, deviation: +{deviation})"
+                    )
+        elif isinstance(value, (list, tuple)):
+            worst_idx, worst_val, worst_dev = None, None, 0.0
+            for i, v in enumerate(value):
+                if isinstance(v, (int, float)):
+                    if v < lo and (lo - v) > worst_dev:
+                        worst_idx, worst_val, worst_dev = i, v, lo - v
+                    elif v > hi and (v - hi) > worst_dev:
+                        worst_idx, worst_val, worst_dev = i, v, v - hi
+            if worst_idx is not None:
+                if worst_val < lo:
+                    raise AssertionError(
+                        f"Invariant '{name}' violated: value[{worst_idx}] = {worst_val} "
+                        f"(expected >= {lo}, deviation: -{worst_dev})"
+                    )
+                else:
+                    raise AssertionError(
+                        f"Invariant '{name}' violated: value[{worst_idx}] = {worst_val} "
+                        f"(expected <= {hi}, deviation: +{worst_dev})"
                     )
         elif hasattr(value, "shape"):
             try:
@@ -172,10 +196,45 @@ def bounded(lo: float, hi: float) -> Invariant:
 
                 if not isinstance(value, np.ndarray):
                     value = np.asarray(value)
-                if (value < lo).any() or (value > hi).any():
-                    raise AssertionError(
-                        f"Invariant '{name}' violated: values outside [{lo}, {hi}]"
-                    )
+                below = value < lo
+                above = value > hi
+                if below.any() or above.any():
+                    # Find the worst violation
+                    worst_dev = 0.0
+                    worst_idx = None
+                    worst_val = None
+                    if below.any():
+                        dev_below = lo - value[below]
+                        max_below = float(np.max(dev_below))
+                        if max_below > worst_dev:
+                            worst_dev = max_below
+                            idx_flat = int(np.argmax(lo - value * below.astype(float)))
+                            worst_idx = np.unravel_index(idx_flat, value.shape)
+                            worst_val = float(value.flat[idx_flat])
+                    if above.any():
+                        dev_above = value[above] - hi
+                        max_above = float(np.max(dev_above))
+                        if max_above > worst_dev:
+                            worst_dev = max_above
+                            idx_flat = int(np.argmax(value * above.astype(float) - hi))
+                            worst_idx = np.unravel_index(idx_flat, value.shape)
+                            worst_val = float(value.flat[idx_flat])
+                    if worst_idx is not None:
+                        idx_str = (
+                            str(worst_idx[0])
+                            if len(worst_idx) == 1
+                            else str(tuple(int(x) for x in worst_idx))
+                        )
+                        if worst_val < lo:
+                            raise AssertionError(
+                                f"Invariant '{name}' violated: value[{idx_str}] = {worst_val} "
+                                f"(expected >= {lo}, deviation: -{worst_dev})"
+                            )
+                        else:
+                            raise AssertionError(
+                                f"Invariant '{name}' violated: value[{idx_str}] = {worst_val} "
+                                f"(expected <= {hi}, deviation: +{worst_dev})"
+                            )
             except (TypeError, ImportError):
                 pass
 
@@ -260,16 +319,23 @@ def unit_normalized(*, tol: float = 1e-6) -> Invariant:
         if arr.ndim == 1:
             norm = float(np.linalg.norm(arr))
             if abs(norm - 1.0) > tol:
+                deviation = norm - 1.0
                 raise AssertionError(
-                    f"Invariant '{name}' violated: norm={norm:.8f}, expected ~1.0"
+                    f"Invariant '{name}' violated: norm = {norm:.8f} "
+                    f"(expected 1.0, deviation: {deviation:+.8f}, tol: {tol})"
                 )
         elif arr.ndim == 2:
             norms = np.linalg.norm(arr, axis=1)
-            for i, n in enumerate(norms):
-                if abs(n - 1.0) > tol:
-                    raise AssertionError(
-                        f"Invariant '{name}' violated: row {i} norm={n:.8f}, expected ~1.0"
-                    )
+            deviations = np.abs(norms - 1.0)
+            worst_row = int(np.argmax(deviations))
+            worst_norm = float(norms[worst_row])
+            worst_dev = float(deviations[worst_row])
+            if worst_dev > tol:
+                deviation = worst_norm - 1.0
+                raise AssertionError(
+                    f"Invariant '{name}' violated: row {worst_row} norm = {worst_norm:.8f} "
+                    f"(expected 1.0, deviation: {deviation:+.8f}, tol: {tol})"
+                )
         else:
             raise AssertionError(
                 f"Invariant '{name}': expected 1-D or 2-D array, got {arr.ndim}-D"
@@ -294,10 +360,17 @@ def orthonormal(*, tol: float = 1e-6) -> Invariant:
             raise AssertionError(f"Invariant '{name}': expected 2-D array, got {arr.ndim}-D")
         gram = arr @ arr.T
         identity = np.eye(gram.shape[0])
-        max_err = float(np.max(np.abs(gram - identity)))
+        diff = np.abs(gram - identity)
+        max_err = float(np.max(diff))
         if max_err > tol:
+            worst_flat = int(np.argmax(diff))
+            worst_row, worst_col = np.unravel_index(worst_flat, diff.shape)
+            actual_val = float(gram[worst_row, worst_col])
+            expected_val = float(identity[worst_row, worst_col])
             raise AssertionError(
-                f"Invariant '{name}' violated: max |G - I| = {max_err:.8f} > {tol}"
+                f"Invariant '{name}' violated: "
+                f"(M @ M.T)[{int(worst_row)}, {int(worst_col)}] = {actual_val:.8f} "
+                f"(expected {expected_val:.8f}, deviation: {max_err:.8f}, tol: {tol})"
             )
 
     return Invariant("orthonormal", check)
@@ -316,10 +389,18 @@ def symmetric(*, tol: float = 1e-6) -> Invariant:
             raise AssertionError(
                 f"Invariant '{name}': expected square 2-D array, got shape {arr.shape}"
             )
-        max_err = float(np.max(np.abs(arr - arr.T)))
+        diff = np.abs(arr - arr.T)
+        max_err = float(np.max(diff))
         if max_err > tol:
+            worst_flat = int(np.argmax(diff))
+            worst_row, worst_col = np.unravel_index(worst_flat, diff.shape)
+            actual_val = float(arr[worst_row, worst_col])
+            transpose_val = float(arr[worst_col, worst_row])
             raise AssertionError(
-                f"Invariant '{name}' violated: max |M - M.T| = {max_err:.8f} > {tol}"
+                f"Invariant '{name}' violated: "
+                f"M[{int(worst_row)}, {int(worst_col)}] = {actual_val:.8f} "
+                f"but M[{int(worst_col)}, {int(worst_row)}] = {transpose_val:.8f} "
+                f"(deviation: {max_err:.8f}, tol: {tol})"
             )
 
     return Invariant("symmetric", check)
@@ -341,7 +422,11 @@ def positive_semi_definite(*, tol: float = 1e-6) -> Invariant:
         eigenvalues = np.linalg.eigvalsh(arr)
         min_eig = float(np.min(eigenvalues))
         if min_eig < -tol:
-            raise AssertionError(f"Invariant '{name}' violated: min eigenvalue = {min_eig:.8f}")
+            min_idx = int(np.argmin(eigenvalues))
+            raise AssertionError(
+                f"Invariant '{name}' violated: eigenvalue[{min_idx}] = {min_eig:.8f} "
+                f"(expected >= {-tol:.8f}, deviation: {abs(min_eig):.8f})"
+            )
 
     return Invariant("positive_semi_definite", check)
 

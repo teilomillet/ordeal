@@ -66,12 +66,12 @@ class TestBounded:
 
     def test_fails_below(self):
         check = bounded(0, 1)
-        with pytest.raises(AssertionError, match="not in"):
+        with pytest.raises(AssertionError, match="deviation"):
             check(-0.1)
 
     def test_fails_above(self):
         check = bounded(0, 1)
-        with pytest.raises(AssertionError, match="not in"):
+        with pytest.raises(AssertionError, match="deviation"):
             check(1.1)
 
     def test_boundary_values_pass(self):
@@ -140,7 +140,7 @@ class TestComposition:
         check(0.5)  # passes both
         with pytest.raises(AssertionError, match="NaN"):
             check(float("nan"))
-        with pytest.raises(AssertionError, match="not in"):
+        with pytest.raises(AssertionError, match="deviation"):
             check(1.5)
 
     def test_triple_composition(self):

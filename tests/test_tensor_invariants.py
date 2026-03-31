@@ -30,7 +30,7 @@ class TestUnitNormalized:
 
     def test_fails_unnormalized_1d(self):
         v = np.array([2.0, 0.0, 0.0])
-        with pytest.raises(AssertionError, match="norm=2.0"):
+        with pytest.raises(AssertionError, match="norm = 2.0"):
             unit_normalized()(v)
 
     def test_passes_unit_rows_2d(self):

@@ -118,6 +118,7 @@ class FuzzResult:
     function: str
     examples: int
     failures: list[Exception] = field(default_factory=list)
+    failing_args: dict[str, Any] | None = None
 
     @property
     def passed(self) -> bool:
@@ -126,10 +127,13 @@ class FuzzResult:
     def summary(self) -> str:
         if self.passed:
             return f"fuzz({self.function}): {self.examples} examples, passed"
-        return (
+        lines = [
             f"fuzz({self.function}): {self.examples} examples, "
             f"{len(self.failures)} failure(s): {self.failures[0]}"
-        )
+        ]
+        if self.failing_args is not None:
+            lines.append(f"  Failing input: {self.failing_args!r}")
+        return "\n".join(lines)
 
 
 # ============================================================================
@@ -353,7 +357,7 @@ def _type_matches(value: Any, expected: type) -> bool:
 def scan_module(
     module: str | ModuleType,
     *,
-    max_examples: int = 50,
+    max_examples: int | dict[str, int] = 50,
     check_return_type: bool = True,
     fixtures: dict[str, st.SearchStrategy] | None = None,
     expected_failures: list[str] | None = None,
@@ -374,6 +378,13 @@ def scan_module(
 
         result = scan_module("myapp", fixtures={"model": model_strategy})
 
+    With per-function example budgets::
+
+        result = scan_module("myapp", max_examples={
+            "compute": 200,    # fuzz this one harder
+            "__default__": 50, # everything else
+        })
+
     With expected failures for known-broken functions::
 
         result = scan_module("myapp", expected_failures=["broken_func"])
@@ -381,7 +392,9 @@ def scan_module(
 
     Args:
         module: Module path or object to scan.
-        max_examples: Hypothesis examples per function.
+        max_examples: Hypothesis examples per function. Either a single int
+            (same budget for all functions) or a dict mapping function names
+            to budgets, with ``"__default__"`` as fallback (default: 50).
         check_return_type: Verify return type annotations.
         fixtures: Strategy overrides for specific parameter names.
         expected_failures: Function names that are expected to fail.
@@ -395,6 +408,14 @@ def scan_module(
         expected_failure_names=list(expected_failures) if expected_failures else [],
     )
 
+    # Resolve per-function example budgets
+    if isinstance(max_examples, int):
+        default_examples = max_examples
+        examples_map: dict[str, int] = {}
+    else:
+        default_examples = max_examples.get("__default__", 50)
+        examples_map = max_examples
+
     for name, func in _get_public_functions(mod):
         strategies = _infer_strategies(func, fixtures)
         if strategies is None:
@@ -407,12 +428,13 @@ def scan_module(
             hints = {}
         return_type = hints.get("return")
 
+        func_examples = examples_map.get(name, default_examples)
         func_result = _test_one_function(
             name,
             func,
             strategies,
             return_type,
-            max_examples=max_examples,
+            max_examples=func_examples,
             check_return_type=check_return_type,
         )
         result.functions.append(func_result)
@@ -501,11 +523,14 @@ def fuzz(
     return_type = hints.get("return")
 
     failures: list[Exception] = []
+    last_kwargs: dict[str, Any] = {}
     try:
 
         @given(**strategies)
         @settings(max_examples=max_examples, database=None)
         def test(**kwargs: Any) -> None:
+            nonlocal last_kwargs
+            last_kwargs = dict(kwargs)
             result = fn(**kwargs)
             if check_return_type and return_type is not None:
                 if not _type_matches(result, return_type):
@@ -515,10 +540,12 @@ def fuzz(
     except Exception as e:
         failures.append(e)
 
+    failing_args = last_kwargs if failures and last_kwargs else None
     return FuzzResult(
         function=fn.__qualname__ or fn.__name__,
         examples=max_examples,
         failures=failures,
+        failing_args=failing_args,
     )
 
 
@@ -531,7 +558,7 @@ def chaos_for(
     module: str | ModuleType,
     *,
     fixtures: dict[str, st.SearchStrategy] | None = None,
-    invariants: list[Invariant] | None = None,
+    invariants: list[Invariant] | dict[str, Invariant] | None = None,
     faults: list[Fault] | None = None,
     max_examples: int = 50,
     stateful_step_count: int = 30,
@@ -546,13 +573,21 @@ def chaos_for(
 
         TestScoring = chaos_for("myapp.scoring")
 
-    With fixtures and invariants::
+    With invariants applied to all functions::
 
         TestScoring = chaos_for(
             "myapp.scoring",
-            fixtures={"model": model_strategy},
             invariants=[finite, bounded(0, 1)],
-            faults=[timing.timeout("myapp.scoring.predict")],
+        )
+
+    With per-function invariants::
+
+        TestScoring = chaos_for(
+            "myapp.scoring",
+            invariants={
+                "score_response": bounded(0, 1),
+                "compute_weights": finite,
+            },
         )
 
     Returns a pytest-discoverable ``TestCase`` class.
@@ -560,15 +595,26 @@ def chaos_for(
     Args:
         module: Module path or object.
         fixtures: Strategy overrides for parameter names.
-        invariants: Checked on every return value after each rule call.
+        invariants: Checked on return values after each rule call.
+            A list applies all invariants to every function.
+            A dict maps function names to specific invariants.
         faults: Fault instances for the nemesis to toggle.
         max_examples: Hypothesis examples.
         stateful_step_count: Max rules per test case.
     """
     mod = _resolve_module(module)
     mod_name = module if isinstance(module, str) else mod.__name__
-    invs = invariants or []
     fault_list = faults or []
+
+    # Normalize invariants to per-function lookup
+    if isinstance(invariants, dict):
+        invariant_map: dict[str, list[Invariant]] = {
+            k: [v] if isinstance(v, Invariant) else list(v) for k, v in invariants.items()
+        }
+        global_invs: list[Invariant] = []
+    else:
+        invariant_map = {}
+        global_invs = invariants or []
 
     # Collect rule methods
     rules_dict: dict[str, Any] = {}
@@ -576,7 +622,9 @@ def chaos_for(
         strategies = _infer_strategies(func, fixtures)
         if strategies is None:
             continue
-        method = _make_rule_method(name, func, strategies, invs)
+        # Per-function invariants override global; if neither, empty list
+        func_invs = invariant_map.get(name, global_invs)
+        method = _make_rule_method(name, func, strategies, func_invs)
         rules_dict[method.__name__] = method
 
     if not rules_dict:

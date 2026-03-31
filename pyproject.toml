@@ -89,4 +89,5 @@ select = ["E", "F", "I", "W"]
 [dependency-groups]
 dev = [
     "numpy>=2.4.4",
+    "pytest-xdist>=3.8.0",
 ]

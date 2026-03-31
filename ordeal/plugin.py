@@ -69,12 +69,29 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=0.1,
         help="Probability for buggify() calls (default: 0.1).",
     )
+    group.addoption(
+        "--mutate",
+        action="store_true",
+        default=False,
+        help="Run mutation testing on @pytest.mark.mutate tests.",
+    )
+    group.addoption(
+        "--mutate-preset",
+        type=str,
+        default="standard",
+        choices=["essential", "standard", "thorough"],
+        help="Mutation operator preset (default: standard).",
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
     """Activate assertions + buggify when ``--chaos`` is passed."""
     config.addinivalue_line("markers", "chaos: mark test for chaos mode")
     config.addinivalue_line("markers", "ordeal_scan: auto-generated scan test")
+    config.addinivalue_line(
+        "markers",
+        'mutate(target, preset="standard"): run mutation testing on target',
+    )
 
     if config.getoption("chaos", default=False):
         assertions.tracker.active = True
@@ -98,13 +115,18 @@ def pytest_collection_modifyitems(
     config: pytest.Config,
     items: list[pytest.Item],
 ) -> None:
-    """Skip @pytest.mark.chaos tests unless --chaos is passed."""
-    if config.getoption("chaos", default=False):
-        return
-    skip_chaos = pytest.mark.skip(reason="chaos tests require --chaos flag")
-    for item in items:
-        if "chaos" in item.keywords:
-            item.add_marker(skip_chaos)
+    """Skip @pytest.mark.chaos and @pytest.mark.mutate tests unless flags are passed."""
+    if not config.getoption("chaos", default=False):
+        skip_chaos = pytest.mark.skip(reason="chaos tests require --chaos flag")
+        for item in items:
+            if "chaos" in item.keywords:
+                item.add_marker(skip_chaos)
+
+    if not config.getoption("mutate", default=False):
+        skip_mutate = pytest.mark.skip(reason="mutation tests require --mutate flag")
+        for item in items:
+            if "mutate" in item.keywords:
+                item.add_marker(skip_mutate)
 
 
 # -- Fixtures ---------------------------------------------------------------
@@ -119,6 +141,45 @@ def chaos_enabled() -> Generator[None, None, None]:
     yield
     _buggify_deactivate()
     assertions.tracker.active = prev_active
+
+
+# Storage for mutation results collected during the session
+_mutation_results: list[tuple[str, Any]] = []
+
+
+@pytest.fixture
+def mutate_target(request: pytest.FixtureRequest):
+    """Run mutation testing on the target specified in @pytest.mark.mutate.
+
+    Usage::
+
+        @pytest.mark.mutate("myapp.scoring.compute", preset="standard")
+        def test_scoring(mutate_target):
+            result = mutate_target  # MutationResult
+            assert result.score >= 0.8
+
+    The mutation result is also collected for the terminal summary.
+    """
+    from ordeal.mutations import mutate
+
+    marker = request.node.get_closest_marker("mutate")
+    if marker is None:
+        pytest.skip("no @pytest.mark.mutate marker")
+        return
+
+    target = marker.args[0] if marker.args else None
+    if target is None:
+        pytest.fail("@pytest.mark.mutate requires a target path")
+        return
+
+    preset = marker.kwargs.get("preset") or request.config.getoption(
+        "mutate_preset", default="standard"
+    )
+    workers = marker.kwargs.get("workers", 1)
+
+    result = mutate(target, preset=preset, workers=workers)
+    _mutation_results.append((target, result))
+    return result
 
 
 # -- Auto-scan test collection from ordeal.toml ----------------------------
@@ -295,7 +356,15 @@ def pytest_terminal_summary(
     exitstatus: int,
     config: pytest.Config,
 ) -> None:
-    """Print the Ordeal Property Results section at the end of the test run."""
+    """Print Ordeal Property Results and Mutation Results at the end."""
+    # -- Mutation results (from @pytest.mark.mutate tests) --
+    if _mutation_results:
+        terminalreporter.section("Ordeal Mutation Results")
+        for target, result in _mutation_results:
+            terminalreporter.line(result.summary())
+            terminalreporter.line("")
+        _mutation_results.clear()
+
     # Only show property report when --chaos is active
     if not config.getoption("chaos", default=False):
         return

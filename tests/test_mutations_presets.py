@@ -345,3 +345,63 @@ def test_cli_mutate_parser():
     with pytest.raises(SystemExit) as exc_info:
         main(["mutate", "--help"])
     assert exc_info.value.code == 0
+
+
+# ============================================================================
+# generate_test_stubs
+# ============================================================================
+
+
+def test_generate_test_stubs_for_surviving_mutants():
+    def weak_test():
+        assert _add(1, 2) == 3
+
+    result = mutate_function_and_test(
+        f"{__name__}._add",
+        weak_test,
+        preset="essential",
+        filter_equivalent=False,
+    )
+    stubs = result.generate_test_stubs()
+    if result.survived:
+        assert f"from {__name__} import _add" in stubs
+        assert "def test_" in stubs
+        assert "TODO" in stubs
+    else:
+        assert stubs == ""
+
+
+def test_generate_test_stubs_empty_when_all_killed():
+    result = mutate_function_and_test(
+        f"{__name__}._add",
+        _test_add,
+        preset="essential",
+        filter_equivalent=False,
+    )
+    if not result.survived:
+        assert result.generate_test_stubs() == ""
+
+
+# ============================================================================
+# pytest marker registration
+# ============================================================================
+
+
+def test_mutate_marker_registered():
+    """The mutate marker is registered by the plugin."""
+
+    # The marker should be in the plugin's pytest_configure
+    from ordeal.plugin import pytest_configure
+
+    class FakeConfig:
+        _ini_lines: list[str] = []
+
+        def addinivalue_line(self, name: str, line: str) -> None:
+            self._ini_lines.append(line)
+
+        def getoption(self, name: str, default=None):
+            return default
+
+    cfg = FakeConfig()
+    pytest_configure(cfg)  # type: ignore[arg-type]
+    assert any("mutate" in line for line in cfg._ini_lines)

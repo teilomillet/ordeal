@@ -73,10 +73,11 @@ class TestPytestAddoption:
         calls = [str(c) for c in group.addoption.call_args_list]
         assert any("--buggify-prob" in c for c in calls)
 
-    def test_registers_three_options(self):
+    def test_registers_all_options(self):
         parser, group = _make_parser()
         pytest_addoption(parser)
-        assert group.addoption.call_count == 3
+        # chaos, chaos-seed, buggify-prob, mutate, mutate-preset
+        assert group.addoption.call_count == 5
 
 
 # ============================================================================
@@ -100,10 +101,12 @@ class TestPytestConfigure:
     def test_registers_markers(self):
         cfg = _make_config(chaos=False)
         pytest_configure(cfg)
-        assert cfg.addinivalue_line.call_count == 2
+        # chaos, ordeal_scan, mutate
+        assert cfg.addinivalue_line.call_count == 3
         calls = [str(c) for c in cfg.addinivalue_line.call_args_list]
         assert any("chaos" in c for c in calls)
         assert any("ordeal_scan" in c for c in calls)
+        assert any("mutate" in c for c in calls)
 
     def test_activates_tracker_with_chaos(self):
         cfg = _make_config(chaos=True)

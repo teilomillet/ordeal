@@ -1057,7 +1057,7 @@ def audit(
                 f"mining failed for {name}: {type(exc).__name__}: {exc}",
             )
 
-    # Validate mined properties against mutations (lightweight: arithmetic + comparison only)
+    # Validate mined properties against mutations using standard preset
     from ordeal.mutations import validate_mined_properties
 
     total_killed = total_mutants = 0
@@ -1067,7 +1067,7 @@ def audit(
             mr = validate_mined_properties(
                 target_path,
                 max_examples=min(max_examples, 20),
-                operators=["arithmetic", "comparison"],
+                preset="standard",
             )
             total_killed += mr.killed
             total_mutants += mr.total

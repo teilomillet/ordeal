@@ -68,9 +68,7 @@ def get_order_by_id(order_id: int) -> dict | None:
 
 async def list_stock(request: Request) -> JSONResponse:
     """GET /stock — list all stock levels."""
-    return JSONResponse(
-        [{"item": k, "stock": v} for k, v in _inventory.items()]
-    )
+    return JSONResponse([{"item": k, "stock": v} for k, v in _inventory.items()])
 
 
 async def get_stock(request: Request) -> JSONResponse:

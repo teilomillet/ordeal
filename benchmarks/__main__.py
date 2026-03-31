@@ -281,7 +281,12 @@ def bench_ablation() -> dict:
         @invariant()
         def ok(self):
             assert self.svc.state in {
-                "init", "a", "b", "ab", "c", "deep",
+                "init",
+                "a",
+                "b",
+                "ab",
+                "c",
+                "deep",
             }
 
         def teardown(self):
@@ -400,9 +405,7 @@ def bench_ablation() -> dict:
                     checkpoint_strategy=strategy,
                     checkpoint_prob=0.7,
                 )
-                result = explorer.run(
-                    max_runs=n_runs, steps_per_run=20
-                )
+                result = explorer.run(max_runs=n_runs, steps_per_run=20)
 
                 for i, q in enumerate(quartiles):
                     if q < len(result.edge_log):
@@ -412,9 +415,7 @@ def bench_ablation() -> dict:
                 final_edges.append(result.unique_edges)
 
             label = f"{target_name}/{strategy}"
-            avgs = [
-                statistics.mean(eq) if eq else 0 for eq in edges_at_q
-            ]
+            avgs = [statistics.mean(eq) if eq else 0 for eq in edges_at_q]
             final_avg = statistics.mean(final_edges)
             print(f"{label:>14}", end="")
             for a in avgs:

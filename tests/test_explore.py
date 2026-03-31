@@ -389,9 +389,7 @@ class TestAblation:
     STEPS_PER_RUN = 20
     N_SEEDS = 5
 
-    def _run_strategy(
-        self, strategy: str, seed: int
-    ) -> tuple[int, list[tuple[int, int]]]:
+    def _run_strategy(self, strategy: str, seed: int) -> tuple[int, list[tuple[int, int]]]:
         """Run exploration, return (unique_edges, edge_log)."""
         explorer = Explorer(
             HardChaos,
@@ -400,9 +398,7 @@ class TestAblation:
             checkpoint_strategy=strategy,
             checkpoint_prob=0.7,
         )
-        result = explorer.run(
-            max_runs=self.N_RUNS, steps_per_run=self.STEPS_PER_RUN
-        )
+        result = explorer.run(max_runs=self.N_RUNS, steps_per_run=self.STEPS_PER_RUN)
         return result.unique_edges, result.edge_log
 
     def test_energy_beats_uniform(self):
@@ -464,6 +460,5 @@ class TestAblation:
             energy_mid = e_log[midpoint][1]
             uniform_mid = u_log[midpoint][1]
             assert energy_mid >= uniform_mid * 0.8, (
-                f"Energy midpoint ({energy_mid}) much worse than "
-                f"uniform ({uniform_mid})"
+                f"Energy midpoint ({energy_mid}) much worse than uniform ({uniform_mid})"
             )

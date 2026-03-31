@@ -371,6 +371,5 @@ class TestPoolAblation:
         avg_off = sum(without_pool) / trials
 
         assert avg_on >= avg_off * 0.9, (
-            f"Pool should not hurt: with={avg_on:.1f}, "
-            f"without={avg_off:.1f}"
+            f"Pool should not hurt: with={avg_on:.1f}, without={avg_off:.1f}"
         )

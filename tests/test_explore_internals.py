@@ -111,7 +111,6 @@ class TestCoverageCollectorRestoresTrace:
     def test_stop_does_not_leave_ordeal_tracer(self):
         """After stop(), the ordeal tracer must not remain installed."""
         cc = CoverageCollector(["tests"])
-        prev = sys.gettrace()
         cc.start()
         # During collection, our tracer is installed
         tracer = sys.gettrace()
@@ -121,7 +120,9 @@ class TestCoverageCollectorRestoresTrace:
         # After stop, our tracer is gone
         after = sys.gettrace()
         if after is not None:
-            assert not (hasattr(after, "__self__") and isinstance(after.__self__, CoverageCollector))
+            assert not (
+                hasattr(after, "__self__") and isinstance(after.__self__, CoverageCollector)
+            )
 
 
 class TestCoverageCollectorFlush:

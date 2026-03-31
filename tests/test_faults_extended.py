@@ -501,4 +501,3 @@ class TestJitterFault:
         r = returns_float()
         assert r != 42.0
         fault.deactivate()
-

@@ -317,8 +317,7 @@ class TestShrinkStress:
 
         # Core assertion: shrinks to exactly the 8 essential steps
         assert len(shrunk.steps) == 8, (
-            f"Expected 8 steps, got {len(shrunk.steps)}: "
-            f"{[s.name for s in shrunk.steps]}"
+            f"Expected 8 steps, got {len(shrunk.steps)}: {[s.name for s in shrunk.steps]}"
         )
 
         # Verify all noise is gone

@@ -721,9 +721,7 @@ class Explorer:
         - **Exploration**: over-selected checkpoints are penalized
         """
         weights = [
-            cp.energy
-            * (1 + i) ** 0.5
-            / (1 + cp.times_selected) ** 0.5
+            cp.energy * (1 + i) ** 0.5 / (1 + cp.times_selected) ** 0.5
             for i, cp in enumerate(self._checkpoints)
         ]
         (cp,) = self.rng.choices(self._checkpoints, weights=weights, k=1)
@@ -1283,11 +1281,7 @@ class Explorer:
             shm_name = shm.name
 
         # Shared checkpoint pool directory
-        pool_dir = (
-            tempfile.mkdtemp(prefix="ordeal-pool-")
-            if self.share_checkpoints
-            else None
-        )
+        pool_dir = tempfile.mkdtemp(prefix="ordeal-pool-") if self.share_checkpoints else None
 
         try:
             worker_args = []

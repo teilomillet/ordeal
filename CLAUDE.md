@@ -19,6 +19,9 @@ uv run ruff check .              # lint
 uv run ruff format --check .     # check formatting
 uv run ruff format .             # auto-format
 uv run ordeal explore            # run coverage-guided explorer (reads ordeal.toml)
+uv run ordeal mutate <target>    # mutation testing (preset="standard" by default)
+uv run ordeal audit <module>     # audit test coverage for a module
+uv run ordeal mine <target>      # discover properties of a function
 uv run ordeal replay <trace>     # replay a failure trace
 ```
 
@@ -37,7 +40,7 @@ ordeal/
 ├── mutations.py        AST-based mutation testing with 14 operators
 ├── trace.py            Trace recording, JSON serialization, replay, delta-debugging shrink
 ├── config.py           ordeal.toml loader with strict validation
-├── cli.py              CLI entry point: ordeal explore / ordeal replay
+├── cli.py              CLI: ordeal explore / mutate / audit / mine / replay
 ├── plugin.py           Pytest plugin: --chaos, --chaos-seed, --buggify-prob flags
 ├── strategies.py       Adversarial Hypothesis strategies for fuzzing
 ├── faults/
@@ -78,7 +81,82 @@ ordeal/
   - `ordeal[all]` — everything including numpy
 - **Dev**: ruff, pytest-cov (`pip install ordeal[dev]`)
 
-## Common tasks
+## Using ordeal
+
+Intent-based guide — match what the developer wants to the right ordeal tool.
+
+### "Are my tests good enough?" / "Check test quality"
+
+Mutation testing. Mutates the code and checks if tests catch the changes.
+
+```python
+from ordeal import mutate_function_and_test
+
+result = mutate_function_and_test("myapp.scoring.compute", preset="standard")
+print(result.summary())
+```
+
+- `preset="essential"` — 4 operators, fast. `"standard"` — 8 operators, CI default. `"thorough"` — all 14.
+- `test_fn` is optional — pytest auto-discovers relevant tests when omitted.
+- Each gap in `result.survived` has `.operator`, `.description`, `.source_line`, `.remediation`.
+- CLI: `uv run ordeal mutate myapp.scoring.compute --preset standard`
+- Config: `[mutations]` section in `ordeal.toml` (see `ordeal.toml.example`).
+
+### "Test my code under failure conditions" / "Chaos test"
+
+Stateful chaos testing with fault injection.
+
+```python
+from ordeal import ChaosTest, rule, invariant, always
+from ordeal.faults import timing, io
+
+class MyServiceChaos(ChaosTest):
+    faults = [timing.timeout("myapp.db.query"), io.error_on_call("myapp.cache.get")]
+
+    @rule()
+    def call_service(self):
+        result = my_service.process("input")
+        always(result is not None, "never returns None")
+
+TestMyService = MyServiceChaos.TestCase  # run with: pytest --chaos
+```
+
+### "Inject faults inline" / "What if this call fails?"
+
+Inline fault injection — no-op in production, active under `--chaos`.
+
+```python
+from ordeal import buggify
+if buggify():
+    data = corrupt(data)  # only runs during chaos testing
+```
+
+### "Explore all reachable states" / "Deep testing"
+
+Coverage-guided exploration — AFL-style edge discovery.
+
+```bash
+uv run ordeal explore              # reads ordeal.toml
+uv run ordeal explore -v -w 4      # verbose, 4 workers
+```
+
+### "Audit a module" / "What's the test coverage?"
+
+Module audit — mutation score, property coverage, test gaps.
+
+```bash
+uv run ordeal audit myapp.scoring
+```
+
+### "Discover properties" / "What invariants hold?"
+
+Property mining — automatically discovers what's true about a function.
+
+```bash
+uv run ordeal mine myapp.scoring.compute
+```
+
+## Extending ordeal
 
 ### Add a new fault type
 

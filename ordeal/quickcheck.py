@@ -37,7 +37,7 @@ import functools
 import inspect
 import math
 import types as pytypes
-from typing import Any, Callable, Union, get_args, get_origin, get_type_hints
+from typing import Any, Callable, Literal, Union, get_args, get_origin, get_type_hints
 
 import hypothesis.strategies as st
 from hypothesis import given, settings
@@ -262,6 +262,10 @@ def strategy_for_type(tp: type, *, _depth: int = 0) -> st.SearchStrategy:
     if origin is frozenset:
         elem = args[0] if args else Any
         return st.frozensets(strategy_for_type(elem, _depth=next_depth), max_size=10)
+
+    # Literal["a", "b", "c"]
+    if origin is Literal:
+        return st.sampled_from(args)
 
     # Union[T, U] or T | U  (Python 3.10+)
     if origin is Union or origin is pytypes.UnionType:

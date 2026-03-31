@@ -23,7 +23,7 @@ import importlib
 import inspect
 from dataclasses import dataclass, field
 from types import ModuleType
-from typing import Any, get_origin, get_type_hints
+from typing import Any, Union, get_args, get_origin, get_type_hints
 
 import hypothesis.strategies as st
 from hypothesis import given, settings
@@ -61,6 +61,18 @@ class ScanResult:
     module: str
     functions: list[FunctionResult] = field(default_factory=list)
     skipped: list[tuple[str, str]] = field(default_factory=list)
+
+    @property
+    def results(self) -> list[FunctionResult]:
+        """Deprecated alias for ``.functions``."""
+        import warnings
+
+        warnings.warn(
+            "ScanResult.results was renamed to .functions",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.functions
 
     @property
     def passed(self) -> bool:
@@ -296,16 +308,26 @@ def _infer_strategies(
 
 
 def _type_matches(value: Any, expected: type) -> bool:
-    """Check if value matches expected type, handling generics."""
+    """Check if value matches expected type, handling generics and unions."""
+    import types as pytypes
+
     if expected is type(None):
         return value is None
     origin = get_origin(expected)
+    # Union[str, None] or str | None — check each member
+    is_union = origin is Union or (
+        hasattr(pytypes, "UnionType") and isinstance(expected, pytypes.UnionType)
+    )
+    if is_union:
+        args = get_args(expected)
+        return any(_type_matches(value, a) for a in args)
     if origin is not None:
+        # list[int] → check isinstance(value, list)
         return isinstance(value, origin)
     try:
         return isinstance(value, expected)
     except TypeError:
-        return True  # can't check (e.g. Union), assume ok
+        return True  # can't check, assume ok
 
 
 # ============================================================================

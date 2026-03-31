@@ -21,6 +21,8 @@ from __future__ import annotations
 import math
 from typing import Any, Callable
 
+_MISSING = object()
+
 
 class Invariant:
     """A named, composable assertion."""
@@ -29,9 +31,18 @@ class Invariant:
         self.name = name
         self._check = check_fn
 
-    def __call__(self, value: Any, *, name: str | None = None) -> None:
-        """Run the invariant check, raising ``AssertionError`` on violation."""
+    def __call__(self, value: Any = _MISSING, *, name: str | None = None) -> Any:
+        """Run the invariant check, or return self if called with no args.
+
+        This makes both patterns work::
+
+            finite(value)   # check immediately
+            finite()        # returns the invariant (for use as a parameter)
+        """
+        if value is _MISSING:
+            return self
         self._check(value, name=name or self.name)
+        return None
 
     def __and__(self, other: Invariant) -> Invariant:
         """Compose two invariants: ``(a & b)(x)`` checks both ``a`` and ``b``."""

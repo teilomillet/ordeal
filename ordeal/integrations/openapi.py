@@ -1151,7 +1151,12 @@ def _validate_response(
     endpoint: _Endpoint,
     active_faults: list[str],
 ) -> dict[str, Any] | None:
-    """Return a failure dict if the response indicates an error, else None."""
+    """Return a failure dict if the response indicates an error, else None.
+
+    Checks both application-level errors (5xx) and HTTP protocol violations
+    (Content-Length mismatch, which causes uvicorn RuntimeError when
+    middleware modifies the response after headers are set).
+    """
     # 5xx is always a failure
     if response.status_code >= 500:
         return {
@@ -1162,6 +1167,36 @@ def _validate_response(
             "status_code": response.status_code,
             "active_faults": active_faults,
         }
+
+    # HTTP protocol: Content-Length must match actual body length.
+    # Middleware chains (e.g. CORS) can modify the response body after
+    # Content-Length is set, causing "Response content longer than
+    # Content-Length" at the transport layer (uvicorn/hypercorn).
+    cl = response.headers.get("content-length")
+    if cl is not None:
+        try:
+            declared = int(cl)
+            actual = len(response.body)
+            if declared != actual:
+                return {
+                    "type": "content_length_mismatch",
+                    "error": (
+                        f"{endpoint.method} {endpoint.path}: "
+                        f"Content-Length={declared} but body is {actual} bytes. "
+                        "This causes RuntimeError at the transport layer "
+                        "(uvicorn/hypercorn). Likely a middleware modifying "
+                        "the response after headers were finalized."
+                    ),
+                    "endpoint": endpoint.path,
+                    "method": endpoint.method,
+                    "status_code": response.status_code,
+                    "declared_length": declared,
+                    "actual_length": actual,
+                    "active_faults": active_faults,
+                }
+        except (ValueError, TypeError):
+            pass
+
     return None
 
 

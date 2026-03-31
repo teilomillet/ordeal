@@ -37,7 +37,7 @@ Or let your AI assistant do it — open Claude Code, Cursor, or any coding assis
 
 > "Run `uvx ordeal mine` and `uvx ordeal audit` on my main modules. Explain what it finds and fix the issues."
 
-ordeal ships with an [AGENTS.md](https://github.com/teilomillet/ordeal/blob/main/AGENTS.md) — your AI reads it automatically and knows how to use every command.
+ordeal ships with an [AGENTS.md](https://github.com/teilomillet/ordeal/blob/main/AGENTS.md) — your AI reads it automatically and knows how to use every command. For programmatic discovery: `from ordeal import catalog; catalog()` returns all faults, invariants, assertions, strategies, and integrations with signatures and docs.
 
 ```
 pip install ordeal                        # or: uv tool install ordeal

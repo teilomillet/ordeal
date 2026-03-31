@@ -1,5 +1,11 @@
 """ordeal — Automated chaos testing for Python.
 
+Discover everything available::
+
+    from ordeal import catalog
+    c = catalog()  # faults, invariants, assertions, strategies, integrations
+    # Each entry has: name, qualname, signature, doc
+
 Capabilities (each is independent — use one or all):
 
 1. **Stateful chaos testing** — Hypothesis-powered rule exploration with fault injection::
@@ -116,7 +122,106 @@ __all__ = [
     "MutationResult",
     "PRESETS",
     "OPERATORS",
+    # Discovery
+    "catalog",
 ]
+
+
+def catalog() -> dict[str, list[dict]]:
+    """Discover all ordeal capabilities via runtime introspection.
+
+    Returns a dict keyed by category, each containing a list of entries
+    with ``name``, ``signature``, ``doc``, and category-specific fields.
+
+    Categories: ``faults``, ``invariants``, ``assertions``, ``strategies``,
+    ``integrations``.
+
+    Everything is derived from the source code via ``inspect`` — when new
+    functions are added to any module, they appear here automatically.
+
+    Example::
+
+        from ordeal import catalog
+        c = catalog()
+        c["faults"]       # 25 fault factories with signatures + docs
+        c["invariants"]   # 14 invariants (instances + factories)
+        c["assertions"]   # 4 assertion types with signatures
+        c["strategies"]   # adversarial data generation strategies
+        c["integrations"] # API testing, atheris fuzzing entry points
+    """
+    result: dict[str, list[dict]] = {}
+
+    # Faults — delegate to the submodule catalog
+    from ordeal.faults import catalog as _faults_catalog
+
+    result["faults"] = _faults_catalog()
+
+    # Invariants — delegate to the submodule catalog
+    from ordeal.invariants import catalog as _inv_catalog
+
+    result["invariants"] = _inv_catalog()
+
+    # Assertions — introspect the 4 public functions
+    from ordeal import assertions as _assertions_mod
+
+    result["assertions"] = _introspect_module(
+        _assertions_mod,
+        include={"always", "sometimes", "reachable", "unreachable"},
+    )
+
+    # Strategies — introspect all public functions
+    from ordeal import strategies as _strategies_mod
+
+    result["strategies"] = _introspect_module(_strategies_mod)
+
+    # Integrations — introspect key entry points
+    from ordeal.integrations import openapi as _openapi_mod
+
+    result["integrations"] = _introspect_module(
+        _openapi_mod,
+        include={"chaos_api_test", "with_chaos", "auto_faults"},
+    )
+    try:
+        from ordeal.integrations import atheris_engine as _atheris_mod
+
+        result["integrations"].extend(
+            _introspect_module(_atheris_mod, include={"fuzz", "fuzz_chaos_test"})
+        )
+    except ImportError:
+        pass
+
+    return result
+
+
+def _introspect_module(
+    mod: object,
+    include: set[str] | None = None,
+) -> list[dict]:
+    """Introspect public callables from a module."""
+    import inspect as _inspect
+
+    entries: list[dict] = []
+    for attr_name in sorted(dir(mod)):
+        if attr_name.startswith("_"):
+            continue
+        if include and attr_name not in include:
+            continue
+        obj = getattr(mod, attr_name)
+        if not callable(obj) or _inspect.isclass(obj):
+            continue
+        try:
+            sig = str(_inspect.signature(obj))
+        except (ValueError, TypeError):
+            sig = "(...)"
+        entries.append(
+            {
+                "name": attr_name,
+                "qualname": f"{mod.__name__}.{attr_name}",
+                "signature": sig,
+                "doc": (_inspect.getdoc(obj) or "").split("\n")[0],
+            }
+        )
+    return entries
 
 
 def auto_configure(

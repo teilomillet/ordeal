@@ -1373,7 +1373,7 @@ def _auto_test_fn(target: str) -> Callable[[], None]:
         parts = target.rsplit(".", 1)
         module_name = parts[0] if len(parts) >= 2 else target
         short_name = module_name.split(".")[-1]
-        rc = pytest.main(["-x", "-q", "--tb=short", "--no-header", "-k", short_name])
+        rc = pytest.main(["-x", "-q", "--tb=short", "--no-header", "--chaos", "-k", short_name])
         if rc != 0:
             raise AssertionError(f"pytest returned exit code {rc}")
 

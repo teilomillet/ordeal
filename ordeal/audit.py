@@ -1072,7 +1072,7 @@ def audit(
             total_killed += mr.killed
             total_mutants += mr.total
         except Exception:
-            pass  # skip functions that can't be mutated
+            pass
     if total_mutants > 0:
         pct = total_killed / total_mutants
         result.mutation_score = f"{total_killed}/{total_mutants} ({pct:.0%})"

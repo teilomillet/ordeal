@@ -333,6 +333,12 @@ def auto_faults(
         module_path, func_name = target.rsplit(".", 1)
         module = importlib.import_module(module_path)
         func = getattr(module, func_name)
+        # Unwrap decorators (@ray.remote, @functools.wraps, etc.)
+        func = getattr(func, "_function", func)  # ray.remote
+        try:
+            func = inspect.unwrap(func)
+        except (ValueError, TypeError):
+            pass
 
         try:
             source = textwrap.dedent(inspect.getsource(func))
@@ -520,6 +526,12 @@ def _discover_handlers(app: Any, *, max_depth: int = 3) -> list[str]:
         mod_name, func, depth = queue.pop(0)
         if depth >= max_depth:
             continue
+        # Unwrap decorators (@ray.remote, @functools.wraps, etc.)
+        func = getattr(func, "_function", func)
+        try:
+            func = inspect.unwrap(func)
+        except (ValueError, TypeError):
+            pass
         try:
             source = textwrap.dedent(inspect.getsource(func))
             tree = ast.parse(source)

@@ -8,18 +8,32 @@ Three built-in fault types:
 - LambdaFault: custom activate/deactivate callables
 - Subclass Fault directly for full control
 
-Fault modules:
-- timing: timeout, slow, intermittent_crash, jitter
-- io: error_on_call, disk_full, permission_denied, corrupt/truncate output
-- numerical: nan_injection, inf_injection, wrong_shape, corrupted_floats
-- network: http_error, connection_reset, rate_limited, auth_failure, dns_failure
-- concurrency: contended_call, delayed_release, thread_boundary, stale_state
+Fault modules — each function returns a ready-to-use Fault instance::
+
+    from ordeal.faults import timing, io, numerical, network, concurrency
+
+    faults = [
+        timing.timeout("myapp.db.query"),              # raise TimeoutError
+        timing.slow("myapp.db.query", delay=2.0),      # add latency
+        io.error_on_call("myapp.cache.get"),            # raise IOError
+        io.disk_full(),                                 # global write failure
+        numerical.nan_injection("myapp.model.predict"), # inject NaN
+        network.http_error("myapp.api.call", status=503),
+        concurrency.contended_call("myapp.lock.acquire"),
+    ]
+
+Discover all available faults programmatically::
+
+    from ordeal.faults import catalog
+    for entry in catalog():
+        print(f"{entry['module']}.{entry['name']}  -- {entry['doc']}")
 """
 
 from __future__ import annotations
 
 import copy
 import importlib
+import inspect
 import threading
 from abc import ABC, abstractmethod
 from typing import Any, Callable
@@ -208,3 +222,72 @@ class LambdaFault(Fault):
 
     def _do_deactivate(self) -> None:
         self._on_deactivate()
+
+
+# ---------------------------------------------------------------------------
+# Catalog — introspect available faults at runtime
+# ---------------------------------------------------------------------------
+
+_FAULT_MODULES = ("io", "timing", "numerical", "network", "concurrency")
+
+
+def catalog() -> list[dict[str, Any]]:
+    """Discover all available fault factories via runtime introspection.
+
+    Returns a list of dicts, one per fault factory function::
+
+        [
+            {
+                "module": "timing",
+                "name": "timeout",
+                "qualname": "ordeal.faults.timing.timeout",
+                "signature": "(target: str, delay: float = 30.0, ...) -> PatchFault",
+                "doc": "Make *target* raise ``TimeoutError`` ...",
+                "parameters": {"target": "str", "delay": "float", ...},
+            },
+            ...
+        ]
+
+    No hardcoded descriptions — everything is derived from the source code
+    via ``inspect``.  When a new fault is added to any submodule, it
+    appears here automatically.
+    """
+    entries: list[dict[str, Any]] = []
+    for mod_name in _FAULT_MODULES:
+        try:
+            mod = importlib.import_module(f"ordeal.faults.{mod_name}")
+        except ImportError:
+            continue
+        for attr_name in sorted(dir(mod)):
+            if attr_name.startswith("_"):
+                continue
+            obj = getattr(mod, attr_name)
+            if not callable(obj) or inspect.isclass(obj):
+                continue
+            try:
+                sig = inspect.signature(obj)
+                ret = sig.return_annotation
+                # Only include functions that return a Fault subclass.
+                if ret is inspect.Parameter.empty:
+                    continue
+                ret_name = getattr(ret, "__name__", str(ret))
+                if not any(kw in ret_name for kw in ("Fault", "PatchFault")):
+                    continue
+            except (ValueError, TypeError):
+                continue
+            params = {
+                p.name: getattr(p.annotation, "__name__", str(p.annotation))
+                for p in sig.parameters.values()
+                if p.annotation is not inspect.Parameter.empty
+            }
+            entries.append(
+                {
+                    "module": mod_name,
+                    "name": attr_name,
+                    "qualname": f"ordeal.faults.{mod_name}.{attr_name}",
+                    "signature": str(sig),
+                    "doc": (inspect.getdoc(obj) or "").split("\n")[0],
+                    "parameters": params,
+                }
+            )
+    return entries

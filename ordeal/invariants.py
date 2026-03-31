@@ -8,6 +8,12 @@ They compose with ``&``::
     valid_score = no_nan & no_inf & bounded(0, 1)
     valid_score(model_output)          # raises AssertionError on violation
     valid_score(model_output, name="final_score")  # custom name in message
+
+Discover all available invariants programmatically::
+
+    from ordeal.invariants import catalog
+    for entry in catalog():
+        print(f"{entry['name']}  -- {entry['doc']}")
 """
 
 from __future__ import annotations
@@ -368,3 +374,55 @@ def variance_bounded(lo: float, hi: float) -> Invariant:
             )
 
     return Invariant(label, check)
+
+
+# ---------------------------------------------------------------------------
+# Catalog — introspect available invariants at runtime
+# ---------------------------------------------------------------------------
+
+
+def catalog() -> list[dict[str, str]]:
+    """Discover all available invariants via runtime introspection.
+
+    Returns a list of dicts with ``name``, ``type`` (instance or factory),
+    ``doc``, and ``signature`` (for factories).  Derived from module globals
+    — new invariants appear automatically.
+    """
+    import inspect as _inspect
+    import sys
+
+    mod = sys.modules[__name__]
+    entries: list[dict[str, str]] = []
+    for attr_name in sorted(dir(mod)):
+        if attr_name.startswith("_"):
+            continue
+        obj = getattr(mod, attr_name)
+        if isinstance(obj, Invariant):
+            entries.append(
+                {
+                    "name": attr_name,
+                    "type": "instance",
+                    "doc": repr(obj),
+                    "signature": "(value, *, name=None)",
+                }
+            )
+        elif callable(obj) and not _inspect.isclass(obj) and attr_name != "catalog":
+            try:
+                sig = _inspect.signature(obj)
+                ret = sig.return_annotation
+                if ret is _inspect.Parameter.empty:
+                    continue
+                ret_name = getattr(ret, "__name__", str(ret))
+                if "Invariant" not in ret_name:
+                    continue
+            except (ValueError, TypeError):
+                continue
+            entries.append(
+                {
+                    "name": attr_name,
+                    "type": "factory",
+                    "doc": (_inspect.getdoc(obj) or "").split("\n")[0],
+                    "signature": str(sig),
+                }
+            )
+    return entries

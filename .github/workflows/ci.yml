@@ -98,11 +98,55 @@ jobs:
           sed -i "s/^version = \"$CURRENT\"/version = \"$NEW\"/" pyproject.toml
           echo "NEW_VERSION=$NEW" >> "$GITHUB_ENV"
 
+      - name: Update changelog
+        run: |
+          # Find the previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$PREV_TAG" ]; then
+            RANGE="HEAD"
+          else
+            RANGE="${PREV_TAG}..HEAD"
+          fi
+
+          # Collect commits grouped by type
+          FEATS=$(git log "$RANGE" --pretty=format:"- %s" --grep="^feat" | sed 's/^- feat: /- /' | sed 's/^- feat(/- (/')
+          FIXES=$(git log "$RANGE" --pretty=format:"- %s" --grep="^fix" | sed 's/^- fix: /- /' | sed 's/^- fix(/- (/')
+          DOCS=$(git log "$RANGE" --pretty=format:"- %s" --grep="^docs" | sed 's/^- docs: /- /' | sed 's/^- docs(/- (/')
+          OTHER=$(git log "$RANGE" --pretty=format:"- %s" --grep="^refactor\|^perf\|^test" | head -5)
+
+          # Skip if no meaningful commits
+          if [ -z "$FEATS" ] && [ -z "$FIXES" ]; then
+            echo "No feat/fix commits — skipping changelog update"
+            exit 0
+          fi
+
+          # Build the new entry
+          ENTRY="## $NEW_VERSION"$'\n'
+          if [ -n "$FEATS" ]; then
+            ENTRY+=$'\n'"**Features:**"$'\n'$'\n'"$FEATS"$'\n'
+          fi
+          if [ -n "$FIXES" ]; then
+            ENTRY+=$'\n'"**Fixes:**"$'\n'$'\n'"$FIXES"$'\n'
+          fi
+          if [ -n "$DOCS" ]; then
+            ENTRY+=$'\n'"**Docs:**"$'\n'$'\n'"$DOCS"$'\n'
+          fi
+          if [ -n "$OTHER" ]; then
+            ENTRY+=$'\n'"**Other:**"$'\n'$'\n'"$OTHER"$'\n'
+          fi
+
+          # Prepend to CHANGELOG.md (after the "# Changelog" header)
+          if [ -f CHANGELOG.md ]; then
+            sed -i "0,/^# Changelog$/s/^# Changelog$/# Changelog\n\n${ENTRY}/" CHANGELOG.md
+          else
+            echo -e "# Changelog\n\n${ENTRY}" > CHANGELOG.md
+          fi
+
       - name: Commit and tag
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add pyproject.toml
+          git add pyproject.toml CHANGELOG.md
           git commit -m "chore: bump version to v$NEW_VERSION [skip ci]"
           git tag "v$NEW_VERSION"
           git push

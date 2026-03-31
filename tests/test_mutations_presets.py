@@ -123,6 +123,27 @@ def test_result_carries_preset_and_operators_metadata():
     assert f"operators: {len(PRESETS['essential'])}" in s
 
 
+def test_summary_shows_gaps_with_cause_and_fix():
+    """Surviving mutants appear as GAP with Cause + Fix for AI consumption."""
+
+    def weak_test():
+        # Only checks one input — unlikely to catch all mutations
+        assert _add(1, 2) == 3
+
+    result = mutate_function_and_test(
+        f"{__name__}._add",
+        weak_test,
+        preset="essential",
+        filter_equivalent=False,
+    )
+    s = result.summary()
+    if result.survived:
+        assert "test gap(s)" in s
+        assert "GAP" in s
+        assert "Cause:" in s
+        assert "Fix:" in s
+
+
 def test_preset_thorough_produces_more_mutants():
     result_essential = mutate_function_and_test(
         f"{__name__}._add",

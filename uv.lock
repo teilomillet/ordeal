@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.12"
 
 [[package]]
@@ -489,7 +489,7 @@ wheels = [
 
 [[package]]
 name = "ordeal"
-version = "0.1.36"
+version = "0.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "hypothesis" },

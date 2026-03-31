@@ -8,10 +8,41 @@
 
 **Your tests pass. Your code still breaks.**
 
-Traditional tests verify what you thought of. Ordeal explores what you didn't — thousands of operation sequences, faults injected at every level, property assertions that hold across all of them. When ordeal passes, the code works. Not just on the happy path. Under adversity.
+From your project root — no install needed:
+
+```bash
+uvx ordeal mine myapp.scoring
+```
 
 ```
-pip install ordeal
+mine(compute): 500 examples
+  ALWAYS  output in [0, 1] (500/500)
+  ALWAYS  monotonically non-decreasing (499/499)
+
+mine(normalize): 500 examples
+  ALWAYS  len(output) == len(xs) (500/500)
+     97%  idempotent (29/30)              ← normalize(normalize(x)) != normalize(x)
+```
+
+```bash
+uvx ordeal audit myapp.scoring
+```
+
+```
+myapp.scoring
+  current:   33 tests |   343 lines | 98% coverage [verified]
+  migrated:  12 tests |   130 lines | 96% coverage [verified]
+  mutation: 14/18 (78%)                   ← 4 mutations survived — tests have blind spots
+  suggest:
+    - L42 in compute(): test when x < 0
+    - L67 in normalize(): test that ValueError is raised
+```
+
+`mine` discovers what your functions actually do. `audit` compares your existing tests to what ordeal finds — the `suggest` lines are real gaps. Want to try it without your own code? `uvx ordeal mine ordeal.demo` runs against a built-in module.
+
+```
+pip install ordeal                        # or: uv add ordeal
+ordeal explore                            # deep stateful exploration (reads ordeal.toml)
 ```
 
 ## 30-second example

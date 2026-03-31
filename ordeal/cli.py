@@ -38,7 +38,7 @@ class _ProgressPrinter:
 
     def __init__(self, interval: float = 2.0) -> None:
         self._interval = interval
-        self._last: float = 0.0
+        self._last: float = float("-inf")
 
     def __call__(self, snap: ProgressSnapshot) -> None:
         now = _time.monotonic()

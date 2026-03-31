@@ -763,6 +763,7 @@ class _Endpoint:
     header_params: list[dict[str, Any]] = field(default_factory=list)
     request_body: dict | None = None  # JSON Schema for body
     response_codes: set[int] = field(default_factory=set)
+    response_schemas: dict[int, dict] = field(default_factory=dict)  # status -> JSON Schema
 
 
 def _parse_endpoints(spec: dict) -> list[_Endpoint]:
@@ -805,13 +806,20 @@ def _parse_endpoints(spec: dict) -> list[_Endpoint]:
             if "application/json" in content:
                 body_schema = _resolve_refs(content["application/json"].get("schema", {}), root)
 
-            # Response codes
+            # Response codes and schemas
             response_codes: set[int] = set()
-            for code_str in operation.get("responses", {}):
+            response_schemas: dict[int, dict] = {}
+            for code_str, resp_obj in operation.get("responses", {}).items():
                 try:
-                    response_codes.add(int(code_str))
+                    code = int(code_str)
+                    response_codes.add(code)
                 except ValueError:
-                    pass  # "default", "2XX", etc.
+                    continue  # "default", "2XX", etc.
+                resp_obj = _resolve_refs(resp_obj, root) if isinstance(resp_obj, dict) else {}
+                content = resp_obj.get("content", {})
+                if "application/json" in content:
+                    schema = content["application/json"].get("schema", {})
+                    response_schemas[code] = _resolve_refs(schema, root)
 
             endpoints.append(
                 _Endpoint(
@@ -822,6 +830,7 @@ def _parse_endpoints(spec: dict) -> list[_Endpoint]:
                     header_params=header_params,
                     request_body=body_schema,
                     response_codes=response_codes,
+                    response_schemas=response_schemas,
                 )
             )
 
@@ -1283,40 +1292,115 @@ def _validate_response(
                 "causing browsers to block the response entirely.",
             )
 
+    # Response body vs OpenAPI schema contract.
+    # If the spec declares a schema for this status code, validate the body
+    # against it. Catches drift between spec and implementation.
+    schema = endpoint.response_schemas.get(status)
+    if schema and "application/json" in ct and response.body:
+        try:
+            body_data = json.loads(response.body)
+            errors = _validate_json_schema(body_data, schema)
+            if errors:
+                return _fail(
+                    "schema_violation",
+                    f"{prefix}: response body violates OpenAPI schema. {errors[0]}",
+                    schema_errors=errors,
+                )
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass  # already caught by invalid_json_body above
+
     return None
 
 
+def _validate_json_schema(data: Any, schema: dict) -> list[str]:
+    """Minimal JSON Schema validator — no external dependencies.
+
+    Validates type, required properties, and basic structure.
+    Returns a list of human-readable error strings (empty = valid).
+    """
+    errors: list[str] = []
+    schema_type = schema.get("type")
+
+    if schema_type == "object":
+        if not isinstance(data, dict):
+            errors.append(f"Expected object, got {type(data).__name__}")
+            return errors
+        # Check required properties
+        for prop in schema.get("required", []):
+            if prop not in data:
+                errors.append(f"Missing required property: {prop!r}")
+        # Validate property types
+        properties = schema.get("properties", {})
+        for prop, prop_schema in properties.items():
+            if prop in data:
+                errors.extend(
+                    f"{prop}: {e}" for e in _validate_json_schema(data[prop], prop_schema)
+                )
+    elif schema_type == "array":
+        if not isinstance(data, list):
+            errors.append(f"Expected array, got {type(data).__name__}")
+            return errors
+        items_schema = schema.get("items", {})
+        if items_schema:
+            for i, item in enumerate(data[:5]):  # check first 5 items
+                errors.extend(f"[{i}]: {e}" for e in _validate_json_schema(item, items_schema))
+    elif schema_type == "string":
+        if not isinstance(data, str):
+            errors.append(f"Expected string, got {type(data).__name__}")
+    elif schema_type == "integer":
+        if not isinstance(data, int) or isinstance(data, bool):
+            errors.append(f"Expected integer, got {type(data).__name__}")
+    elif schema_type == "number":
+        if not isinstance(data, (int, float)) or isinstance(data, bool):
+            errors.append(f"Expected number, got {type(data).__name__}")
+    elif schema_type == "boolean":
+        if not isinstance(data, bool):
+            errors.append(f"Expected boolean, got {type(data).__name__}")
+
+    return errors
+
+
 def _analyze_cross_request(
-    responses: list[tuple[_Endpoint, _Response, list[str]]],
+    responses: list[tuple[_Endpoint, _Response, list[str]]]
+    | list[tuple[_Endpoint, _Response, list[str], float]],
 ) -> list[dict[str, Any]]:
     """Post-run analysis of cross-request patterns.
 
     Detects bugs that only appear when comparing multiple responses:
     - Error format inconsistency (some endpoints return JSON, others HTML)
     - CORS disappearing on fault responses vs normal responses
+    - Latency spikes under faults (missing timeout handling)
     """
     findings: list[dict[str, Any]] = []
 
     # Track error response formats per endpoint
-    error_formats: dict[str, set[str]] = {}  # endpoint -> set of content-types
-    normal_cors: dict[str, bool] = {}  # endpoint -> has CORS on normal response
-    fault_cors: dict[str, bool] = {}  # endpoint -> has CORS on fault response
+    error_formats: dict[str, set[str]] = {}
+    normal_cors: dict[str, bool] = {}
+    fault_cors: dict[str, bool] = {}
+    normal_latencies: dict[str, list[float]] = {}
+    fault_latencies: dict[str, list[float]] = {}
 
-    for ep, resp, faults in responses:
+    for entry in responses:
+        if len(entry) == 4:
+            ep, resp, faults, duration = entry
+        else:
+            ep, resp, faults = entry[:3]
+            duration = 0.0
         key = f"{ep.method} {ep.path}"
         hdrs = {k.lower(): v for k, v in resp.headers.items()}
         has_cors = "access-control-allow-origin" in hdrs
 
         if 400 <= resp.status_code < 600:
             ct = hdrs.get("content-type", "none")
-            # Normalize to base type
             base_ct = ct.split(";")[0].strip().lower()
             error_formats.setdefault(key, set()).add(base_ct)
 
         if faults:
             fault_cors[key] = has_cors
+            fault_latencies.setdefault(key, []).append(duration)
         else:
             normal_cors[key] = has_cors
+            normal_latencies.setdefault(key, []).append(duration)
 
     # Error format inconsistency: same endpoint returns different Content-Types
     # for errors. Clients parsing JSON errors will crash on HTML errors.
@@ -1351,6 +1435,31 @@ def _analyze_cross_request(
                         "causing browsers to block fault responses entirely."
                     ),
                     "endpoint": ep_key,
+                }
+            )
+
+    # Latency spikes under faults — indicates missing timeout handling.
+    # If fault responses are 5x+ slower than normal, the fault is probably
+    # hitting a code path without a timeout (e.g. a retry loop on a dead DB).
+    for ep_key, normal_times in normal_latencies.items():
+        fault_times = fault_latencies.get(ep_key)
+        if not fault_times or not normal_times:
+            continue
+        normal_avg = sum(normal_times) / len(normal_times)
+        fault_avg = sum(fault_times) / len(fault_times)
+        if normal_avg > 0 and fault_avg > normal_avg * 5 and fault_avg > 0.5:
+            findings.append(
+                {
+                    "type": "latency_spike_under_faults",
+                    "error": (
+                        f"{ep_key}: avg response time {fault_avg:.2f}s under faults "
+                        f"vs {normal_avg:.3f}s normally ({fault_avg / normal_avg:.0f}x slower). "
+                        "This suggests a missing timeout — the fault is probably "
+                        "hitting a retry loop or blocking call without a deadline."
+                    ),
+                    "endpoint": ep_key,
+                    "normal_avg_seconds": round(normal_avg, 4),
+                    "fault_avg_seconds": round(fault_avg, 4),
                 }
             )
 
@@ -1401,10 +1510,14 @@ def chaos_api_test(
     - **Missing Content-Type** — MIME sniffing, XSS risk
     - **CORS headers lost under faults** — error handlers bypass middleware
 
+    - **Schema violation** — response body doesn't match declared OpenAPI schema
+      (missing required fields, wrong types)
+
     After all requests, cross-request analysis detects:
 
     - **Inconsistent error format** — same endpoint returns JSON and HTML
     - **CORS present normally, missing under faults** — middleware bypass
+    - **Latency spike under faults** — 5x+ slower under faults, missing timeout
 
     Supports three schema sources (exactly one of *schema_url* or *app*
     must be provided):
@@ -1550,7 +1663,9 @@ def chaos_api_test(
                     qs = urllib.parse.urlencode(case.query_params)
                     path = f"{path}?{qs}"
 
+                req_t0 = time.monotonic()
                 response = client.request(case.method, path, call_headers, body_bytes)
+                req_duration = time.monotonic() - req_t0
 
                 if collector is not None:
                     collector.after(case.method, case.endpoint_path, response.status_code)
@@ -1558,7 +1673,7 @@ def chaos_api_test(
                 # Validate
                 ep = ep_map.get(case.endpoint_path)
                 if ep is not None:
-                    all_responses.append((ep, response, list(active)))
+                    all_responses.append((ep, response, list(active), req_duration))
                     fail = _validate_response(response, ep, active)
                     if fail is not None:
                         failures.append(fail)

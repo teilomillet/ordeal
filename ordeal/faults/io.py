@@ -241,3 +241,31 @@ def corrupt_stdout(target: str) -> PatchFault:
         return _corrupt_run
 
     return PatchFault("subprocess.run", _factory, name=f"corrupt_stdout({target!r})")
+
+
+def subprocess_delay(target: str, *, delay: float = 1.0) -> PatchFault:
+    """Add *delay* seconds to subprocess calls matching *target*.
+
+    Simulates slow FFI responses — tests timeout handling and
+    progress reporting in Python↔Rust/C/Go bridges::
+
+        faults = [subprocess_delay("cargo run", delay=5.0)]
+
+    Args:
+        target: Substring to match in the command.
+        delay: Seconds to sleep before returning the real result.
+    """
+    import time as _time
+
+    def _factory(original: object) -> object:
+        def _slow_run(*args: object, **kwargs: object) -> object:
+            cmd = args[0] if args else kwargs.get("args", "")
+            cmd_str = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+            result = original(*args, **kwargs)  # type: ignore[operator]
+            if target in cmd_str:
+                _time.sleep(delay)
+            return result
+
+        return _slow_run
+
+    return PatchFault("subprocess.run", _factory, name=f"subprocess_delay({target!r})")

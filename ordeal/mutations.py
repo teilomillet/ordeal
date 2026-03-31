@@ -1214,6 +1214,89 @@ def _mutated_module(module_name: str, mutated_tree: ast.Module):
         sys.modules[module_name] = original
 
 
+def _module_is_equivalent(
+    original: types.ModuleType,
+    mutated_tree: ast.Module,
+    n_samples: int = 10,
+) -> bool:
+    """Heuristic: compare all public callables in original vs mutated module.
+
+    Returns ``True`` (skip) when every callable produces identical outputs
+    on random inputs.  Falls back to ``False`` (test it) on any error.
+    """
+    try:
+        mutated = types.ModuleType(original.__name__)
+        mutated.__file__ = getattr(original, "__file__", "<mutated>")
+        code = compile(mutated_tree, mutated.__file__, "exec")
+        exec(code, mutated.__dict__)  # noqa: S102
+    except Exception:
+        return False
+
+    for name in sorted(dir(original)):
+        if name.startswith("_"):
+            continue
+        orig_fn = getattr(original, name, None)
+        mut_fn = getattr(mutated, name, None)
+        if not callable(orig_fn) or inspect.isclass(orig_fn):
+            continue
+        if mut_fn is None:
+            return False
+        if not _is_runtime_equivalent(orig_fn, mut_fn, n_samples):
+            return False
+    return True
+
+
+def _batch_module_test(
+    target: str,
+    mutant_pairs: list[tuple[Mutant, ast.Module]],
+) -> list[tuple[Mutant, bool, str | None]]:
+    """Run all mutants in a single pytest session via a custom plugin.
+
+    Instead of starting a new pytest session per mutant, collects tests
+    once and replays them for each mutant — cutting out repeated startup.
+    """
+    import pytest
+
+    parts = target.rsplit(".", 1)
+    module_name = parts[0] if len(parts) >= 2 else target
+    short_name = module_name.split(".")[-1]
+
+    results: list[tuple[Mutant, bool, str | None]] = []
+
+    class _BatchPlugin:
+        """Pytest plugin that tests multiple mutants in one session."""
+
+        def pytest_runtestloop(self, session: pytest.Session) -> bool:
+            """Override the default test loop to iterate mutants."""
+            if not session.config.option.collectonly:
+                for mutant, mutated_tree in mutant_pairs:
+                    killed = False
+                    error = None
+                    try:
+                        with _mutated_module(target, mutated_tree):
+                            importlib.invalidate_caches()
+                            for item in session.items:
+                                item.config.hook.pytest_runtest_protocol(item=item, nextitem=None)
+                                if item.session.testsfailed:
+                                    killed = True
+                                    error = "test failed"
+                                    break
+                    except Exception as e:
+                        killed = True
+                        error = str(e)[:200]
+                    # Reset failures for next mutant
+                    session.testsfailed = 0
+                    results.append((mutant, killed, error))
+            return True  # prevent default loop from running
+
+    plugin = _BatchPlugin()
+    pytest.main(
+        ["-x", "-q", "--tb=no", "--no-header", "--chaos", "-k", short_name],
+        plugins=[plugin],
+    )
+    return results
+
+
 def mutate_and_test(
     target: str,
     test_fn: Callable[[], None] | None = None,
@@ -1221,6 +1304,8 @@ def mutate_and_test(
     *,
     preset: PresetName | None = None,
     workers: int = 1,
+    filter_equivalent: bool = True,
+    equivalence_samples: int = 10,
 ) -> MutationResult:
     """Apply mutations to an entire module and run *test_fn* against each.
 
@@ -1239,7 +1324,12 @@ def mutate_and_test(
         preset: Named operator group: ``"essential"``, ``"standard"``,
             or ``"thorough"``. Mutually exclusive with *operators*.
         workers: Parallel workers for testing mutants. Default ``1``.
+        filter_equivalent: Drop mutants that produce identical outputs on
+            random inputs.  Default ``True``.
+        equivalence_samples: Number of random inputs for equivalence
+            filtering.  Default ``10``.
     """
+    use_batch = test_fn is None  # batch when auto-discovering tests
     if test_fn is None:
         test_fn = _auto_test_fn(target)
     used_preset = preset
@@ -1252,8 +1342,30 @@ def mutate_and_test(
         source = f.read()
 
     mutant_pairs = generate_mutants(source, operators)
+
+    # Filter equivalent mutants (same outputs on random inputs)
+    if filter_equivalent:
+        filtered = []
+        for mutant, tree in mutant_pairs:
+            if _module_is_equivalent(module, tree, equivalence_samples):
+                mutant.killed = True
+                mutant.error = "equivalent (filtered)"
+            else:
+                filtered.append((mutant, tree))
+        mutant_pairs = filtered
+
     result = MutationResult(target=target, operators_used=operators, preset_used=used_preset)
 
+    # Batch mode: single pytest session for all mutants (much faster)
+    if use_batch and mutant_pairs:
+        batch_results = _batch_module_test(target, mutant_pairs)
+        for mutant, killed, error in batch_results:
+            mutant.killed = killed
+            mutant.error = error
+            result.mutants.append(mutant)
+        return result
+
+    # Fallback: serial per-mutant testing (custom test_fn)
     for mutant, mutated_tree in mutant_pairs:
         try:
             with _mutated_module(target, mutated_tree):

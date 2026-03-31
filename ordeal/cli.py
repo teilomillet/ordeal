@@ -501,6 +501,8 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
                     operators=operators,
                     preset=preset,
                     workers=workers,
+                    filter_equivalent=filter_equivalent,
+                    equivalence_samples=equivalence_samples,
                 )
         except (ImportError, AttributeError, ValueError) as e:
             _stderr(f"  Error: {e}\n")

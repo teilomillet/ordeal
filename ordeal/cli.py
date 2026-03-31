@@ -565,7 +565,7 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry point for ``ordeal``."""
     parser = argparse.ArgumentParser(
         prog="ordeal",
-        description="Ordeal — automated chaos testing for Python",
+        description="Ordeal — automated chaos testing for Python. Docs: https://docs.byordeal.com/",
     )
     sub = parser.add_subparsers(dest="command")
 

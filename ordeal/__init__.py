@@ -1,10 +1,23 @@
 """ordeal — Automated chaos testing for Python.
 
+Ordeal finds bugs your tests miss. It explores thousands of scenarios —
+including realistic failures like timeouts, corrupted data, and crashes —
+and when something breaks, it shows the shortest sequence that reproduces
+the failure. No test code required for basic usage.
+
+Quick start::
+
+    ordeal mine mymodule            # discover what your functions actually do
+    ordeal audit mymodule           # find gaps in your existing tests
+    ordeal explore                  # coverage-guided exploration (reads ordeal.toml)
+
 Discover everything available::
 
     from ordeal import catalog
     c = catalog()  # faults, invariants, assertions, strategies, integrations
     # Each entry has: name, qualname, signature, doc
+
+Full documentation: https://docs.byordeal.com/
 
 Capabilities (each is independent — use one or all):
 

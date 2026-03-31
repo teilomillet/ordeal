@@ -83,18 +83,33 @@ pip install ordeal           # or: uv tool install ordeal
 
 Then `ordeal mine`, `ordeal audit`, and `ordeal explore` are available directly from your terminal.
 
-## What do you want to do?
+## Find what you need
+
+Every goal maps to a starting point — a command to run, a module to import, and a page to read. Nothing is hidden.
+
+| I want to... | Start here | Learn more |
+|---|---|---|
+| Find bugs without writing tests | `ordeal mine mymodule` | [Auto Testing](guides/auto.md) |
+| Check if my tests are good enough | `ordeal audit mymodule` | [Mutations](guides/mutations.md) |
+| Write a chaos test | `from ordeal import ChaosTest` | [Getting Started](getting-started.md) |
+| Inject specific failures (timeout, NaN, ...) | `from ordeal.faults import timing` | [Fault Injection](concepts/fault-injection.md) |
+| Explore all failure combinations | `ordeal explore` | [Explorer](guides/explorer.md) |
+| Reproduce and shrink a failure | `ordeal replay trace.json` | [Shrinking](concepts/shrinking.md) |
+| Add fail-safe gates to production code | `from ordeal.buggify import buggify` | [Fault Injection](concepts/fault-injection.md) |
+| Make assertions across all runs | `from ordeal import always, sometimes` | [Assertions](concepts/property-assertions.md) |
+| Control time / filesystem in tests | `from ordeal.simulate import Clock` | [Simulation](guides/simulate.md) |
+| Compare two implementations | `ordeal mine-pair mod.fn1 mod.fn2` | [Auto Testing](guides/auto.md) |
+| Test API endpoints for faults | `from ordeal.integrations.openapi import chaos_api_test` | [Integrations](guides/integrations.md) |
+| Extend ordeal with a new fault | Follow the pattern in `ordeal/faults/*.py` | [Fault Injection](concepts/fault-injection.md) |
+| Configure reproducible runs | Create `ordeal.toml` | [Configuration](guides/configuration.md) |
 
 !!! quote "Pick your starting point"
     Every path leads somewhere useful. You can't pick wrong.
 
-    - **"I just want to see what ordeal does"** → Run `uvx ordeal mine ordeal.demo` in your terminal, then read [Getting Started](getting-started.md)
-    - **"I have code and want to find bugs"** → Run `ordeal mine mymodule` — see [Auto Testing](guides/auto.md)
-    - **"I want to write chaos tests for my service"** → Start with [Getting Started](getting-started.md), then [Writing Tests](guides/writing-tests.md)
-    - **"I want to understand the ideas behind ordeal"** → Read [Philosophy](philosophy.md), then the [Concepts](core-concepts.md)
-    - **"I need to check if my tests are any good"** → Run `ordeal audit` — see [Mutations](guides/mutations.md)
-    - **"I want to run ordeal in CI"** → See the [Explorer guide](guides/explorer.md) and [Configuration](guides/configuration.md)
-    - **"I want to explore the source code"** → See the [Architecture section in the README](https://github.com/teilomillet/ordeal#architecture--code-map) for a full code map
+    - **New to ordeal?** Run `uvx ordeal mine ordeal.demo` to see it in action, then read [Getting Started](getting-started.md)
+    - **Have existing tests?** Run `ordeal audit mymodule --test-dir tests/` to see how they compare
+    - **Want to understand the ideas?** Read [Philosophy](philosophy.md), then the [Concepts](core-concepts.md)
+    - **Want to explore the source code?** See the [Architecture section in the README](https://github.com/teilomillet/ordeal#architecture--code-map)
 
 ## Start here
 

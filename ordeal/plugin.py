@@ -319,3 +319,12 @@ def pytest_terminal_summary(
         terminalreporter.line(f"\n  {len(failed)}/{total} properties FAILED", red=True)
     else:
         terminalreporter.line(f"\n  {total}/{total} properties passed", green=True)
+
+    # Structured metadata — no hardcoded advice, just facts.
+    seed = config.getoption("chaos_seed", default=None)
+    kinds = {p.kind for p in results if hasattr(p, "kind") and isinstance(p.kind, str)}
+    terminalreporter.line("")
+    terminalreporter.line(
+        f"  Config: seed={'none' if seed is None else seed}, "
+        f"assertion types used: {', '.join(sorted(kinds)) or 'none'}",
+    )

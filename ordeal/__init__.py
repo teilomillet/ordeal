@@ -1,37 +1,62 @@
 """ordeal — Automated chaos testing for Python.
 
-Core API::
+Capabilities (each is independent — use one or all):
 
-    from ordeal import ChaosTest, rule, invariant, always, sometimes
-    from ordeal.faults import io, numerical, timing
-    from ordeal import strategies
+1. **Stateful chaos testing** — Hypothesis-powered rule exploration with fault injection::
 
-Assertions (Antithesis-style)::
+    from ordeal import ChaosTest, rule, invariant, always
+    from ordeal.faults import timing, io
 
-    always(condition, "property name")       # must hold every time
-    sometimes(condition, "property name")    # must hold at least once
-    reachable("label")                       # code path must execute
-    unreachable("label")                     # code path must never execute
+    class MyServiceChaos(ChaosTest):
+        faults = [timing.timeout("myapp.db.query"), io.error_on_call("myapp.cache.get")]
+        swarm = True  # random fault subsets for better coverage
 
-Inline fault injection (FoundationDB-style)::
+        @rule()
+        def call_service(self):
+            result = my_service.process("input")
+            always(result is not None, "never returns None")
+
+    TestMyService = MyServiceChaos.TestCase  # run with pytest
+
+2. **Property assertions** (Antithesis-style) — ``always``/``sometimes``/``reachable``::
+
+    always(condition, "name")       # must hold every time — raises immediately
+    sometimes(condition, "name")    # must hold at least once — checked at end
+    reachable("label")              # code path must execute at least once
+    unreachable("label")            # code path must never execute
+
+3. **Inline fault injection** (FoundationDB BUGGIFY) — no-op in production::
 
     from ordeal import buggify
-    if buggify():
-        inject_chaos()
+    if buggify():                   # True only when chaos mode is active
+        data = corrupt(data)
 
-Metamorphic relation testing::
+4. **API chaos testing** — built-in OpenAPI engine, no extra deps::
 
-    from ordeal.metamorphic import Relation, metamorphic
+    from ordeal.integrations.openapi import chaos_api_test
+    result = chaos_api_test(app=my_fastapi_app, faults=[...])
+    result = chaos_api_test(app=my_app, auto_discover=True)  # auto-generate faults
+    print(result.summary())  # pass/fail + contextual hints
 
-Mutation testing::
+5. **Mutation testing** — verify your tests catch real bugs::
 
     from ordeal.mutations import mutate_function_and_test
-    result = mutate_function_and_test("mymodule.func", my_test)
+    result = mutate_function_and_test("myapp.scoring.compute", my_test_suite)
 
-Integrations::
+6. **Coverage-guided exploration** — deeper than random testing::
 
-    ordeal.integrations.atheris_engine   # coverage-guided fuzzing
-    ordeal.integrations.openapi          # API chaos testing
+    ordeal explore  # CLI, reads ordeal.toml — checkpoints, energy scheduling
+
+7. **Atheris integration** — coverage-guided fuzzing for buggify() decisions::
+
+    from ordeal.integrations.atheris_engine import fuzz
+    fuzz(my_function, max_time=60)  # requires: pip install ordeal[atheris]
+
+Running chaos tests::
+
+    pytest --chaos                  # enable chaos mode globally
+    pytest --chaos --chaos-seed 42  # reproducible chaos
+    auto_configure()                # or enable programmatically in conftest.py
 """
 
 from __future__ import annotations

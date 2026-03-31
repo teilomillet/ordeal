@@ -44,13 +44,40 @@ from ordeal.faults import Fault
 
 
 class ChaosTest(RuleBasedStateMachine):
-    """Base class for chaos tests.
+    """Base class for stateful chaos tests.
+
+    Quick start::
+
+        class MyServiceChaos(ChaosTest):
+            faults = [timing.timeout("myapp.db.query")]
+
+            @rule()
+            def call_service(self):
+                result = my_service.process("input")
+                always(result is not None, "never None")
+
+        TestMyService = MyServiceChaos.TestCase  # run with: pytest
 
     Class attributes:
-        faults: List of :class:`Fault` instances to inject.  The nemesis
-            rule automatically toggles these during exploration.
-        swarm:  If ``True``, each test case randomly selects a subset of
-            faults.  Improves coverage across many runs.
+        faults: Fault instances to inject.  A nemesis rule auto-toggles
+            them during exploration — you just declare, ordeal explores.
+        swarm:  ``True`` = each test case picks a random fault subset.
+            Use when you have 3+ faults for better aggregate coverage.
+
+    Key methods to override:
+        state_hash(): Return a hash of qualitatively different states to
+            enable state-aware exploration.  The explorer checkpoints new
+            state hashes and branches from them.  Default returns 0
+            (disabled).  Example::
+
+                def state_hash(self):
+                    return hash((self.service.state, self.balance > 0))
+
+    Deeper testing:
+        - ``pytest --chaos`` enables buggify() + property tracking
+        - ``ordeal explore`` runs coverage-guided exploration with
+          checkpointing and energy scheduling (reads ordeal.toml)
+        - ``swarm = True`` tests random fault subsets per run
     """
 
     faults: ClassVar[list[Fault]] = []
@@ -123,6 +150,16 @@ class ChaosTest(RuleBasedStateMachine):
         Return 0 (default) to disable state-aware coverage.
         """
         return 0
+
+    def __repr__(self) -> str:
+        cls = self.__class__
+        active = [f.name for f in self._faults if f.active]
+        parts = [f"{cls.__name__}(faults={len(self._faults)}"]
+        if cls.swarm:
+            parts.append(f"swarm={len(self._faults)}/{len(cls.faults)}")
+        if active:
+            parts.append(f"active=[{', '.join(active)}]")
+        return ", ".join(parts) + ")"
 
     def teardown(self) -> None:
         """Deactivate all faults (including those not in the swarm subset)."""

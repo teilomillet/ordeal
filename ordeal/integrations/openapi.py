@@ -1,34 +1,42 @@
 """Built-in OpenAPI chaos testing engine (zero external dependencies).
 
-Combines OpenAPI-driven request generation with ordeal's fault injection.
-Faults fire on the server side while Hypothesis exercises every API endpoint.
+Quick start — pick one::
 
-No extra install needed -- uses only ``hypothesis`` (already required) and
-the Python standard library.
+    # ASGI (FastAPI, Starlette) — most common
+    from ordeal.integrations.openapi import chaos_api_test
+    result = chaos_api_test(app=my_fastapi_app, faults=[...])
 
-Three schema sources:
+    # WSGI (Flask, Django)
+    result = chaos_api_test(app=my_flask_app, wsgi=True, faults=[...])
 
-- **URL** (requires a running server)::
+    # Remote server
+    result = chaos_api_test(schema_url="http://localhost:8080/openapi.json", faults=[...])
 
-    result = chaos_api_test(
-        schema_url="http://localhost:8080/openapi.json",
-        faults=[timing.slow("myapp.db.query", delay=2.0)],
-    )
+Go deeper — each parameter unlocks more power:
 
-- **ASGI app** (in-process, no server needed -- ideal for FastAPI/Starlette)::
+    # Auto-generate faults from your app's source code (AST mutations + semantic)
+    result = chaos_api_test(app=my_app, auto_discover=True)
 
-    result = chaos_api_test(
-        app=my_fastapi_app,
-        faults=[timing.slow("myapp.db.query", delay=2.0)],
-    )
+    # Target specific functions for mutation-based fault generation
+    result = chaos_api_test(app=my_app, mutation_targets=["myapp.db.save"])
 
-- **WSGI app** (in-process, no server needed -- ideal for Flask/Django)::
+    # Swarm mode — random fault subsets per run, better aggregate coverage
+    result = chaos_api_test(app=my_app, faults=[...], swarm=True)
 
-    result = chaos_api_test(
-        app=my_flask_app,
-        faults=[timing.slow("myapp.db.query", delay=2.0)],
-        wsgi=True,
-    )
+    # Record replayable traces of every API call and fault activation
+    result = chaos_api_test(app=my_app, faults=[...], record_traces=True)
+
+    # Print results with contextual hints for next steps
+    print(result.summary())
+
+The ``@with_chaos`` decorator wraps any function with fault injection::
+
+    from ordeal.integrations.openapi import with_chaos
+
+    @with_chaos(faults=[timing.slow("myapp.db.query")], seed=42)
+    def test_my_endpoint():
+        response = call_api()
+        assert response.status_code != 500
 """
 
 from __future__ import annotations
@@ -110,11 +118,61 @@ class ChaosAPIResult:
     duration_seconds: float
     deferred_ok: bool
     traces: tuple = ()  # tuple[Trace, ...] when record_traces=True
+    # What the caller used — lets introspection see unused capabilities.
+    _used_swarm: bool = False
+    _used_auto_discover: bool = False
+    _used_mutation_targets: bool = False
+    _had_app: bool = False
 
     @property
     def passed(self) -> bool:
         """True if no failures occurred and all deferred assertions passed."""
         return len(self.failures) == 0 and self.deferred_ok
+
+    @property
+    def config_used(self) -> dict[str, bool]:
+        """Which capabilities were active for this run.
+
+        Compare against the full parameter list of :func:`chaos_api_test`
+        to see what's available but wasn't used.
+        """
+        return {
+            "swarm": self._used_swarm,
+            "auto_discover": self._used_auto_discover,
+            "mutation_targets": self._used_mutation_targets,
+            "record_traces": bool(self.traces),
+            "app": self._had_app,
+        }
+
+    def summary(self) -> str:
+        """Structured summary of the run."""
+        status = "PASSED" if self.passed else "FAILED"
+        nfaults = len(self.fault_activations)
+        lines = [
+            f"chaos_api_test: {status}"
+            f" ({self.total_requests} requests, {nfaults} faults,"
+            f" {self.duration_seconds:.1f}s)",
+        ]
+        if self.fault_activations:
+            for name, count in self.fault_activations.items():
+                lines.append(f"  {name}: activated {count}x")
+        if self.failures:
+            lines.append(f"  Failures: {len(self.failures)}")
+            for f in self.failures[:3]:
+                lines.append(f"    {f.get('type', '?')}: {f.get('error', '?')}")
+        unused = [k for k, v in self.config_used.items() if not v]
+        if unused:
+            lines.append(f"  Unused capabilities: {', '.join(unused)}")
+        return "\n".join(lines)
+
+    def __repr__(self) -> str:
+        status = "PASSED" if self.passed else "FAILED"
+        return (
+            f"ChaosAPIResult({status}, requests={self.total_requests}, "
+            f"faults={len(self.fault_activations)}, "
+            f"failures={len(self.failures)}, "
+            f"{self.duration_seconds:.1f}s)"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1213,6 +1271,7 @@ def chaos_api_test(
             fault_activations={f.name: 0 for f in faults},
             duration_seconds=0.0,
             deferred_ok=True,
+            _had_app=app is not None,
         )
 
     # Build composite strategy across all endpoints
@@ -1311,4 +1370,8 @@ def chaos_api_test(
         duration_seconds=duration,
         deferred_ok=deferred_ok,
         traces=traces,
+        _used_swarm=swarm or use_auto,
+        _used_auto_discover=auto_discover,
+        _used_mutation_targets=bool(mutation_targets),
+        _had_app=app is not None,
     )

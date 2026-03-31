@@ -387,7 +387,29 @@ class ExplorationResult:
             lines.append("No failures found.")
         if self.stopped_reason:
             lines.append(f"Stopped: {self.stopped_reason}")
+
+        # Structured capabilities — what was active vs not.
+        caps = self.capabilities_used
+        unused = [k for k, v in caps.items() if not v]
+        if unused:
+            lines.append(f"Unused capabilities: {', '.join(unused)}")
+
         return "\n".join(lines)
+
+    @property
+    def capabilities_used(self) -> dict[str, bool]:
+        """Which exploration capabilities were active for this run.
+
+        Exposes structured metadata so tooling (or an AI assistant) can
+        identify what's available but wasn't exercised, and decide
+        whether to suggest it based on context.
+        """
+        return {
+            "state_hash": self.unique_states > 0,
+            "mutations": self.mutations_total > 0,
+            "checkpoints": self.checkpoints_saved > 0,
+            "sometimes_properties": self.properties_satisfied > 0,
+        }
 
 
 # ============================================================================

@@ -126,6 +126,19 @@ SchemathesisConfig = APIConfig
 
 
 @dataclass
+class MutationConfig:
+    """Settings for ``[mutations]`` — declarative mutation testing."""
+
+    targets: list[str] = field(default_factory=list)
+    preset: str = "standard"
+    operators: list[str] | None = None  # mutually exclusive with preset
+    workers: int = 1
+    threshold: float = 0.0  # 0.0 = no threshold enforcement
+    filter_equivalent: bool = True
+    equivalence_samples: int = 10
+
+
+@dataclass
 class OrdealConfig:
     """Top-level configuration loaded from ``ordeal.toml``."""
 
@@ -135,6 +148,7 @@ class OrdealConfig:
     report: ReportConfig = field(default_factory=ReportConfig)
     api: APIConfig | None = None
     schemathesis: APIConfig | None = None  # legacy alias for api
+    mutations: MutationConfig | None = None
 
 
 # ============================================================================
@@ -143,8 +157,18 @@ class OrdealConfig:
 
 _VALID_CHECKPOINT_STRATEGIES = {"energy", "uniform", "recent"}
 _VALID_REPORT_FORMATS = {"json", "text", "both"}
+_VALID_PRESETS = {"essential", "standard", "thorough"}
 
-_KNOWN_SECTIONS = {"explorer", "tests", "scan", "report", "faults", "schemathesis", "api"}
+_KNOWN_SECTIONS = {
+    "explorer",
+    "tests",
+    "scan",
+    "report",
+    "faults",
+    "schemathesis",
+    "api",
+    "mutations",
+}
 _KNOWN_API_KEYS = {
     "schema_url",
     "app",
@@ -176,6 +200,15 @@ _KNOWN_EXPLORER_KEYS = {
 }
 _KNOWN_TEST_KEYS = {"class", "steps_per_run", "swarm"}
 _KNOWN_REPORT_KEYS = {"format", "output", "traces", "traces_dir", "verbose"}
+_KNOWN_MUTATIONS_KEYS = {
+    "targets",
+    "preset",
+    "operators",
+    "workers",
+    "threshold",
+    "filter_equivalent",
+    "equivalence_samples",
+}
 
 
 class ConfigError(Exception):
@@ -339,6 +372,41 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
             headers=s_raw.get("headers", {}),
         )
 
+    # -- Mutations (optional) --
+    mutations_cfg: MutationConfig | None = None
+    if "mutations" in raw:
+        m_raw = raw["mutations"]
+        _warn_unknown_keys("mutations", m_raw, _KNOWN_MUTATIONS_KEYS)
+
+        m_preset = m_raw.get("preset")
+        m_operators = m_raw.get("operators")
+
+        if m_preset is not None and m_operators is not None:
+            raise ConfigError(
+                "Cannot specify both 'preset' and 'operators' in [mutations]. "
+                "Use one or the other."
+            )
+        if m_preset is not None and m_preset not in _VALID_PRESETS:
+            raise ConfigError(
+                f"Invalid mutations preset: {m_preset!r}. Must be one of: {_VALID_PRESETS}"
+            )
+
+        m_threshold = float(m_raw.get("threshold", 0.0))
+        if not (0.0 <= m_threshold <= 1.0):
+            raise ConfigError(
+                f"mutations.threshold must be between 0.0 and 1.0, got {m_threshold}"
+            )
+
+        mutations_cfg = MutationConfig(
+            targets=m_raw.get("targets", []),
+            preset=m_preset if m_preset is not None else "standard",
+            operators=m_operators,
+            workers=int(m_raw.get("workers", 1)),
+            threshold=m_threshold,
+            filter_equivalent=m_raw.get("filter_equivalent", True),
+            equivalence_samples=int(m_raw.get("equivalence_samples", 10)),
+        )
+
     return OrdealConfig(
         explorer=explorer,
         tests=tests,
@@ -346,4 +414,5 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
         report=report,
         api=api_cfg,
         schemathesis=schemathesis_cfg,
+        mutations=mutations_cfg,
     )

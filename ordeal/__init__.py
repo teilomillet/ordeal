@@ -76,6 +76,7 @@ from hypothesis.stateful import (
 from ordeal.assertions import always, reachable, sometimes, unreachable
 from ordeal.buggify import buggify, buggify_value
 from ordeal.chaos import ChaosTest
+from ordeal.mutations import MutationResult, mutate_function_and_test
 
 try:
     __version__ = _get_version("ordeal")
@@ -101,6 +102,9 @@ __all__ = [
     "Bundle",
     # Config
     "auto_configure",
+    # Mutations
+    "mutate_function_and_test",
+    "MutationResult",
 ]
 
 

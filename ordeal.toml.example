@@ -61,3 +61,26 @@ traces_dir = ".ordeal/traces"
 
 # Print live progress to stderr during exploration.
 verbose = true
+
+
+# Mutation testing — validate that your tests catch real bugs.
+# Run with:  ordeal mutate
+#
+# [mutations]
+# targets = ["myapp.scoring.compute", "myapp.scoring.normalize"]
+#
+# Preset: "essential" (4 ops — fast), "standard" (8 ops — default), "thorough" (all 14).
+# preset = "standard"
+#
+# Or specify operators explicitly (cannot use both preset and operators):
+# operators = ["arithmetic", "comparison", "negate"]
+#
+# Minimum mutation score — exit 1 if below (useful for CI gating).
+# threshold = 0.8
+#
+# Parallel workers for testing mutants.
+# workers = 4
+#
+# Skip mutants that produce identical output to the original.
+# filter_equivalent = true
+# equivalence_samples = 10

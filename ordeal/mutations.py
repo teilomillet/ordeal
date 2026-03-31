@@ -719,6 +719,47 @@ OPERATORS: dict[str, tuple[type[_Counter], type[_Applicator]]] = {
 
 
 # ============================================================================
+# Operator presets — named groups for different thoroughness levels
+# ============================================================================
+
+
+PRESETS: dict[str, list[str]] = {
+    "essential": ["arithmetic", "comparison", "negate", "return_none"],
+    "standard": [
+        "arithmetic",
+        "comparison",
+        "negate",
+        "return_none",
+        "boundary",
+        "constant",
+        "logical",
+        "delete_statement",
+    ],
+    "thorough": list(OPERATORS.keys()),
+}
+
+
+def _resolve_operators(
+    operators: list[str] | None = None,
+    preset: str | None = None,
+) -> list[str] | None:
+    """Resolve operators from an explicit list or a preset name.
+
+    - Both ``None``: returns ``None`` (caller uses all operators).
+    - Only *preset*: returns ``PRESETS[preset]``.
+    - Only *operators*: returns *operators* as-is.
+    - Both specified: raises ``ValueError``.
+    """
+    if operators is not None and preset is not None:
+        raise ValueError("Cannot specify both 'operators' and 'preset'. Use one or the other.")
+    if preset is not None:
+        if preset not in PRESETS:
+            raise ValueError(f"Unknown preset: {preset!r}. Available: {list(PRESETS.keys())}")
+        return PRESETS[preset]
+    return operators
+
+
+# ============================================================================
 # Mutant generation
 # ============================================================================
 
@@ -930,6 +971,7 @@ def mutate_and_test(
     test_fn: Callable[[], None],
     operators: list[str] | None = None,
     *,
+    preset: str | None = None,
     workers: int = 1,
 ) -> MutationResult:
     """Apply mutations to an entire module and run *test_fn* against each.
@@ -945,8 +987,11 @@ def mutate_and_test(
         target: Module path (e.g. ``"myapp.scoring"``).
         test_fn: Zero-arg callable; should raise on failure.
         operators: Mutation operators to use (default: all).
+        preset: Named operator group: ``"essential"``, ``"standard"``,
+            or ``"thorough"``. Mutually exclusive with *operators*.
         workers: Parallel workers for testing mutants. Default ``1``.
     """
+    operators = _resolve_operators(operators, preset)
     module = importlib.import_module(target)
     source_file = getattr(module, "__file__", None)
     if source_file is None:
@@ -981,6 +1026,8 @@ def validate_mined_properties(
     target: str,
     max_examples: int = 100,
     operators: list[str] | None = None,
+    *,
+    preset: str | None = None,
 ) -> MutationResult:
     """Mine properties of *target*, then mutate it and check the properties catch the mutations.
 
@@ -992,7 +1039,10 @@ def validate_mined_properties(
         target: Dotted path to the function (e.g. ``"myapp.scoring.compute"``).
         max_examples: Examples for mine() property discovery.
         operators: Mutation operators to use (default: all).
+        preset: Named operator group: ``"essential"``, ``"standard"``,
+            or ``"thorough"``. Mutually exclusive with *operators*.
     """
+    operators = _resolve_operators(operators, preset)
     from ordeal.mine import mine
 
     module_path, func_name = target.rsplit(".", 1)
@@ -1085,6 +1135,7 @@ def mutate_function_and_test(
     test_fn: Callable[[], None],
     operators: list[str] | None = None,
     *,
+    preset: str | None = None,
     workers: int = 1,
     filter_equivalent: bool = True,
     equivalence_samples: int = 10,
@@ -1098,6 +1149,8 @@ def mutate_function_and_test(
         target: Dotted path to the function (e.g. ``"myapp.scoring.compute"``).
         test_fn: Zero-arg callable; should raise on failure.
         operators: Mutation operators to use (default: all).
+        preset: Named operator group: ``"essential"``, ``"standard"``,
+            or ``"thorough"``. Mutually exclusive with *operators*.
         workers: Number of parallel worker processes. ``1`` (default)
             runs sequentially.  Higher values give near-linear speedup
             since each mutant is tested independently.
@@ -1107,6 +1160,7 @@ def mutate_function_and_test(
         equivalence_samples: Number of random inputs for equivalence
             filtering.  Default ``10``.
     """
+    operators = _resolve_operators(operators, preset)
     module_path, func_name = target.rsplit(".", 1)
     module = importlib.import_module(module_path)
     func = getattr(module, func_name)
@@ -1219,6 +1273,8 @@ def _parallel_function_test(
 def mutation_faults(
     target: str,
     operators: list[str] | None = None,
+    *,
+    preset: str | None = None,
 ) -> list[tuple[Mutant, PatchFault]]:
     """Generate :class:`PatchFault` objects for each mutant of a function.
 
@@ -1231,10 +1287,13 @@ def mutation_faults(
     Args:
         target: Dotted path to the function (e.g. ``"myapp.scoring.compute"``).
         operators: Mutation operators to use (default: all).
+        preset: Named operator group: ``"essential"``, ``"standard"``,
+            or ``"thorough"``. Mutually exclusive with *operators*.
 
     Returns:
         List of ``(Mutant, PatchFault)`` pairs.
     """
+    operators = _resolve_operators(operators, preset)
     module_path, func_name = target.rsplit(".", 1)
     module = importlib.import_module(module_path)
     func = getattr(module, func_name)

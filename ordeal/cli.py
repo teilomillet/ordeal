@@ -394,6 +394,154 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def _is_function_target(target: str) -> bool:
+    """Determine if a dotted path refers to a callable (vs a module)."""
+    from importlib import import_module
+
+    try:
+        import_module(target)
+        return False  # imported as module — not a function
+    except ImportError:
+        pass
+
+    parts = target.rsplit(".", 1)
+    if len(parts) < 2:
+        return False
+    try:
+        mod = import_module(parts[0])
+        attr = getattr(mod, parts[1], None)
+        return callable(attr)
+    except ImportError:
+        return False
+
+
+def _make_auto_test_fn(target: str):
+    """Create a test function that runs pytest in-process against the target."""
+
+    def run_tests():
+        import pytest
+
+        module_name = target.rsplit(".", 1)[0] if _is_function_target(target) else target
+        short_name = module_name.split(".")[-1]
+        rc = pytest.main(["-x", "-q", "--tb=short", "--no-header", "-k", short_name])
+        if rc != 0:
+            raise AssertionError(f"pytest returned exit code {rc}")
+
+    return run_tests
+
+
+def _cmd_mutate(args: argparse.Namespace) -> int:
+    """Run mutation testing on specified targets."""
+    from ordeal.mutations import (
+        MutationResult,
+        mutate_and_test,
+        mutate_function_and_test,
+    )
+
+    targets: list[str] = args.targets or []
+    preset: str | None = args.preset
+    operators: list[str] | None = None
+    workers: int = args.workers
+    threshold: float = args.threshold
+    filter_equivalent: bool = not args.no_filter
+    equivalence_samples: int = args.equivalence_samples
+
+    # Fall back to config file if no targets given
+    if not targets:
+        config_path = args.config or "ordeal.toml"
+        try:
+            cfg = load_config(config_path)
+        except FileNotFoundError:
+            _stderr(
+                "No targets specified. Use positional args or [mutations] in ordeal.toml.\n"
+                "  ordeal mutate myapp.scoring.compute\n"
+                "  ordeal mutate myapp.scoring\n"
+            )
+            return 1
+        except ConfigError as e:
+            _stderr(f"Config error: {e}\n")
+            return 1
+
+        if cfg.mutations is None:
+            _stderr("No [mutations] section in config.\n")
+            return 1
+
+        targets = cfg.mutations.targets
+        if not targets:
+            _stderr("No targets in [mutations] section.\n")
+            return 1
+
+        # Config provides defaults; CLI flags override
+        if preset is None and cfg.mutations.operators is None:
+            preset = cfg.mutations.preset
+        if cfg.mutations.operators is not None and preset is None:
+            operators = cfg.mutations.operators
+        if args.workers == 1 and cfg.mutations.workers > 1:
+            workers = cfg.mutations.workers
+        if args.threshold == 0.0 and cfg.mutations.threshold > 0.0:
+            threshold = cfg.mutations.threshold
+        if not args.no_filter:
+            filter_equivalent = cfg.mutations.filter_equivalent
+        if args.equivalence_samples == 10 and cfg.mutations.equivalence_samples != 10:
+            equivalence_samples = cfg.mutations.equivalence_samples
+
+    # Default preset when nothing specified
+    if preset is None and operators is None:
+        preset = "standard"
+
+    all_results: list[tuple[str, MutationResult]] = []
+    exit_code = 0
+
+    for target in targets:
+        _stderr(f"Mutating {target}...\n")
+
+        is_func = _is_function_target(target)
+        test_fn = _make_auto_test_fn(target)
+
+        try:
+            if is_func:
+                result = mutate_function_and_test(
+                    target,
+                    test_fn,
+                    operators=operators,
+                    preset=preset,
+                    workers=workers,
+                    filter_equivalent=filter_equivalent,
+                    equivalence_samples=equivalence_samples,
+                )
+            else:
+                result = mutate_and_test(
+                    target,
+                    test_fn,
+                    operators=operators,
+                    preset=preset,
+                    workers=workers,
+                )
+        except (ImportError, AttributeError, ValueError) as e:
+            _stderr(f"  Error: {e}\n")
+            exit_code = 1
+            continue
+
+        all_results.append((target, result))
+        print(result.summary())
+        print()
+
+        if threshold > 0.0 and result.score < threshold:
+            exit_code = 1
+
+    # Overall summary for multiple targets
+    if len(all_results) > 1:
+        total_mutants = sum(r.total for _, r in all_results)
+        total_killed = sum(r.killed for _, r in all_results)
+        overall = total_killed / total_mutants if total_mutants > 0 else 1.0
+        print(f"Overall: {total_killed}/{total_mutants} ({overall:.0%})")
+        if threshold > 0.0:
+            status = "PASS" if overall >= threshold else "FAIL"
+            print(f"Threshold: {threshold:.0%} — {status}")
+
+    return exit_code
+
+
 # ============================================================================
 # Reporting
 # ============================================================================
@@ -568,6 +716,44 @@ def main(argv: list[str] | None = None) -> int:
         help="Throughput metric to fit (default: runs)",
     )
 
+    # -- ordeal mutate --
+    mutate_p = sub.add_parser("mutate", help="Run mutation testing")
+    mutate_p.add_argument(
+        "targets", nargs="*", help="Dotted paths: myapp.scoring.compute or myapp.scoring"
+    )
+    mutate_p.add_argument(
+        "--config",
+        "-c",
+        default=None,
+        help="Config file with [mutations] section (used when no targets given)",
+    )
+    mutate_p.add_argument(
+        "--preset",
+        "-p",
+        choices=["essential", "standard", "thorough"],
+        default=None,
+        help="Operator preset (default: standard)",
+    )
+    mutate_p.add_argument(
+        "--workers", "-w", type=int, default=1, help="Parallel workers (default: 1)"
+    )
+    mutate_p.add_argument(
+        "--threshold",
+        "-t",
+        type=float,
+        default=0.0,
+        help="Minimum mutation score; exit 1 if below (e.g. 0.8 for 80%%)",
+    )
+    mutate_p.add_argument(
+        "--no-filter", action="store_true", help="Disable equivalent mutant filtering"
+    )
+    mutate_p.add_argument(
+        "--equivalence-samples",
+        type=int,
+        default=10,
+        help="Samples for equivalence filtering (default: 10)",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "explore":
@@ -582,6 +768,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_mine_pair(args)
     elif args.command == "benchmark":
         return _cmd_benchmark(args)
+    elif args.command == "mutate":
+        return _cmd_mutate(args)
     else:
         parser.print_help()
         return 0

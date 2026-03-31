@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.29
+
+**Features:**
+
+- @scales_linearly decorator — assert function scales with concurrency
+- subprocess_delay fault for FFI latency injection
+- property report shows in pytest output without --chaos
+
+**Fixes:**
+
+- sometimes(warn=True) uses print for pytest visibility
+
+**Docs:**
+
+- update all docs for subprocess_delay, scales_linearly, warn=True
+
+**Other:**
+
+- test: add tests for all new features (15 new tests, 854→869)
+
+
 ## 0.2.28
 
 **Features:**

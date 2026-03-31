@@ -434,10 +434,7 @@ def pytest_terminal_summary(
             terminalreporter.line("")
         _mutation_results.clear()
 
-    # Only show property report when --chaos is active
-    if not config.getoption("chaos", default=False):
-        return
-
+    # Show property report when --chaos is active or when there are results
     results = assertions.tracker.results
     if not results:
         return

@@ -438,8 +438,7 @@ ordeal/
 │   └── concurrency.py     contended_call, thread_boundary, stale_state
 └── integrations/      Optional bridges to specialized tools:
     ├── openapi.py         Built-in API chaos testing (no extra deps)
-    ├── atheris_engine.py  Coverage-guided fuzzing (pip install ordeal[atheris])
-    └── schemathesis_ext.py  Schemathesis bridge (pip install ordeal[api])
+    └── atheris_engine.py  Coverage-guided fuzzing (pip install ordeal[atheris])
 ```
 
 > **Want to add a new fault?** Look at any function in `ordeal/faults/` — they all follow the same pattern: take a dotted target path, return a `PatchFault` or `LambdaFault`. Adding a new fault type means adding a new function that follows this pattern.

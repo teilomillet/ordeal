@@ -147,7 +147,6 @@ class OrdealConfig:
     scan: list[ScanConfig] = field(default_factory=list)
     report: ReportConfig = field(default_factory=ReportConfig)
     api: APIConfig | None = None
-    schemathesis: APIConfig | None = None  # legacy alias for api
     mutations: MutationConfig | None = None
 
 
@@ -165,7 +164,6 @@ _KNOWN_SECTIONS = {
     "scan",
     "report",
     "faults",
-    "schemathesis",
     "api",
     "mutations",
 }
@@ -185,7 +183,6 @@ _KNOWN_API_KEYS = {
     "mutation_targets",
     "auto_discover",
 }
-_KNOWN_SCHEMATHESIS_KEYS = _KNOWN_API_KEYS
 _KNOWN_EXPLORER_KEYS = {
     "target_modules",
     "max_time",
@@ -321,15 +318,8 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
             f"Invalid report format: {report.format!r}. Must be one of: {_VALID_REPORT_FORMATS}"
         )
 
-    # -- API / Schemathesis (optional, mutually exclusive) --
-    if "api" in raw and "schemathesis" in raw:
-        raise ConfigError(
-            "Cannot have both [api] and [schemathesis] sections. "
-            "Use [api] (the [schemathesis] name is deprecated)."
-        )
-
+    # -- API (optional) --
     api_cfg: APIConfig | None = None
-    schemathesis_cfg: APIConfig | None = None
 
     if "api" in raw:
         a_raw = raw["api"]
@@ -346,30 +336,6 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
             swarm=a_raw.get("swarm", False),
             max_examples=int(a_raw.get("max_examples", 100)),
             headers=a_raw.get("headers", {}),
-        )
-
-    if "schemathesis" in raw:
-        import warnings
-
-        warnings.warn(
-            "The [schemathesis] config section is deprecated. Use [api] instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        s_raw = raw["schemathesis"]
-        _warn_unknown_keys("schemathesis", s_raw, _KNOWN_SCHEMATHESIS_KEYS)
-        schemathesis_cfg = APIConfig(
-            schema_url=s_raw.get("schema_url"),
-            app=s_raw.get("app"),
-            wsgi=s_raw.get("wsgi", False),
-            schema_path=s_raw.get("schema_path", "/openapi.json"),
-            base_url=s_raw.get("base_url"),
-            faults=s_raw.get("faults", []),
-            fault_probability=float(s_raw.get("fault_probability", 0.3)),
-            seed=int(s_raw.get("seed", 42)),
-            swarm=s_raw.get("swarm", False),
-            max_examples=int(s_raw.get("max_examples", 100)),
-            headers=s_raw.get("headers", {}),
         )
 
     # -- Mutations (optional) --
@@ -413,6 +379,5 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
         scan=scans,
         report=report,
         api=api_cfg,
-        schemathesis=schemathesis_cfg,
         mutations=mutations_cfg,
     )

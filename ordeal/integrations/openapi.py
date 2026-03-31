@@ -184,7 +184,7 @@ class _FaultScheduler:
     """Manages fault toggling with optional swarm mode and activation tracking.
 
     Centralises the fault-management logic shared by :func:`with_chaos`,
-    :func:`chaos_api_test`, and the schemathesis bridge.
+    :func:`chaos_api_test`.
 
     .. note:: Not thread-safe.  Each concurrent context should use its own
        scheduler instance.

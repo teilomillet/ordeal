@@ -47,7 +47,7 @@ ordeal/
 │   └── timing.py       timeout, slow, intermittent_crash, jitter
 └── integrations/
     ├── atheris_engine.py    Coverage-guided fuzzing bridge (optional: atheris)
-    └── schemathesis_ext.py  API chaos testing bridge (optional: schemathesis)
+    └── openapi.py           Built-in API chaos testing (no extra deps)
 ```
 
 ## Key design decisions
@@ -58,7 +58,7 @@ ordeal/
 - **Assertions**: `always`/`unreachable` raise immediately (triggers Hypothesis shrinking). `sometimes`/`reachable` are deferred — checked at session end via PropertyTracker.
 - **buggify()**: No-op when chaos mode is inactive. Thread-local RNG, seed-controlled, negligible overhead in production.
 - **PatchFault**: Resolves a dotted path (e.g. `"myapp.api.call"`) and wraps the target function with fault behavior. Activate/deactivate cycle managed by ChaosTest.
-- **Optional deps**: atheris, schemathesis, numpy are behind try/except imports with helpful error messages.
+- **Optional deps**: atheris, numpy are behind try/except imports with helpful error messages.
 
 ## Conventions
 

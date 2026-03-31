@@ -1,4 +1,4 @@
-"""Tests for ordeal.integrations — mock-based tests for atheris and schemathesis."""
+"""Tests for ordeal.integrations — mock-based tests for atheris and openapi."""
 
 from __future__ import annotations
 
@@ -168,17 +168,6 @@ class TestBuiltinEngineNoDeps:
         from ordeal.integrations.openapi import chaos_api_test  # noqa: F811
 
         assert callable(chaos_api_test)
-
-    def test_chaos_api_hook_raises_not_implemented(self):
-        """ChaosAPIHook is removed — instantiation raises NotImplementedError."""
-        import warnings
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            from ordeal.integrations.schemathesis_ext import ChaosAPIHook
-
-        with pytest.raises(NotImplementedError, match="removed"):
-            ChaosAPIHook(faults=[])
 
 
 # ============================================================================

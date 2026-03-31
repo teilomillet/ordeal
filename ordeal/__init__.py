@@ -151,12 +151,58 @@ def catalog() -> dict[str, list]:
     from ordeal.mutations import catalog as _mutations_catalog
     from ordeal.strategies import catalog as _strategies_catalog
 
-    return {
+    result = {
         "faults": _faults_catalog(),
         "invariants": _invariants_catalog(),
+        "assertions": _introspect_module(
+            __import__("ordeal.assertions", fromlist=["assertions"]),
+            include={"always", "sometimes", "reachable", "unreachable"},
+        ),
         "strategies": _strategies_catalog(),
         "mutations": _mutations_catalog(),
+        "integrations": _introspect_module(
+            __import__("ordeal.integrations.openapi", fromlist=["openapi"]),
+            include={"chaos_api_test", "with_chaos", "auto_faults"},
+        ),
     }
+    try:
+        result["integrations"].extend(
+            _introspect_module(
+                __import__("ordeal.integrations.atheris_engine", fromlist=["atheris_engine"]),
+                include={"fuzz", "fuzz_chaos_test"},
+            )
+        )
+    except ImportError:
+        pass
+    return result
+
+
+def _introspect_module(mod: object, include: set[str] | None = None) -> list[dict]:
+    """Introspect public callables from a module."""
+    import inspect as _inspect
+
+    entries: list[dict] = []
+    for attr_name in sorted(dir(mod)):
+        if attr_name.startswith("_"):
+            continue
+        if include and attr_name not in include:
+            continue
+        obj = getattr(mod, attr_name)
+        if not callable(obj) or _inspect.isclass(obj):
+            continue
+        try:
+            sig = str(_inspect.signature(obj))
+        except (ValueError, TypeError):
+            sig = "(...)"
+        entries.append(
+            {
+                "name": attr_name,
+                "qualname": f"{mod.__name__}.{attr_name}",
+                "signature": sig,
+                "doc": (_inspect.getdoc(obj) or "").split("\n")[0],
+            }
+        )
+    return entries
 
 
 def auto_configure(

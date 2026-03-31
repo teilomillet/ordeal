@@ -1,15 +1,18 @@
-"""Network and HTTP fault injections.
+"""Network and HTTP fault injections — 7 faults.
 
-Targeted faults for libraries that make HTTP/API calls — the most common
-integration pattern in modern Python.  These faults simulate real-world
-network failures without requiring network access.
+- http_error(target, status_code) — raise HTTP error (default 500)
+- connection_reset(target) — simulate connection reset
+- rate_limited(target, retry_after) — HTTP 429 Too Many Requests
+- auth_failure(target, status_code) — HTTP 401/403
+- dns_failure(target) — simulate DNS resolution failure
+- partial_response(target, fraction) — truncate response content
+- intermittent_http_error(target, every_n, status_code) — fail every Nth call
 
-    from ordeal.faults.network import http_error, rate_limited, connection_reset
-    faults = [
-        http_error("myapp.client.post", status_code=500),
-        rate_limited("myapp.client.post", retry_after=30),
-        connection_reset("myapp.client.post"),
-    ]
+::
+
+    from ordeal.faults.network import http_error, connection_reset, rate_limited
+    faults = [http_error("myapp.client.post", status_code=503),
+              connection_reset("myapp.client.post")]
 """
 
 from __future__ import annotations

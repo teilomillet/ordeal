@@ -1,14 +1,15 @@
-"""Concurrency fault injections.
+"""Concurrency fault injections — 4 faults.
 
-Faults for testing thread-safety, resource contention, and concurrent
-access patterns — common in any Python library that uses threading,
-connection pools, or shared mutable state.
+- contended_call(target, contention) — add lock contention to target
+- delayed_release(target, delay) — delay after target returns
+- thread_boundary(target, timeout) — run target on a background thread
+- stale_state(obj, attr, stale_value) — overwrite attribute while active
 
-    from ordeal.faults.concurrency import contended_call, delayed_release
-    faults = [
-        contended_call("myapp.pool.acquire", contention=0.1),
-        delayed_release("myapp.pool.release", delay=0.5),
-    ]
+::
+
+    from ordeal.faults.concurrency import contended_call, stale_state
+    faults = [contended_call("myapp.pool.acquire", contention=0.1),
+              stale_state(config, "timeout", 0)]
 """
 
 from __future__ import annotations

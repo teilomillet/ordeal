@@ -163,7 +163,7 @@ tracker = PropertyTracker()
 
 
 def always(condition: bool, name: str, *, mute: bool = False, **details: Any) -> None:
-    """Assert *condition* is ``True`` every time this line executes.
+    """Assert *condition* every time — raises immediately on violation.
 
     Raises ``AssertionError`` immediately on violation — whether or not
     the tracker is active.  Violations are never silent by default.
@@ -193,7 +193,7 @@ def sometimes(
     attempts: int | None = None,
     **details: Any,
 ) -> None:
-    """Assert *condition* is ``True`` at least once.
+    """Assert *condition* at least once — deferred, checked at session end.
 
     Simple — deferred, checked at session end::
 
@@ -225,7 +225,7 @@ def sometimes(
 
 
 def reachable(name: str, **details: Any) -> None:
-    """Assert this code path executes at least once during the run."""
+    """Assert this code path executes at least once — deferred, checked at session end."""
     was_active = tracker.record_hit(name, "reachable")
     if not was_active:
         warnings.warn(
@@ -236,7 +236,7 @@ def reachable(name: str, **details: Any) -> None:
 
 
 def unreachable(name: str, *, mute: bool = False, **details: Any) -> None:
-    """Assert this code path *never* executes.
+    """Assert this code path never executes — raises immediately if reached.
 
     Raises ``AssertionError`` immediately — whether or not the tracker
     is active.  Violations are never silent by default.

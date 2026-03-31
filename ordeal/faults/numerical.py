@@ -1,12 +1,15 @@
-"""Numerical fault injections.
+"""Numerical fault injections — 4 faults.
 
-Target a function and corrupt its numeric output while the fault is active.
+- nan_injection(target) — inject NaN into numeric output
+- inf_injection(target) — inject Inf into numeric output
+- wrong_shape(target, expected, actual) — return array with wrong shape
+- corrupted_floats(corrupt_type) — provide corrupt floats via fault.value()
 
-    from ordeal.faults.numerical import nan_injection, inf_injection, wrong_shape
-    faults = [
-        nan_injection("model.predict"),
-        wrong_shape("model.predict", expected=(1, 512), actual=(1, 256)),
-    ]
+::
+
+    from ordeal.faults.numerical import nan_injection, wrong_shape
+    faults = [nan_injection("myapp.model.predict"),
+              wrong_shape("myapp.model.predict", expected=(1, 512), actual=(1, 256))]
 """
 
 from __future__ import annotations

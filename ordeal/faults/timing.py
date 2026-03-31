@@ -1,10 +1,14 @@
-"""Timing fault injections.
+"""Timing fault injections — 4 faults.
 
-from ordeal.faults.timing import timeout, slow, intermittent_crash
-faults = [
-    timeout("api.call", delay=30),
-    intermittent_crash("worker.process", every_n=3),
-]
+- timeout(target) — raise TimeoutError instantly (no sleep)
+- slow(target, delay) — add latency (simulate or real sleep)
+- intermittent_crash(target, every_n) — crash every Nth call
+- jitter(target, magnitude) — add numeric jitter to return value
+
+::
+
+    from ordeal.faults.timing import timeout, slow
+    faults = [timeout("myapp.db.query"), slow("myapp.api.call", delay=2.0)]
 """
 
 from __future__ import annotations

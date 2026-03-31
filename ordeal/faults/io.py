@@ -1,14 +1,19 @@
-"""I/O fault injections.
+"""I/O fault injections — 6 faults.
 
-Targeted faults (patch a specific function):
+Targeted (patch a specific function):
+- error_on_call(target) — raise IOError on every call
+- return_empty(target) — return None on every call
+- corrupt_output(target) — replace output with random bytes
+- truncate_output(target, fraction) — cut output to fraction of length
 
-    from ordeal.faults.io import error_on_call, return_empty, corrupt_output
-    faults = [error_on_call("mymodule.read_file")]
+Environment (system-wide, use with caution):
+- disk_full() — fail all write-mode open() and os.write()
+- permission_denied() — fail all write-mode open()
 
-Environment faults (system-wide, use with caution):
+::
 
-    from ordeal.faults.io import disk_full, permission_denied
-    faults = [disk_full()]
+    from ordeal.faults.io import error_on_call, disk_full
+    faults = [error_on_call("myapp.db.read"), disk_full()]
 """
 
 from __future__ import annotations

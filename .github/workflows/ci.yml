@@ -136,11 +136,17 @@ jobs:
           fi
 
           # Prepend to CHANGELOG.md (after the "# Changelog" header)
-          if [ -f CHANGELOG.md ]; then
-            sed -i "0,/^# Changelog$/s/^# Changelog$/# Changelog\n\n${ENTRY}/" CHANGELOG.md
-          else
-            echo -e "# Changelog\n\n${ENTRY}" > CHANGELOG.md
-          fi
+          export ENTRY
+          python3 -c "
+          import pathlib, os
+          entry = os.environ['ENTRY']
+          p = pathlib.Path('CHANGELOG.md')
+          if p.exists():
+              old = p.read_text()
+              p.write_text(old.replace('# Changelog', '# Changelog\n\n' + entry, 1))
+          else:
+              p.write_text('# Changelog\n\n' + entry + '\n')
+          "
 
       - name: Commit and tag
         run: |

@@ -52,6 +52,86 @@ from ordeal.faults import PatchFault
 # ============================================================================
 
 
+_REMEDIATION: dict[str, str] = {
+    "arithmetic": (
+        "Add an assertion that checks the exact numeric result of this expression.\n"
+        "    Example: assert compute(3, 4) == 7  # catches + -> -\n"
+        "    The surviving mutant changes the arithmetic operator, so a test that\n"
+        "    verifies the precise output value (not just sign or range) will kill it."
+    ),
+    "comparison": (
+        "Add a boundary test using the exact threshold value.\n"
+        "    Example: test with x == boundary to distinguish < from <=\n"
+        "    The surviving mutant shifts a comparison boundary, so test the\n"
+        "    value exactly at the boundary where < and <= differ."
+    ),
+    "negate": (
+        "Add a test that exercises the opposite branch of this condition.\n"
+        "    The surviving mutant flips an if-condition; add a test case where\n"
+        "    the condition is True and verify different behavior from when False."
+    ),
+    "return_none": (
+        "Add an assertion that checks the return value is not None.\n"
+        "    Example: result = func(...); assert result is not None\n"
+        "    Also verify the return value's type or contents."
+    ),
+    "boundary": (
+        "Add a test using the exact integer constant and its neighbors.\n"
+        "    Example: if the code uses limit=10, test with 9, 10, and 11.\n"
+        "    The surviving mutant shifts an integer by ±1."
+    ),
+    "constant": (
+        "Add a test that verifies the exact constant value matters.\n"
+        "    The surviving mutant replaces a number with 0, 1, or -1.\n"
+        "    Test with inputs where the original constant produces a\n"
+        "    meaningfully different result from the replacement."
+    ),
+    "delete_statement": (
+        "Add a test that depends on the side effect of this statement.\n"
+        "    The surviving mutant removes the statement entirely.\n"
+        "    Verify the observable effect: updated state, return value,\n"
+        "    or accumulated result that this statement contributes to."
+    ),
+    "logical": (
+        "Add a test where exactly one of the two conditions is True.\n"
+        "    The surviving mutant swaps 'and' with 'or' (or vice versa).\n"
+        "    When both are True or both False, and/or are equivalent;\n"
+        "    test with mixed True/False to distinguish them."
+    ),
+    "swap_if_else": (
+        "Add a test that verifies the if-branch produces different output\n"
+        "    from the else-branch, then assert the correct one is taken.\n"
+        "    The surviving mutant swaps the two branches."
+    ),
+    "remove_not": (
+        "Add a test where the negation changes the outcome.\n"
+        "    The surviving mutant removes a 'not' operator.\n"
+        "    Test with a value where the condition is True, ensuring the\n"
+        "    negated version (False) produces different behavior."
+    ),
+    "exception_swallow": (
+        "Add a test that verifies the except handler's body executes.\n"
+        "    The surviving mutant replaces the handler body with 'pass'.\n"
+        "    Assert on any side effect of the error handling logic."
+    ),
+    "argument_swap": (
+        "Add a test where the first two arguments are different values\n"
+        "    and the function is not commutative.\n"
+        "    Example: assert f(a, b) != f(b, a), then check the correct one."
+    ),
+    "break_continue_swap": (
+        "Add a test that verifies the loop exits (break) or continues\n"
+        "    at the right point. Check the number of iterations or the\n"
+        "    accumulated result to distinguish break from continue."
+    ),
+    "unary_negate": (
+        "Add a test where the sign of the value matters.\n"
+        "    The surviving mutant removes a unary minus.\n"
+        "    Assert the exact (negative) value, not just its magnitude."
+    ),
+}
+
+
 @dataclass
 class Mutant:
     """A single code mutation."""
@@ -62,11 +142,20 @@ class Mutant:
     col: int
     killed: bool = False
     error: str | None = None
+    source_line: str = ""
 
     @property
     def location(self) -> str:
         """Source location as ``L<line>:<col>``."""
         return f"L{self.line}:{self.col}"
+
+    @property
+    def remediation(self) -> str:
+        """Actionable guidance for killing this mutant."""
+        advice = _REMEDIATION.get(self.operator, "")
+        if not advice:
+            return f"Add a test that distinguishes the original from: {self.description}"
+        return advice
 
 
 @dataclass
@@ -96,11 +185,21 @@ class MutationResult:
         """Kill ratio: 1.0 means every mutant was caught."""
         return self.killed / self.total if self.total > 0 else 1.0
 
-    def summary(self) -> str:
-        """Human-readable report with surviving mutants listed."""
+    def summary(self, remediation: bool = True) -> str:
+        """Human-readable report with surviving mutants listed.
+
+        Args:
+            remediation: If True (default), include actionable guidance
+                for each surviving mutant explaining what test to write.
+        """
         lines = [f"Mutation score: {self.killed}/{self.total} ({self.score:.0%})"]
         for m in self.survived:
-            lines.append(f"  SURVIVED  {m.location} {m.description}")
+            header = f"  SURVIVED  {m.location} {m.description}"
+            if m.source_line:
+                header += f"  |  {m.source_line}"
+            lines.append(header)
+            if remediation:
+                lines.append(f"    Fix: {m.remediation}")
         return "\n".join(lines)
 
 
@@ -753,6 +852,7 @@ def generate_mutants(
     Returns a list of ``(Mutant, mutated_AST)`` pairs.
     """
     tree = ast.parse(source)
+    source_lines = source.splitlines()
     ops = operators or list(OPERATORS.keys())
     results: list[tuple[Mutant, ast.Module]] = []
 
@@ -779,11 +879,16 @@ def generate_mutants(
                     tree, mutated_tree, op_name, applicator.description, applicator.line
                 ):
                     continue
+                # Capture the source line for context
+                src_line = ""
+                if 0 < applicator.line <= len(source_lines):
+                    src_line = source_lines[applicator.line - 1].strip()
                 mutant = Mutant(
                     operator=op_name,
                     description=applicator.description,
                     line=applicator.line,
                     col=applicator.col,
+                    source_line=src_line,
                 )
                 results.append((mutant, mutated_tree))
 

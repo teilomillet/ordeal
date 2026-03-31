@@ -196,6 +196,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "DiffResult": ("ordeal.diff", "DiffResult"),
     "ScalingAnalysis": ("ordeal.scaling", "ScalingAnalysis"),
     "fit_usl": ("ordeal.scaling", "fit_usl"),
+    "scales_linearly": ("ordeal.scaling", "scales_linearly"),
 }
 
 
@@ -250,38 +251,30 @@ def catalog() -> dict[str, list]:
         "mutations": _mutations_catalog(),
         "integrations": _introspect_module(
             __import__("ordeal.integrations.openapi", fromlist=["openapi"]),
-            include={"chaos_api_test", "with_chaos", "auto_faults"},
         ),
         "mining": _introspect_module(
             __import__("ordeal.mine", fromlist=["mine"]),
-            include={"mine", "mine_pair"},
         ),
         "audit": _introspect_module(
             __import__("ordeal.audit", fromlist=["audit"]),
-            include={"audit", "audit_report"},
         ),
         "auto": _introspect_module(
             __import__("ordeal.auto", fromlist=["auto"]),
-            include={"scan_module", "fuzz", "chaos_for", "register_fixture"},
         ),
         "metamorphic": _introspect_module(
             __import__("ordeal.metamorphic", fromlist=["metamorphic"]),
-            include={"metamorphic"},
         ),
         "diff": _introspect_module(
             __import__("ordeal.diff", fromlist=["diff"]),
-            include={"diff"},
         ),
         "scaling": _introspect_module(
             __import__("ordeal.scaling", fromlist=["scaling"]),
-            include={"fit_usl", "analyze", "benchmark"},
         ),
     }
     try:
         result["integrations"].extend(
             _introspect_module(
                 __import__("ordeal.integrations.atheris_engine", fromlist=["atheris_engine"]),
-                include={"fuzz", "fuzz_chaos_test"},
             )
         )
     except ImportError:
@@ -290,17 +283,27 @@ def catalog() -> dict[str, list]:
 
 
 def _introspect_module(mod: object, include: set[str] | None = None) -> list[dict]:
-    """Introspect public callables from a module."""
+    """Introspect public callables from a module.
+
+    Auto-filters re-imports by checking ``__module__`` — only functions
+    defined in *mod* are returned.  The *include* allowlist is still
+    honoured when given, but should no longer be needed for most modules.
+    """
     import inspect as _inspect
 
+    mod_name = getattr(mod, "__name__", "")
     entries: list[dict] = []
     for attr_name in sorted(dir(mod)):
         if attr_name.startswith("_"):
             continue
-        if include and attr_name not in include:
-            continue
         obj = getattr(mod, attr_name)
         if not callable(obj) or _inspect.isclass(obj):
+            continue
+        # Skip re-imports: only keep functions defined in this module
+        obj_mod = getattr(obj, "__module__", None)
+        if obj_mod and obj_mod != mod_name:
+            continue
+        if include and attr_name not in include:
             continue
         try:
             sig = str(_inspect.signature(obj))

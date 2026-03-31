@@ -182,6 +182,9 @@ The migrated test is generated to `.ordeal/test_<module>_migrated.py`. Check:
 
 ## Tests pass locally but fail in CI
 
+!!! quote "Environment differences"
+    Chaos testing is sensitive to environment: different CPUs, memory pressure, and timing can change which paths the explorer visits. The fix is almost always pinning the seed in `ordeal.toml` so that local and CI runs explore the same space.
+
 - **Seed mismatch**: set a fixed seed in `ordeal.toml` for reproducibility
 - **Missing dependencies**: make sure `ordeal[all]` or the specific extras are installed
 - **Timeout**: CI may be slower — increase `max_time`
@@ -189,7 +192,8 @@ The migrated test is generated to `.ordeal/test_<module>_migrated.py`. Check:
 
 ## Getting help
 
-If you're stuck:
+!!! quote "Still stuck?"
+    If nothing on this page matched your problem, you've likely found something new. That's valuable -- open an issue with what you tried and what happened. Include your `ordeal.toml`, the error output, and your Python version. The fastest path to a fix is a minimal reproducing example, but even a description helps.
 
 - Check the [full documentation](https://docs.byordeal.com/)
 - Open an issue at [github.com/teilomillet/ordeal](https://github.com/teilomillet/ordeal/issues)

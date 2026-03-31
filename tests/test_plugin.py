@@ -308,21 +308,16 @@ class TestOrdealScanItem:
 
 
 class TestPytestTerminalSummary:
-    def test_no_output_without_chaos(self):
-        cfg = _make_config(chaos=False)
-        tr = MagicMock()
-        pytest_terminal_summary(tr, 0, cfg)
-        tr.section.assert_not_called()
-
     def test_no_output_without_results(self):
-        cfg = _make_config(chaos=True)
-        tr = MagicMock()
-        # Ensure tracker has no results
-        prev = assertions.tracker.active
-        assertions.tracker.reset()
-        pytest_terminal_summary(tr, 0, cfg)
-        tr.section.assert_not_called()
-        assertions.tracker.active = prev
+        """Report is gated on having results, not on --chaos."""
+        for chaos in (False, True):
+            cfg = _make_config(chaos=chaos)
+            tr = MagicMock()
+            prev = assertions.tracker.active
+            assertions.tracker.reset()
+            pytest_terminal_summary(tr, 0, cfg)
+            tr.section.assert_not_called()
+            assertions.tracker.active = prev
 
     def test_prints_pass_results(self):
         cfg = _make_config(chaos=True)

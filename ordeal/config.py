@@ -154,7 +154,13 @@ class OrdealConfig:
 
 _VALID_CHECKPOINT_STRATEGIES = {"energy", "uniform", "recent"}
 _VALID_REPORT_FORMATS = {"json", "text", "both"}
-_VALID_PRESETS = {"essential", "standard", "thorough"}
+
+
+def _valid_presets() -> frozenset[str]:
+    from ordeal.mutations import PRESETS
+
+    return frozenset(PRESETS.keys())
+
 
 _KNOWN_SECTIONS = {
     "explorer",
@@ -351,9 +357,9 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
                 "Cannot specify both 'preset' and 'operators' in [mutations]. "
                 "Use one or the other."
             )
-        if m_preset is not None and m_preset not in _VALID_PRESETS:
+        if m_preset is not None and m_preset not in _valid_presets():
             raise ConfigError(
-                f"Invalid mutations preset: {m_preset!r}. Must be one of: {_VALID_PRESETS}"
+                f"Invalid mutations preset: {m_preset!r}. Must be one of: {_valid_presets()}"
             )
 
         m_threshold = float(m_raw.get("threshold", 0.0))

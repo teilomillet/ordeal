@@ -161,60 +161,63 @@ __all__ = [
     "NoTestsFoundError",
     "generate_starter_tests",
     "init_project",
-    # Property mining
-    "mine",
-    "MineResult",
-    # Module audit
-    "audit",
-    "ModuleAudit",
-    # Auto-discovery
-    "scan_module",
-    "ScanResult",
-    # Metamorphic testing
-    "metamorphic",
-    "Relation",
-    # Differential testing
-    "diff",
-    "DiffResult",
-    # Scaling analysis
-    "ScalingAnalysis",
-    "fit_usl",
+    # Everything in _LAZY_SUBMODULES is also importable via
+    # ``from ordeal import X`` — see __getattr__ and __dir__.
 ]
 
-# Lazy imports — keeps `import ordeal` fast while making everything
-# accessible via `from ordeal import mine`, etc.
-_LAZY_IMPORTS: dict[str, tuple[str, str]] = {
-    "mine": ("ordeal.mine", "mine"),
-    "MineResult": ("ordeal.mine", "MineResult"),
-    "audit": ("ordeal.audit", "audit"),
-    "ModuleAudit": ("ordeal.audit", "ModuleAudit"),
-    "scan_module": ("ordeal.auto", "scan_module"),
-    "ScanResult": ("ordeal.auto", "ScanResult"),
-    "metamorphic": ("ordeal.metamorphic", "metamorphic"),
-    "Relation": ("ordeal.metamorphic", "Relation"),
-    "diff": ("ordeal.diff", "diff"),
-    "DiffResult": ("ordeal.diff", "DiffResult"),
-    "ScalingAnalysis": ("ordeal.scaling", "ScalingAnalysis"),
-    "fit_usl": ("ordeal.scaling", "fit_usl"),
-    "scales_linearly": ("ordeal.scaling", "scales_linearly"),
-}
+# Submodules whose public exports are re-exported from ordeal.
+# Add a public function or class to any of these → it becomes
+# importable via ``from ordeal import X`` with zero registration.
+_LAZY_SUBMODULES = (
+    "ordeal.mine",
+    "ordeal.audit",
+    "ordeal.auto",
+    "ordeal.metamorphic",
+    "ordeal.diff",
+    "ordeal.scaling",
+)
+
+_SENTINEL = object()
 
 
 def __getattr__(name: str) -> object:
-    if name in _LAZY_IMPORTS:
-        module_path, attr_name = _LAZY_IMPORTS[name]
-        import importlib
+    """Lazy import: search submodules for the requested name."""
+    import importlib
 
-        mod = importlib.import_module(module_path)
-        val = getattr(mod, attr_name)
-        globals()[name] = val  # cache for subsequent access
-        return val
+    for mod_path in _LAZY_SUBMODULES:
+        try:
+            mod = importlib.import_module(mod_path)
+        except ImportError:
+            continue
+        obj = getattr(mod, name, _SENTINEL)
+        if obj is not _SENTINEL:
+            globals()[name] = obj  # cache for subsequent access
+            return obj
     raise AttributeError(f"module 'ordeal' has no attribute {name!r}")
 
 
 def __dir__() -> list[str]:
-    """Include lazy imports in dir() so help(ordeal) and tab completion find them."""
-    return list(set(globals().keys()) | set(_LAZY_IMPORTS.keys()))
+    """Include lazy submodule exports in dir() for tab completion."""
+    import importlib
+    import inspect as _inspect
+
+    names = set(globals().keys())
+    for mod_path in _LAZY_SUBMODULES:
+        try:
+            mod = importlib.import_module(mod_path)
+        except ImportError:
+            continue
+        for attr in dir(mod):
+            if attr.startswith("_"):
+                continue
+            obj = getattr(mod, attr, None)
+            if obj is None:
+                continue
+            # Only list things defined in that module (skip re-imports)
+            obj_mod = getattr(obj, "__module__", None)
+            if obj_mod == mod_path or (_inspect.isclass(obj) and obj_mod == mod_path):
+                names.add(attr)
+    return sorted(names)
 
 
 def catalog() -> dict[str, list]:

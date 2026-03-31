@@ -1938,22 +1938,32 @@ class _UnaryNegateCounter(_Counter):
             self.count += 1
 
 
-OPERATORS: dict[str, tuple[type[_Counter], type[_Applicator]]] = {
-    "arithmetic": (_ArithmeticCounter, _ArithmeticApplicator),
-    "comparison": (_ComparisonCounter, _ComparisonApplicator),
-    "negate": (_NegateCounter, _NegateApplicator),
-    "return_none": (_ReturnNoneCounter, _ReturnNoneApplicator),
-    "boundary": (_BoundaryCounter, _BoundaryApplicator),
-    "constant": (_ConstantCounter, _ConstantApplicator),
-    "delete_statement": (_DeleteStatementCounter, _DeleteStatementApplicator),
-    "logical": (_LogicalCounter, _LogicalApplicator),
-    "swap_if_else": (_SwapIfElseCounter, _SwapIfElseApplicator),
-    "remove_not": (_RemoveNotCounter, _RemoveNotApplicator),
-    "exception_swallow": (_ExceptionSwallowCounter, _ExceptionSwallowApplicator),
-    "argument_swap": (_ArgumentSwapCounter, _ArgumentSwapApplicator),
-    "break_continue_swap": (_BreakContinueSwapCounter, _BreakContinueSwapApplicator),
-    "unary_negate": (_UnaryNegateCounter, _UnaryNegateApplicator),
-}
+def _discover_operators() -> dict[str, tuple[type[_Counter], type[_Applicator]]]:
+    """Auto-discover mutation operators by scanning for _*Counter/_*Applicator pairs."""
+    import re as _re
+
+    g = globals()
+    counters: dict[str, type[_Counter]] = {}
+    applicators: dict[str, type[_Applicator]] = {}
+    for name, obj in g.items():
+        if not isinstance(obj, type) or not name.startswith("_"):
+            continue
+        if name.endswith("Counter") and issubclass(obj, _Counter) and obj is not _Counter:
+            stem = _re.sub(r"(?<!^)(?=[A-Z])", "_", name[1:].removesuffix("Counter")).lower()
+            counters[stem] = obj
+        elif (
+            name.endswith("Applicator") and issubclass(obj, _Applicator) and obj is not _Applicator
+        ):
+            stem = _re.sub(r"(?<!^)(?=[A-Z])", "_", name[1:].removesuffix("Applicator")).lower()
+            applicators[stem] = obj
+    return {
+        stem: (counters[stem], applicators[stem])
+        for stem in sorted(counters)
+        if stem in applicators
+    }
+
+
+OPERATORS: dict[str, tuple[type[_Counter], type[_Applicator]]] = _discover_operators()
 
 
 # ============================================================================

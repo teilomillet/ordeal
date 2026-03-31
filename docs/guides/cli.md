@@ -341,7 +341,7 @@ This is useful for tests that are slow (because they explore fault interleavings
 
 ### The property report
 
-When `--chaos` is active, ordeal prints a property report at the end of the test run. It shows every tracked property, its type, hit count, and pass/fail status:
+Ordeal prints a property report at the end of the test run whenever there are tracked results — with or without `--chaos`. It shows every tracked property, its type, hit count, and pass/fail status:
 
 ```
 --- Ordeal Property Results ---

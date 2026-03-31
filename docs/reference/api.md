@@ -338,6 +338,9 @@ from ordeal.faults import io
 | `truncate_output` | `(target: str, fraction: float = 0.5) -> PatchFault` | Target output truncated to fraction |
 | `disk_full` | `() -> Fault` | Global: writes fail with `OSError(ENOSPC)` |
 | `permission_denied` | `() -> Fault` | Global: opens fail with `PermissionError` |
+| `subprocess_timeout` | `(target: str) -> PatchFault` | `subprocess.run` raises `TimeoutExpired` when command matches target |
+| `corrupt_stdout` | `(target: str) -> PatchFault` | `subprocess.run` returns garbled `stdout` when command matches target |
+| `subprocess_delay` | `(target: str, *, delay: float = 1.0) -> PatchFault` | Adds delay to `subprocess.run` when command matches target |
 
 ```python
 faults = [
@@ -1248,6 +1251,28 @@ from ordeal.scaling import benchmark
 analysis = benchmark(MyServiceChaos, target_modules=["myapp"])
 print(analysis.summary())
 ```
+
+### scales_linearly
+
+```python
+from ordeal.scaling import scales_linearly
+
+@scales_linearly(n_range=(1, 8), max_kappa=0.01, max_sigma=0.3)
+def process_batch(items):
+    ...
+```
+
+Decorator: assert that a function scales linearly with concurrency. Runs the function with increasing worker counts, fits the USL model, and fails if contention or coherence exceed thresholds.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `n_range` | `tuple[int, int]` | `(1, 8)` | `(min_workers, max_workers)` to test |
+| `max_kappa` | `float` | `0.01` | Fail if coherence exceeds this (quadratic overhead) |
+| `max_sigma` | `float` | `0.3` | Fail if contention exceeds this (serial bottleneck) |
+| `samples` | `int` | `3` | Number of worker counts to test between min and max |
+| `time_per_sample` | `float` | `2.0` | Seconds to run at each worker count |
+
+Raises `AssertionError` with diagnostics when thresholds are exceeded. Works as a bare decorator (`@scales_linearly`) or with parameters (`@scales_linearly(max_kappa=0.005)`).
 
 ### ScalingAnalysis
 

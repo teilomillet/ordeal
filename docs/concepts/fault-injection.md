@@ -79,6 +79,9 @@ You list the faults. ordeal's nemesis -- an automatically injected rule -- toggl
 | `truncate_output(target, fraction=0.5)` | Truncates the target's output to a fraction of its length |
 | `disk_full()` | Makes write-mode `open()` and `os.write()` fail system-wide with `ENOSPC` |
 | `permission_denied()` | Makes write-mode `open()` fail system-wide with `EACCES` |
+| `subprocess_timeout(target)` | Makes `subprocess.run` raise `TimeoutExpired` when command matches target |
+| `corrupt_stdout(target)` | Makes `subprocess.run` return garbled `stdout` when command matches target |
+| `subprocess_delay(target, delay=1.0)` | Adds delay to `subprocess.run` when command matches target — tests timeout handling in Python/Rust/C/Go bridges |
 
 **Numerical faults** (`ordeal.faults.numerical`):
 

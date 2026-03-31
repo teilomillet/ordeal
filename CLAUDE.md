@@ -109,14 +109,14 @@ Quick reference — match what the developer wants to the right tool:
 - **"Fix my test gaps"** → `result.generate_test_stubs()` or `ordeal mutate --generate-stubs` (now suggests invariants by name/type)
 - **"Test under failure conditions"** → `@chaos_test` decorator or `ChaosTest` with `faults = [...]`
 - **"What if this call fails?"** → `buggify()`
-- **"What if a subprocess fails?"** → `faults.io.subprocess_timeout("cargo run")` or `corrupt_stdout("my_binary")`
+- **"What if a subprocess fails?"** → `faults.io.subprocess_timeout("cargo run")`, `corrupt_stdout("my_binary")`, or `subprocess_delay("cargo run", delay=5.0)`
 - **"Explore all reachable states"** → `ordeal explore`
 - **"Audit test coverage"** → `ordeal audit myapp.scoring`
 - **"Discover properties"** → `ordeal mine myapp.scoring.compute`
 - **"Smoke-test a whole module"** → `scan_module("myapp.scoring", expected_failures=["known_broken"])`
 - **"Does my refactor change behavior?"** → `diff(old_fn, new_fn)`
 - **"Test algebraic relations"** → `@metamorphic(Relation(...))`
-- **"How does my system scale?"** → `ordeal benchmark` or `fit_usl(measurements)`
+- **"How does my system scale?"** → `ordeal benchmark` or `fit_usl(measurements)` or `@scales_linearly`
 - **"Get a preflight report"** → `from ordeal import report; report()` (structured pass/fail summary)
 - **"What can ordeal do?"** → `from ordeal import catalog; catalog()`
 
@@ -238,7 +238,7 @@ for p in r["failed"]:
 - **`@chaos_test`** — decorator that replaces `TestCase = MyChaos.TestCase` boilerplate
 - **`sometimes(..., warn=True)`** — visible in normal pytest without `--chaos`
 - **`result.kill_attribution()`** — which tests kill which mutations
-- **`subprocess_timeout(target)`** / **`corrupt_stdout(target)`** — subprocess/FFI fault injection
+- **`subprocess_timeout(target)`** / **`corrupt_stdout(target)`** / **`subprocess_delay(target, delay=1.0)`** — subprocess/FFI fault injection
 - **`Literal["a", "b"]`** — auto-generates `sampled_from` strategy
 - **`scan_module(expected_failures=["broken_fn"])`** — skip known failures
 - **`scan_module(max_examples={"expensive_fn": 3, "__default__": 30})`** — per-function depth
@@ -247,6 +247,9 @@ for p in r["failed"]:
 - **ML array support** — invariants auto-convert MLX/JAX/PyTorch arrays via `np.asarray`
 - **`fuzz().failing_args`** — shrunk input captured on failure
 - **Invariant diffs** — violations show actual value, expected bound, index, deviation
+- **`@scales_linearly`** — decorator that asserts a function scales linearly via USL fit
+- **Property report without `--chaos`** — prints whenever there are tracked results
+- **`sometimes(warn=True)` prints to stdout** — captured by pytest, includes details
 
 ## Extending ordeal
 

@@ -93,15 +93,16 @@ assert is_active()
 
 ## Property assertions not tracked in the report
 
-`always()` and `unreachable()` always raise on violation — they are never silent, with or without `--chaos`. But the property *report* (hit counts, pass/fail summary) only appears when the PropertyTracker is active.
+`always()` and `unreachable()` always raise on violation — they are never silent, with or without `--chaos`. The property *report* (hit counts, pass/fail summary) appears whenever there are tracked results — even without `--chaos`.
 
-`sometimes()` and `reachable()` only track when the tracker is active. Without `--chaos`, they do nothing.
+`sometimes()` and `reachable()` only track when the tracker is active. Without `--chaos`, they are no-ops unless you use `sometimes(..., warn=True)` which prints status to stdout (captured by pytest).
 
 To enable the tracker and the property report:
 
-- Run with `--chaos` flag
+- Run with `--chaos` flag (enables full tracking)
 - Or call `auto_configure()` at test start
-- Check the property report at the end of the pytest output (printed when `--chaos` is active)
+- Use `sometimes(..., warn=True)` for visibility without `--chaos`
+- The property report prints at the end of pytest output whenever there are tracked results
 
 ## "sometimes" or "reachable" fails at session end
 

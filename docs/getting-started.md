@@ -198,15 +198,16 @@ This matters. Get it wrong and your assertions silently do nothing.
 - `@invariant()` methods run and `assert` statements work
 - `always()` **raises on violation** — violations are never silent
 - `unreachable()` **raises on violation** — violations are never silent
-- `sometimes()` and `reachable()` don't track (no property report)
+- `sometimes()` and `reachable()` don't track (no deferred checks)
+- `sometimes(..., warn=True)` prints status to stdout — visible without `--chaos`
 - `buggify()` always returns `False`
+- The property report prints if there are any tracked results
 
 **With `--chaos`**:
 
 - Everything above, plus:
 - `sometimes()` and `reachable()` track hits — checked at session end
 - `buggify()` returns `True` probabilistically (default 10%)
-- A property report prints at the end showing all tracked properties
 
 **The practical rule:**
 
@@ -216,12 +217,14 @@ This matters. Get it wrong and your assertions silently do nothing.
 | `always(condition, "name")` | No — raises on violation regardless |
 | `unreachable("name")` | No — raises when reached regardless |
 | `sometimes(condition, "name")` | **Yes** — not tracked without it |
+| `sometimes(condition, "name", warn=True)` | No — prints to stdout without it |
 | `reachable("name")` | **Yes** — not tracked without it |
 | `buggify()` in production code | **Yes** — returns False without it |
 | Faults (timeout, NaN, etc.) | No — nemesis toggles them regardless |
 | `@invariant()` with `assert` | No — works always |
+| Property report | No — prints whenever there are tracked results |
 
-**The design principle:** violations are never silent. `always()` and `unreachable()` raise `AssertionError` whether or not `--chaos` is active. The `--chaos` flag adds the *tracking* layer (property report, `sometimes`/`reachable` deferred checks) and activates `buggify()`. But if something is wrong, you'll know immediately — no flag required.
+**The design principle:** violations are never silent. `always()` and `unreachable()` raise `AssertionError` whether or not `--chaos` is active. The `--chaos` flag adds the *tracking* layer (`sometimes`/`reachable` deferred checks) and activates `buggify()`. The property report prints whenever there are tracked results, regardless of flags. If something is wrong, you'll know immediately.
 
 **Too loud?** If a known violation fires constantly and you need to focus on something else, pass `mute=True`:
 

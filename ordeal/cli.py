@@ -238,10 +238,13 @@ def _cmd_mine(args: argparse.Namespace) -> int:
         # Single function
         funcs = [(attr, getattr(mod, attr))]
     else:
-        # Module — mine all public functions
+        # Maybe the full target is a module (e.g. "ordeal.demo")
         from ordeal.auto import _get_public_functions
 
-        mod = import_module(target if attr is None else mod_path)
+        try:
+            mod = import_module(target)
+        except ImportError:
+            mod = import_module(mod_path)
         funcs = _get_public_functions(mod)
         if not funcs:
             _stderr(f"No public functions found in {target}\n")

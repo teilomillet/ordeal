@@ -283,7 +283,7 @@ You've written a chaos test. Here's where to go next, depending on what you want
 ```python
 from ordeal import catalog
 c = catalog()  # returns all faults, invariants, assertions, strategies, integrations
-c["faults"]    # 25 fault types with names, signatures, and docs
+c["faults"]    # all fault types with names, signatures, and docs
 ```
 
 `catalog()` gives you runtime discovery of everything ordeal offers — every fault, every invariant, every strategy, with signatures and documentation. AI assistants can use this to find the right tool for any situation.

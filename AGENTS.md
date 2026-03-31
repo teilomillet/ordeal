@@ -1,21 +1,57 @@
 # AGENTS.md
 
+## Using ordeal on a project
+
+When a user asks you to run ordeal on their code — not to develop ordeal itself.
+
+**What ordeal does:** Finds bugs your tests miss by exploring thousands of scenarios with realistic failures (timeouts, corrupted data, crashes). When something breaks, it shows the shortest sequence that reproduces the failure.
+
+**Commands:**
+
+```bash
+ordeal mine mymodule            # discover what functions actually do
+ordeal audit mymodule            # find gaps in existing tests
+ordeal explore                   # coverage-guided exploration (reads ordeal.toml)
+ordeal replay trace.json         # reproduce a specific failure
+ordeal mutate mymodule.func      # verify tests catch real code changes
+```
+
+**Reading output:**
+- `ALWAYS property (N/N)` — held every time. Strong guarantee.
+- `X% property (M/N)` — failed in some cases. Fix the failing ones.
+- `SURVIVED L42:8 + -> -` — mutation your tests didn't catch. Gap at that line.
+- `suggest: L42 test when x < 0` — actionable suggestion.
+
+**Discover everything available programmatically:**
+
+```python
+from ordeal import catalog
+c = catalog()  # faults, invariants, assertions, strategies, mutations, integrations
+# Each entry has: name, qualname, signature, doc
+```
+
+**Deeper understanding:** https://docs.byordeal.com/ — conceptual explanations (in highlighted blocks) before each technical section.
+
+---
+
+## Developing ordeal
+
 Conventions for AI agents working on ordeal.
 
 ## Build & test
 
 ```bash
 uv sync                          # install deps
-uv run pytest tests/ -q          # run all 205 tests (~7s)
+uv run pytest tests/ -q          # run all tests
 uv run pytest tests/ --chaos     # with property reporting
 uv run ordeal explore -c demo.toml  # run explorer (needs PYTHONPATH if tests/ is target)
 ```
 
 ## Project structure
 
-- `ordeal/` — library source (14 modules + faults/ + integrations/)
-- `tests/` — 13 test files, includes `test_battle.py` (ordeal testing itself)
-- `docs/` — 9 markdown docs, `index.md` is the hub
+- `ordeal/` — library source (modules + faults/ + integrations/)
+- `tests/` — test files, includes `test_battle.py` (ordeal testing itself)
+- `docs/` — markdown docs, `index.md` is the hub
 - `ordeal.toml.example` — annotated config reference
 
 ## Rules

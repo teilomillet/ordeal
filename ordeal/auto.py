@@ -213,15 +213,36 @@ def _resolve_module(module: str | ModuleType) -> ModuleType:
     return module
 
 
+def _unwrap(func: Any) -> Any:
+    """Unwrap decorated functions to reach the original callable.
+
+    Handles Ray ``@ray.remote`` (`._function``), ``functools.wraps``
+    (``__wrapped__`` chains), and Celery-style patterns.
+    """
+    import inspect
+
+    func = getattr(func, "_function", func)
+    try:
+        func = inspect.unwrap(func)
+    except (ValueError, TypeError):
+        pass
+    return func
+
+
 def _get_public_functions(mod: ModuleType) -> list[tuple[str, Any]]:
-    """Return (name, callable) pairs for public, non-class callables."""
+    """Return (name, callable) pairs for public, non-class callables.
+
+    Decorated functions (``@ray.remote``, ``@functools.wraps``, etc.)
+    are auto-unwrapped so that ``mine()``, ``fuzz()``, and ``scan_module()``
+    can inspect signatures and call the real function.
+    """
     results = []
     for name in sorted(dir(mod)):
         if name.startswith("_"):
             continue
         obj = getattr(mod, name)
         if callable(obj) and not isinstance(obj, type):
-            results.append((name, obj))
+            results.append((name, _unwrap(obj)))
     return results
 
 

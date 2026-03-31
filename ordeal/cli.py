@@ -235,8 +235,10 @@ def _cmd_mine(args: argparse.Namespace) -> int:
             return 1
 
     if attr and hasattr(mod, attr) and callable(getattr(mod, attr)):
-        # Single function
-        funcs = [(attr, getattr(mod, attr))]
+        # Single function — unwrap decorators (@ray.remote, functools.wraps)
+        from ordeal.auto import _unwrap
+
+        funcs = [(attr, _unwrap(getattr(mod, attr)))]
     else:
         # Maybe the full target is a module (e.g. "ordeal.demo")
         from ordeal.auto import _get_public_functions
@@ -272,11 +274,14 @@ def _cmd_mine_pair(args: argparse.Namespace) -> int:
     from ordeal.mine import mine_pair
 
     def _resolve_func(path: str):
+        from ordeal.auto import _unwrap
+
         parts = path.rsplit(".", 1)
         if len(parts) < 2:
             return None
         mod = import_module(parts[0])
-        return getattr(mod, parts[1], None)
+        obj = getattr(mod, parts[1], None)
+        return _unwrap(obj) if obj is not None else None
 
     f = _resolve_func(args.f)
     g = _resolve_func(args.g)

@@ -15,6 +15,7 @@ from ordeal.assertions import tracker
 from ordeal.faults import LambdaFault
 from ordeal.integrations.openapi import (
     ChaosAPIResult,
+    _analyze_cross_request,
     _APICase,
     _ASGIClient,
     _Endpoint,
@@ -642,6 +643,224 @@ class TestValidateResponse:
         resp = _Response(status_code=404, headers={}, body=b"")
         ep = _Endpoint(method="GET", path="/items/{id}", response_codes={200, 404})
         assert _validate_response(resp, ep, []) is None
+
+    def test_content_length_mismatch(self):
+        """Middleware modifies body after Content-Length is set."""
+        resp = _Response(
+            status_code=200,
+            headers={"content-length": "5", "content-type": "text/plain"},
+            body=b"hello world",  # 11 bytes, declared 5
+        )
+        ep = _Endpoint(method="GET", path="/items", response_codes={200})
+        fail = _validate_response(resp, ep, [])
+        assert fail is not None
+        assert fail["type"] == "content_length_mismatch"
+        assert fail["declared_length"] == 5
+        assert fail["actual_length"] == 11
+
+    def test_content_length_matches(self):
+        resp = _Response(
+            status_code=200,
+            headers={"content-length": "2", "content-type": "application/json"},
+            body=b"[]",
+        )
+        ep = _Endpoint(method="GET", path="/items", response_codes={200})
+        assert _validate_response(resp, ep, []) is None
+
+    def test_transfer_encoding_conflict(self):
+        """Content-Length + chunked is an RFC 7230 violation."""
+        resp = _Response(
+            status_code=200,
+            headers={
+                "content-length": "11",
+                "transfer-encoding": "chunked",
+                "content-type": "application/json",
+            },
+            body=b'{"ok":true}',  # 11 bytes, matches content-length
+        )
+        ep = _Endpoint(method="GET", path="/items", response_codes={200})
+        fail = _validate_response(resp, ep, [])
+        assert fail is not None
+        assert fail["type"] == "conflicting_transfer_headers"
+
+    def test_body_on_204(self):
+        """204 No Content must not have a body."""
+        resp = _Response(status_code=204, headers={"content-type": "text/plain"}, body=b"oops")
+        ep = _Endpoint(method="DELETE", path="/items/{id}", response_codes={204})
+        fail = _validate_response(resp, ep, [])
+        assert fail is not None
+        assert fail["type"] == "body_on_no_content"
+
+    def test_body_on_304(self):
+        """304 Not Modified must not have a body."""
+        resp = _Response(status_code=304, headers={}, body=b"cached")
+        ep = _Endpoint(method="GET", path="/items", response_codes={200, 304})
+        fail = _validate_response(resp, ep, [])
+        assert fail is not None
+        assert fail["type"] == "body_on_no_content"
+
+    def test_204_empty_body_ok(self):
+        resp = _Response(status_code=204, headers={}, body=b"")
+        ep = _Endpoint(method="DELETE", path="/items/{id}", response_codes={204})
+        assert _validate_response(resp, ep, []) is None
+
+    def test_invalid_json_body(self):
+        """Content-Type says JSON but body is HTML."""
+        resp = _Response(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=b"<html>Internal Server Error</html>",
+        )
+        ep = _Endpoint(method="GET", path="/items", response_codes={200})
+        fail = _validate_response(resp, ep, [])
+        assert fail is not None
+        assert fail["type"] == "invalid_json_body"
+
+    def test_valid_json_body_ok(self):
+        resp = _Response(
+            status_code=200,
+            headers={"content-type": "application/json; charset=utf-8"},
+            body=b'{"items": []}',
+        )
+        ep = _Endpoint(method="GET", path="/items", response_codes={200})
+        assert _validate_response(resp, ep, []) is None
+
+    def test_missing_content_type(self):
+        """Non-empty body with no Content-Type triggers MIME sniffing."""
+        resp = _Response(status_code=200, headers={}, body=b"some data")
+        ep = _Endpoint(method="GET", path="/data", response_codes={200})
+        fail = _validate_response(resp, ep, [])
+        assert fail is not None
+        assert fail["type"] == "missing_content_type"
+
+    def test_empty_body_no_content_type_ok(self):
+        """Empty body without Content-Type is fine."""
+        resp = _Response(status_code=200, headers={}, body=b"")
+        ep = _Endpoint(method="POST", path="/items", response_codes={200})
+        assert _validate_response(resp, ep, []) is None
+
+    def test_cors_partial_loss(self):
+        """CORS partially present but missing Allow-Origin under faults."""
+        resp = _Response(
+            status_code=200,
+            headers={
+                "content-type": "application/json",
+                "access-control-allow-methods": "GET, POST",
+            },
+            body=b"[]",
+        )
+        ep = _Endpoint(method="GET", path="/items", response_codes={200})
+        fail = _validate_response(resp, ep, ["timeout_fault"])
+        assert fail is not None
+        assert fail["type"] == "cors_header_lost"
+
+    def test_cors_complete_ok(self):
+        """Full CORS headers under faults is fine."""
+        resp = _Response(
+            status_code=200,
+            headers={
+                "content-type": "application/json",
+                "access-control-allow-origin": "*",
+                "access-control-allow-methods": "GET, POST",
+            },
+            body=b"[]",
+        )
+        ep = _Endpoint(method="GET", path="/items", response_codes={200})
+        assert _validate_response(resp, ep, ["timeout_fault"]) is None
+
+
+class TestCrossRequestAnalysis:
+    """Tests for _analyze_cross_request post-run analysis."""
+
+    def test_inconsistent_error_format(self):
+        """Same endpoint returns JSON and HTML errors."""
+        ep = _Endpoint(method="GET", path="/items", response_codes={200, 500})
+        responses = [
+            (ep, _Response(400, {"content-type": "application/json"}, b'{"err":"bad"}'), []),
+            (ep, _Response(500, {"content-type": "text/html"}, b"<h1>Error</h1>"), []),
+        ]
+        findings = _analyze_cross_request(responses)
+        types = [f["type"] for f in findings]
+        assert "inconsistent_error_format" in types
+
+    def test_consistent_error_format_ok(self):
+        """All errors return JSON — no finding."""
+        ep = _Endpoint(method="GET", path="/items", response_codes={200})
+        responses = [
+            (ep, _Response(400, {"content-type": "application/json"}, b'{"err":"bad"}'), []),
+            (ep, _Response(422, {"content-type": "application/json"}, b'{"err":"invalid"}'), []),
+        ]
+        findings = _analyze_cross_request(responses)
+        assert not any(f["type"] == "inconsistent_error_format" for f in findings)
+
+    def test_cors_lost_under_faults(self):
+        """CORS present normally, missing when faults active."""
+        ep = _Endpoint(method="GET", path="/items", response_codes={200})
+        responses = [
+            # Normal: has CORS
+            (
+                ep,
+                _Response(
+                    200,
+                    {
+                        "content-type": "application/json",
+                        "access-control-allow-origin": "*",
+                    },
+                    b"[]",
+                ),
+                [],
+            ),
+            # Under fault: CORS missing
+            (
+                ep,
+                _Response(
+                    200,
+                    {
+                        "content-type": "application/json",
+                    },
+                    b"[]",
+                ),
+                ["timeout_fault"],
+            ),
+        ]
+        findings = _analyze_cross_request(responses)
+        types = [f["type"] for f in findings]
+        assert "cors_lost_under_faults" in types
+
+    def test_cors_consistent_ok(self):
+        """CORS present on both normal and fault responses — no finding."""
+        ep = _Endpoint(method="GET", path="/items", response_codes={200})
+        responses = [
+            (
+                ep,
+                _Response(
+                    200,
+                    {
+                        "content-type": "application/json",
+                        "access-control-allow-origin": "*",
+                    },
+                    b"[]",
+                ),
+                [],
+            ),
+            (
+                ep,
+                _Response(
+                    200,
+                    {
+                        "content-type": "application/json",
+                        "access-control-allow-origin": "*",
+                    },
+                    b"[]",
+                ),
+                ["fault_0"],
+            ),
+        ]
+        findings = _analyze_cross_request(responses)
+        assert not any(f["type"] == "cors_lost_under_faults" for f in findings)
+
+    def test_no_responses_no_findings(self):
+        assert _analyze_cross_request([]) == []
 
 
 # ============================================================================

@@ -219,6 +219,71 @@ def wilson_lower(successes: int, total: int, z: float = 1.96) -> float:
 # ============================================================================
 
 
+_PROPERTY_TO_RELATION: dict[str, dict[str, str]] = {
+    "commutative": {
+        "name": "commutative",
+        "code": 'Relation("commutative", '
+        "transform=lambda args: (args[1], args[0]), "
+        "check=lambda a, b: a == b)",
+    },
+    "idempotent": {
+        "name": "idempotent",
+        "code": 'Relation("idempotent", '
+        "transform=lambda args: (args[0],), "  # apply result as input
+        "check=lambda a, b: a == b)",
+    },
+    "involution": {
+        "name": "involution",
+        "code": 'Relation("involution", '
+        "transform=lambda args: (args[0],), "  # apply f twice
+        "check=lambda a, b: b == args[0])",  # f(f(x)) == x
+    },
+    "deterministic": {
+        "name": "deterministic",
+        "code": 'Relation("deterministic", '
+        "transform=lambda args: args, "
+        "check=lambda a, b: a == b)",
+    },
+}
+
+
+def _suggest_relations(mined_properties: list[str]) -> list[dict[str, str]]:
+    """Convert mined properties into suggested metamorphic Relation objects.
+
+    Each mined property string is ``"func: property (stats)"``.
+    Returns a list of dicts with ``function``, ``property``, ``code``.
+    """
+    results: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for entry in mined_properties:
+        # Parse "func: property (stats)"
+        if ": " not in entry:
+            continue
+        func, rest = entry.split(": ", 1)
+        prop_name = rest.split(" (")[0].strip()
+        # Check for length relationships
+        if prop_name.startswith("len(output)"):
+            results.append(
+                {
+                    "function": func,
+                    "property": prop_name,
+                    "code": 'Relation("length_preserving", '
+                    "transform=lambda args: args, "
+                    "check=lambda a, b: len(a) == len(b))",
+                }
+            )
+            continue
+        if prop_name in _PROPERTY_TO_RELATION:
+            key = (func, prop_name)
+            if key not in seen:
+                seen.add(key)
+                rel = dict(_PROPERTY_TO_RELATION[prop_name])
+                rel["function"] = func
+                rel["property"] = prop_name
+                results.append(rel)
+    return results
+
+
 def _group_mined_properties(raw: list[str]) -> str:
     """Group ``"func: prop (stats)"`` entries by property kind.
 
@@ -280,6 +345,7 @@ class ModuleAudit:
     mutation_score: str = ""  # e.g. "8/10 (80%)" or "" if not run
     gap_functions: list[str] = field(default_factory=list)
     suggestions: list[str] = field(default_factory=list)
+    suggested_relations: list[dict[str, str]] = field(default_factory=list)
 
     # Known unknowns — what ordeal structurally cannot verify
     not_checked: list[str] = field(default_factory=list)
@@ -361,6 +427,11 @@ class ModuleAudit:
             lines.append("    suggest:")
             for s in self.suggestions:
                 lines.append(f"      - {s}")
+
+        if self.suggested_relations:
+            lines.append("    metamorphic relations (auto-discovered):")
+            for rel in self.suggested_relations:
+                lines.append(f"      - {rel['function']}: {rel['code']}")
 
         if self.not_checked:
             lines.append("    NOT verified (requires manual tests):")
@@ -1056,6 +1127,9 @@ def audit(
             result.warnings.append(
                 f"mining failed for {name}: {type(exc).__name__}: {exc}",
             )
+
+    # Suggest metamorphic relations from mined properties
+    result.suggested_relations = _suggest_relations(result.mined_properties)
 
     # Validate mined properties against mutations using standard preset
     from ordeal.mutations import validate_mined_properties

@@ -146,6 +146,7 @@ def catalog() -> dict[str, list]:
         for inv in c["invariants"]:
             print(f"{inv['name']}  -- {inv['doc']}")
     """
+    from ordeal.assertions import catalog as _assertions_catalog
     from ordeal.faults import catalog as _faults_catalog
     from ordeal.invariants import catalog as _invariants_catalog
     from ordeal.mutations import catalog as _mutations_catalog
@@ -154,10 +155,7 @@ def catalog() -> dict[str, list]:
     result = {
         "faults": _faults_catalog(),
         "invariants": _invariants_catalog(),
-        "assertions": _introspect_module(
-            __import__("ordeal.assertions", fromlist=["assertions"]),
-            include={"always", "sometimes", "reachable", "unreachable"},
-        ),
+        "assertions": _assertions_catalog(),
         "strategies": _strategies_catalog(),
         "mutations": _mutations_catalog(),
         "integrations": _introspect_module(
@@ -203,6 +201,25 @@ def _introspect_module(mod: object, include: set[str] | None = None) -> list[dic
             }
         )
     return entries
+
+    # Integrations — optional, may not be installed
+    try:
+        from ordeal.integrations.openapi import catalog as _openapi_catalog
+
+        result["integrations"] = _openapi_catalog()
+    except (ImportError, AttributeError):
+        result["integrations"] = []
+
+    try:
+        from ordeal.integrations.atheris_engine import (
+            catalog as _atheris_catalog,
+        )
+
+        result["integrations"].extend(_atheris_catalog())
+    except (ImportError, AttributeError):
+        pass
+
+    return result
 
 
 def auto_configure(

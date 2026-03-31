@@ -1375,3 +1375,36 @@ def chaos_api_test(
         _used_mutation_targets=bool(mutation_targets),
         _had_app=app is not None,
     )
+
+
+def catalog() -> list[dict[str, str]]:
+    """Discover public entry points in this integration module.
+
+    Fully automatic — scans all public functions defined in this module.
+    """
+    import inspect as _inspect
+    import sys
+
+    mod = sys.modules[__name__]
+    entries: list[dict[str, str]] = []
+    for attr_name in sorted(dir(mod)):
+        if attr_name.startswith("_") or attr_name == "catalog":
+            continue
+        obj = getattr(mod, attr_name)
+        if not callable(obj) or _inspect.isclass(obj):
+            continue
+        if getattr(obj, "__module__", None) != __name__:
+            continue
+        try:
+            sig = str(_inspect.signature(obj))
+        except (ValueError, TypeError):
+            sig = "(...)"
+        entries.append(
+            {
+                "name": attr_name,
+                "qualname": f"ordeal.integrations.openapi.{attr_name}",
+                "signature": sig,
+                "doc": (_inspect.getdoc(obj) or "").split("\n")[0],
+            }
+        )
+    return entries

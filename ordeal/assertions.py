@@ -250,3 +250,39 @@ def unreachable(name: str, *, mute: bool = False, **details: Any) -> None:
         if details:
             msg += f" | {details}"
         raise AssertionError(msg)
+
+
+def catalog() -> list[dict[str, str]]:
+    """Discover all assertion functions via runtime introspection.
+
+    Returns a list of dicts with ``name``, ``signature``, and ``doc``.
+    Fully automatic — scans all public functions in this module.
+    New assertion functions appear without registration.
+    """
+    import inspect as _inspect
+    import sys
+
+    mod = sys.modules[__name__]
+    entries: list[dict[str, str]] = []
+    for attr_name in sorted(dir(mod)):
+        if attr_name.startswith("_") or attr_name == "catalog":
+            continue
+        obj = getattr(mod, attr_name)
+        if not callable(obj) or _inspect.isclass(obj):
+            continue
+        # Only include functions defined in this module
+        if getattr(obj, "__module__", None) != __name__:
+            continue
+        try:
+            sig = str(_inspect.signature(obj))
+        except (ValueError, TypeError):
+            sig = "(...)"
+        entries.append(
+            {
+                "name": attr_name,
+                "qualname": f"ordeal.assertions.{attr_name}",
+                "signature": sig,
+                "doc": (_inspect.getdoc(obj) or "").split("\n")[0],
+            }
+        )
+    return entries

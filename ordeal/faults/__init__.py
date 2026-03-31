@@ -228,7 +228,13 @@ class LambdaFault(Fault):
 # Catalog — introspect available faults at runtime
 # ---------------------------------------------------------------------------
 
-_FAULT_MODULES = ("io", "timing", "numerical", "network", "concurrency")
+
+def _discover_fault_modules() -> list[str]:
+    """Auto-discover fault submodules by scanning the faults/ directory."""
+    from pathlib import Path
+
+    pkg_dir = Path(__file__).parent
+    return sorted(p.stem for p in pkg_dir.glob("*.py") if not p.name.startswith("_"))
 
 
 def catalog() -> list[dict[str, Any]]:
@@ -248,12 +254,12 @@ def catalog() -> list[dict[str, Any]]:
             ...
         ]
 
-    No hardcoded descriptions — everything is derived from the source code
-    via ``inspect``.  When a new fault is added to any submodule, it
-    appears here automatically.
+    Fully automatic — submodules are discovered by scanning the ``faults/``
+    directory.  When a new fault file or function is added, it appears here
+    automatically with no registration needed.
     """
     entries: list[dict[str, Any]] = []
-    for mod_name in _FAULT_MODULES:
+    for mod_name in _discover_fault_modules():
         try:
             mod = importlib.import_module(f"ordeal.faults.{mod_name}")
         except ImportError:

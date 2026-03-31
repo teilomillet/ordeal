@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time as _time
 from pathlib import Path
@@ -423,11 +424,265 @@ def _is_function_target(target: str) -> bool:
         return False
 
 
+def _cmd_init(args: argparse.Namespace) -> int:
+    """Bootstrap test files for untested modules."""
+    import re
+    import subprocess
+
+    from ordeal.mutations import init_project
+
+    target: str | None = args.target or None
+    output_dir: str = args.output_dir
+    dry_run: bool = args.dry_run
+
+    results = init_project(target=target, output_dir=output_dir, dry_run=dry_run)
+
+    if not results:
+        if target:
+            _stderr(f"Could not resolve {target!r}. Is it importable?\n")
+        else:
+            _stderr(
+                "No Python package found in the current directory.\n  Usage: ordeal init myapp\n"
+            )
+        return 1
+
+    pkg = target or results[0]["module"].split(".")[0]
+
+    generated = [r for r in results if r["status"] == "generated"]
+    existed = sum(1 for r in results if r["status"] == "exists")
+
+    if dry_run:
+        _stderr(f"\nordeal init — DRY RUN for {pkg}\n\n")
+        for r in generated:
+            print(f"\n# --- {r['path']} ---\n")
+            print(r["content"])
+        _stderr(f"  Would generate {len(generated)} test file(s)\n\n")
+        return 0
+
+    if not generated:
+        _stderr(f"\nordeal init — {pkg}: all modules already have tests.\n\n")
+        return 0
+
+    # --- Setup subprocess env ---
+    env = dict(os.environ)
+    cwd = os.getcwd()
+    pypath = env.get("PYTHONPATH", "")
+    src = os.path.join(cwd, "src")
+    extra = src if os.path.isdir(src) else cwd
+    env["PYTHONPATH"] = f"{extra}:{pypath}" if pypath else extra
+
+    def _run_ordeal(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from ordeal.cli import main; import sys; sys.exit(main(" + repr(argv) + "))",
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+    # --- Phase 1: Verify generated tests pass ---
+    test_files = [r["path"] for r in generated]
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "--tb=line", "--no-header", *test_files],
+        capture_output=True,
+        text=True,
+    )
+    tests_pass = proc.returncode == 0
+
+    # --- Phase 2: Mutation loop ---
+    # Collect function-level targets for more reliable mutation testing
+    mut_targets: list[str] = []
+    for r in generated:
+        content = r.get("content", "")
+        mod = r["module"]
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(f"def test_{mod.replace('.', '_')}_") and "_pinned" in stripped:
+                prefix = f"def test_{mod.replace('.', '_')}_"
+                func = stripped.split("_pinned")[0].replace(prefix, "")
+                mut_targets.append(f"{mod}.{func}")
+    if not mut_targets:
+        mut_targets = [r["module"] for r in generated]
+
+    mutation_score = ""
+    for round_num in range(3):
+        mp = _run_ordeal(
+            ["mutate", *mut_targets, "-p", "essential", "--generate-stubs", ".ordeal_stubs_tmp.py"]
+        )
+        for line in mp.stdout.splitlines():
+            if line.startswith("Score:"):
+                mutation_score = line.strip()
+                break
+        stubs_path = Path(".ordeal_stubs_tmp.py")
+        if "(100%)" in mutation_score or not stubs_path.exists():
+            stubs_path.unlink(missing_ok=True)
+            break
+        stubs = stubs_path.read_text().strip()
+        stubs_path.unlink(missing_ok=True)
+        if not stubs:
+            break
+        # Append gap-closing tests
+        for r in generated:
+            if r["path"]:
+                p = Path(r["path"])
+                p.write_text(p.read_text() + "\n\n" + stubs + "\n")
+                break
+
+    Path(".ordeal_stubs_tmp.py").unlink(missing_ok=True)
+
+    # --- Phase 3: Brief explore ---
+    explore_summary = ""
+    if Path("ordeal.toml").exists():
+        ep = _run_ordeal(["explore", "--max-time", "10", "-c", "ordeal.toml"])
+        for line in (ep.stderr + ep.stdout).splitlines():
+            if "edge" in line.lower() or "runs:" in line.lower():
+                explore_summary = line.strip()
+                break
+
+    # --- Count what was generated ---
+    n_tests = 0
+    n_pinned = 0
+    n_properties = 0
+    n_chaos = 0
+    pinned_values: list[str] = []
+    property_names: list[str] = []
+
+    for r in generated:
+        content = r.get("content", "")
+        # Re-read in case mutation loop appended stubs
+        if r["path"] and Path(r["path"]).exists():
+            content = Path(r["path"]).read_text()
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("def test_"):
+                n_tests += 1
+                if "_pinned" in stripped:
+                    n_pinned += 1
+                elif "_properties" in stripped:
+                    n_properties += 1
+            if "chaos_for(" in stripped:
+                n_chaos += 1
+            # Collect pinned values for review
+            if stripped.startswith("assert ") and "==" in stripped:
+                expr = stripped.removeprefix("assert ").strip()
+                skip_kw = (
+                    "isinstance",
+                    "is not",
+                    "is None",
+                    "len(",
+                    "math.",
+                    "not ",
+                    ">= 0",
+                    "== result",
+                    "<= result",
+                    "== ...",
+                )
+                if not any(kw in expr for kw in skip_kw):
+                    if "pytest.approx(" in expr:
+                        expr = re.sub(r"pytest\.approx\(([^)]+)\)", r"\1", expr)
+                    pinned_values.append(expr)
+            # Collect discovered properties
+            if stripped.startswith('"""Discovered:'):
+                props = stripped.replace('"""Discovered:', "").rstrip('."""')
+                property_names.extend(p.strip() for p in props.split(","))
+
+    # Deduplicate properties
+    seen: set[str] = set()
+    unique_props: list[str] = []
+    for p in property_names:
+        if p not in seen:
+            seen.add(p)
+            unique_props.append(p)
+
+    # --- Print the quality report ---
+    _stderr(f"\n{'=' * 60}\n")
+    _stderr(f"  ordeal init — quality report for {pkg}\n")
+    _stderr(f"{'=' * 60}\n\n")
+
+    _stderr(f"  Scanned:    {len(results)} module(s)")
+    if existed:
+        _stderr(f" ({existed} already tested)")
+    _stderr("\n")
+
+    _stderr(f"  Generated:  {n_tests} tests")
+    parts = []
+    if n_pinned:
+        parts.append(f"{n_pinned} pinned")
+    if n_properties:
+        parts.append(f"{n_properties} property")
+    if n_chaos:
+        parts.append(f"{n_chaos} chaos")
+    if parts:
+        _stderr(f" ({', '.join(parts)})")
+    _stderr("\n")
+
+    if unique_props:
+        _stderr(f"  Properties: {len(unique_props)} discovered")
+        # Show the interesting ones
+        interesting = [
+            p
+            for p in unique_props
+            if not p.startswith("output type")
+            and p not in ("deterministic", "never None", "no NaN")
+        ]
+        if interesting:
+            _stderr(f" — {', '.join(interesting[:5])}")
+        _stderr("\n")
+
+    _stderr(f"  Tests pass: {'yes' if tests_pass else 'NO — check generated files'}\n")
+
+    if mutation_score and "0/0" not in mutation_score:
+        _stderr(f"  Mutations:  {mutation_score.removeprefix('Score: ')}\n")
+
+    if explore_summary:
+        _stderr(f"  Explored:   {explore_summary}\n")
+
+    _stderr("\n  Files:\n")
+    for r in generated:
+        _stderr(f"    {r['path']}\n")
+    if Path("ordeal.toml").exists():
+        _stderr("    ordeal.toml\n")
+    _stderr("\n")
+
+    # --- Pinned values for review ---
+    if pinned_values:
+        _stderr("  Pinned values (verify these match intended behavior):\n")
+        for expr in pinned_values:
+            _stderr(f"    {expr}\n")
+        _stderr("\n")
+
+    # --- JSON to stdout for AI assistants ---
+    import json
+
+    report = {
+        "package": pkg,
+        "modules_scanned": len(results),
+        "tests_generated": n_tests,
+        "test_breakdown": {"pinned": n_pinned, "property": n_properties, "chaos": n_chaos},
+        "properties_discovered": unique_props,
+        "tests_pass": tests_pass,
+        "mutation_score": mutation_score.removeprefix("Score: ") if mutation_score else None,
+        "files": [r["path"] for r in generated]
+        + (["ordeal.toml"] if Path("ordeal.toml").exists() else []),
+        "pinned_values": pinned_values,
+        "functions": [
+            {"module": r["module"], "status": r["status"], "test_file": r["path"]} for r in results
+        ],
+    }
+    print(json.dumps(report, indent=2))
+
+    return 0
+
+
 def _cmd_mutate(args: argparse.Namespace) -> int:
     """Run mutation testing on specified targets."""
     from ordeal.mutations import (
         MutationResult,
         NoTestsFoundError,
+        generate_starter_tests,
         mutate_and_test,
         mutate_function_and_test,
     )
@@ -511,7 +766,22 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
                     equivalence_samples=equivalence_samples,
                 )
         except NoTestsFoundError as e:
-            _stderr(f"  WARNING: {e}\n")
+            _stderr(f"  WARNING: No tests found for {target!r}\n")
+            starter = generate_starter_tests(target)
+            if starter:
+                suggested = e.suggested_file or f"tests/test_{target.rsplit('.', 1)[-1]}.py"
+                if args.generate_stubs:
+                    stubs_path = Path(args.generate_stubs)
+                    stubs_path.parent.mkdir(parents=True, exist_ok=True)
+                    existing = stubs_path.read_text() if stubs_path.exists() else ""
+                    sep = "\n\n" if existing else ""
+                    stubs_path.write_text(existing + sep + starter)
+                    _stderr(f"  Starter tests written: {stubs_path}\n")
+                else:
+                    # Print the scaffold directly — don't hide it behind a flag
+                    print(f"\n# Save to: {suggested}\n")
+                    print(starter)
+                    _stderr(f"  Or run: ordeal init {target}\n")
             exit_code = 1
             continue
         except (ImportError, AttributeError, ValueError) as e:
@@ -728,6 +998,24 @@ def main(argv: list[str] | None = None) -> int:
         help="Throughput metric to fit (default: runs)",
     )
 
+    # -- ordeal init --
+    init_p = sub.add_parser("init", help="Bootstrap test files for untested modules")
+    init_p.add_argument(
+        "target",
+        nargs="?",
+        default=None,
+        help="Package path (e.g. myapp); auto-detects if omitted",
+    )
+    init_p.add_argument(
+        "--output-dir",
+        "-o",
+        default="tests",
+        help="Directory to write test files (default: tests)",
+    )
+    init_p.add_argument(
+        "--dry-run", action="store_true", help="Show what would be generated without writing files"
+    )
+
     # -- ordeal mutate --
     mutate_p = sub.add_parser("mutate", help="Run mutation testing")
     mutate_p.add_argument(
@@ -787,6 +1075,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_mine_pair(args)
     elif args.command == "benchmark":
         return _cmd_benchmark(args)
+    elif args.command == "init":
+        return _cmd_init(args)
     elif args.command == "mutate":
         return _cmd_mutate(args)
     else:

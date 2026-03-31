@@ -109,6 +109,8 @@ class MineResult:
     properties: list[MinedProperty] = field(default_factory=list)
     not_applicable: list[str] = field(default_factory=list)
     not_checked: list[str] = field(default_factory=lambda: list(STRUCTURAL_LIMITATIONS))
+    collected_inputs: list[dict[str, object]] = field(default_factory=list, repr=False)
+    collected_outputs: list[object] = field(default_factory=list, repr=False)
 
     @property
     def universal(self) -> list[MinedProperty]:
@@ -572,6 +574,8 @@ def mine(
         examples=len(outputs),
         properties=props,
         not_applicable=not_applicable,
+        collected_inputs=inputs,
+        collected_outputs=outputs,
     )
 
 

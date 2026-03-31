@@ -70,11 +70,13 @@ import ast
 import copy
 import importlib
 import inspect
+import pkgutil
 import sys
 import textwrap
 import types
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Literal
 
 from ordeal.faults import PatchFault
@@ -103,7 +105,17 @@ def _unwrap_func(func: object) -> object:
 
 
 class NoTestsFoundError(RuntimeError):
-    """Raised when auto-discovery finds no tests for a mutation target."""
+    """Raised when auto-discovery finds no tests for a mutation target.
+
+    Attributes:
+        target: The dotted path that was being tested.
+        suggested_file: Recommended filename to save starter tests to.
+    """
+
+    def __init__(self, message: str, *, target: str = "", suggested_file: str = ""):
+        super().__init__(message)
+        self.target = target
+        self.suggested_file = suggested_file
 
 
 # ============================================================================
@@ -217,25 +229,33 @@ class Mutant:
         return advice
 
 
+# Multiple candidate values per type — distinct values so that a != b.
+# Each list is ordered: [interior, interior, interior, boundary].
+# Consecutive params get different values via index offset.
+_TYPE_VALUES: dict[str, list[object]] = {
+    "int": [2, 3, 7, 0, -1, 100, 5],
+    "float": [2.5, 0.7, 3.14, 0.0, -1.0, 0.001, 100.0],
+    "str": ["hello", "world", "abc", "", "x", "a b c"],
+    "bool": [True, False, True, False],
+    "list": [[1.0, 2.0, 3.0], [4.0, 5.0], [7.0], [], [0.0, 0.0]],
+    "dict": [{"a": 1}, {"x": 2, "y": 3}, {}, {"k": 0}],
+    "bytes": [b"abc", b"xyz", b"", b"\x00\xff"],
+    "None": [None],
+    "NoneType": [None],
+}
+
+# Legacy single-value mapping used by generate_test_stubs (surviving mutants).
 _TYPE_EXAMPLES: dict[str, str] = {
-    "int": "1",
-    "float": "1.0",
-    "str": '"value"',
-    "bool": "True",
-    "list": "[]",
-    "dict": "{}",
-    "bytes": 'b""',
-    "None": "None",
-    "NoneType": "None",
+    k: repr(v[0]) if k != "str" else repr(v[0]) for k, v in _TYPE_VALUES.items()
 }
 
 
 def _resolve_signature(target: str) -> tuple[str, str]:
     """Resolve a function's signature into display and call forms.
 
-    Returns ``(sig_str, call_args)`` where *sig_str* is the signature
-    string (e.g. ``"(a: int, b: int) -> int"``) and *call_args* is
-    an example call (e.g. ``"a=1, b=1"``).
+    Returns ``(sig_str, call_args)`` where *sig_str* is the repr-based
+    call string using the first value set, and *call_args* uses the
+    first candidate per parameter.
 
     Falls back to ``("(...)", "...")``) when the function can't be resolved.
     """
@@ -250,17 +270,28 @@ def _resolve_signature(target: str) -> tuple[str, str]:
         return "(...)", "..."
 
     sig_str = str(sig)
+    kwargs = _build_kwargs(func, value_set=0)
+    call_args = ", ".join(f"{k}={v!r}" for k, v in kwargs.items()) if kwargs else "..."
+    return sig_str, call_args
 
-    # Build example call args from parameter names + type hints
-    call_parts: list[str] = []
-    hints = {}
+
+def _build_kwargs(func: object, value_set: int = 0) -> dict[str, object]:
+    """Build a dict of example kwargs for *func*.
+
+    *value_set* offsets into the candidate list so each call produces
+    distinct inputs.  Parameter index also offsets so a != b.
+    """
+    sig = inspect.signature(func)  # type: ignore[arg-type]
+    hints: dict[str, type] = {}
     try:
         from typing import get_type_hints
 
-        hints = get_type_hints(func)
+        hints = get_type_hints(func)  # type: ignore[arg-type]
     except Exception:
         pass
 
+    kwargs: dict[str, object] = {}
+    param_idx = 0
     for name, param in sig.parameters.items():
         if name == "self":
             continue
@@ -268,11 +299,26 @@ def _resolve_signature(target: str) -> tuple[str, str]:
             continue
         hint = hints.get(name)
         hint_name = getattr(hint, "__name__", str(hint)) if hint else ""
-        example = _TYPE_EXAMPLES.get(hint_name, "...")
-        call_parts.append(f"{name}={example}")
+        candidates = _TYPE_VALUES.get(hint_name, [None])
+        # Pick a different value for each parameter
+        idx = (value_set + param_idx) % len(candidates)
+        kwargs[name] = candidates[idx]
+        param_idx += 1
 
-    call_args = ", ".join(call_parts) if call_parts else "..."
-    return sig_str, call_args
+    return kwargs
+
+
+def _build_multiple_kwargs(target: str, n: int = 3) -> list[dict[str, object]]:
+    """Build *n* distinct sets of kwargs for a function."""
+    try:
+        parts = target.rsplit(".", 1)
+        if len(parts) < 2:
+            return []
+        mod = importlib.import_module(parts[0])
+        func = getattr(mod, parts[1])
+    except Exception:
+        return []
+    return [_build_kwargs(func, value_set=i) for i in range(n)]
 
 
 @dataclass
@@ -410,6 +456,927 @@ class MutationResult:
             lines.append("")
 
         return "\n".join(lines)
+
+
+def generate_starter_tests(target: str) -> str:
+    """Generate a smoke-test file for a target that has no tests yet.
+
+    Introspects the target (function or module) via ``inspect`` and
+    produces one smoke test per public callable — real imports, real
+    parameter names, typed example values.  No assertions beyond
+    ``assert result is not None``; the goal is a runnable file that
+    gives mutation testing something to work with.
+
+    Returns an empty string if the target cannot be resolved.
+    """
+    is_func = _is_function_target(target)
+
+    if is_func:
+        return _starter_for_function(target)
+    else:
+        return _starter_for_module(target)
+
+
+@dataclass
+class _CallResult:
+    """Result of trying to call a function with example args."""
+
+    value: object = None
+    value_repr: str = "None"
+    kwargs: dict[str, object] = field(default_factory=dict)
+    call_repr: str = ""
+    error: str = ""
+    error_type: str = ""
+
+
+def _try_call_with_kwargs(target: str, kwargs: dict[str, object]) -> _CallResult:
+    """Call a function with specific kwargs and return what happened."""
+    try:
+        parts = target.rsplit(".", 1)
+        if len(parts) < 2:
+            return _CallResult(error="cannot resolve", error_type="ImportError")
+        mod = importlib.import_module(parts[0])
+        func = getattr(mod, parts[1])
+        result = func(**kwargs)
+        call_repr = ", ".join(f"{k}={v!r}" for k, v in kwargs.items())
+        return _CallResult(
+            value=result, value_repr=repr(result), kwargs=kwargs, call_repr=call_repr
+        )
+    except Exception as exc:
+        call_repr = ", ".join(f"{k}={v!r}" for k, v in kwargs.items())
+        return _CallResult(
+            kwargs=kwargs,
+            call_repr=call_repr,
+            error=str(exc)[:80],
+            error_type=type(exc).__name__,
+        )
+
+
+def _try_multiple_calls(target: str) -> list[_CallResult]:
+    """Try multiple input sets, return all results (successes and failures)."""
+    all_kwargs = _build_multiple_kwargs(target, n=3)
+    if not all_kwargs:
+        return []
+    return [_try_call_with_kwargs(target, kw) for kw in all_kwargs]
+
+
+@dataclass
+class _MineFindings:
+    """Everything mine() discovered about a function."""
+
+    pinned: list[tuple[dict[str, object], object]]  # (kwargs, output) pairs
+    property_lines: list[str]  # generated test lines
+    prop_names: list[str]  # human-readable property names
+
+
+def _run_mine(target: str, safe_name: str, func_name: str) -> _MineFindings | None:
+    """Run mine() on a function. Return all findings or None."""
+    try:
+        parts = target.rsplit(".", 1)
+        if len(parts) < 2:
+            return None
+        mod = importlib.import_module(parts[0])
+        func = getattr(mod, parts[1])
+
+        from ordeal.mine import mine
+
+        hints = inspect.get_annotations(func)
+        is_void = hints.get("return") is None
+
+        result = mine(func, max_examples=50)
+
+        # --- Extract representative (input, output) pairs ---
+        # Pick diverse examples: spread across the range of outputs
+        pinned: list[tuple[dict[str, object], object]] = []
+        if result.collected_inputs and result.collected_outputs:
+            pairs = list(zip(result.collected_inputs, result.collected_outputs))
+            pinned = _pick_diverse(pairs, n=3)
+
+        if is_void:
+            return _MineFindings(pinned=pinned, property_lines=[], prop_names=[])
+
+        if not result.universal:
+            return _MineFindings(pinned=pinned, property_lines=[], prop_names=[])
+
+        # --- Build property assertions ---
+        type_props = [p.name for p in result.universal if p.name.startswith("output type is ")]
+        is_float = any("float" in t for t in type_props)
+        prop_name_set = {p.name for p in result.universal}
+
+        assertions = []
+        for prop in result.universal:
+            a = _property_to_assert(prop.name, is_float=is_float)
+            if a:
+                assertions.append(a)
+
+        param_call = _param_call(target)
+        param_names = param_call.split(", ") if param_call != "..." else []
+
+        if "commutative" in prop_name_set and len(param_names) == 2:
+            a, b = param_names
+            assertions.append(f"assert {func_name}({b}, {a}) == result")
+        if "involution" in prop_name_set and len(param_names) == 1:
+            assertions.append(f"assert {func_name}(result) == {param_names[0]}")
+        if "idempotent" in prop_name_set and len(param_names) == 1:
+            assertions.append(f"assert {func_name}(result) == result")
+
+        doc_parts = [p.name for p in result.universal[:5]]
+
+        if not assertions:
+            return _MineFindings(pinned=pinned, property_lines=[], prop_names=doc_parts)
+
+        module_path = parts[0]
+        param_sig = _param_sig(target)
+        needs_math = any("math." in a for a in assertions)
+
+        lines: list[str] = []
+        lines.append("")
+        lines.append(f"def test_{safe_name}_properties():")
+        lines.append(f'    """Discovered: {", ".join(doc_parts)}."""')
+        if needs_math:
+            lines.append("    import math")
+        lines.append("    from ordeal.quickcheck import quickcheck")
+        lines.append(f"    from {module_path} import {func_name}")
+        lines.append("")
+        lines.append("    @quickcheck")
+        lines.append(f"    def check({param_sig}):")
+        lines.append(f"        result = {func_name}({param_call})")
+        for a in assertions:
+            lines.append(f"        {a}")
+        lines.append("")
+
+        return _MineFindings(pinned=pinned, property_lines=lines, prop_names=doc_parts)
+    except Exception:
+        return None
+
+
+def _pick_diverse(
+    pairs: list[tuple[dict[str, object], object]], n: int = 3
+) -> list[tuple[dict[str, object], object]]:
+    """Pick *n* diverse (input, output) pairs from mine's collected data.
+
+    Prefers simple inputs with diverse outputs. Machine-discovered,
+    not hand-crafted.
+    """
+    if len(pairs) <= n:
+        return pairs
+
+    def _complexity(kwargs: dict[str, object]) -> int:
+        return sum(len(repr(v)) for v in kwargs.values())
+
+    # Sort by simplicity first — prefer short, readable inputs
+    ranked = sorted(pairs, key=lambda p: _complexity(p[0]))
+
+    selected: list[tuple[dict[str, object], object]] = []
+    seen_outputs: set[str] = set()
+
+    for kwargs, output in ranked:
+        out_repr = repr(output)
+        if out_repr not in seen_outputs:
+            selected.append((kwargs, output))
+            seen_outputs.add(out_repr)
+            if len(selected) >= n:
+                break
+
+    # Pad if needed
+    if len(selected) < n:
+        for kwargs, output in ranked:
+            if (kwargs, output) not in selected:
+                selected.append((kwargs, output))
+                if len(selected) >= n:
+                    break
+
+    return selected[:n]
+
+
+def _param_sig(target: str) -> str:
+    """Build a parameter signature for a quickcheck function."""
+    try:
+        parts = target.rsplit(".", 1)
+        mod = importlib.import_module(parts[0])
+        func = getattr(mod, parts[1])
+        sig = inspect.signature(func)
+        params = []
+        for name, p in sig.parameters.items():
+            if name == "self":
+                continue
+            if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
+                continue
+            ann = p.annotation
+            if ann is not inspect.Parameter.empty:
+                ann_name = getattr(ann, "__name__", str(ann))
+                params.append(f"{name}: {ann_name}")
+            else:
+                params.append(name)
+        return ", ".join(params)
+    except Exception:
+        return "..."
+
+
+def _param_call(target: str) -> str:
+    """Build a call expression using parameter names."""
+    try:
+        parts = target.rsplit(".", 1)
+        mod = importlib.import_module(parts[0])
+        func = getattr(mod, parts[1])
+        sig = inspect.signature(func)
+        names = []
+        for name, p in sig.parameters.items():
+            if name == "self":
+                continue
+            if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
+                continue
+            names.append(name)
+        return ", ".join(names)
+    except Exception:
+        return "..."
+
+
+_PROPERTY_ASSERTIONS: dict[str, str | None] = {
+    "never None": "assert result is not None",
+    "output >= 0": "assert result >= 0",
+    "output in [0, 1]": "assert 0 <= result <= 1",
+    "no NaN": "assert not math.isnan(result)",
+    "never empty": "assert len(result) > 0",
+    "deterministic": None,  # covered by pinned tests
+}
+
+# Properties that need the function reference — generated as extra lines
+_ALGEBRAIC_ASSERTIONS: dict[str, str] = {
+    "commutative": "assert {func}({b}={args}[0], {a}={args}[1]) == result",
+    "involution": "assert {func}(result) == {first_arg}",
+    "idempotent": "assert {func}(result) == result",
+}
+
+
+def _property_to_assert(prop_name: str, *, is_float: bool = False) -> str | None:
+    """Convert a mined property name to an assertion line."""
+    # Exact match
+    if prop_name in _PROPERTY_ASSERTIONS:
+        a = _PROPERTY_ASSERTIONS[prop_name]
+        # no NaN only makes sense for float
+        if prop_name == "no NaN" and not is_float:
+            return None
+        return a
+    # Type consistency: "output type is float"
+    if prop_name.startswith("output type is "):
+        type_name = prop_name.replace("output type is ", "")
+        if type_name == "NoneType":
+            return "assert result is None"
+        return f"assert isinstance(result, {type_name})"
+    # Length relationships: "len(output) == len(xs)"
+    if prop_name.startswith("len(output) "):
+        return f"assert {prop_name.replace('output', 'result')}"
+    return None
+
+
+def _returns_none(target: str) -> bool:
+    """Check if a function's return annotation is None."""
+    try:
+        parts = target.rsplit(".", 1)
+        if len(parts) < 2:
+            return False
+        mod = importlib.import_module(parts[0])
+        func = getattr(mod, parts[1])
+        hints = inspect.get_annotations(func)
+        ret = hints.get("return", _SENTINEL)
+        return ret is None or ret is type(None)
+    except Exception:
+        return False
+
+
+_SENTINEL = object()
+
+
+def _needs_approx(value: object) -> bool:
+    """Check if a value needs pytest.approx for comparison."""
+    if isinstance(value, float):
+        return True
+    if isinstance(value, (list, tuple)):
+        return any(isinstance(v, float) for v in value)
+    return False
+
+
+def _pin_assertion(call_expr: str, value: object, value_repr: str) -> str:
+    """Generate the right assertion for a pinned value."""
+    if _needs_approx(value):
+        return f"assert {call_expr} == pytest.approx({value_repr})"
+    return f"assert {call_expr} == {value_repr}"
+
+
+def _starter_for_function(target: str) -> str:
+    """Generate real tests for a single function.
+
+    Calls the function with multiple distinct inputs, pins actual return
+    values, then runs mine() to discover properties and turn them into
+    assertions.
+    """
+    parts = target.rsplit(".", 1)
+    if len(parts) < 2:
+        return ""
+    module_path, func_name = parts
+    safe_name = target.replace(".", "_")
+
+    sig_str, _ = _resolve_signature(target)
+    returns_none = _returns_none(target)
+
+    lines = [
+        f'"""Tests for {target} — generated by ordeal init.',
+        "",
+        "Pinned return values and discovered properties.",
+        "Pinned values freeze CURRENT behavior — verify they match INTENDED behavior.",
+        "If a pinned test fails, the function changed.",
+        "If a value looks wrong, the code has a bug.",
+        '"""',
+        "",
+        f"from {module_path} import {func_name}",
+        "",
+    ]
+
+    # Try multiple inputs and pin each successful result
+    results = _try_multiple_calls(target)
+    successes = [r for r in results if not r.error]
+    failures = [r for r in results if r.error]
+
+    uses_approx = any(_needs_approx(r.value) for r in successes)
+    uses_pytest = bool(failures) or uses_approx
+
+    if uses_pytest:
+        lines.append("import pytest")
+        lines.append("")
+
+    if successes:
+        lines.append("")
+        lines.append(f"def test_{safe_name}_pinned():")
+        lines.append(f'    """{func_name}{sig_str} — pinned return values."""')
+        for r in successes:
+            if returns_none:
+                lines.append(f"    assert {func_name}({r.call_repr}) is None")
+            else:
+                a = _pin_assertion(f"{func_name}({r.call_repr})", r.value, r.value_repr)
+                lines.append(f"    {a}")
+        lines.append("")
+
+    if failures:
+        lines.append("")
+        lines.append(f"def test_{safe_name}_crashes():")
+        err = failures[0]
+        lines.append(f'    """Crashes on some inputs: {err.error_type}."""')
+        for f in failures:
+            lines.append(f"    with pytest.raises({f.error_type}):")
+            lines.append(f"        {func_name}({f.call_repr})")
+        lines.append("")
+
+    # Mine properties
+    mine_result = _run_mine(target, safe_name, func_name)
+    if mine_result and mine_result.property_lines:
+        lines.extend(mine_result.property_lines)
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _starter_for_module(target: str) -> str:
+    """Generate real tests for every public callable in a module.
+
+    Uses the full ordeal toolkit:
+    1. scan_module — smoke-test with random inputs, find crashes
+    2. Pinned values — call with distinct args, record results
+    3. mine — discover properties (commutativity, bounds, etc.)
+    4. fuzz — deep-fuzz typed functions, capture crash inputs
+    5. chaos_for — generate a stateful ChaosTest class
+    """
+    try:
+        mod = importlib.import_module(target)
+    except ImportError:
+        return ""
+
+    callables: list[str] = []
+    for name in sorted(dir(mod)):
+        if name.startswith("_"):
+            continue
+        obj = getattr(mod, name, None)
+        if not callable(obj):
+            continue
+        obj_mod = getattr(obj, "__module__", None)
+        if obj_mod and not obj_mod.startswith(target):
+            continue
+        callables.append(name)
+
+    if not callables:
+        return ""
+
+    safe_mod = target.replace(".", "_")
+
+    # --- Phase 1: mine() each function (the discovery engine) ---
+    # mine() runs the function with random inputs and discovers everything:
+    # (input, output) pairs + universal properties. No hand-crafted values.
+    mine_findings: dict[str, _MineFindings | None] = {}
+    for name in callables:
+        dotted = f"{target}.{name}"
+        mine_findings[name] = _run_mine(dotted, f"{safe_mod}_{name}", name)
+
+    # --- Phase 2: scan_module for crash discovery ---
+    scan_crashes: dict[str, str] = {}
+    try:
+        from ordeal.auto import scan_module
+
+        scan = scan_module(target, max_examples=30)
+        for fr in scan.functions:
+            if not fr.passed and fr.error:
+                scan_crashes[fr.name] = fr.error[:80]
+    except Exception:
+        pass
+
+    # --- Phase 3: fallback for functions mine() couldn't handle ---
+    fallback: dict[str, tuple[list[_CallResult], list[_CallResult]]] = {}
+    for name in callables:
+        f = mine_findings.get(name)
+        if f and f.pinned:
+            continue  # mine handled it
+        dotted = f"{target}.{name}"
+        results = _try_multiple_calls(dotted)
+        successes = [r for r in results if not r.error]
+        failures = [r for r in results if r.error]
+        if successes or failures:
+            fallback[name] = (successes, failures)
+
+    # --- Determine imports ---
+    needs_pytest = bool(scan_crashes)
+    for name, f in mine_findings.items():
+        if f and f.pinned:
+            for _, output in f.pinned:
+                if _needs_approx(output):
+                    needs_pytest = True
+    for _, (_, failures) in fallback.items():
+        if failures:
+            needs_pytest = True
+
+    lines = [
+        f'"""Tests for {target} — generated by ordeal init.',
+        "",
+        f"{len(callables)} callable(s). All values discovered by ordeal, not hand-written.",
+        "Pinned values freeze CURRENT behavior — verify they match INTENDED behavior.",
+        "If a pinned test fails, the function changed.",
+        "If a value looks wrong, the code has a bug.",
+        '"""',
+        "",
+        f"import {target}",
+    ]
+    if needs_pytest:
+        lines.append("import pytest")
+    lines.append("")
+
+    # --- Emit tests per function ---
+    for name in callables:
+        dotted = f"{target}.{name}"
+        sig_str, _ = _resolve_signature(dotted)
+        is_void = _returns_none(dotted)
+        f = mine_findings.get(name)
+
+        # Pinned values from mine (machine-discovered inputs)
+        if f and f.pinned:
+            lines.append("")
+            lines.append(f"def test_{safe_mod}_{name}_pinned():")
+            lines.append(f'    """{name}{sig_str} — discovered by ordeal."""')
+            for kwargs, output in f.pinned:
+                call_repr = ", ".join(f"{k}={v!r}" for k, v in kwargs.items())
+                call = f"{target}.{name}({call_repr})"
+                if is_void:
+                    lines.append(f"    assert {call} is None")
+                else:
+                    a = _pin_assertion(call, output, repr(output))
+                    lines.append(f"    {a}")
+            lines.append("")
+        elif name in fallback:
+            # Fallback for functions mine couldn't handle
+            successes, failures = fallback[name]
+            if successes:
+                lines.append("")
+                lines.append(f"def test_{safe_mod}_{name}_pinned():")
+                lines.append(f'    """{name}{sig_str} — pinned values."""')
+                for r in successes:
+                    if is_void:
+                        lines.append(f"    assert {target}.{name}({r.call_repr}) is None")
+                    else:
+                        call = f"{target}.{name}({r.call_repr})"
+                        a = _pin_assertion(call, r.value, r.value_repr)
+                        lines.append(f"    {a}")
+                lines.append("")
+            if failures:
+                lines.append("")
+                lines.append(f"def test_{safe_mod}_{name}_crashes():")
+                lines.append(f'    """Crashes: {failures[0].error_type}."""')
+                for fail in failures:
+                    lines.append(f"    with pytest.raises({fail.error_type}):")
+                    lines.append(f"        {target}.{name}({fail.call_repr})")
+                lines.append("")
+
+        # Property tests from mine
+        if f and f.property_lines:
+            lines.extend(f.property_lines)
+
+    # --- Scan crash findings not already covered ---
+    for name, error in scan_crashes.items():
+        has_test = name in mine_findings and mine_findings[name] and mine_findings[name].pinned
+        if has_test or name in fallback:
+            continue
+        lines.append("")
+        lines.append(f"def test_{safe_mod}_{name}_crash():")
+        lines.append(f'    """scan found: {name} crashes on random input: {error}."""')
+        lines.append("    pass")
+        lines.append("")
+
+    # --- Emit chaos test ---
+    has_typed = False
+    for name in callables:
+        obj = getattr(mod, name, None)
+        if obj:
+            try:
+                ann = inspect.get_annotations(obj)
+                if len(ann) > 1:  # at least one param + return
+                    has_typed = True
+                    break
+            except Exception:
+                pass
+
+    if has_typed:
+        lines.append("")
+        lines.append("")
+        lines.append("# --- Stateful chaos test (ordeal explores rule interleavings) ---")
+        lines.append("from ordeal.auto import chaos_for")
+        lines.append("")
+        lines.append(f'Test{safe_mod.title().replace("_", "")}Chaos = chaos_for("{target}")')
+        lines.append("")
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+# ============================================================================
+# Project init — bootstrap tests for untested modules
+# ============================================================================
+
+_SKIP_DIRS = {
+    "tests",
+    "test",
+    "docs",
+    "doc",
+    ".venv",
+    "venv",
+    "env",
+    "node_modules",
+    "__pycache__",
+    "build",
+    "dist",
+    ".git",
+    ".tox",
+    ".nox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "htmlcov",
+    ".eggs",
+    "*.egg-info",
+}
+
+
+def _ensure_importable(target: str) -> None:
+    """Add src/ or project root to sys.path if needed for import."""
+    cwd = Path.cwd()
+    # src/ layout: src/myapp/__init__.py
+    src = cwd / "src"
+    if src.is_dir() and str(src) not in sys.path:
+        top = target.split(".")[0]
+        if (src / top).is_dir():
+            sys.path.insert(0, str(src))
+            return
+    # Flat layout: myapp/__init__.py at project root
+    if str(cwd) not in sys.path:
+        sys.path.insert(0, str(cwd))
+
+
+def _discover_modules(target: str) -> list[str]:
+    """Find all importable modules under *target* (package or single module)."""
+    _ensure_importable(target)
+    try:
+        mod = importlib.import_module(target)
+    except ImportError:
+        return []
+
+    if not hasattr(mod, "__path__"):
+        return [target]
+
+    modules = [target]
+    for info in pkgutil.walk_packages(mod.__path__, prefix=target + "."):
+        if info.name.rsplit(".", 1)[-1].startswith("_"):
+            continue
+        modules.append(info.name)
+    return modules
+
+
+# Common test directory names and patterns
+_TEST_DIRS = ["tests", "test", "src/tests", "src/test"]
+
+
+def _find_test_dirs() -> list[Path]:
+    """Discover all directories that contain test files."""
+    cwd = Path.cwd()
+    found: list[Path] = []
+    # Check well-known locations
+    for name in _TEST_DIRS:
+        d = cwd / name
+        if d.is_dir():
+            found.append(d)
+    # Also check for test files at project root (rare but valid)
+    if list(cwd.glob("test_*.py")):
+        found.append(cwd)
+    return found or [cwd / "tests"]  # default to tests/ even if missing
+
+
+def _has_tests(module_name: str, test_dir: str = "tests") -> str | None:
+    """Return the existing test file path if one exists, else None.
+
+    Searches the specified *test_dir* and also auto-discovers common
+    test directory layouts (``tests/``, ``test/``, ``src/tests/``, nested
+    subdirectories).
+    """
+    short = module_name.rsplit(".", 1)[-1]
+
+    # Build list of directories to search
+    dirs_to_check: list[Path] = []
+    specified = Path(test_dir)
+    if specified.is_dir():
+        dirs_to_check.append(specified)
+    for d in _find_test_dirs():
+        if d not in dirs_to_check:
+            dirs_to_check.append(d)
+
+    for d in dirs_to_check:
+        # Exact match: test_{name}.py
+        exact = d / f"test_{short}.py"
+        if exact.exists():
+            return str(exact)
+        # Prefix match: test_{name}_*.py (e.g. test_mutations_presets.py)
+        for match in d.glob(f"test_{short}_*.py"):
+            return str(match)
+        # Also search subdirectories (tests/unit/test_X.py, tests/integration/test_X.py)
+        for match in d.rglob(f"test_{short}.py"):
+            return str(match)
+        for match in d.rglob(f"test_{short}_*.py"):
+            return str(match)
+
+    return None
+
+
+def init_project(
+    target: str | None = None,
+    *,
+    output_dir: str = "tests",
+    dry_run: bool = False,
+) -> list[dict[str, str]]:
+    """Bootstrap test files for a Python package.
+
+    Scans *target* for public modules, checks which ones already have
+    tests, and generates starter smoke tests for the rest.
+
+    Args:
+        target: Dotted package path (e.g. ``"myapp"``).  When ``None``,
+            auto-detects from the current directory.
+        output_dir: Directory to write test files to (default ``"tests"``).
+        dry_run: If True, generate content but don't write files.
+
+    Returns:
+        List of dicts with keys ``module``, ``status``, ``path``, ``content``.
+        Status is one of ``"generated"``, ``"exists"``, ``"empty"``.
+    """
+    if target is None:
+        target = _detect_package()
+        if target is None:
+            return []
+
+    modules = _discover_modules(target)
+    results: list[dict[str, str]] = []
+    out = Path(output_dir)
+
+    for mod_name in modules:
+        existing = _has_tests(mod_name, output_dir)
+        if existing:
+            results.append(
+                {
+                    "module": mod_name,
+                    "status": "exists",
+                    "path": existing,
+                    "content": "",
+                }
+            )
+            continue
+
+        content = generate_starter_tests(mod_name)
+        if not content:
+            results.append(
+                {
+                    "module": mod_name,
+                    "status": "empty",
+                    "path": "",
+                    "content": "",
+                }
+            )
+            continue
+
+        short = mod_name.rsplit(".", 1)[-1]
+        dest = out / f"test_{short}.py"
+
+        if not dry_run:
+            out.mkdir(parents=True, exist_ok=True)
+            dest.write_text(content)
+
+        results.append(
+            {
+                "module": mod_name,
+                "status": "generated",
+                "path": str(dest),
+                "content": content,
+            }
+        )
+
+    # Generate ordeal.toml if it doesn't exist
+    if not dry_run and not Path("ordeal.toml").exists():
+        generated_mods = [r["module"] for r in results if r["status"] == "generated"]
+        all_mods = [r["module"] for r in results]
+        if all_mods:
+            _generate_toml(target, all_mods, generated_mods, output_dir)
+
+    return results
+
+
+def _generate_toml(
+    target: str,
+    modules: list[str],
+    generated_modules: list[str],
+    test_dir: str,
+) -> None:
+    """Generate ordeal.toml with explorer + mutation config."""
+    # Find chaos test classes in generated test files
+    test_classes: list[str] = []
+    for mod in generated_modules:
+        short = mod.rsplit(".", 1)[-1]
+        test_file = Path(test_dir) / f"test_{short}.py"
+        if test_file.exists():
+            content = test_file.read_text()
+            for line in content.splitlines():
+                if "= chaos_for(" in line:
+                    cls_name = line.split("=")[0].strip()
+                    test_mod = f"{test_dir}.test_{short}".replace("/", ".")
+                    test_classes.append(f"{test_mod}:{cls_name}")
+
+    top_pkg = target.split(".")[0]
+
+    lines = [
+        f"# ordeal.toml — generated by ordeal init for {target}",
+        "#",
+        "# Run:  ordeal explore     (coverage-guided state exploration)",
+        "#       ordeal mutate      (mutation testing)",
+        "#       ordeal audit <mod> (test coverage audit)",
+        "",
+        "[explorer]",
+        f'target_modules = ["{top_pkg}"]',
+        "max_time = 30",
+        "seed = 42",
+        "verbose = true",
+        "",
+    ]
+
+    for cls in test_classes:
+        lines.append("[[tests]]")
+        lines.append(f'class = "{cls}"')
+        lines.append("")
+
+    # Mutation targets: all function-containing modules
+    func_targets = [m for m in modules if m != target]
+    if not func_targets:
+        func_targets = modules
+    target_strs = ", ".join(f'"{m}"' for m in func_targets[:10])
+
+    lines.extend(
+        [
+            "[mutations]",
+            f"targets = [{target_strs}]",
+            'preset = "standard"',
+            "threshold = 0.8",
+            "",
+            "[report]",
+            'format = "text"',
+            "verbose = true",
+            "",
+        ]
+    )
+
+    Path("ordeal.toml").write_text("\n".join(lines))
+
+
+def _detect_package() -> str | None:
+    """Auto-detect the top-level package from the current directory.
+
+    Checks (in order):
+    1. ``pyproject.toml`` ``[project] name`` (PEP 621)
+    2. ``setup.cfg`` ``[metadata] name``
+    3. ``setup.py`` ``name=`` argument
+    4. Directories with ``__init__.py`` (flat layout)
+    5. ``src/`` subdirectories with ``__init__.py``
+
+    For each candidate, verifies the directory actually exists before returning.
+    """
+    cwd = Path.cwd()
+
+    candidates = _candidates_from_pyproject(cwd)
+    candidates.extend(_candidates_from_setup_cfg(cwd))
+    candidates.extend(_candidates_from_setup_py(cwd))
+
+    # Verify each candidate exists as a real package
+    for name in candidates:
+        pkg = name.replace("-", "_")
+        if _verify_package(cwd, pkg):
+            return pkg
+
+    # Fall back: scan for directories with __init__.py
+    for search_root in [cwd, cwd / "src"]:
+        if not search_root.is_dir():
+            continue
+        for child in sorted(search_root.iterdir()):
+            if not child.is_dir():
+                continue
+            if child.name.startswith(".") or child.name in _SKIP_DIRS:
+                continue
+            if (child / "__init__.py").exists():
+                return child.name
+
+    return None
+
+
+def _candidates_from_pyproject(cwd: Path) -> list[str]:
+    """Extract package name from pyproject.toml [project] section."""
+    path = cwd / "pyproject.toml"
+    if not path.exists():
+        return []
+    text = path.read_text()
+    in_project = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped == "[project]":
+            in_project = True
+            continue
+        if stripped.startswith("[") and in_project:
+            break  # left [project] section
+        if in_project and stripped.startswith("name"):
+            _, _, val = stripped.partition("=")
+            val = val.strip().strip("\"'")
+            if val:
+                return [val]
+    return []
+
+
+def _candidates_from_setup_cfg(cwd: Path) -> list[str]:
+    """Extract package name from setup.cfg [metadata] section."""
+    path = cwd / "setup.cfg"
+    if not path.exists():
+        return []
+    text = path.read_text()
+    in_metadata = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped == "[metadata]":
+            in_metadata = True
+            continue
+        if stripped.startswith("[") and in_metadata:
+            break
+        if in_metadata and stripped.startswith("name"):
+            _, _, val = stripped.partition("=")
+            val = val.strip()
+            if val:
+                return [val]
+    return []
+
+
+def _candidates_from_setup_py(cwd: Path) -> list[str]:
+    """Extract package name from setup.py (best-effort regex)."""
+    path = cwd / "setup.py"
+    if not path.exists():
+        return []
+    import re
+
+    text = path.read_text()
+    m = re.search(r"""name\s*=\s*["']([^"']+)["']""", text)
+    return [m.group(1)] if m else []
+
+
+def _verify_package(cwd: Path, name: str) -> bool:
+    """Check that *name* exists as a package directory in cwd or cwd/src."""
+    for root in [cwd, cwd / "src"]:
+        pkg_dir = root / name
+        if pkg_dir.is_dir() and (pkg_dir / "__init__.py").exists():
+            return True
+    return False
 
 
 # ============================================================================
@@ -1195,27 +2162,45 @@ def generate_mutants(
 
 @contextmanager
 def _mutated_module(module_name: str, mutated_tree: ast.Module):
-    """Temporarily replace a module in ``sys.modules`` with mutated code.
+    """Temporarily replace a module's contents with mutated code.
 
-    Note: code that used ``from module import func`` before the swap will
-    still reference the original.  Import the module itself for full effect.
+    Patches the original module object in-place so that both
+    ``import mod; mod.func(...)`` and ``from mod import func``
+    (captured before the swap) see the mutated definitions.
     """
     original = sys.modules.get(module_name)
     if original is None:
         raise ImportError(f"Module {module_name!r} not in sys.modules")
 
-    mutated = types.ModuleType(module_name)
-    mutated.__file__ = getattr(original, "__file__", "<mutated>")
-    mutated.__package__ = getattr(original, "__package__", None)
+    # Save original dict contents
+    saved = dict(original.__dict__)
 
-    code = compile(mutated_tree, mutated.__file__, "exec")
-    exec(code, mutated.__dict__)
+    # Compile and exec mutated code into a temp namespace
+    code = compile(mutated_tree, getattr(original, "__file__", "<mutated>"), "exec")
+    mutated_ns: dict[str, object] = {}
+    exec(code, mutated_ns)  # noqa: S102
 
-    sys.modules[module_name] = mutated
+    # Patch original module in-place: replace only the names that the
+    # mutated code defines (preserves __name__, __file__, etc.)
+    for name, value in mutated_ns.items():
+        if not name.startswith("__"):
+            setattr(original, name, value)
+
     try:
-        yield mutated
+        yield original
     finally:
-        sys.modules[module_name] = original
+        # Restore original contents
+        # Remove names that the mutation added
+        for name in mutated_ns:
+            if not name.startswith("__") and name not in saved:
+                try:
+                    delattr(original, name)
+                except AttributeError:
+                    pass
+        # Restore original values
+        for name, value in saved.items():
+            if not name.startswith("__"):
+                setattr(original, name, value)
 
 
 def _module_is_equivalent(
@@ -1274,10 +2259,16 @@ def _batch_module_test(
             """Override the default test loop to iterate mutants."""
             if not session.config.option.collectonly:
                 if not session.items:
+                    short = target.rsplit(".", 1)[-1]
+                    suggested = f"tests/test_{short}.py"
                     raise NoTestsFoundError(
                         f"No tests found for {target!r}. "
-                        "Mutation score is meaningless without tests. "
-                        "Pass test_fn= or ensure test files match the module name."
+                        "Mutation score is meaningless without tests.\n"
+                        f"  Generate: generate_starter_tests({target!r})\n"
+                        f"  CLI:      ordeal init {target}\n"
+                        f"  Save to:  {suggested}",
+                        target=target,
+                        suggested_file=suggested,
                     )
                 for mutant, mutated_tree in mutant_pairs:
                     killed = False
@@ -1573,10 +2564,16 @@ def _auto_test_fn(target: str) -> Callable[[], None]:
         short_name = module_name.split(".")[-1]
         rc = pytest.main(["-x", "-q", "--tb=short", "--no-header", "--chaos", "-k", short_name])
         if rc == 5:
+            short = target.rsplit(".", 1)[-1]
+            suggested = f"tests/test_{short}.py"
             raise NoTestsFoundError(
                 f"No tests found for {target!r}. "
-                "Mutation score is meaningless without tests. "
-                "Pass test_fn= or ensure test files match the module name."
+                "Mutation score is meaningless without tests.\n"
+                f"  Generate: generate_starter_tests({target!r})\n"
+                f"  CLI:      ordeal init {target}\n"
+                f"  Save to:  {suggested}",
+                target=target,
+                suggested_file=suggested,
             )
         if rc != 0:
             raise AssertionError(f"pytest returned exit code {rc}")

@@ -115,7 +115,6 @@ pip install ordeal
 
 # With extras
 pip install ordeal[atheris]    # coverage-guided fuzzing via Atheris
-pip install ordeal[api]        # API chaos testing via Schemathesis
 pip install ordeal[all]        # everything
 
 # As a CLI tool
@@ -402,7 +401,7 @@ Every goal maps to a starting point — a command to run, a module to import, an
 | Control time / filesystem in tests | `from ordeal.simulate import Clock` | `ordeal/simulate.py` | [Simulation](https://docs.byordeal.com/guides/simulate) |
 | Compare two implementations | `ordeal mine-pair mod.fn1 mod.fn2` | `ordeal/diff.py` | [Auto Testing](https://docs.byordeal.com/guides/auto) |
 | Compose validation rules | `from ordeal.invariants import no_nan` | `ordeal/invariants.py` | [API Reference](https://docs.byordeal.com/reference/api) |
-| Test API endpoints for faults | Schemathesis integration | `ordeal/integrations/` | [Integrations](https://docs.byordeal.com/guides/integrations) |
+| Test API endpoints for faults | `from ordeal.integrations.openapi import chaos_api_test` | `ordeal/integrations/openapi.py` | [Integrations](https://docs.byordeal.com/guides/integrations) |
 | Extend ordeal with a new fault | Follow the pattern in `faults/*.py` | `ordeal/faults/` | [Fault Injection](https://docs.byordeal.com/concepts/fault-injection) |
 | Configure reproducible runs | Create `ordeal.toml` | `ordeal/config.py` | [Configuration](https://docs.byordeal.com/guides/configuration) |
 | Discover all faults, assertions, strategies | `from ordeal import catalog; catalog()` | `ordeal/__init__.py` | [API Reference](https://docs.byordeal.com/reference/api) |

@@ -121,10 +121,6 @@ class APIConfig:
         return results
 
 
-# Backward-compat alias
-SchemathesisConfig = APIConfig
-
-
 @dataclass
 class MutationConfig:
     """Settings for ``[mutations]`` — declarative mutation testing."""

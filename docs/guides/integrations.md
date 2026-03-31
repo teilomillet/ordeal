@@ -8,7 +8,7 @@ description: >-
 # Integrations
 
 !!! quote "In plain English"
-    ordeal connects to other testing tools so you can combine their strengths. The built-in Explorer handles most chaos testing. Integrations are for when you need something specialized: Atheris for deep coverage-guided fuzzing, Schemathesis for testing APIs against their schema. Think of them as power tools you reach for when the basics aren't enough.
+    ordeal connects to other testing tools so you can combine their strengths. The built-in Explorer handles most chaos testing. Integrations are for when you need something specialized: Atheris for deep coverage-guided fuzzing, the built-in OpenAPI engine for testing APIs under fault conditions. Think of them as power tools you reach for when the basics aren't enough.
 
 ## When to use integrations
 

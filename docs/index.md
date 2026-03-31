@@ -172,7 +172,7 @@ Every goal maps to a starting point — a command to run, a module to import, an
 -   **[Auto Testing](guides/auto.md)** — Zero-boilerplate: scan_module, fuzz, mine, diff, chaos_for
 -   **[Simulation](guides/simulate.md)** — Deterministic Clock and FileSystem
 -   **[Mutations](guides/mutations.md)** — Validate that your tests catch real bugs
--   **[Integrations](guides/integrations.md)** — Atheris fuzzing, Schemathesis API testing
+-   **[Integrations](guides/integrations.md)** — Atheris fuzzing, built-in API chaos testing
 
 </div>
 

@@ -1285,11 +1285,12 @@ def _batch_module_test(
                     try:
                         with _mutated_module(target, mutated_tree):
                             importlib.invalidate_caches()
-                            for item in session.items:
-                                item.config.hook.pytest_runtest_protocol(item=item, nextitem=None)
+                            for i, item in enumerate(session.items):
+                                nxt = session.items[i + 1] if i + 1 < len(session.items) else None
+                                item.config.hook.pytest_runtest_protocol(item=item, nextitem=nxt)
                                 if item.session.testsfailed:
                                     killed = True
-                                    error = "test failed"
+                                    error = f"{item.nodeid} failed"
                                     break
                     except Exception as e:
                         killed = True
@@ -1304,6 +1305,55 @@ def _batch_module_test(
         ["-x", "-q", "--tb=no", "--no-header", "--chaos", "-k", short_name],
         plugins=[plugin],
     )
+    return results
+
+
+def _parallel_module_test(
+    target: str,
+    mutant_pairs: list[tuple[Mutant, ast.Module]],
+    workers: int,
+) -> list[tuple[Mutant, bool, str | None]]:
+    """Run module-level mutants in parallel, each worker batch-testing a chunk.
+
+    Divides *mutant_pairs* across *workers* processes.  Each worker runs
+    a single pytest session that iterates its chunk — combining the startup
+    savings of batch mode with parallelism.
+    """
+    import multiprocessing as mp
+
+    # Serialize mutant pairs: ast.Module doesn't pickle, so send source text
+    serialized: list[tuple[Mutant, str]] = []
+    for mutant, tree in mutant_pairs:
+        try:
+            serialized.append((mutant, ast.unparse(tree)))
+        except Exception:
+            continue
+
+    # Chunk work across workers
+    chunk_size = max(1, len(serialized) // workers)
+    chunks: list[list[tuple[Mutant, str]]] = []
+    for i in range(0, len(serialized), chunk_size):
+        chunks.append(serialized[i : i + chunk_size])
+
+    def _worker_fn(chunk: list[tuple[Mutant, str]]) -> list[tuple[int, bool, str | None]]:
+        """Worker: re-parse ASTs and batch-test a chunk of mutants."""
+        reparsed = []
+        for mutant, source_text in chunk:
+            try:
+                tree = ast.parse(source_text)
+                reparsed.append((mutant, tree))
+            except Exception:
+                continue
+        return _batch_module_test(target, reparsed)
+
+    ctx = mp.get_context("fork" if sys.platform != "win32" else "spawn")
+    with ctx.Pool(min(workers, len(chunks))) as pool:
+        chunk_results = pool.map(_worker_fn, chunks)
+
+    # Flatten results
+    results: list[tuple[Mutant, bool, str | None]] = []
+    for chunk_result in chunk_results:
+        results.extend(chunk_result)
     return results
 
 
@@ -1368,7 +1418,10 @@ def mutate_and_test(
 
     # Batch mode: single pytest session for all mutants (much faster)
     if use_batch and mutant_pairs:
-        batch_results = _batch_module_test(target, mutant_pairs)
+        if workers > 1 and len(mutant_pairs) > 1:
+            batch_results = _parallel_module_test(target, mutant_pairs, workers)
+        else:
+            batch_results = _batch_module_test(target, mutant_pairs)
         for mutant, killed, error in batch_results:
             mutant.killed = killed
             mutant.error = error

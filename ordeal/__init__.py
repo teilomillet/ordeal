@@ -91,6 +91,7 @@ from ordeal.mutations import (
     OPERATORS,
     PRESETS,
     MutationResult,
+    NoTestsFoundError,
     mutate_function_and_test,
 )
 
@@ -125,6 +126,7 @@ __all__ = [
     "MutationResult",
     "PRESETS",
     "OPERATORS",
+    "NoTestsFoundError",
 ]
 
 

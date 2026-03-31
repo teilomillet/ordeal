@@ -1289,3 +1289,291 @@ class TestProtocolBugDetection:
         result = chaos_api_test(app=_asgi_app, faults=[], max_examples=10, seed=42)
         assert result.passed
         assert len(result.failures) == 0
+
+
+# ============================================================================
+# Deep: faults, mutations, and combinations that expose hidden bugs
+# ============================================================================
+
+_DEEP_SPEC = {
+    "openapi": "3.0.3",
+    "info": {"title": "Deep", "version": "1.0"},
+    "paths": {
+        "/compute": {
+            "get": {
+                "parameters": [
+                    {
+                        "name": "x",
+                        "in": "query",
+                        "schema": {"type": "integer"},
+                    }
+                ],
+                "responses": {"200": {"description": "ok"}},
+            },
+        },
+        "/health": {
+            "get": {"responses": {"200": {"description": "ok"}}},
+        },
+    },
+}
+
+# A module with a function that faults can target
+_db_available = True
+_cache = {}
+
+
+def _fetch_from_db(key: str) -> str:
+    """Simulated dependency that faults can break."""
+    if not _db_available:
+        raise ConnectionError("DB unavailable")
+    return _cache.get(key, "default")
+
+
+class TestDeepFaultInducedBugs:
+    """Apps that work fine normally but break under fault injection.
+
+    These test that ordeal's fault injection + protocol validation
+    compose to find bugs that only appear in error paths.
+    """
+
+    def test_fault_triggers_wrong_content_type(self):
+        """Error handler returns HTML with JSON Content-Type when DB is down.
+
+        Common pattern: try/except catches DB error, returns a generic
+        error page, but forgets to change Content-Type from JSON to HTML.
+        """
+
+        async def app(scope, receive, send):
+            if scope["type"] != "http":
+                return
+            await receive()
+            if scope["path"] == "/openapi.json":
+                body = json.dumps(_DEEP_SPEC).encode()
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 200,
+                        "headers": [(b"content-type", b"application/json")],
+                    }
+                )
+                await send({"type": "http.response.body", "body": body})
+                return
+            try:
+                _fetch_from_db("key")
+                resp = b'{"result": "ok"}'
+            except ConnectionError:
+                # Bug: returns HTML but keeps JSON content-type
+                resp = b"<h1>Service Unavailable</h1>"
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-type", b"application/json")],
+                }
+            )
+            await send({"type": "http.response.body", "body": resp})
+
+        db_fault = LambdaFault(
+            "db_down",
+            lambda: globals().__setitem__("_db_available", False),
+            lambda: globals().__setitem__("_db_available", True),
+        )
+        result = chaos_api_test(
+            app=app, faults=[db_fault], fault_probability=1.0, max_examples=5, seed=1
+        )
+        types = [f["type"] for f in result.failures]
+        assert "invalid_json_body" in types
+
+    def test_fault_triggers_content_length_mismatch(self):
+        """Middleware adds error details to body without updating Content-Length.
+
+        Simulates: app sets Content-Length for normal response, but the
+        error path appends extra data to the body.
+        """
+
+        async def app(scope, receive, send):
+            if scope["type"] != "http":
+                return
+            await receive()
+            if scope["path"] == "/openapi.json":
+                body = json.dumps(_DEEP_SPEC).encode()
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 200,
+                        "headers": [(b"content-type", b"application/json")],
+                    }
+                )
+                await send({"type": "http.response.body", "body": body})
+                return
+            normal_body = b'{"ok":true}'
+            try:
+                _fetch_from_db("key")
+                body = normal_body
+            except ConnectionError:
+                # Bug: uses normal Content-Length but appends error context
+                body = normal_body + b" /* DB ERROR: connection refused */"
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(normal_body)).encode()),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": body})
+
+        db_fault = LambdaFault(
+            "db_down",
+            lambda: globals().__setitem__("_db_available", False),
+            lambda: globals().__setitem__("_db_available", True),
+        )
+        result = chaos_api_test(
+            app=app, faults=[db_fault], fault_probability=1.0, max_examples=5, seed=1
+        )
+        types = [f["type"] for f in result.failures]
+        assert "content_length_mismatch" in types
+
+    def test_no_faults_no_bugs(self):
+        """Same apps pass clean without faults — bugs are fault-induced only."""
+
+        async def app(scope, receive, send):
+            if scope["type"] != "http":
+                return
+            await receive()
+            if scope["path"] == "/openapi.json":
+                body = json.dumps(_DEEP_SPEC).encode()
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 200,
+                        "headers": [(b"content-type", b"application/json")],
+                    }
+                )
+                await send({"type": "http.response.body", "body": body})
+                return
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-type", b"application/json")],
+                }
+            )
+            await send({"type": "http.response.body", "body": b'{"result":"ok"}'})
+
+        result = chaos_api_test(app=app, faults=[], max_examples=10, seed=42)
+        assert result.passed
+
+    def test_swarm_finds_fault_combination_bug(self):
+        """Bug only appears when two specific faults are active simultaneously.
+
+        Swarm mode (random fault subsets) should eventually hit the combination.
+        Uses a shared dict so the async app and fault activators share state.
+        """
+        state = {"a": False, "b": False}
+
+        async def app(scope, receive, send):
+            if scope["type"] != "http":
+                return
+            await receive()
+            if scope["path"] == "/openapi.json":
+                body = json.dumps(_DEEP_SPEC).encode()
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 200,
+                        "headers": [(b"content-type", b"application/json")],
+                    }
+                )
+                await send({"type": "http.response.body", "body": body})
+                return
+            # Bug: only crashes when BOTH faults active
+            status = 500 if (state["a"] and state["b"]) else 200
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": status,
+                    "headers": [(b"content-type", b"application/json")],
+                }
+            )
+            await send({"type": "http.response.body", "body": b'{"ok":true}'})
+
+        fault_a = LambdaFault(
+            "fault_a",
+            lambda: state.__setitem__("a", True),
+            lambda: state.__setitem__("a", False),
+        )
+        fault_b = LambdaFault(
+            "fault_b",
+            lambda: state.__setitem__("b", True),
+            lambda: state.__setitem__("b", False),
+        )
+
+        result = chaos_api_test(
+            app=app,
+            faults=[fault_a, fault_b],
+            fault_probability=1.0,
+            seed=42,
+            max_examples=10,
+        )
+        types = [f["type"] for f in result.failures]
+        assert "server_error" in types
+
+    def test_cross_request_error_format_inconsistency(self):
+        """App returns JSON errors normally but HTML errors under faults.
+
+        Cross-request analysis should detect the format inconsistency.
+        """
+        error_as_html = False
+
+        async def app(scope, receive, send):
+            if scope["type"] != "http":
+                return
+            await receive()
+            if scope["path"] == "/openapi.json":
+                body = json.dumps(_DEEP_SPEC).encode()
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 200,
+                        "headers": [(b"content-type", b"application/json")],
+                    }
+                )
+                await send({"type": "http.response.body", "body": body})
+                return
+            # Return 400 with different formats depending on fault state
+            if error_as_html:
+                ct = "text/html"
+                body = b"<h1>Bad Request</h1>"
+            else:
+                ct = "application/json"
+                body = b'{"error":"bad"}'
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 400,
+                    "headers": [(b"content-type", ct.encode())],
+                }
+            )
+            await send({"type": "http.response.body", "body": body})
+
+        def activate():
+            nonlocal error_as_html
+            error_as_html = True
+
+        def deactivate():
+            nonlocal error_as_html
+            error_as_html = False
+
+        fault = LambdaFault("html_errors", activate, deactivate)
+        result = chaos_api_test(
+            app=app,
+            faults=[fault],
+            fault_probability=0.5,
+            seed=42,
+            max_examples=20,
+        )
+        types = [f["type"] for f in result.failures]
+        assert "inconsistent_error_format" in types

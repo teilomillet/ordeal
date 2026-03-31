@@ -87,24 +87,33 @@ ordeal/
 
 ## Using ordeal
 
-Intent-based guide — match what the developer wants to the right ordeal tool.
+Quick reference — match what the developer wants to the right tool:
 
-### "Are my tests good enough?" / "Check test quality"
+- **"Are my tests good enough?"** → `mutate("myapp.func", preset="standard")`
+- **"Fix my test gaps"** → `result.generate_test_stubs()` or `ordeal mutate --generate-stubs`
+- **"Test under failure conditions"** → `ChaosTest` with `faults = [...]`
+- **"What if this call fails?"** → `buggify()`
+- **"Explore all reachable states"** → `ordeal explore`
+- **"Audit test coverage"** → `ordeal audit myapp.scoring`
+- **"Discover properties"** → `ordeal mine myapp.scoring.compute`
 
-Mutation testing. Mutates the code and checks if tests catch the changes.
+### Mutation testing — `mutate()`
 
 ```python
-from ordeal import mutate_function_and_test
+from ordeal import mutate
 
-result = mutate_function_and_test("myapp.scoring.compute", preset="standard")
-print(result.summary())
+result = mutate("myapp.scoring.compute", preset="standard")  # auto-detects function vs module
+print(result.summary())          # test gaps with cause + fix
+stubs = result.generate_test_stubs()  # Python test file with real signatures
 ```
 
-- `preset="essential"` — 4 operators, fast. `"standard"` — 8 operators, CI default. `"thorough"` — all 14.
+- `preset`: `"essential"` (4 ops, fast), `"standard"` (8, CI default), `"thorough"` (all 14).
 - `test_fn` is optional — pytest auto-discovers relevant tests when omitted.
-- Each gap in `result.survived` has `.operator`, `.description`, `.source_line`, `.remediation`.
-- CLI: `uv run ordeal mutate myapp.scoring.compute --preset standard`
+- `result.survived` — list of gaps, each with `.operator`, `.source_line`, `.remediation`.
+- `result.generate_test_stubs()` — test file with real param names and typed examples.
+- CLI: `uv run ordeal mutate myapp.scoring.compute --preset standard --generate-stubs tests/test_gaps.py`
 - Config: `[mutations]` section in `ordeal.toml` (see `ordeal.toml.example`).
+- Pytest: `@pytest.mark.mutate("myapp.func", preset="standard")` with `--mutate` flag.
 
 ### "Test my code under failure conditions" / "Chaos test"
 

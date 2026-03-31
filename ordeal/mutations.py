@@ -252,20 +252,26 @@ def _resolve_signature(target: str) -> tuple[str, str]:
 class MutationResult:
     """Aggregated mutation testing results.
 
-    Access structured data for AI consumption::
+    Key attributes and methods::
+
+        result.score              # 0.625 (kill ratio, 1.0 = all caught)
+        result.survived           # list of Mutant objects — test gaps
+        result.summary()          # formatted report with gaps + fix guidance
+        result.generate_test_stubs()  # Python test file with real signatures
+
+    Per-gap data (each item in ``result.survived``)::
+
+        m.operator      # "arithmetic"
+        m.description   # "+ -> -"
+        m.location      # "L12:4"
+        m.source_line   # "return a + b"
+        m.remediation   # what test to write to close this gap
+
+    Metadata::
 
         result.target           # "myapp.scoring.compute"
-        result.score            # 0.625 (kill ratio)
-        result.survived         # list of Mutant objects that tests missed
-        result.operators_used   # ["arithmetic", "comparison", ...] or None
+        result.operators_used   # ["arithmetic", ...] or None
         result.preset_used      # "standard" or None
-
-        for m in result.survived:
-            print(m.operator)     # "arithmetic"
-            print(m.description)  # "+ -> -"
-            print(m.location)     # "L12:4"
-            print(m.source_line)  # "return a + b"
-            print(m.remediation)  # actionable fix guidance
     """
 
     target: str

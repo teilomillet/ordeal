@@ -415,21 +415,6 @@ def _is_function_target(target: str) -> bool:
         return False
 
 
-def _make_auto_test_fn(target: str):
-    """Create a test function that runs pytest in-process against the target."""
-
-    def run_tests():
-        import pytest
-
-        module_name = target.rsplit(".", 1)[0] if _is_function_target(target) else target
-        short_name = module_name.split(".")[-1]
-        rc = pytest.main(["-x", "-q", "--tb=short", "--no-header", "-k", short_name])
-        if rc != 0:
-            raise AssertionError(f"pytest returned exit code {rc}")
-
-    return run_tests
-
-
 def _cmd_mutate(args: argparse.Namespace) -> int:
     """Run mutation testing on specified targets."""
     from ordeal.mutations import (
@@ -496,13 +481,11 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
         _stderr(f"Mutating {target}...\n")
 
         is_func = _is_function_target(target)
-        test_fn = _make_auto_test_fn(target)
 
         try:
             if is_func:
                 result = mutate_function_and_test(
                     target,
-                    test_fn,
                     operators=operators,
                     preset=preset,
                     workers=workers,
@@ -512,7 +495,6 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
             else:
                 result = mutate_and_test(
                     target,
-                    test_fn,
                     operators=operators,
                     preset=preset,
                     workers=workers,

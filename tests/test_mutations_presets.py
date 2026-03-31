@@ -144,6 +144,15 @@ def test_summary_shows_gaps_with_cause_and_fix():
         assert "Fix:" in s
 
 
+def test_test_fn_defaults_to_none():
+    """test_fn is optional — auto-discovers tests when omitted."""
+    from ordeal.mutations import _auto_test_fn
+
+    # _auto_test_fn returns a callable that runs pytest in-process
+    fn = _auto_test_fn("tests.test_mutations_presets._add")
+    assert callable(fn)
+
+
 def test_preset_thorough_produces_more_mutants():
     result_essential = mutate_function_and_test(
         f"{__name__}._add",

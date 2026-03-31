@@ -6,16 +6,12 @@ If a mutant survives (tests still pass), the tests are missing something.
 Quick start
 -----------
 
-Pick a preset and go::
+Pick a preset and go — tests are auto-discovered via pytest::
 
     from ordeal import mutate_function_and_test
 
-    result = mutate_function_and_test(
-        "myapp.scoring.compute",
-        test_fn=lambda: assert compute(1, 2) == 3,
-        preset="standard",    # "essential" | "standard" | "thorough"
-    )
-    print(result.summary())   # shows surviving mutants + how to fix them
+    result = mutate_function_and_test("myapp.scoring.compute", preset="standard")
+    print(result.summary())   # shows test gaps + how to fix them
 
 Or from the command line::
 
@@ -1039,7 +1035,7 @@ def _mutated_module(module_name: str, mutated_tree: ast.Module):
 
 def mutate_and_test(
     target: str,
-    test_fn: Callable[[], None],
+    test_fn: Callable[[], None] | None = None,
     operators: list[str] | None = None,
     *,
     preset: str | None = None,
@@ -1056,12 +1052,15 @@ def mutate_and_test(
 
     Args:
         target: Module path (e.g. ``"myapp.scoring"``).
-        test_fn: Zero-arg callable; should raise on failure.
+        test_fn: Zero-arg callable; should raise on failure.  When ``None``
+            (default), auto-discovers tests via pytest in-process.
         operators: Mutation operators to use (default: all).
         preset: Named operator group: ``"essential"``, ``"standard"``,
             or ``"thorough"``. Mutually exclusive with *operators*.
         workers: Parallel workers for testing mutants. Default ``1``.
     """
+    if test_fn is None:
+        test_fn = _auto_test_fn(target)
     used_preset = preset
     operators = _resolve_operators(operators, preset)
     module = importlib.import_module(target)
@@ -1202,9 +1201,30 @@ def _is_runtime_equivalent(
     return True
 
 
+def _auto_test_fn(target: str) -> Callable[[], None]:
+    """Create a test function that runs pytest in-process for *target*.
+
+    Derives a ``-k`` filter from the target's module name so pytest
+    runs only the relevant tests.  Runs in-process so PatchFault
+    swaps are visible to the test code.
+    """
+
+    def run_tests() -> None:
+        import pytest
+
+        parts = target.rsplit(".", 1)
+        module_name = parts[0] if len(parts) >= 2 else target
+        short_name = module_name.split(".")[-1]
+        rc = pytest.main(["-x", "-q", "--tb=short", "--no-header", "-k", short_name])
+        if rc != 0:
+            raise AssertionError(f"pytest returned exit code {rc}")
+
+    return run_tests
+
+
 def mutate_function_and_test(
     target: str,
-    test_fn: Callable[[], None],
+    test_fn: Callable[[], None] | None = None,
     operators: list[str] | None = None,
     *,
     preset: str | None = None,
@@ -1212,43 +1232,40 @@ def mutate_function_and_test(
     filter_equivalent: bool = True,
     equivalence_samples: int = 10,
 ) -> MutationResult:
-    """Mutate a single function and run *test_fn* against each mutant.
+    """Mutate a single function and run tests against each mutant.
 
     This is the **recommended** entry point for mutation testing. It uses
     :class:`PatchFault` to swap the function at its module attribute, so any
     code that accesses it via ``mod.func()`` will see the mutant.
 
-    Example — basic usage with a preset::
+    Example — minimal (auto-discovers tests via pytest)::
 
         from ordeal import mutate_function_and_test
 
+        result = mutate_function_and_test("myapp.scoring.compute", preset="standard")
+        print(result.summary())
+
+    Example — explicit test function::
+
         result = mutate_function_and_test(
             "myapp.scoring.compute",
-            test_fn=lambda: assert compute(1, 2) == 3,
+            test_fn=run_scoring_tests,
             preset="standard",
         )
-        print(result.summary())  # surviving mutants + remediation
 
-    Example — custom operator selection::
+    Example — custom operators + parallel::
 
         result = mutate_function_and_test(
             "myapp.scoring.compute",
-            test_fn=run_scoring_tests,
             operators=["arithmetic", "comparison", "boundary"],
-        )
-
-    Example — parallel execution for large codebases::
-
-        result = mutate_function_and_test(
-            "myapp.scoring.compute",
-            test_fn=run_scoring_tests,
-            preset="thorough",
             workers=4,
         )
 
     Args:
         target: Dotted path to the function (e.g. ``"myapp.scoring.compute"``).
-        test_fn: Zero-arg callable; should raise on failure.
+        test_fn: Zero-arg callable; should raise on failure.  When ``None``
+            (default), auto-discovers and runs relevant tests via pytest
+            in-process (``pytest -x -k <module_name>``).
         operators: Explicit list of operator names to apply. See
             ``OPERATORS.keys()`` for all available operators. Mutually
             exclusive with *preset*.
@@ -1269,6 +1286,8 @@ def mutate_function_and_test(
         equivalence_samples: Number of random inputs for equivalence
             filtering.  Default ``10``.
     """
+    if test_fn is None:
+        test_fn = _auto_test_fn(target)
     used_preset = preset
     operators = _resolve_operators(operators, preset)
     module_path, func_name = target.rsplit(".", 1)

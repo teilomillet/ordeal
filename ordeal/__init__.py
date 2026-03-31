@@ -42,11 +42,8 @@ Capabilities (each is independent — use one or all):
 
     from ordeal import mutate_function_and_test
 
-    result = mutate_function_and_test(
-        "mymodule.func", my_test,
-        preset="standard",    # "essential" | "standard" | "thorough"
-    )
-    print(result.summary())   # surviving mutants + how to fix them
+    result = mutate_function_and_test("mymodule.func", preset="standard")
+    print(result.summary())   # test gaps + how to fix them
 
     # CLI: ordeal mutate mymodule.func --preset standard
 

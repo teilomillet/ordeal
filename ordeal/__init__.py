@@ -40,9 +40,9 @@ Capabilities (each is independent — use one or all):
 
 5. **Mutation testing** — verify your tests catch real bugs::
 
-    from ordeal import mutate_function_and_test
+    from ordeal import mutate
 
-    result = mutate_function_and_test("mymodule.func", preset="standard")
+    result = mutate("mymodule.func", preset="standard")  # auto-detects function vs module
     print(result.summary())   # test gaps + how to fix them
 
     # CLI: ordeal mutate mymodule.func --preset standard
@@ -51,17 +51,39 @@ Capabilities (each is independent — use one or all):
 
     ordeal explore  # CLI, reads ordeal.toml — checkpoints, energy scheduling
 
-7. **Atheris integration** — coverage-guided fuzzing for buggify() decisions::
+7. **Property mining** — discover what functions actually do::
+
+    from ordeal import mine
+    result = mine(my_function)  # discovers likely properties
+
+8. **Module audit** — measure test quality across an entire module::
+
+    from ordeal import audit
+    result = audit("myapp.scoring")  # mutation score, property coverage, gaps
+
+9. **Metamorphic testing** — relation-based property checking::
+
+    from ordeal import metamorphic, Relation
+    @metamorphic(Relation("negate", transform=lambda x: -x, expect=lambda a, b: a == -b))
+    def compute(x: int) -> int: ...
+
+10. **Differential testing** — compare two implementations::
+
+    from ordeal import diff
+    result = diff(fn_a, fn_b)  # find inputs where they disagree
+
+11. **Atheris integration** — coverage-guided fuzzing for buggify() decisions::
 
     from ordeal.integrations.atheris_engine import fuzz
     fuzz(my_function, max_time=60)  # requires: pip install ordeal[atheris]
 
-8. **Discoverability** — introspect all capabilities programmatically::
+12. **Discoverability** — introspect all capabilities programmatically::
 
     from ordeal import catalog
-    c = catalog()  # faults, invariants, strategies, mutations
-    for fault in c["faults"]:
-        print(f"{fault['qualname']}  -- {fault['doc']}")
+    c = catalog()  # 12 subsystems: faults, mining, audit, auto, mutations, ...
+    for key in sorted(c):
+        for item in c[key]:
+            print(f"{item['qualname']}  -- {item['doc']}")
 
 Running chaos tests::
 
@@ -92,6 +114,7 @@ from ordeal.mutations import (
     PRESETS,
     MutationResult,
     NoTestsFoundError,
+    mutate,
     mutate_function_and_test,
 )
 
@@ -122,31 +145,81 @@ __all__ = [
     # Discoverability
     "catalog",
     # Mutations
+    "mutate",
     "mutate_function_and_test",
     "MutationResult",
     "PRESETS",
     "OPERATORS",
     "NoTestsFoundError",
+    # Property mining
+    "mine",
+    "MineResult",
+    # Module audit
+    "audit",
+    "ModuleAudit",
+    # Auto-discovery
+    "scan_module",
+    "ScanResult",
+    # Metamorphic testing
+    "metamorphic",
+    "Relation",
+    # Differential testing
+    "diff",
+    "DiffResult",
+    # Scaling analysis
+    "ScalingAnalysis",
+    "fit_usl",
 ]
+
+# Lazy imports — keeps `import ordeal` fast while making everything
+# accessible via `from ordeal import mine`, etc.
+_LAZY_IMPORTS: dict[str, tuple[str, str]] = {
+    "mine": ("ordeal.mine", "mine"),
+    "MineResult": ("ordeal.mine", "MineResult"),
+    "audit": ("ordeal.audit", "audit"),
+    "ModuleAudit": ("ordeal.audit", "ModuleAudit"),
+    "scan_module": ("ordeal.auto", "scan_module"),
+    "ScanResult": ("ordeal.auto", "ScanResult"),
+    "metamorphic": ("ordeal.metamorphic", "metamorphic"),
+    "Relation": ("ordeal.metamorphic", "Relation"),
+    "diff": ("ordeal.diff", "diff"),
+    "DiffResult": ("ordeal.diff", "DiffResult"),
+    "ScalingAnalysis": ("ordeal.scaling", "ScalingAnalysis"),
+    "fit_usl": ("ordeal.scaling", "fit_usl"),
+}
+
+
+def __getattr__(name: str) -> object:
+    if name in _LAZY_IMPORTS:
+        module_path, attr_name = _LAZY_IMPORTS[name]
+        import importlib
+
+        mod = importlib.import_module(module_path)
+        val = getattr(mod, attr_name)
+        globals()[name] = val  # cache for subsequent access
+        return val
+    raise AttributeError(f"module 'ordeal' has no attribute {name!r}")
 
 
 def catalog() -> dict[str, list]:
     """Discover all ordeal capabilities via runtime introspection.
 
     Returns a dict with one key per subsystem — each value is a list of
-    dicts describing the available items (faults, invariants, strategies,
-    mutation operators/presets).  Everything is derived from the source
-    code via ``inspect``; adding a new fault, invariant, or strategy
-    makes it appear here automatically.
+    dicts describing the available items.  Keys: ``faults``, ``invariants``,
+    ``assertions``, ``strategies``, ``mutations``, ``integrations``,
+    ``mining``, ``audit``, ``auto``, ``metamorphic``, ``diff``, ``scaling``.
+
+    Everything is derived from the source code via ``inspect``; adding a new
+    fault, invariant, or capability makes it appear here automatically.
 
     Example::
 
         from ordeal import catalog
         c = catalog()
-        for fault in c["faults"]:
-            print(f"{fault['qualname']}  -- {fault['doc']}")
-        for inv in c["invariants"]:
-            print(f"{inv['name']}  -- {inv['doc']}")
+        for key in sorted(c):
+            print(f"\\n{key}:")
+            for item in c[key]:
+                print(f"  {item['qualname']}  -- {item['doc']}")
     """
     from ordeal.assertions import catalog as _assertions_catalog
     from ordeal.faults import catalog as _faults_catalog
@@ -163,6 +236,30 @@ def catalog() -> dict[str, list]:
         "integrations": _introspect_module(
             __import__("ordeal.integrations.openapi", fromlist=["openapi"]),
             include={"chaos_api_test", "with_chaos", "auto_faults"},
+        ),
+        "mining": _introspect_module(
+            __import__("ordeal.mine", fromlist=["mine"]),
+            include={"mine", "mine_pair"},
+        ),
+        "audit": _introspect_module(
+            __import__("ordeal.audit", fromlist=["audit"]),
+            include={"audit", "audit_report"},
+        ),
+        "auto": _introspect_module(
+            __import__("ordeal.auto", fromlist=["auto"]),
+            include={"scan_module", "fuzz", "chaos_for", "register_fixture"},
+        ),
+        "metamorphic": _introspect_module(
+            __import__("ordeal.metamorphic", fromlist=["metamorphic"]),
+            include={"metamorphic"},
+        ),
+        "diff": _introspect_module(
+            __import__("ordeal.diff", fromlist=["diff"]),
+            include={"diff"},
+        ),
+        "scaling": _introspect_module(
+            __import__("ordeal.scaling", fromlist=["scaling"]),
+            include={"fit_usl", "analyze", "benchmark"},
         ),
     }
     try:

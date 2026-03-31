@@ -20,8 +20,14 @@ class TestTopLevelCatalog:
             "strategies",
             "mutations",
             "integrations",
+            "mining",
+            "audit",
+            "auto",
+            "metamorphic",
+            "diff",
+            "scaling",
         }
-        always(set(c.keys()) == expected, "catalog has all 6 categories")
+        always(set(c.keys()) == expected, "catalog has all 12 categories")
 
     def test_no_empty_categories(self):
         c = catalog()

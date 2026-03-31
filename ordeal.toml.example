@@ -84,3 +84,46 @@ verbose = true
 # Skip mutants that produce identical output to the original.
 # filter_equivalent = true
 # equivalence_samples = 10
+
+
+# Auto-scan — smoke-test every public function in a module.
+# Run with:  ordeal audit <module>
+#
+# [[scan]]
+# module = "myapp.scoring"
+# max_examples = 50
+#
+# # Custom fixtures: keys = parameter names, values = comma-separated choices.
+# # These override Hypothesis strategy inference for parameters that need
+# # domain-specific values (e.g. enums, categories).
+# [scan.fixtures]
+# category = "violence,cyber,sexual"
+#
+# [[scan]]
+# module = "myapp.validation"
+# max_examples = 100
+
+
+# API chaos testing — built-in OpenAPI engine, no extra deps.
+# Run with:  ordeal api (or use programmatically via chaos_api_test)
+#
+# [api]
+# # ASGI/WSGI app to test — "module.path:attribute" format.
+# app = "myapp.main:app"
+# wsgi = false                     # set true for Flask/Django WSGI apps
+#
+# # Or fetch the schema from a running server:
+# # schema_url = "http://localhost:8000"
+# # schema_path = "/openapi.json"  # path to OpenAPI schema endpoint
+# # base_url = "http://localhost:8000"
+#
+# # Fault injection during API testing.
+# # faults = ["ordeal.faults.timing.slow", "ordeal.faults.io.error_on_call"]
+# fault_probability = 0.3
+# seed = 42
+# swarm = false                    # random fault subsets per run
+# max_examples = 100
+#
+# # Extra headers sent with every request (e.g. auth tokens).
+# [api.headers]
+# Authorization = "Bearer test-token"

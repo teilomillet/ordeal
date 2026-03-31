@@ -1764,6 +1764,73 @@ def _parallel_function_test(
     return result
 
 
+def _is_function_target(target: str) -> bool:
+    """Determine if a dotted path refers to a callable (vs a module)."""
+    try:
+        importlib.import_module(target)
+        return False
+    except ImportError:
+        pass
+    parts = target.rsplit(".", 1)
+    if len(parts) < 2:
+        return False
+    try:
+        mod = importlib.import_module(parts[0])
+        attr = getattr(mod, parts[1], None)
+        return callable(attr)
+    except ImportError:
+        return False
+
+
+def mutate(
+    target: str,
+    test_fn: Callable[[], None] | None = None,
+    operators: list[str] | None = None,
+    *,
+    preset: PresetName | None = None,
+    workers: int = 1,
+    filter_equivalent: bool = True,
+    equivalence_samples: int = 10,
+) -> MutationResult:
+    """Unified mutation testing entry point — auto-detects function vs module.
+
+    Inspects *target* to decide whether it names a callable or a module,
+    then delegates to :func:`mutate_function_and_test` or
+    :func:`mutate_and_test` respectively.
+
+    This is the function used by the ``@pytest.mark.mutate`` fixture and
+    is the simplest way to run mutation testing programmatically::
+
+        from ordeal.mutations import mutate
+
+        result = mutate("myapp.scoring.compute", preset="standard")
+        print(result.summary())
+
+    Args:
+        target: Dotted path to a function (e.g. ``"myapp.scoring.compute"``)
+            or module (e.g. ``"myapp.scoring"``).
+        test_fn: Zero-arg callable; should raise on failure.  When ``None``
+            (default), auto-discovers tests via pytest in-process.
+        operators: Explicit list of operator names. Mutually exclusive with
+            *preset*.
+        preset: Named operator group: ``"essential"``, ``"standard"``,
+            or ``"thorough"``. Mutually exclusive with *operators*.
+        workers: Parallel worker processes. Default ``1``.
+        filter_equivalent: Skip equivalent mutants. Default ``True``.
+        equivalence_samples: Samples for equivalence filtering. Default ``10``.
+    """
+    dispatch = mutate_function_and_test if _is_function_target(target) else mutate_and_test
+    return dispatch(
+        target,
+        test_fn=test_fn,
+        operators=operators,
+        preset=preset,
+        workers=workers,
+        filter_equivalent=filter_equivalent,
+        equivalence_samples=equivalence_samples,
+    )
+
+
 def mutation_faults(
     target: str,
     operators: list[str] | None = None,

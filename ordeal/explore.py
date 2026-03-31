@@ -28,12 +28,12 @@ import multiprocessing as mp
 import os
 import pickle
 import random
-import shutil
+import struct
 import sys
-import tempfile
 import threading
 import time as _time
 import warnings
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -252,6 +252,121 @@ _ENERGY_MIN = 0.01
 # Single-byte writes are atomic — no locks needed.
 _EDGE_BITMAP_SIZE = 65536
 
+# Shared-memory state bitmap: same pattern as edges, for global state dedup.
+# Workers skip states already visited by any worker.
+_STATE_BITMAP_SIZE = 65536
+
+# Shared-memory ring buffer for checkpoint exchange.
+#
+# Design: each worker owns a contiguous slice of slots (no write contention).
+# Readers scan all slots and skip their own.  A CRC32 checksum guards against
+# torn reads — if a reader sees a partially-written slot, the checksum won't
+# match and the slot is silently skipped until the next poll.
+#
+# Energy propagation: any worker can update a slot's energy field.  When
+# worker B selects a checkpoint published by worker A and discovers new
+# edges, B writes the updated energy back to the slot.  All workers see
+# the update on their next poll, so the global energy landscape converges
+# without locks.
+_POOL_NUM_SLOTS = 256
+_POOL_SLOT_SIZE = 16384  # 16 KB per slot
+_POOL_HEADER_SIZE = 64
+_POOL_RING_SIZE = _POOL_HEADER_SIZE + _POOL_NUM_SLOTS * _POOL_SLOT_SIZE
+
+# Slot binary layout (32-byte header + data):
+#   [0:4]   sequence   uint32  — 0 = empty, >0 = valid (set LAST by writer)
+#   [4:6]   writer_id  uint16
+#   [6:8]   _pad       uint16
+#   [8:12]  energy     float32 — writable by any worker (propagation)
+#   [12:16] data_len   uint32
+#   [16:20] checksum   uint32  — CRC32 of data bytes
+#   [20:24] new_edges  uint32
+#   [24:28] step       uint32
+#   [28:32] _pad       4 bytes
+#   [32:]   data       pickled _MachineSnapshot payload
+_POOL_SLOT_HDR_SIZE = 32
+_POOL_SLOT_DATA_MAX = _POOL_SLOT_SIZE - _POOL_SLOT_HDR_SIZE
+
+
+def _ring_write(
+    buf: memoryview,
+    slot: int,
+    seq: int,
+    writer_id: int,
+    energy: float,
+    data: bytes,
+    new_edges: int,
+    step: int,
+) -> bool:
+    """Write a serialized checkpoint into a ring buffer slot.
+
+    Writes data first, then the header, then sequence *last*.
+    The sequence field is the "publish" signal — readers ignore
+    slots where sequence == 0 or hasn't changed.
+
+    Returns False if data exceeds the slot capacity.
+    """
+    if len(data) > _POOL_SLOT_DATA_MAX:
+        return False
+    base = _POOL_HEADER_SIZE + slot * _POOL_SLOT_SIZE
+    # 1. Write data bytes
+    d_start = base + _POOL_SLOT_HDR_SIZE
+    buf[d_start : d_start + len(data)] = data
+    # 2. Write header fields (except sequence)
+    crc = zlib.crc32(data) & 0xFFFFFFFF
+    struct.pack_into("<HH", buf, base + 4, writer_id, 0)
+    struct.pack_into("<f", buf, base + 8, energy)
+    struct.pack_into("<I", buf, base + 12, len(data))
+    struct.pack_into("<I", buf, base + 16, crc)
+    struct.pack_into("<I", buf, base + 20, new_edges)
+    struct.pack_into("<I", buf, base + 24, step)
+    # 3. Sequence LAST — signals "slot is ready"
+    struct.pack_into("<I", buf, base, seq)
+    return True
+
+
+def _ring_read(buf: memoryview, slot: int) -> dict[str, Any] | None:
+    """Read a checkpoint from a ring buffer slot.
+
+    Returns None for empty slots, oversized data, or checksum mismatches
+    (torn reads).  Callers retry on the next poll cycle.
+    """
+    base = _POOL_HEADER_SIZE + slot * _POOL_SLOT_SIZE
+    seq = struct.unpack_from("<I", buf, base)[0]
+    if seq == 0:
+        return None
+    writer_id = struct.unpack_from("<H", buf, base + 4)[0]
+    energy = struct.unpack_from("<f", buf, base + 8)[0]
+    data_len = struct.unpack_from("<I", buf, base + 12)[0]
+    checksum = struct.unpack_from("<I", buf, base + 16)[0]
+    new_edges = struct.unpack_from("<I", buf, base + 20)[0]
+    step_val = struct.unpack_from("<I", buf, base + 24)[0]
+    if data_len == 0 or data_len > _POOL_SLOT_DATA_MAX:
+        return None
+    d_start = base + _POOL_SLOT_HDR_SIZE
+    data = bytes(buf[d_start : d_start + data_len])
+    if (zlib.crc32(data) & 0xFFFFFFFF) != checksum:
+        return None  # torn read — skip until next poll
+    return {
+        "sequence": seq,
+        "writer_id": writer_id,
+        "energy": energy,
+        "data": data,
+        "new_edge_count": new_edges,
+        "step": step_val,
+        "slot": slot,
+    }
+
+
+def _ring_update_energy(buf: memoryview, slot: int, energy: float) -> None:
+    """Propagate an energy update to a ring buffer slot.
+
+    Any worker can call this.  Relaxed consistency: other workers
+    see the update on their next poll, no barriers needed.
+    """
+    base = _POOL_HEADER_SIZE + slot * _POOL_SLOT_SIZE
+    struct.pack_into("<f", buf, base + 8, energy)
+
 
 @dataclass
 class _MachineSnapshot:
@@ -276,6 +391,7 @@ class Checkpoint:
     run_id: int
     energy: float = 1.0
     times_selected: int = 0
+    _pool_slot: int = -1  # ring buffer slot (-1 = local checkpoint)
 
 
 # ============================================================================
@@ -469,10 +585,11 @@ class Explorer:
                 AFL-style: one byte per edge hash, single-byte atomic
                 writes, zero locks.  Default ``True``.
             share_checkpoints: When ``workers > 1``, share checkpoints
-                between workers via a file-based pool.  Workers publish
-                significant discoveries and subscribe to others' finds,
-                allowing one worker to branch from a state another
-                discovered.  Default ``True``.
+                between workers via a shared-memory ring buffer.  Workers
+                publish discoveries and subscribe to others' finds with
+                global energy propagation — a checkpoint that leads to
+                new edges for any worker gets higher priority for all.
+                Default ``True``.
         """
         self.test_class = test_class
         self.target_paths = [m.replace(".", "/") for m in (target_modules or [])]
@@ -494,14 +611,19 @@ class Explorer:
         # Single-byte writes are atomic on all architectures.
         self._shared_bitmap: memoryview | None = None
 
-        # Shared checkpoint pool (file-based, set by _run_parallel / _worker_fn)
-        self._pool_dir: Path | None = None
+        # Shared-memory state bitmap (set by _run_parallel / _worker_fn)
+        self._shared_state_bitmap: memoryview | None = None
+
+        # Shared-memory ring buffer for checkpoint exchange
+        self._pool_ring: memoryview | None = None
         self._worker_id: int = 0
-        self._pool_loaded: set[str] = set()
-        self._pool_publish_count: int = 0
-        self._last_pool_sync: float = 0.0
-        self._pool_sync_interval: float = 2.0
-        self._max_pool_publish: int = 20
+        self._pool_num_workers: int = 1
+        self._pool_slots_per_worker: int = _POOL_NUM_SLOTS
+        self._pool_next_slot: int = 0  # next slot to write (within our range)
+        self._pool_write_seq: int = 0  # per-worker monotonic sequence
+        self._pool_seen_seq: dict[int, int] = {}  # slot → last seen sequence
+        self._pool_last_sync: float = 0.0
+        self._pool_sync_interval: float = 0.5  # 500ms (was 2s for file-based)
 
         # Internal state
         self._total_edges: set[int] = set()
@@ -757,29 +879,30 @@ class Explorer:
         return self.rng.choices(self._checkpoints, weights=weights, k=1)[0]
 
     def _update_checkpoint_energy(self, cp: Checkpoint, new_edges: int) -> None:
-        """Reward checkpoints that led to new discoveries, decay others."""
+        """Reward checkpoints that led to new discoveries, decay others.
+
+        When the checkpoint came from the shared ring buffer, propagate
+        the energy update back so all workers see it on their next poll.
+        """
         if new_edges > 0:
             cp.energy += new_edges * _ENERGY_REWARD
         else:
             cp.energy = max(_ENERGY_MIN, cp.energy * _ENERGY_DECAY)
+        # Propagate to ring buffer — other workers see the updated energy
+        if cp._pool_slot >= 0 and self._pool_ring is not None:
+            _ring_update_energy(self._pool_ring, cp._pool_slot, cp.energy)
 
     def _pool_publish(self, machine: ChaosTest, new_count: int, step: int, run_id: int) -> None:
-        """Publish a checkpoint to the shared pool directory.
+        """Publish a checkpoint to the shared-memory ring buffer.
 
-        Pickles only the instance ``__dict__`` (not the class) because
-        Hypothesis-decorated methods break pickle's identity check.
-        The subscriber reconstructs via ``cls()`` + ``__dict__.update()``.
+        Each worker owns a contiguous slice of slots and writes to them
+        in round-robin order.  The ring buffer uses per-worker monotonic
+        sequence numbers so readers can detect new writes without locks.
         """
-        if (
-            self._pool_dir is None
-            or self._pool_publish_count >= self._max_pool_publish
-            or new_count < 2  # only publish significant discoveries
-        ):
+        if self._pool_ring is None:
             return
-        fname = f"cp-w{self._worker_id}-r{run_id}-s{step}.pkl"
         try:
             snap = self._snapshot_machine(machine)
-            # Filter to only picklable values
             picklable_state: dict[str, Any] = {}
             for k, v in snap.state_dict.items():
                 try:
@@ -788,35 +911,59 @@ class Explorer:
                 except Exception:
                     pass
             payload = {"state_dict": picklable_state, "fault_active": snap.fault_active}
-            tmp = self._pool_dir / f".tmp-{fname}"
-            with open(tmp, "wb") as f:
-                pickle.dump(payload, f)
-            tmp.rename(self._pool_dir / fname)  # atomic on POSIX
-            self._pool_publish_count += 1
-            self._pool_loaded.add(fname)
+            data = pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
+            if len(data) > _POOL_SLOT_DATA_MAX:
+                return  # checkpoint too large for a slot — skip
+
+            # Claim our next slot (round-robin within our owned range)
+            base_slot = self._worker_id * self._pool_slots_per_worker
+            slot = base_slot + (self._pool_next_slot % self._pool_slots_per_worker)
+            self._pool_next_slot += 1
+            self._pool_write_seq += 1
+
+            energy = 1.0 + new_count * _ENERGY_REWARD
+            _ring_write(
+                self._pool_ring,
+                slot,
+                self._pool_write_seq,
+                self._worker_id,
+                energy,
+                data,
+                new_count,
+                step,
+            )
         except Exception:
             pass
 
     def _pool_subscribe(self) -> None:
-        """Load new checkpoints from other workers.
+        """Import new checkpoints from other workers via the ring buffer.
 
-        Reconstructs machines by creating a fresh instance (proper
-        Hypothesis init) then overlaying the saved state dict.
+        Scans all slots outside our owned range.  Skips slots already
+        seen (via per-slot sequence tracking) and torn reads (CRC32
+        mismatch).  Imported checkpoints carry the energy from the
+        ring buffer, reflecting global energy propagation.
         """
-        if self._pool_dir is None:
+        if self._pool_ring is None:
             return
         now = _time.monotonic()
-        if now - self._last_pool_sync < self._pool_sync_interval:
+        if now - self._pool_last_sync < self._pool_sync_interval:
             return
-        self._last_pool_sync = now
+        self._pool_last_sync = now
         try:
-            for path in self._pool_dir.glob("cp-*.pkl"):
-                if path.name in self._pool_loaded:
+            my_base = self._worker_id * self._pool_slots_per_worker
+            my_end = my_base + self._pool_slots_per_worker
+            for slot in range(_POOL_NUM_SLOTS):
+                if my_base <= slot < my_end:
+                    continue  # skip our own slots
+                entry = _ring_read(self._pool_ring, slot)
+                if entry is None:
                     continue
-                self._pool_loaded.add(path.name)
+                seq = entry["sequence"]
+                if seq <= self._pool_seen_seq.get(slot, 0):
+                    continue  # already imported
+                self._pool_seen_seq[slot] = seq
                 try:
-                    with open(path, "rb") as f:
-                        payload = pickle.load(f)
+                    payload = pickle.loads(entry["data"])
                     snap = _MachineSnapshot(
                         state_dict=payload.get("state_dict", payload),
                         fault_active=payload.get("fault_active", {}),
@@ -824,10 +971,11 @@ class Explorer:
                     self._checkpoints.append(
                         Checkpoint(
                             snapshot=snap,
-                            new_edge_count=0,
-                            step=0,
+                            new_edge_count=entry["new_edge_count"],
+                            step=entry["step"],
                             run_id=-1,
-                            energy=_ENERGY_REWARD,
+                            energy=entry["energy"],
+                            _pool_slot=slot,
                         )
                     )
                 except Exception:
@@ -912,16 +1060,23 @@ class Explorer:
                 self._pool_publish(machine, len(new), step, run_id)
                 result.checkpoints_saved += 1
 
-        # State-aware coverage
+        # State-aware coverage (with global dedup via shared state bitmap)
         if hasattr(machine, "state_hash"):
             sh = machine.state_hash()
             if sh and sh not in self._total_states:
-                self._total_states.add(sh)
-                new_edges_this_run += 1
-                if use_coverage:
-                    self._save_checkpoint(machine, 1, step, run_id)
-                    self._pool_publish(machine, 1, step, run_id)
-                    result.checkpoints_saved += 1
+                # Global dedup: skip states another worker already explored
+                sh16 = sh & 0xFFFF
+                if self._shared_state_bitmap is not None and self._shared_state_bitmap[sh16]:
+                    pass  # another worker already found this state
+                else:
+                    self._total_states.add(sh)
+                    if self._shared_state_bitmap is not None:
+                        self._shared_state_bitmap[sh16] = 1
+                    new_edges_this_run += 1
+                    if use_coverage:
+                        self._save_checkpoint(machine, 1, step, run_id)
+                        self._pool_publish(machine, 1, step, run_id)
+                        result.checkpoints_saved += 1
 
         # Property-guided search
         for p in _assertions.tracker.results:
@@ -1302,8 +1457,23 @@ class Explorer:
             shm.buf[:] = b"\x00" * _EDGE_BITMAP_SIZE
             shm_name = shm.name
 
-        # Shared checkpoint pool directory
-        pool_dir = tempfile.mkdtemp(prefix="ordeal-pool-") if self.share_checkpoints else None
+        # Shared state bitmap (same pattern as edges, for global state dedup)
+        state_shm: SharedMemory | None = None
+        state_shm_name: str | None = None
+        if self.share_edges:
+            state_shm = SharedMemory(create=True, size=_STATE_BITMAP_SIZE)
+            state_shm.buf[:] = b"\x00" * _STATE_BITMAP_SIZE
+            state_shm_name = state_shm.name
+
+        # Shared ring buffer for checkpoint exchange + energy propagation
+        ring_shm: SharedMemory | None = None
+        ring_shm_name: str | None = None
+        if self.share_checkpoints:
+            ring_shm = SharedMemory(create=True, size=_POOL_RING_SIZE)
+            # SharedMemory is zeroed on creation (POSIX shm_open + ftruncate)
+            ring_shm_name = ring_shm.name
+
+        slots_per_worker = _POOL_NUM_SLOTS // max(self.workers, 1)
 
         try:
             worker_args = []
@@ -1325,8 +1495,11 @@ class Explorer:
                         "max_shrink_time": max_shrink_time,
                         "patience": patience,
                         "shared_edges_name": shm_name,
-                        "pool_dir": pool_dir,
+                        "shared_state_name": state_shm_name,
+                        "ring_shm_name": ring_shm_name,
                         "worker_id": i,
+                        "num_workers": self.workers,
+                        "slots_per_worker": slots_per_worker,
                     }
                 )
 
@@ -1364,8 +1537,12 @@ class Explorer:
             if shm is not None:
                 shm.close()
                 shm.unlink()
-            if pool_dir is not None:
-                shutil.rmtree(pool_dir, ignore_errors=True)
+            if state_shm is not None:
+                state_shm.close()
+                state_shm.unlink()
+            if ring_shm is not None:
+                ring_shm.close()
+                ring_shm.unlink()
 
 
 def _worker_fn(args: dict[str, Any]) -> dict[str, Any]:
@@ -1394,18 +1571,29 @@ def _worker_fn(args: dict[str, Any]) -> dict[str, Any]:
         workers=1,  # each worker runs sequentially
     )
 
-    # Attach to shared edge bitmap if available
+    # Attach to shared edge bitmap
     shm: SharedMemory | None = None
     shm_name = args.get("shared_edges_name")
     if shm_name:
         shm = SharedMemory(name=shm_name, create=False)
         explorer._shared_bitmap = shm.buf
 
-    # Attach to shared checkpoint pool
-    pool_dir_str = args.get("pool_dir")
-    if pool_dir_str:
-        explorer._pool_dir = Path(pool_dir_str)
+    # Attach to shared state bitmap
+    state_shm: SharedMemory | None = None
+    state_name = args.get("shared_state_name")
+    if state_name:
+        state_shm = SharedMemory(name=state_name, create=False)
+        explorer._shared_state_bitmap = state_shm.buf
+
+    # Attach to shared ring buffer for checkpoint exchange
+    ring_shm: SharedMemory | None = None
+    ring_name = args.get("ring_shm_name")
+    if ring_name:
+        ring_shm = SharedMemory(name=ring_name, create=False)
+        explorer._pool_ring = ring_shm.buf
         explorer._worker_id = args.get("worker_id", 0)
+        explorer._pool_num_workers = args.get("num_workers", 1)
+        explorer._pool_slots_per_worker = args.get("slots_per_worker", _POOL_NUM_SLOTS)
 
     try:
         result = explorer.run(
@@ -1443,3 +1631,7 @@ def _worker_fn(args: dict[str, Any]) -> dict[str, Any]:
     finally:
         if shm is not None:
             shm.close()
+        if state_shm is not None:
+            state_shm.close()
+        if ring_shm is not None:
+            ring_shm.close()

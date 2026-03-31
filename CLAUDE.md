@@ -27,13 +27,13 @@ uv run ordeal replay <trace>     # replay a failure trace
 
 ## Discovery
 
-See [AGENTS.md § Discovery](AGENTS.md#discovery) for the full reference. Quick start: `from ordeal import catalog; catalog()` returns all capabilities (faults, invariants, assertions, strategies, integrations) via runtime introspection.
+See [AGENTS.md § Discovery](AGENTS.md#discovery) for the full reference. Quick start: `from ordeal import catalog; catalog()` returns all capabilities via runtime introspection.
 
 ## Architecture
 
 ```
 ordeal/
-├── __init__.py         Public API: ChaosTest, rule, invariant, always, sometimes, buggify, etc.
+├── __init__.py         Public API + lazy exports + catalog() discovery
 ├── chaos.py            ChaosTest base class (extends Hypothesis RuleBasedStateMachine)
 ├── explore.py          Coverage-guided explorer — AFL-style edge hashing, energy scheduling
 ├── assertions.py       always / sometimes / reachable / unreachable (Antithesis model)
@@ -42,16 +42,25 @@ ordeal/
 ├── simulate.py         Deterministic simulation primitives: Clock, FileSystem
 ├── invariants.py       Composable invariants with & operator: no_nan & bounded(0, 1)
 ├── mutations.py        AST-based mutation testing with 14 operators, batch + parallel
+├── mine.py             Property mining — discover what functions actually do
+├── audit.py            Module audit — mutation score, property coverage, test gaps
+├── auto.py             Auto-scan: smoke-test, fuzz, chaos_for entire modules
+├── metamorphic.py      Metamorphic testing — relation-based property checking
+├── diff.py             Differential testing — compare two implementations
+├── scaling.py          USL scaling analysis — fit_usl, analyze, benchmark
 ├── trace.py            Trace recording, JSON serialization, replay, delta-debugging shrink
 ├── config.py           ordeal.toml loader with strict validation
-├── cli.py              CLI: ordeal explore / mutate / audit / mine / replay
-├── plugin.py           Pytest plugin: --chaos, --chaos-seed, --buggify-prob flags
+├── cli.py              CLI: ordeal explore / mutate / audit / mine / replay / benchmark
+├── plugin.py           Pytest plugin: --chaos, --chaos-seed, --buggify-prob, --mutate
 ├── strategies.py       Adversarial Hypothesis strategies for fuzzing
+├── demo.py             Demo utility functions for examples and testing
 ├── faults/
 │   ├── __init__.py     Fault / PatchFault / LambdaFault base abstractions
 │   ├── io.py           error_on_call, disk_full, permission_denied, corrupt/truncate output
 │   ├── numerical.py    nan_injection, inf_injection, wrong_shape, corrupted_floats
-│   └── timing.py       timeout, slow, intermittent_crash, jitter
+│   ├── timing.py       timeout, slow, intermittent_crash, jitter
+│   ├── network.py      http_error, connection_reset, dns_failure, rate_limited
+│   └── concurrency.py  contended_call, delayed_release, stale_state, thread_boundary
 └── integrations/
     ├── atheris_engine.py    Coverage-guided fuzzing bridge (optional: atheris)
     └── openapi.py           Built-in API chaos testing (no extra deps)
@@ -61,7 +70,8 @@ ordeal/
 
 - **ChaosTest** extends `hypothesis.stateful.RuleBasedStateMachine`. A **nemesis rule** is auto-injected to toggle faults during exploration. Hypothesis explores rule interleavings + fault schedules.
 - **Swarm mode**: Each test run uses a random subset of faults. Better aggregate coverage than all-faults-always-on.
-- **Energy scheduling**: Checkpoints that led to new edge coverage get higher selection probability. Constants: reward=2.0, decay=0.8, min=0.01. Selection combines energy, recency, and exploration bonuses to avoid over-exploiting one checkpoint.
+- **Energy scheduling**: Checkpoints that led to new edge coverage get higher selection probability. Constants: reward=2.0, decay=0.8, min=0.01. Selection combines energy, recency, and exploration bonuses to avoid over-exploiting one checkpoint. Energy propagates across workers via the shared ring buffer.
+- **Parallel sharing**: Workers communicate via three shared-memory regions: (1) edge bitmap (65536 bytes, AFL-style), (2) state bitmap (65536 bytes, global state dedup), (3) ring buffer (256 slots × 16KB, checkpoint exchange with energy propagation). Per-worker slot ownership eliminates write contention. CRC32 checksums guard against torn reads.
 - **Assertions**: `always`/`unreachable` raise immediately (triggers Hypothesis shrinking). `sometimes`/`reachable` are deferred — checked at session end via PropertyTracker.
 - **buggify()**: No-op when chaos mode is inactive. Thread-local RNG, seed-controlled, negligible overhead in production.
 - **PatchFault**: Resolves a dotted path (e.g. `"myapp.api.call"`) and wraps the target function with fault behavior. Activate/deactivate cycle managed by ChaosTest.

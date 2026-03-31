@@ -1,19 +1,25 @@
 """Tests for shared checkpoint pool — verifying checkpoints flow between workers.
 
-Tests both the mechanics (pickle round-trip, file exchange) and the
-exploration benefit (deeper states reached with sharing).
+Tests both the mechanics (pickle round-trip, ring buffer exchange, energy
+propagation) and the exploration benefit (deeper states reached with sharing).
 """
 
 from __future__ import annotations
 
 import copy
 import pickle
-import tempfile
-from pathlib import Path
 from typing import ClassVar
 
 from ordeal import ChaosTest, rule
-from ordeal.explore import Explorer
+from ordeal.explore import (
+    _POOL_HEADER_SIZE,
+    _POOL_RING_SIZE,
+    _POOL_SLOT_DATA_MAX,
+    Explorer,
+    _ring_read,
+    _ring_update_energy,
+    _ring_write,
+)
 from ordeal.faults import Fault, LambdaFault
 from tests._deep_target import DeepService
 
@@ -137,147 +143,256 @@ class TestStatePickleRoundTrip:
 
 
 # ============================================================================
-# File-based checkpoint exchange
+# Ring buffer primitive tests
 # ============================================================================
 
 
-class TestCheckpointFileExchange:
-    """Verify the publish/subscribe file mechanism works."""
+def _make_ring() -> bytearray:
+    """Create a zeroed ring buffer for testing."""
+    return bytearray(_POOL_RING_SIZE)
 
-    def test_publish_creates_file(self):
-        """_pool_publish writes a pickle file to the pool directory."""
-        explorer = Explorer(DeepServiceChaos, workers=1)
-        pool_dir = Path(tempfile.mkdtemp(prefix="test-pool-"))
 
-        try:
-            explorer._pool_dir = pool_dir
-            explorer._worker_id = 0
-            explorer._max_pool_publish = 5
+class TestRingBufferPrimitives:
+    """Verify the low-level ring buffer read/write/energy helpers."""
 
-            machine = DeepServiceChaos()
-            for _ in range(6):
-                machine.service.accumulate()
-            machine.service.pivot()
+    def test_write_then_read(self):
+        """A written slot is readable and contains correct data."""
+        buf = _make_ring()
+        data = pickle.dumps({"state_dict": {"x": 42}, "fault_active": {}})
 
-            explorer._pool_publish(machine, new_count=3, step=5, run_id=1)
+        ok = _ring_write(
+            memoryview(buf), slot=0, seq=1, writer_id=0, energy=2.5, data=data, new_edges=3, step=7
+        )
+        assert ok
 
-            files = list(pool_dir.glob("cp-*.pkl"))
-            assert len(files) == 1
-            assert "w0" in files[0].name
+        entry = _ring_read(memoryview(buf), slot=0)
+        assert entry is not None
+        assert entry["sequence"] == 1
+        assert entry["writer_id"] == 0
+        assert abs(entry["energy"] - 2.5) < 0.001
+        assert entry["new_edge_count"] == 3
+        assert entry["step"] == 7
+        assert entry["slot"] == 0
 
-            # Verify the file is a valid snapshot payload
-            payload = pickle.loads(files[0].read_bytes())
-            assert isinstance(payload, dict)
-            assert "state_dict" in payload
-            assert "fault_active" in payload
-            assert payload["state_dict"]["service"].state == "pivoted"
-        finally:
-            import shutil
+        payload = pickle.loads(entry["data"])
+        assert payload["state_dict"]["x"] == 42
 
-            shutil.rmtree(pool_dir, ignore_errors=True)
+    def test_empty_slot_returns_none(self):
+        """An unwritten (zeroed) slot returns None."""
+        buf = _make_ring()
+        assert _ring_read(memoryview(buf), slot=5) is None
+
+    def test_oversized_data_rejected(self):
+        """Data larger than slot capacity is rejected."""
+        buf = _make_ring()
+        data = b"\x00" * (_POOL_SLOT_DATA_MAX + 1)
+        ok = _ring_write(
+            memoryview(buf), slot=0, seq=1, writer_id=0, energy=1.0, data=data, new_edges=0, step=0
+        )
+        assert not ok
+
+    def test_corrupted_data_detected(self):
+        """A checksum mismatch (simulating torn read) returns None."""
+        buf = _make_ring()
+        data = pickle.dumps({"state_dict": {}, "fault_active": {}})
+        _ring_write(
+            memoryview(buf), slot=0, seq=1, writer_id=0, energy=1.0, data=data, new_edges=0, step=0
+        )
+
+        # Corrupt one byte in the data region
+        base = _POOL_HEADER_SIZE + 32  # slot 0, data starts at offset 32
+        buf[base] ^= 0xFF
+
+        entry = _ring_read(memoryview(buf), slot=0)
+        assert entry is None  # CRC32 mismatch → rejected
+
+    def test_energy_update_propagates(self):
+        """Energy updates are visible to subsequent reads."""
+        buf = _make_ring()
+        data = pickle.dumps({"state_dict": {}, "fault_active": {}})
+        _ring_write(
+            memoryview(buf), slot=3, seq=1, writer_id=0, energy=1.0, data=data, new_edges=0, step=0
+        )
+
+        _ring_update_energy(memoryview(buf), slot=3, energy=7.5)
+
+        entry = _ring_read(memoryview(buf), slot=3)
+        assert entry is not None
+        assert abs(entry["energy"] - 7.5) < 0.001
+
+    def test_multiple_slots_independent(self):
+        """Writing to different slots doesn't interfere."""
+        buf = _make_ring()
+        mv = memoryview(buf)
+
+        for i in range(4):
+            data = pickle.dumps({"state_dict": {"slot": i}, "fault_active": {}})
+            _ring_write(
+                mv, slot=i, seq=i + 1, writer_id=i, energy=float(i), data=data, new_edges=i, step=i
+            )
+
+        for i in range(4):
+            entry = _ring_read(mv, slot=i)
+            assert entry is not None
+            assert entry["writer_id"] == i
+            payload = pickle.loads(entry["data"])
+            assert payload["state_dict"]["slot"] == i
+
+    def test_slot_overwrite(self):
+        """Overwriting a slot updates its contents."""
+        buf = _make_ring()
+        mv = memoryview(buf)
+
+        data1 = pickle.dumps({"state_dict": {"v": 1}, "fault_active": {}})
+        _ring_write(mv, slot=0, seq=1, writer_id=0, energy=1.0, data=data1, new_edges=0, step=0)
+
+        data2 = pickle.dumps({"state_dict": {"v": 2}, "fault_active": {}})
+        _ring_write(mv, slot=0, seq=2, writer_id=0, energy=3.0, data=data2, new_edges=5, step=10)
+
+        entry = _ring_read(mv, slot=0)
+        assert entry["sequence"] == 2
+        assert abs(entry["energy"] - 3.0) < 0.001
+        payload = pickle.loads(entry["data"])
+        assert payload["state_dict"]["v"] == 2
+
+
+# ============================================================================
+# Ring buffer checkpoint exchange (replaces file-based tests)
+# ============================================================================
+
+
+class TestCheckpointRingExchange:
+    """Verify the Explorer's publish/subscribe via the ring buffer."""
+
+    def _make_explorer_pair(self, *, num_workers=2, slots_per_worker=128):
+        """Create two Explorers sharing a ring buffer."""
+        buf = bytearray(_POOL_RING_SIZE)
+        mv = memoryview(buf)
+
+        def setup(explorer, worker_id):
+            explorer._pool_ring = mv
+            explorer._worker_id = worker_id
+            explorer._pool_num_workers = num_workers
+            explorer._pool_slots_per_worker = slots_per_worker
+            explorer._pool_last_sync = 0  # force immediate sync
+
+        pub = Explorer(DeepServiceChaos, workers=1)
+        sub = Explorer(DeepServiceChaos, workers=1)
+        setup(pub, 0)
+        setup(sub, 1)
+        return pub, sub, buf
+
+    def test_publish_writes_to_ring(self):
+        """_pool_publish writes a checkpoint into the worker's ring slot."""
+        pub, _, buf = self._make_explorer_pair()
+
+        machine = DeepServiceChaos()
+        for _ in range(6):
+            machine.service.accumulate()
+        machine.service.pivot()
+
+        pub._pool_publish(machine, new_count=3, step=5, run_id=1)
+
+        # Read the raw slot (worker 0's first slot = slot 0)
+        entry = _ring_read(memoryview(buf), slot=0)
+        assert entry is not None
+        assert entry["writer_id"] == 0
+        payload = pickle.loads(entry["data"])
+        assert payload["state_dict"]["service"].state == "pivoted"
 
     def test_subscribe_loads_other_workers_checkpoints(self):
         """_pool_subscribe loads checkpoints published by other workers."""
-        pool_dir = Path(tempfile.mkdtemp(prefix="test-pool-"))
+        pub, sub, _ = self._make_explorer_pair()
 
-        try:
-            # Worker 0 publishes
-            publisher = Explorer(DeepServiceChaos, workers=1)
-            publisher._pool_dir = pool_dir
-            publisher._worker_id = 0
-            publisher._max_pool_publish = 5
+        machine = DeepServiceChaos()
+        for _ in range(6):
+            machine.service.accumulate()
+        machine.service.pivot()
+        pub._pool_publish(machine, new_count=3, step=5, run_id=1)
 
-            machine = DeepServiceChaos()
-            for _ in range(6):
-                machine.service.accumulate()
-            machine.service.pivot()
-            publisher._pool_publish(machine, new_count=3, step=5, run_id=1)
+        assert len(sub._checkpoints) == 0
+        sub._pool_subscribe()
+        assert len(sub._checkpoints) == 1
 
-            # Worker 1 subscribes
-            subscriber = Explorer(DeepServiceChaos, workers=1)
-            subscriber._pool_dir = pool_dir
-            subscriber._worker_id = 1
-            subscriber._last_pool_sync = 0  # force immediate sync
+        cp = sub._checkpoints[0]
+        restored = sub._restore_machine(cp.snapshot)
+        assert restored.service.state == "pivoted"
 
-            assert len(subscriber._checkpoints) == 0
-            subscriber._pool_subscribe()
-            assert len(subscriber._checkpoints) == 1
+    def test_subscribe_skips_own_slots(self):
+        """Workers don't import checkpoints from their own slots."""
+        pub, _, _ = self._make_explorer_pair()
 
-            # The loaded checkpoint should be in pivoted state
-            cp = subscriber._checkpoints[0]
-            restored = subscriber._restore_machine(cp.snapshot)
-            assert restored.service.state == "pivoted"
+        machine = DeepServiceChaos()
+        pub._pool_publish(machine, new_count=3, step=0, run_id=1)
 
-        finally:
-            import shutil
+        # Same worker subscribes — should skip its own slot range
+        pub._pool_subscribe()
+        assert len(pub._checkpoints) == 0
 
-            shutil.rmtree(pool_dir, ignore_errors=True)
+    def test_subscribe_tracks_sequences(self):
+        """Same checkpoint isn't imported twice."""
+        pub, sub, _ = self._make_explorer_pair()
 
-    def test_publish_respects_max_limit(self):
-        """Workers stop publishing after max_pool_publish checkpoints."""
-        pool_dir = Path(tempfile.mkdtemp(prefix="test-pool-"))
+        machine = DeepServiceChaos()
+        pub._pool_publish(machine, new_count=3, step=0, run_id=1)
 
-        try:
-            explorer = Explorer(DeepServiceChaos, workers=1)
-            explorer._pool_dir = pool_dir
-            explorer._worker_id = 0
-            explorer._max_pool_publish = 3
+        sub._pool_subscribe()
+        assert len(sub._checkpoints) == 1
 
-            machine = DeepServiceChaos()
-            for i in range(5):
-                explorer._pool_publish(machine, new_count=3, step=i, run_id=i)
+        # Subscribe again — same sequence, no new imports
+        sub._pool_last_sync = 0
+        sub._pool_subscribe()
+        assert len(sub._checkpoints) == 1
 
-            files = list(pool_dir.glob("cp-*.pkl"))
-            assert len(files) == 3  # capped at max
-        finally:
-            import shutil
+    def test_round_robin_slots(self):
+        """Multiple publishes use consecutive slots within the worker's range."""
+        pub, sub, buf = self._make_explorer_pair()
+        machine = DeepServiceChaos()
 
-            shutil.rmtree(pool_dir, ignore_errors=True)
+        for i in range(5):
+            pub._pool_publish(machine, new_count=3, step=i, run_id=i)
 
-    def test_subscribe_skips_own_checkpoints(self):
-        """Workers don't load their own published checkpoints."""
-        pool_dir = Path(tempfile.mkdtemp(prefix="test-pool-"))
+        # Worker 0 owns slots 0..127, should have written slots 0..4
+        for i in range(5):
+            entry = _ring_read(memoryview(buf), slot=i)
+            assert entry is not None
+            assert entry["step"] == i
 
-        try:
-            explorer = Explorer(DeepServiceChaos, workers=1)
-            explorer._pool_dir = pool_dir
-            explorer._worker_id = 0
-            explorer._max_pool_publish = 5
-            explorer._last_pool_sync = 0
+    def test_unpicklable_checkpoint_handled_gracefully(self):
+        """Unpicklable attributes are silently skipped, not crashed."""
+        pub, sub, _ = self._make_explorer_pair()
 
-            machine = DeepServiceChaos()
-            explorer._pool_publish(machine, new_count=3, step=0, run_id=1)
+        machine = DeepServiceChaos()
+        machine._unpicklable = lambda: None
 
-            # Same worker subscribes — should skip its own file
-            explorer._pool_subscribe()
-            assert len(explorer._checkpoints) == 0
-        finally:
-            import shutil
+        # Should not raise — unpicklable attrs are filtered before pickle
+        pub._pool_publish(machine, new_count=3, step=0, run_id=1)
 
-            shutil.rmtree(pool_dir, ignore_errors=True)
+        sub._pool_subscribe()
+        # Checkpoint is either present (if service state pickled) or absent
+        # (if everything was unpicklable) — no crash either way
 
-    def test_unpicklable_checkpoint_skipped_gracefully(self):
-        """If a checkpoint can't be pickled, publish silently skips it."""
-        pool_dir = Path(tempfile.mkdtemp(prefix="test-pool-"))
+    def test_energy_propagation_across_workers(self):
+        """Energy updates from one worker are visible to others."""
+        pub, sub, buf = self._make_explorer_pair()
 
-        try:
-            explorer = Explorer(DeepServiceChaos, workers=1)
-            explorer._pool_dir = pool_dir
-            explorer._worker_id = 0
-            explorer._max_pool_publish = 5
+        machine = DeepServiceChaos()
+        pub._pool_publish(machine, new_count=1, step=0, run_id=1)
 
-            # Create a machine with an unpicklable attribute
-            machine = DeepServiceChaos()
-            machine._unpicklable = lambda: None  # lambdas can't be pickled
+        sub._pool_subscribe()
+        assert len(sub._checkpoints) == 1
 
-            explorer._pool_publish(machine, new_count=3, step=0, run_id=1)
+        cp = sub._checkpoints[0]
+        assert cp._pool_slot >= 0  # came from ring buffer
 
-            # Should not crash — the important thing is no exception was raised
-            list(pool_dir.glob("cp-*.pkl"))  # verify dir is still valid
-        finally:
-            import shutil
+        # Simulate: exploring from this checkpoint found new edges
+        sub._pool_ring = memoryview(buf)
+        sub._update_checkpoint_energy(cp, new_edges=5)
 
-            shutil.rmtree(pool_dir, ignore_errors=True)
+        # Energy was written back to the ring buffer
+        entry = _ring_read(memoryview(buf), cp._pool_slot)
+        assert entry is not None
+        assert entry["energy"] > 3.0  # initial + 5 * 2.0 reward
 
 
 # ============================================================================
@@ -337,8 +452,8 @@ class TestPoolAblation:
         """Pool-enabled should find >= 90% of pool-disabled edges.
 
         Conservative test: the pool shouldn't make things worse.
-        Sharing checkpoints adds overhead (pickle, filesystem I/O),
-        so this ensures the overhead doesn't dominate.
+        Sharing checkpoints via the ring buffer adds serialization
+        overhead, so this ensures the overhead doesn't dominate.
         """
         trials = 3
         with_pool: list[int] = []

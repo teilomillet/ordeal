@@ -346,7 +346,7 @@ class TestWithChaosIntegration:
             case.call_and_validate()
 
         @given(case=schema.as_strategy())
-        @h_settings(max_examples=3)
+        @h_settings(max_examples=3, database=None)
         def run(case):
             chaos_fn(case)
 
@@ -366,7 +366,7 @@ class TestWithChaosIntegration:
             case.call_and_validate()
 
         @given(case=schema.as_strategy())
-        @h_settings(max_examples=3)
+        @h_settings(max_examples=3, database=None)
         def run(case):
             chaos_fn(case)
 
@@ -392,7 +392,7 @@ class TestChaosAPIHookIntegration:
             schema = schemathesis.openapi.from_asgi("/openapi.json", asgi_app)
 
             @given(case=schema.as_strategy())
-            @h_settings(max_examples=3)
+            @h_settings(max_examples=3, database=None)
             def run(case):
                 case.call_and_validate()
 
@@ -555,3 +555,123 @@ class TestFaultyFault:
         )
         # Should complete without crashing.
         assert isinstance(result, ChaosAPIResult)
+
+
+# ---------------------------------------------------------------------------
+# auto_faults + auto_discover
+# ---------------------------------------------------------------------------
+
+from ordeal.integrations.schemathesis_ext import (  # noqa: E402
+    _discover_handlers,
+    auto_faults,
+)
+
+
+class TestAutoFaults:
+    def test_generates_mutation_faults(self):
+        faults = auto_faults(
+            ["tests._demo_shop.get_stock_level"],
+            include_semantic=False,
+        )
+        mutation = [f for f in faults if f.name.startswith("mutant:")]
+        assert len(mutation) > 0
+
+    def test_generates_semantic_faults(self):
+        faults = auto_faults(
+            ["tests._demo_shop.get_stock_level"],
+            operators=[],  # no mutations, just semantic
+        )
+        names = {f.name for f in faults}
+        assert "returns_none(get_stock_level)" in names
+        assert "raises(get_stock_level)" in names
+        assert "stale(get_stock_level)" in names
+
+    def test_type_hint_sentinels(self):
+        """get_stock_level returns int — should generate returns_zero, returns_negative."""
+        faults = auto_faults(
+            ["tests._demo_shop.get_stock_level"],
+            operators=[],
+        )
+        names = {f.name for f in faults}
+        assert "returns_zero(get_stock_level)" in names
+        assert "returns_negative(get_stock_level)" in names
+
+    def test_generates_dependency_faults(self):
+        faults = auto_faults(
+            ["tests._demo_shop.create_order"],
+            operators=[],
+            include_semantic=False,
+        )
+        dep = [f for f in faults if f.name.startswith("error_on_call")]
+        assert len(dep) > 0
+
+    def test_empty_targets(self):
+        faults = auto_faults([])
+        assert faults == []
+
+
+class TestDiscoverHandlers:
+    def test_finds_handlers(self):
+        from tests._demo_shop import app as shop_app
+
+        targets = _discover_handlers(shop_app)
+        names = [t.rsplit(".", 1)[1] for t in targets]
+        assert "list_stock" in names
+        assert "get_stock" in names
+        assert "create_order" in names
+        assert "get_order" in names
+
+    def test_follows_call_graph(self):
+        from tests._demo_shop import app as shop_app
+
+        targets = _discover_handlers(shop_app)
+        names = [t.rsplit(".", 1)[1] for t in targets]
+        # Should follow handlers into service-layer functions.
+        assert "get_stock_level" in names
+        assert "place_new_order" in names
+        assert "get_order_by_id" in names
+
+    def test_skips_openapi_endpoint(self):
+        from tests._demo_shop import app as shop_app
+
+        targets = _discover_handlers(shop_app)
+        names = [t.rsplit(".", 1)[1] for t in targets]
+        assert "openapi_schema" not in names
+
+    def test_max_depth_zero(self):
+        """Depth 0 should only return handlers, not callees."""
+        from tests._demo_shop import app as shop_app
+
+        targets = _discover_handlers(shop_app, max_depth=0)
+        names = [t.rsplit(".", 1)[1] for t in targets]
+        assert "list_stock" in names
+        assert "get_stock_level" not in names
+
+
+class TestAutoDiscover:
+    def test_chaos_api_test_auto_discover(self):
+        from tests._demo_shop import app as shop_app
+
+        result = chaos_api_test(
+            app=shop_app,
+            auto_discover=True,
+            seed=42,
+            max_examples=10,
+            stateful=False,
+        )
+        assert isinstance(result, ChaosAPIResult)
+        # Should have auto-generated faults.
+        assert len(result.fault_activations) > 0
+
+    def test_mutation_targets(self):
+        from tests._demo_shop import app as shop_app
+
+        result = chaos_api_test(
+            app=shop_app,
+            mutation_targets=["tests._demo_shop.get_stock_level"],
+            seed=42,
+            max_examples=10,
+            stateful=False,
+        )
+        assert isinstance(result, ChaosAPIResult)
+        assert len(result.fault_activations) > 0

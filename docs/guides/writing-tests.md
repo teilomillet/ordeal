@@ -1,10 +1,20 @@
 # Writing Tests
 
+!!! quote "This page is your cookbook"
+    Everything on this page is a pattern you can copy, adapt, and combine. You don't need to memorize it all at once. Start with the first pattern, get a test running, then come back for more when you're ready.
+
+    By the end of this page, you'll know how to write chaos tests for any system — from a single function to a full distributed service. Every pattern here is a tool you're adding to your belt.
+
 Practical patterns for writing effective chaos tests with ordeal. This guide assumes you have read [Getting Started](../getting-started.md) and understand the three ingredients: faults, rules, invariants.
 
 ---
 
 ## Test structure
+
+!!! quote "In plain English"
+    A chaos test is just a class with three things: a list of what can break (faults), a set of actions your system performs (rules), and a set of things that must always be true (invariants). Ordeal then runs your actions in hundreds of different orders, randomly flipping faults on and off, and checks that your invariants hold every single time.
+
+    All chaos tests extend the `ChaosTest` base class from `ordeal/chaos.py`. That class wires everything together — you just fill in the pieces.
 
 Every chaos test has the same shape: a class that extends `ChaosTest`, declares faults, defines rules for operations, and adds invariants for health checks. Here is a complete, well-structured test with annotations:
 
@@ -83,6 +93,11 @@ TestPaymentServiceChaos = PaymentServiceChaos.TestCase
 
 ## Choosing faults
 
+!!! quote "How to decide what faults to use"
+    Walk through your code and ask: "what calls could fail in production?" Every HTTP request, database query, file write, and external API call is a candidate. You don't need to guess which ones matter most — ordeal's swarm mode will figure that out. Your job is just to list the realistic failure modes.
+
+    The fault functions live in `ordeal/faults/` — `timing.py` for slow and crashing calls, `io.py` for disk and network errors, `numerical.py` for math gone wrong. Each one takes a dotted path to the function you want to break.
+
 Start with two questions:
 
 **1. What external dependencies can fail?**
@@ -136,6 +151,11 @@ Each fault takes a `target` -- a dotted path to the function to patch (e.g., `"m
 ---
 
 ## Writing good rules
+
+!!! quote "Think of it this way"
+    Rules are the actions your system can perform. Each rule is one thing a user, service, or background job might do — like "process a payment" or "read the cache." Ordeal mixes and matches these actions in every possible order, with faults flickering on and off, to see if your system stays healthy.
+
+    The magic happens because you write simple, individual actions, and ordeal explores the combinations. You don't need to think about ordering — that's ordeal's job.
 
 Rules represent operations that users, services, or background jobs perform on your system. Think of them as the verbs of your test: "process a payment," "read the cache," "update a record."
 
@@ -200,6 +220,11 @@ def charge(self, amount):
 
 ## Writing good invariants
 
+!!! quote "The key insight"
+    An invariant is a promise about your system that must be true at all times — not just when things go well, but even when faults are active. Think of it like a safety net: "no matter what chaos is happening, the ledger must always balance" or "no account balance can ever go negative."
+
+    If you're not sure what invariants to write, ask yourself: "what would be really bad if it happened?" That's your invariant.
+
 Invariants are checked after every single step -- after every rule execution, after every nemesis toggle. They must be:
 
 1. **Cheap.** They run hundreds or thousands of times per test. Don't call external services, don't do heavy computation.
@@ -259,6 +284,11 @@ def scores_valid(self):
 ---
 
 ## Using assertions effectively
+
+!!! quote "What you can do with this"
+    Assertions go inside your rules to check specific results. Ordeal gives you four kinds, each answering a different question: "must this always be true?" (`always`), "should this happen at least once?" (`sometimes`), "does this error path actually run?" (`reachable`), and "should this never happen?" (`unreachable`).
+
+    Together, they let you express both safety ("nothing bad happens") and liveness ("good things eventually happen"). These assertions live in `ordeal/assertions.py` and are all exported from `ordeal.__init__`.
 
 Ordeal provides four assertion types, inspired by [Antithesis](https://antithesis.com). Each serves a different purpose.
 
@@ -341,6 +371,11 @@ If a fault causes an imbalanced ledger, `unreachable` catches it immediately.
 
 ## Swarm mode
 
+!!! quote "Why this matters"
+    When you have lots of faults, turning them all on at once drowns your system — everything fails and you don't learn much. Swarm mode solves this by picking a random subset of faults for each run. One run might test "timeout + NaN", another might test "disk full + IO error." Across many runs, you get better total coverage than all-faults-always-on ever could.
+
+    Just set `swarm = True` on your test class and ordeal handles the rest. If a bug is found, Hypothesis shrinks to the minimal subset of faults that caused it.
+
 By default, every run has access to all declared faults. The nemesis can toggle any of them. **Swarm mode** changes this: each run randomly selects a *subset* of faults.
 
 ```python
@@ -371,6 +406,9 @@ Hypothesis controls the swarm mask, so shrinking still works -- it finds the min
 ---
 
 ## State management
+
+!!! quote "In plain English"
+    State is the memory your test keeps between steps — things like "how many payments have been processed" or "what's currently in the cache." You need just enough state to verify that your system is behaving correctly, but not so much that the test becomes hard to understand. Think of it as a notebook where you jot down the important facts so you can check them later.
 
 **Initialize in `__init__`.** Set up the system under test and any tracking state:
 
@@ -409,6 +447,11 @@ def teardown(self):
 ---
 
 ## Common patterns
+
+!!! quote "What this unlocks"
+    Each pattern below is a recipe you can copy into your project and adapt. They cover the most common systems people test with ordeal: services that retry, caches that might serve stale data, multi-stage pipelines, and systems with multiple actors. Start with whichever one looks most like your system, then mix and match ideas from the others.
+
+    You don't need to use all of these. Even one pattern, well applied, will catch bugs that hand-written tests miss.
 
 ### The retry test
 
@@ -507,6 +550,9 @@ TestCacheChaos = CacheChaos.TestCase
 
 ### The pipeline test
 
+!!! quote "How to explore this"
+    If your system processes data in stages — extract, transform, load, or anything similar — this pattern is for you. Each stage gets its own fault and its own rule. Ordeal explores what happens when stage 1 fails but stage 2 succeeds, or when stage 3 fails after stage 2 already transformed the data. These partial-failure scenarios are where the nastiest bugs hide.
+
 A data pipeline has multiple stages, each with its own dependencies. Faults target each dependency independently.
 
 ```python
@@ -564,6 +610,9 @@ TestPipelineChaos = PipelineChaos.TestCase
 
 ### The concurrent-actors test
 
+!!! quote "Think of it this way"
+    In real systems, multiple actors do things at the same time — a customer buys an item while the warehouse restocks while an admin checks inventory. This pattern gives each actor its own rule. Ordeal interleaves them in every possible order, with faults adding delays and crashes, mimicking the kind of timing-dependent bugs that are nearly impossible to reproduce by hand.
+
 Rules represent different actors (user, admin, background worker). Faults create scenarios similar to race conditions.
 
 ```python
@@ -618,6 +667,9 @@ TestMultiActorChaos = MultiActorChaos.TestCase
 ---
 
 ## Common mistakes
+
+!!! quote "Why this matters"
+    Everyone makes these mistakes when starting out — they're not obvious until someone points them out. Skim through this section now so you recognize the patterns, and come back here when a test isn't behaving the way you expect. Each mistake has a simple fix.
 
 ### Asserting inside fault declarations
 
@@ -702,6 +754,9 @@ class OverloadedChaos(ChaosTest):
 ---
 
 ## Scaling up
+
+!!! quote "What to expect as your project grows"
+    One test class per component is all you need. As your project grows, you add more test files — not more complexity to existing ones. Each test file targets one component with its own faults. The Explorer (configured via `ordeal.toml` and run with `ordeal explore`) ties them all together with coverage-guided exploration across your entire system.
 
 For a single service, one `ChaosTest` class is enough. For a larger codebase, organize chaos tests by component.
 

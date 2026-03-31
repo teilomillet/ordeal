@@ -1,5 +1,8 @@
 # Philosophy
 
+!!! quote "In plain English"
+    Your tests probably check what you *expect* to happen. But real bugs come from situations you never imagined — weird combinations of failures hitting at the worst possible time. Ordeal exists to find those bugs before your users do.
+
 ## The problem nobody talks about
 
 Your tests pass. All green. You deploy. Then at 2 AM, a request takes 30 seconds instead of 30 milliseconds, a downstream service returns garbage, and your system silently corrupts data for six hours before anyone notices.
@@ -11,6 +14,9 @@ A timeout *during* a write. A NaN *inside* a retry loop. A permission error *aft
 **That space is enormous. And almost nobody tests it.**
 
 ## What chaos testing actually is
+
+!!! quote "Think of it this way"
+    Normal testing is like studying for an exam when you already have the questions. Chaos testing is like studying when you *don't* know the questions — so you have to understand the material deeply enough to handle anything. You describe what your code does and what should always be true, and the machine tries thousands of ways to break those promises.
 
 Chaos testing is a simple idea: instead of writing tests for failures you can imagine, let the computer explore failures you can't.
 
@@ -27,7 +33,13 @@ You don't write test cases. You describe the world and the rules. The machine fi
 
 ## Why ordeal exists
 
+!!! quote "Why this matters"
+    The companies below spent years and millions of dollars building internal tools for this kind of testing. Ordeal takes their best ideas and puts them in a single Python library you can `pip install`. You get the same testing philosophy that protects billion-dollar databases and distributed systems — for free, in your project, today.
+
 The ideas behind ordeal aren't new. They come from some of the most rigorous engineering cultures in the world:
+
+!!! quote "What these names mean for you"
+    You don't need to know who Antithesis or FoundationDB are. Here is the short version: each one solved a piece of the "how do I know my code really works?" puzzle. Ordeal combines all the pieces so you don't have to. The Explorer module (`ordeal/explore.py`) handles the coverage-guided search; faults live in `ordeal/faults/`; property assertions live in `ordeal/assertions.py`.
 
 **Antithesis** proved that deterministic exploration finds bugs that random testing misses. By saving checkpoints at interesting states and branching from them, you can systematically cover the space of possible failures. Their insight: coverage-guided exploration beats random fuzzing.
 
@@ -45,6 +57,9 @@ Ordeal brings all of this to Python. Not as six different tools you have to stit
 
 ## The ordeal standard
 
+!!! quote "What this unlocks"
+    Imagine being able to say "my code was tested against thousands of failure scenarios I never had to think up." That is what the ordeal standard gives you. It is not a badge you slap on — it is a level of confidence backed by automated exploration, fault injection, and mutation testing all working together.
+
 Here's what we believe:
 
 **If your code passes ordeal, it means something.**
@@ -53,11 +68,21 @@ It means an automated explorer ran thousands of operation sequences against your
 
 That's not "the tests pass." That's a *certification* that the code handles adversity.
 
+!!! quote "What this means in practice"
+    For a solo developer, this means shipping with evidence your code handles failure — not just a green check, but a trace showing thousands of scenarios explored.
+
+    For a team, this means a shared standard — every PR gets thousands of scenarios tested automatically. No more "did anyone think to test the timeout case?" The machine tests all of them.
+
+    For an organization, this means catching the interaction failures that page your oncall at 3am — the timeout during a retry during a batch write — before they reach production.
+
 We want ordeal to be the bar. When someone looks at a project and sees ordeal traces, they should know: this code was tested the way FoundationDB tests its storage engine. The way Antithesis tests distributed databases. Not at that scale, but with that philosophy.
 
 **Ordeal-tested means the code works.** Not just on the happy path. Not just with the inputs someone thought to try. It works when things go wrong, in combinations nobody anticipated, under conditions that only a machine would think to create.
 
 ## Built for what's coming
+
+!!! quote "The key insight"
+    Ordeal is designed so that both humans and AI agents can use it the same way. Everything is in config files, deterministic seeds, and machine-readable traces. If an AI generates code, ordeal can tell you whether that code actually handles failure — no human reviewer needed for the mechanics.
 
 Every AI agent generating Python code needs a way to verify that code actually works. Not just "does it run" — does it handle failure? Does it degrade gracefully? Does it maintain its invariants when three things go wrong at once?
 
@@ -74,6 +99,9 @@ An AI agent should be able to: read a codebase, generate an ordeal.toml, run `or
 This isn't theoretical. It's the design constraint that shaped every API decision in ordeal.
 
 ## The testing pyramid is incomplete
+
+!!! quote "Think of it this way"
+    Unit tests ask "does this function work?" Integration tests ask "do these pieces connect?" End-to-end tests ask "does the whole flow run?" But nobody asks "what happens when two things fail at the same time during step three?" That is the missing layer, and ordeal fills it. It sits underneath everything else because the guarantees it provides support all the tests above.
 
 You know the testing pyramid: unit tests at the base, integration tests in the middle, end-to-end tests at the top. It's a good model. But it's missing a layer.
 
@@ -93,6 +121,9 @@ Chaos testing with property assertions is the foundation that validates everythi
 
 That's the layer ordeal adds.
 
+!!! quote "What you can do with this"
+    Whether you are a solo dev shipping a side project or a team maintaining a critical service, the same `ordeal explore` command works. Write an `ordeal.toml`, define your faults and invariants, and let the machine do what machines are good at: exhaustive, tireless exploration of failure combinations.
+
 ## The two audiences
 
 Ordeal is designed for two kinds of users, and both matter equally:
@@ -104,6 +135,9 @@ Ordeal is designed for two kinds of users, and both matter equally:
 Both audiences get the same tool. That's the point. The same ordeal.toml that a human writes, an AI agent can generate. The same traces a human reads, an AI agent can parse. The same certification applies to both.
 
 ## Principles
+
+!!! quote "In plain English"
+    These principles are not abstract rules. They are practical promises. Every API in ordeal was designed around them: you can always reproduce a failure, you can always compose simple pieces into powerful tests, and you never pay a runtime cost in production. If something in ordeal feels surprising, one of these principles probably explains why it works that way.
 
 These are the beliefs that shape ordeal's design:
 

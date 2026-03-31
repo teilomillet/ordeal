@@ -1,8 +1,14 @@
 # Shrinking
 
+!!! quote "In plain English"
+    Imagine finding a needle in a haystack -- then the haystack shrinks itself until only the needle is left. That's shrinking. When ordeal finds a bug, the failure might involve dozens of steps and multiple faults. Shrinking automatically strips away everything that doesn't matter, leaving you with the shortest possible sequence that still triggers the bug. Instead of staring at 47 steps, you get 3. All shrinking logic lives in `ordeal/trace.py`.
+
 How ordeal turns a 100-step failure into a 3-step reproduction you can actually debug.
 
 ## Why shrinking matters
+
+!!! quote "The key insight"
+    A bug report that says "something broke during a 200-step run" is almost useless. A bug report that says "do these 3 things and it breaks" is immediately actionable. Shrinking is the difference between a bug you file and forget, and a bug you fix in ten minutes. It's what makes chaos testing practical, not just theoretical.
 
 The explorer runs thousands of sequences. When it finds a failure, the trace might look like this: 47 rule calls, 5 faults toggling on and off, dozens of irrelevant setup steps. That raw trace tells you *something* is broken, but not *what*.
 
@@ -13,6 +19,9 @@ You need the minimal version: "activate fault X, call rule Y, observe failure." 
 That is exactly what ordeal does to failing test sequences.
 
 ## Three phases of shrinking
+
+!!! quote "Think of it this way"
+    Shrinking works like editing a movie. First, you cut entire scenes that don't matter (delta debugging). Then you go frame by frame and remove individual shots (one-by-one elimination). Finally, you check which special effects were actually needed (fault simplification). Each pass makes the story tighter until you have the shortest version that still tells you exactly what went wrong.
 
 Shrinking runs three phases in a loop, each one removing a different kind of noise. The loop repeats until nothing more can be removed (a fixpoint) or the time limit expires (`max_time`, default 30 seconds).
 
@@ -62,6 +71,9 @@ Fault toggles come in pairs: `+slow_network` activates a fault, `-slow_network` 
 This isolates the exact fault combination that matters. If the original trace had 3 faults toggling, you might discover only 1 of them is actually needed.
 
 ## How replay works
+
+!!! quote "What this unlocks"
+    Replay lets you take any failure trace -- saved as a simple JSON file -- and re-run it exactly. This means you can reproduce bugs deterministically, share them with teammates, store them in CI, or feed them back into the shrinker. Every trace is a self-contained recipe: "do these steps in this order with these faults, and the bug appears."
 
 Before shrinking can remove a step, it needs to check whether the failure still reproduces without it. That is replay.
 
@@ -126,6 +138,9 @@ ordeal replay --shrink trace.json -o min.json  # save the result
 
 ## Shrinking in practice
 
+!!! quote "What you'll see"
+    When you run `ordeal replay --shrink`, ordeal prints the original trace, then progressively shorter versions as it removes unnecessary steps. The final output is the minimal reproduction: typically just 2-5 steps that tell you exactly which fault and which operations caused the failure. That's what you paste into a bug ticket or hand to a teammate.
+
 Here is what shrinking looks like on a real failure.
 
 **Before** (raw explorer output): 47 steps, 3 faults toggling on and off.
@@ -159,6 +174,9 @@ Now you know exactly what happened. When a timeout fault is active and you add a
 
 ## Why ordeal's shrinking is special
 
+!!! quote "Why this matters"
+    Most testing tools can simplify a bad input (like making a number smaller). Ordeal does something much harder: it simplifies an entire *sequence of events combined with failure conditions*. It figures out which operations, in which order, with which faults, are the minimal recipe for the bug. That's the kind of answer you need when debugging real systems where bugs come from specific combinations of actions and failures.
+
 Most property-testing frameworks shrink *data*. Hypothesis makes integers smaller. QuickCheck makes lists shorter. That is useful, but it only simplifies the *inputs* to a single function call.
 
 Ordeal shrinks *sequences of operations* combined with *fault schedules*. This is a fundamentally harder problem:
@@ -168,6 +186,9 @@ Ordeal shrinks *sequences of operations* combined with *fault schedules*. This i
 - **Order matters.** The same set of operations might fail in one order and pass in another. Shrinking preserves the relative order of surviving steps.
 
 This is what makes ordeal's shrinking useful for real system debugging. The bugs you find in distributed systems, stateful services, and concurrent code are not about bad input values. They are about specific sequences of events happening under specific failure conditions. Shrinking gives you the minimal event sequence.
+
+!!! quote "You're ready"
+    You understand how ordeal turns a 50-step failure into a 3-step reproduction. When you see a shrunk trace, you know what each step means and how to read it. Use `ordeal replay trace.json` to reproduce any failure, or `ordeal replay --shrink` to minimize it further.
 
 ---
 

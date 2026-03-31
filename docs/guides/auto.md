@@ -2,7 +2,16 @@
 
 Point ordeal at your code. Get tests. No scaffolding.
 
+!!! quote "In plain English"
+    What if you didn't have to write the test at all? Auto-testing means you give ordeal a module, and it generates chaos tests, fuzzes your functions, and discovers properties for you. You can go from zero tests to comprehensive chaos coverage in one command.
+
+!!! quote "The fastest path to real findings"
+    From install to your first real bug finding: about 30 seconds. No test code to write. No configuration to set up. Just `ordeal mine mymodule` and read the output. If it finds something, you have a real bug report with the exact input that triggers it. If it doesn't, you have evidence that your functions handle random inputs correctly — and you can go deeper with `scan_module`, `fuzz`, or a full `ChaosTest`.
+
 ## scan_module
+
+!!! quote "Think of it this way"
+    `scan_module` is like running a health check on every function in a file. It calls each one with random valid inputs and checks that nothing crashes and the return types match. One line of code, and you know which functions are fragile.
 
 Smoke-test every public function in a module:
 
@@ -30,6 +39,9 @@ result = scan_module("myapp.scoring", fixtures={"model": model_strategy})
 
 ## fuzz
 
+!!! quote "What this unlocks"
+    When `scan_module` finds a function that looks suspicious, `fuzz` lets you zoom in. It hammers a single function with thousands of random inputs, looking for crashes, wrong return types, and unexpected exceptions. Think of it as a stress test for one function.
+
 Deep-fuzz a single function (1000 examples by default):
 
 ```python
@@ -43,6 +55,9 @@ result = fuzz(myapp.scoring.compute, model=model_strategy)
 ```
 
 ## chaos_for
+
+!!! quote "Why this matters"
+    This is the full power of ordeal, fully automated. `chaos_for` takes a module and builds a complete chaos test: every function becomes a rule, faults get toggled by the nemesis, and invariants are checked after every step. You get the same exploration that a hand-written `ChaosTest` provides, without writing any test code yourself.
 
 Auto-generate a `ChaosTest` from a module's public API. Each function becomes a `@rule`. The nemesis toggles faults. Invariants are checked on every return value.
 
@@ -65,6 +80,9 @@ TestScoring = chaos_for(
 Returns a pytest-discoverable `TestCase`. Run with `pytest`.
 
 ## mine — discover properties automatically
+
+!!! quote "The key insight"
+    You might not know what properties your function should have. That's fine -- `mine` figures it out for you. It runs your function hundreds of times and watches what happens: does it always return the same type? Is the output always in a range? Is it deterministic? You review the discoveries and decide which ones are real contracts worth testing.
 
 `mine()` runs a function many times with random inputs and observes patterns in outputs. It checks: type consistency, never None, no NaN, non-negative, bounded [0,1], never empty, deterministic, idempotent, involution (`f(f(x)) == x`), commutative (`f(a,b) == f(b,a)`), associative (`f(f(a,b),c) == f(a,f(b,c))`), observed range, monotonicity, and length relationships. Float comparisons use `math.isclose` so rounding noise doesn't cause false negatives.
 
@@ -114,6 +132,9 @@ Functions without type hints fall back to informational comments with confidence
 
 ## mine_pair — discover cross-function properties
 
+!!! quote "What you can do with this"
+    If you have an `encode` and a `decode`, a `serialize` and a `deserialize`, or any pair of functions that should undo each other, `mine_pair` will verify that automatically. It finds roundtrip properties, commutativity, and inverse relationships without you having to specify them.
+
 Check if two functions are inverses, roundtrip-safe, or commutative under composition:
 
 ```python
@@ -140,6 +161,9 @@ ordeal mine-pair myapp.encode myapp.decode    # CLI equivalent
 
 ## diff — compare two implementations
 
+!!! quote "How to explore this"
+    Rewriting a function? Porting to a faster implementation? `diff` runs both versions on the same random inputs and tells you exactly where they disagree. You don't need to write comparison logic -- ordeal generates the inputs and checks the outputs for you.
+
 Differential testing: run two functions on the same random inputs and check their outputs match. Catches regressions, validates refactors, and verifies backend ports:
 
 ```python
@@ -164,6 +188,9 @@ Use cases:
 - **Regression testing**: ensure a bugfix doesn't change other outputs
 
 ## register_fixture — teach ordeal your types
+
+!!! quote "In plain English"
+    Ordeal is smart about generating random inputs from type hints, but it can't invent your custom types. `register_fixture` lets you teach it once -- "a `model` is one of these strings, an `api_key` looks like this" -- and then every auto tool knows how to generate those values. Register in `conftest.py` and forget about it.
 
 When your codebase has domain-specific types that ordeal can't infer from hints, register a fixture once and every auto tool picks it up:
 
@@ -199,6 +226,9 @@ result = mine(myapp.llm.generate)         # same
 Register fixtures for: API clients, database connections, model objects, configuration dicts, authentication tokens — anything that can't be generated from a type hint alone.
 
 ## How it works
+
+!!! quote "The key insight"
+    Every auto tool follows the same pipeline: scan for functions, figure out what inputs they need (from type hints, registered fixtures, or name-based guesses), generate those inputs, and run. The logic lives in `ordeal/auto.py` and `ordeal/quickcheck.py`. If a function has type hints, ordeal can test it. If it doesn't, you can teach ordeal with fixtures.
 
 All auto primitives (`scan_module`, `fuzz`, `chaos_for`, `mine`, `diff`):
 

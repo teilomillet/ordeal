@@ -1,8 +1,14 @@
 # API Reference
 
+!!! quote "In plain English"
+    This is your lookup table -- when you know what you want to do, find the exact function here. Each section maps to a concept you can learn more about in the guides. Whether you're adding ordeal to an existing test suite or starting fresh, the signatures and examples below give you everything you need to wire things up.
+
 Complete public API with signatures, parameters, and usage.
 
 ## Core
+
+!!! quote "Stateful chaos testing"
+    ChaosTest is the foundation of ordeal. You define rules (things your system does), faults (things that go wrong), and invariants (things that must stay true). Hypothesis then explores thousands of interleavings automatically, finding the exact sequence of operations and failures that breaks your system.
 
 ### ChaosTest
 
@@ -73,6 +79,9 @@ auto_configure(buggify_probability=0.2, seed=42)
 ---
 
 ## Assertions
+
+!!! quote "The key insight"
+    Assertions are how you tell ordeal what "correct" means. `always` and `unreachable` catch violations the instant they happen. `sometimes` and `reachable` are checked at the end of the session -- they verify that something good happened at least once across all your test runs. All four live in `ordeal/assertions.py`.
 
 ```python
 from ordeal import always, sometimes, reachable, unreachable
@@ -195,6 +204,9 @@ from ordeal.assertions import Property
 
 ## Buggify
 
+!!! quote "Inline faults for production code"
+    Buggify lets you embed fault injection points directly in your application code. In production, `buggify()` is a no-op with negligible overhead. During chaos testing, it fires with configurable probability, letting you simulate failures exactly where they'd happen in real life -- inside your own functions, not just at external boundaries.
+
 ```python
 from ordeal.buggify import buggify, buggify_value, activate, deactivate, set_seed, is_active
 ```
@@ -240,6 +252,9 @@ is_active() -> bool                              # check if enabled
 ---
 
 ## Faults
+
+!!! quote "Think of it this way"
+    Faults are how you simulate real-world failures -- timeouts, disk errors, network issues, corrupted data. You pick a target function by its dotted path (like `"myapp.db.query"`), and ordeal replaces it with a faulty version when the fault is active. When deactivated, the original function comes back. The base classes live in `ordeal/faults/__init__.py`, with specialized faults in `io.py`, `numerical.py`, `timing.py`, `network.py`, and `concurrency.py`.
 
 ### Base classes
 
@@ -400,6 +415,9 @@ faults = [
 ---
 
 ## Explorer
+
+!!! quote "Coverage-guided exploration"
+    The Explorer is ordeal's autopilot. Point it at a ChaosTest, and it runs thousands of rule/fault combinations, tracking which code paths each run reaches. Runs that discover new edges get higher energy, so the explorer automatically focuses on the most productive directions. Use it when manual test cases can't cover the combinatorial space of faults and operations.
 
 ```python
 from ordeal.explore import Explorer, ExplorationResult, Failure, ProgressSnapshot, CoverageCollector, Checkpoint
@@ -597,6 +615,9 @@ Or from the CLI: `ordeal explore --generate-tests tests/test_generated.py`
 
 ## QuickCheck
 
+!!! quote "Boundary-biased property testing"
+    QuickCheck gives you property-based testing with a twist: instead of purely random inputs, it biases toward boundary values -- zeros, empty strings, max-size lists, powers of two. These are the values most likely to trigger off-by-one errors and edge-case bugs. Just add type hints to your test function and `@quickcheck` handles the rest.
+
 ```python
 from ordeal.quickcheck import quickcheck, strategy_for_type, biased
 ```
@@ -644,6 +665,9 @@ Biased toward boundary values: 0, -1, +1, empty, max-length, powers of 2, range 
 ---
 
 ## Invariants
+
+!!! quote "Composable correctness checks"
+    Invariants are reusable validation rules you can compose with `&`. Instead of writing ad-hoc assertions in every test, define what "valid output" means once -- `finite & bounded(0, 1)` -- and apply it everywhere. Reach for these when you have numeric outputs that must satisfy mathematical properties like boundedness, monotonicity, or normalization.
 
 ```python
 from ordeal.invariants import (
@@ -694,6 +718,9 @@ valid_embedding(embedding_matrix)
 ---
 
 ## Simulate
+
+!!! quote "Deterministic time and filesystem"
+    Clock and FileSystem replace real time and real disk with in-memory, deterministic versions. Tests that use `Clock` run instantly regardless of how many hours of simulated time pass. Tests that use `FileSystem` can inject corruption, permission errors, and disk-full conditions without touching actual files. Use these when your code depends on time or I/O and you need tests that are fast and reproducible.
 
 ```python
 from ordeal.simulate import Clock, FileSystem
@@ -746,6 +773,9 @@ FileSystem()
 ---
 
 ## Mutations
+
+!!! quote "Test quality validation"
+    Mutation testing answers a hard question: are your tests actually checking behavior, or just checking that the code runs? It makes small changes to your source code (swapping `+` to `-`, replacing returns with `None`) and checks whether your tests notice. A high kill score means your tests are specific. Surviving mutants point you to exactly where your assertions are too weak.
 
 ```python
 from ordeal.mutations import mutate_function_and_test, mutate_and_test, validate_mined_properties, generate_mutants, MutationResult, Mutant

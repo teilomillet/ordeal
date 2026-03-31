@@ -260,6 +260,13 @@ Three steps. That's the minimal reproduction. Now you know exactly what to fix.
     - **What you get**: when something breaks, ordeal gives you the shortest sequence of events that reproduces the failure — a clear path to the fix, not a wall of noise.
     - **Why it's valuable**: it tests combinations and orderings you'd never think of. Passing a chaos test is a stronger guarantee than passing a suite of hand-written scenarios.
 
+!!! quote "Where you go from here depends on what you need"
+    Need results fast? `ordeal mine mymodule` finds bugs in 30 seconds with zero test code.
+
+    Building a test suite? The [Writing Tests](guides/writing-tests.md) guide has patterns you can copy and adapt for your own services.
+
+    Evaluating for your team? Run `ordeal audit` on your existing modules — it shows you exactly what ordeal adds on top of your current tests.
+
 ## Go deeper
 
 You've written a chaos test. Here's where to go next, depending on what you want:

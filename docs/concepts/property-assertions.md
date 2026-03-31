@@ -1,5 +1,8 @@
 # Property Assertions
 
+!!! quote "In plain English"
+    A regular `assert` checks one thing at one moment. But what if you could make promises about *all* runs, *all* scenarios, *all* the chaos? That's what property assertions do. You get four simple tools that let you say "this must always be true," "this should happen at least once," "this code must run," or "this code must never run." Together, they cover every kind of correctness guarantee you'd ever want to make. All four live in `ordeal/assertions.py`.
+
 ## The problem with `assert`
 
 You know how `assert` works. You check something right now, at this exact moment:
@@ -25,6 +28,9 @@ That's what ordeal's four assertion types do.
 
 ## The four types
 
+!!! quote "Think of it this way"
+    You have four tools in your toolkit, and each one asks a different question about your code. Two of them are strict guards that sound an alarm the instant something goes wrong. The other two are patient observers that watch an entire test session and only speak up at the end. Together, they let you describe exactly what "correct" means for your system.
+
 All four are imported from the top level:
 
 ```python
@@ -35,6 +41,9 @@ Each takes a name string that identifies the property. The name is how the track
 
 
 ### `always(condition, name)` -- this must be true every time
+
+!!! quote "Why this matters"
+    `always` is your strongest guarantee. It says: "No matter what faults are active, no matter what sequence of operations runs, this condition must hold every single time." If it ever fails, even once out of ten thousand checks, ordeal catches it immediately and shows you the shortest path to reproduce the problem.
 
 ```python
 always(not math.isnan(result), "score is never NaN")
@@ -51,6 +60,9 @@ That immediate failure is important. When `always` fires inside a `ChaosTest`, H
 
 
 ### `sometimes(condition, name)` -- this must be true at least once
+
+!!! quote "What you can do with this"
+    `sometimes` lets you verify that good things actually happen. Maybe your cache warms up. Maybe your retry logic eventually succeeds. Maybe a high score is possible. You don't need it to be true every time -- you just need proof that it's possible. If it never happens across an entire test session, ordeal tells you something is broken or unreachable.
 
 ```python
 sometimes(cache.hit_count > 0, "cache hit happens at least once")
@@ -76,6 +88,9 @@ With `attempts`, it calls the function up to that many times and succeeds on the
 
 ### `reachable(name)` -- this code path must execute
 
+!!! quote "The key insight"
+    You wrote error handling code. But does it actually run? Many codebases have error handlers that *look* correct but never execute under test because the conditions that trigger them never arise. `reachable` is a one-line way to verify: "Yes, this code path really does get exercised." Drop it into any branch you care about and ordeal will tell you at the end of the session whether anything actually reached it.
+
 ```python
 def handle_timeout(self):
     reachable("timeout handler runs")
@@ -95,6 +110,9 @@ This catches a subtle class of bugs: dead code that looks alive. You wrote an er
 
 ### `unreachable(name)` -- this code path must never execute
 
+!!! quote "What this unlocks"
+    `unreachable` catches the scariest bugs: the ones that happen silently. Place it in code paths that should be impossible -- corrupted data, invalid states, branches that "can never happen." If chaos testing manages to reach one of those paths, ordeal fires immediately and gives you the minimal steps to reproduce. It turns invisible corruption into a loud, actionable failure.
+
 ```python
 def process(self, data):
     if data.checksum != compute_checksum(data.payload):
@@ -113,6 +131,9 @@ Like `always`, the immediate failure triggers Hypothesis shrinking, so you get t
 
 ## Immediate vs. deferred
 
+!!! quote "In plain English"
+    Some promises must hold at every single moment -- if they ever break, that's a bug and you want to know right now. Other promises just need to come true at least once across the whole test session -- you can't judge them until the session is over. This is the difference between safety ("nothing bad ever happens") and liveness ("something good eventually happens"). Ordeal handles both automatically.
+
 The four assertions split into two categories based on when they fail:
 
 | Type | When it fails | Why |
@@ -130,6 +151,9 @@ This isn't an arbitrary split. It follows from the semantics.
 
 
 ## The PropertyTracker
+
+!!! quote "How to think about this"
+    The PropertyTracker is ordeal's memory. Every time you call `always`, `sometimes`, `reachable`, or `unreachable`, ordeal writes it down. At the end of your test session, it reviews everything it recorded and gives you a clear report: which properties held, which ones failed, and how many times each was checked. You don't manage it yourself -- it works automatically behind the scenes.
 
 Behind the scenes, every assertion call records data in a global `PropertyTracker`. This is a thread-safe singleton that accumulates results across the entire test session.
 
@@ -195,6 +219,9 @@ A name should read like a sentence. When you see it in a report, you should imme
 
 
 ## Examples in context
+
+!!! quote "How to explore this"
+    This example shows all four assertion types working together in a real test. Notice how each one plays a different role: `always` guards the math, `sometimes` checks the happy path exists, `reachable` verifies error handling runs, and `unreachable` catches silent corruption. Try writing a `ChaosTest` for your own code and adding one assertion of each type -- you'll be surprised what you discover.
 
 Here's a complete `ChaosTest` using all four assertion types:
 
@@ -273,6 +300,9 @@ What each assertion catches:
 
 ## The Antithesis connection
 
+!!! quote "Why this matters"
+    You don't need to know about Antithesis or formal verification to use ordeal. But if you're curious *where* these ideas come from: they're rooted in decades of research on what makes systems correct. The four assertion types aren't arbitrary -- they map to the two fundamental questions of correctness that computer scientists have been studying since the 1970s. Ordeal brings those powerful ideas to you as simple Python functions.
+
 This model of property assertions comes from [Antithesis](https://antithesis.com/docs/using_antithesis/properties.html), a company that builds deterministic simulation testing for distributed systems.
 
 In the Antithesis model, you don't write traditional test assertions that check a single point in time. You declare *properties* -- statements about what should always be true, what should sometimes be true, what should be reachable, what should be unreachable -- and the system accumulates evidence across long-running deterministic simulations.
@@ -286,6 +316,9 @@ These terms come from formal verification and temporal logic, but the intuition 
 
 Ordeal brings this model to Python's testing ecosystem. Instead of simulating for hours on dedicated infrastructure, you get the same property-accumulation semantics running inside pytest, powered by Hypothesis's exploration and shrinking.
 
+
+!!! quote "You're ready"
+    You now have four assertion types in your toolkit: `always` for safety guarantees, `sometimes` for liveness checks, `reachable` for dead code detection, and `unreachable` for silent-failure guards. You know when to use each one. See them in action in the [Writing Tests guide](../guides/writing-tests.md), or explore the full API in the [reference](../reference/api.md).
 
 ## Next
 

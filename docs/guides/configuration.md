@@ -1,5 +1,8 @@
 # Configuration
 
+!!! quote "In plain English"
+    `ordeal.toml` is your single source of truth. Everything your team needs to reproduce a test run -- seed, time budget, faults, report format -- lives in one file. Check it into your repo and everyone gets the same behavior. No guessing, no "it works on my machine."
+
 All exploration settings live in `ordeal.toml`. Copy from [`ordeal.toml.example`](https://github.com/teilomillet/ordeal/blob/main/ordeal.toml.example) and edit.
 
 ## Why TOML
@@ -11,6 +14,9 @@ TOML is human-readable, machine-parseable, and version-controllable. You can rev
 One file, checked into your repo, that anyone (or anything) can read and modify.
 
 ## Schema
+
+!!! quote "Think of it this way"
+    The config file has four sections. `[explorer]` controls how the engine explores (how long, how deep, how many workers). `[[tests]]` lists which ChaosTest classes to run. `[report]` decides what output you get. `[[scan]]` lets you auto-test modules without writing any test code at all.
 
 ### `[explorer]`
 
@@ -47,6 +53,9 @@ One file, checked into your repo, that anyone (or anything) can read and modify.
 
 ### `[[scan]]`
 
+!!! quote "What you can do with this"
+    Auto-scan is the fastest way to get value from ordeal. Point it at a module and it smoke-tests every public function automatically -- no test code needed. Functions with type hints get random inputs generated for free. Add `fixtures` for anything the type system can't describe.
+
 Declare modules for auto-scan testing. The pytest plugin auto-collects these and runs `scan_module()` on each.
 
 | Key | Type | Default | Description |
@@ -68,6 +77,9 @@ fixtures = { model = "sampled_from(['gpt-4', 'claude'])" }
 When you run `pytest --chaos`, ordeal auto-discovers these entries and smoke-tests every public function in each module. Functions without type hints are skipped unless fixtures are provided.
 
 ## Tuning guide
+
+!!! quote "Why this matters"
+    Tuning is how you tell the explorer where to spend its time. The defaults work out of the box, but understanding these knobs lets you trade speed for depth, breadth for focus, and quick feedback for thorough validation. Start with defaults, then adjust based on what the report tells you.
 
 The defaults are reasonable for a first run. Once you have something working, the parameters below are the ones worth adjusting.
 
@@ -151,6 +163,9 @@ workers = 4    # 4 parallel processes
 ```
 
 ## Examples
+
+!!! quote "How to explore this"
+    These examples show real configurations for different stages of development. Copy the one closest to your situation and adjust from there. The pattern is always the same: short runs for fast feedback while coding, longer runs in CI for confidence, and thorough runs before a release.
 
 ### Local development (quick iteration)
 
@@ -262,6 +277,9 @@ cfg.tests[0].resolve()           # imports the class
 The `load_config` function validates the TOML against the schema and raises `ConfigError` with a clear message if any key is unknown or any value is out of range.
 
 ## For AI agents
+
+!!! quote "The key insight"
+    The config format is intentionally boring -- flat TOML, no inheritance, no conditionals. That means any tool, script, or AI agent can read it, write it, or generate it. You never need Python to produce a valid config.
 
 `ordeal.toml` is designed to be generated programmatically. The format is intentionally flat and predictable -- no inheritance, no imports, no conditional logic.
 

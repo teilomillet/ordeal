@@ -2,6 +2,9 @@
 
 Your tests pass. Your code still breaks in production. Ordeal finds what you missed.
 
+!!! quote "Why ordeal"
+    Your code works until it doesn't. Ordeal finds the failures you didn't think to test — the crash when two things happen at once, the silent wrong answer on a weird input, the timeout that only happens under load. It tries thousands of combinations no human would write by hand, and when it finds a problem, it hands you the exact steps to reproduce it. One command, real bugs, no test code required.
+
 ## What ordeal does
 
 You give it your Python code. It gives you back:
@@ -79,6 +82,19 @@ pip install ordeal           # or: uv tool install ordeal
 ```
 
 Then `ordeal mine`, `ordeal audit`, and `ordeal explore` are available directly from your terminal.
+
+## What do you want to do?
+
+!!! quote "Pick your starting point"
+    Every path leads somewhere useful. You can't pick wrong.
+
+    - **"I just want to see what ordeal does"** → Run `uvx ordeal mine ordeal.demo` in your terminal, then read [Getting Started](getting-started.md)
+    - **"I have code and want to find bugs"** → Run `ordeal mine mymodule` — see [Auto Testing](guides/auto.md)
+    - **"I want to write chaos tests for my service"** → Start with [Getting Started](getting-started.md), then [Writing Tests](guides/writing-tests.md)
+    - **"I want to understand the ideas behind ordeal"** → Read [Philosophy](philosophy.md), then the [Concepts](core-concepts.md)
+    - **"I need to check if my tests are any good"** → Run `ordeal audit` — see [Mutations](guides/mutations.md)
+    - **"I want to run ordeal in CI"** → See the [Explorer guide](guides/explorer.md) and [Configuration](guides/configuration.md)
+    - **"I want to explore the source code"** → See the [Architecture section in the README](https://github.com/teilomillet/ordeal#architecture--code-map) for a full code map
 
 ## Start here
 

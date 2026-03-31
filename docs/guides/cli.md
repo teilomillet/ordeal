@@ -1,5 +1,8 @@
 # CLI
 
+!!! quote "In plain English"
+    The CLI is how you run ordeal outside of pytest. It gives you three superpowers: `explore` to find bugs, `replay` to reproduce them, and tools like `mine`, `audit`, and `benchmark` to understand your code and your tests. The typical workflow is: explore, find a failure, replay it, fix the bug.
+
 ## Install
 
 ```bash
@@ -11,6 +14,9 @@ uv run ordeal explore      # inside project venv
 ## Commands
 
 ### `ordeal mine-pair`
+
+!!! quote "What this unlocks"
+    If you have two functions that should be inverses of each other -- like `encode`/`decode` or `serialize`/`parse` -- this command automatically checks whether that's actually true. No test code needed. Just point it at two functions and it tells you if the roundtrip holds.
 
 Discover relational properties between two functions — roundtrip (`g(f(x)) == x`), reverse roundtrip, and commutative composition:
 
@@ -32,6 +38,9 @@ mine_pair(encode, decode): 200 examples
 | `--max-examples`, `-n` | `200` | Examples to sample |
 
 ### `ordeal audit`
+
+!!! quote "Why this matters"
+    Audit answers the question: "are my tests actually good?" It measures your existing tests, generates ordeal-style replacements, and compares them side by side. Every number is verified, not estimated. If ordeal can match your coverage with less code, you know where your tests have unnecessary complexity.
 
 Measure your existing tests vs what ordeal auto-scan achieves — verified numbers, not estimates:
 
@@ -76,6 +85,9 @@ ordeal audit myapp.scoring --save-generated test_migrated.py  # save to file
 | `--save-generated` | — | Save generated test to this path |
 
 ### `ordeal mine`
+
+!!! quote "Think of it this way"
+    Instead of you guessing what properties a function has, `mine` discovers them automatically. It runs the function hundreds of times with random inputs and tells you what's always true: "output is always a float," "always between 0 and 1," "always deterministic." These discovered properties become your test assertions.
 
 Discover properties of a function or all public functions in a module. Prints what mine() finds — type invariants, algebraic laws, bounds, monotonicity, length relationships — with confidence levels.
 
@@ -132,6 +144,9 @@ Use this when you have function pairs that should be inverses (encode/decode, se
 
 ### `ordeal benchmark`
 
+!!! quote "What you can do with this"
+    Before you set `workers = 8` in your config, run `benchmark` to find out if 8 workers actually helps. Some tests hit diminishing returns at 4 workers, others scale to 16. This command measures real throughput and tells you the sweet spot for your specific test and machine.
+
 Measure how parallel exploration scales on your machine and test class. Runs the Explorer at N=1, 2, 4, 8... workers, measures throughput, and fits the Universal Scaling Law (USL):
 
 ```bash
@@ -164,6 +179,9 @@ Scaling Analysis (Universal Scaling Law)
 
 ### `ordeal explore`
 
+!!! quote "The key insight"
+    This is the core of ordeal. It reads your config, loads your ChaosTest classes, and systematically explores what happens when things go wrong -- different rule orderings, different fault combinations, different timings. It's like having a tireless QA engineer who tries thousands of scenarios while you write code.
+
 Your main command for deep exploration. Reads `ordeal.toml`, loads each ChaosTest class, and runs coverage-guided exploration with fault injection, energy scheduling, and swarm mode.
 
 Use for: pre-commit validation, pre-release exploration runs, CI pipelines, and finding deep bugs that unit tests miss.
@@ -183,6 +201,9 @@ The `--workers` / `-w` flag runs exploration across multiple processes. Each wor
 
 ### `ordeal replay`
 
+!!! quote "How to explore this"
+    When `explore` finds a bug, it saves a trace -- the exact sequence of steps that triggered the failure. `replay` re-runs those steps so you can see the bug happen again. Use `--shrink` to strip the trace down to the minimum steps needed, which makes the bug much easier to understand.
+
 Reproduce a failure from a saved trace. The trace file contains the exact sequence of rules and fault toggles that triggered the failure, so replaying it re-executes the same steps.
 
 Use for: triaging a CI failure, sharing a reproducible bug with a colleague, verifying that a fix actually resolves the issue.
@@ -196,6 +217,9 @@ ordeal replay --shrink trace.json -o minimal.json      # save minimized
 The `--shrink` flag runs delta-debugging to remove unnecessary steps from the trace. Use it when: the trace is too long to understand, or you want the minimal sequence of operations that reproduces the failure. The shrunk trace is often 5-10x shorter than the original.
 
 ## Workflows
+
+!!! quote "In plain English"
+    These workflows show how ordeal fits into your daily development cycle. The pattern is simple: explore fast while coding, explore thoroughly in CI, and when something fails, replay and shrink the trace until you understand the bug.
 
 ### Local development
 
@@ -239,6 +263,9 @@ ordeal explore --seed 42
 Useful for: bisecting changes (did this commit introduce the failure?), comparing exploration runs across branches, and ensuring consistent CI behavior.
 
 ## pytest integration
+
+!!! quote "Think of it this way"
+    You don't have to choose between pytest and the ordeal CLI -- they work together. pytest is great when you want chaos testing mixed into your regular test suite. The CLI is great for standalone exploration runs. Most teams use both: pytest with `--chaos` in CI, and `ordeal explore` for deeper pre-release validation.
 
 ordeal also works as a pytest plugin (auto-registered when ordeal is installed). No configuration needed -- pytest picks it up automatically via the `pytest11` entry point.
 

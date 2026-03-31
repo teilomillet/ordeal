@@ -1,8 +1,14 @@
 # Simulation Primitives
 
+!!! quote "In plain English"
+    Simulation means you control time and the filesystem entirely from your test. Same inputs produce the same outputs, every single run. No flaky tests, no waiting for real time to pass, no touching real files on disk. The simulation primitives live in `ordeal/simulate.py`.
+
 No-mock, fast, deterministic. Inject these instead of mocking real infrastructure.
 
 ## Why simulate instead of mock
+
+!!! quote "The key insight"
+    Mocks check that you called the right function. Simulations check that your system does the right thing. When you refactor internal code, mocks break even if the behavior is still correct. Simulations only break when actual behavior changes -- which is exactly when you want a test to fail.
 
 Mocks verify that you called a function with the right arguments. Simulations verify that your system behaves correctly. The difference matters.
 
@@ -13,6 +19,9 @@ When the contract changes -- a function gets renamed, parameters shift, an inter
 There is also a speed difference. `Clock.advance(3600)` does not wait an hour. It is a single function call that updates an integer. This makes simulated tests orders of magnitude faster than real-time tests and significantly faster than mocked tests that still go through mock machinery, argument recording, and call verification.
 
 ## Clock
+
+!!! quote "What this unlocks"
+    You can control time itself in your tests. Need to test what happens after an hour? `clock.advance(3600)` -- instant, no waiting. Need to verify a timer fires at the right moment? Set it, advance to that moment, and check. The Clock makes time-dependent code completely deterministic and testable.
 
 ```python
 from ordeal.simulate import Clock
@@ -55,6 +64,9 @@ assert clock.pending_timers == 1
 
 ### Patching stdlib
 
+!!! quote "Why this matters"
+    Sometimes you can't change the code you're testing -- it calls `time.time()` directly, and you can't pass in a clock. `clock.patch()` handles this by temporarily replacing the real `time.time` and `time.sleep` with the simulated versions. Everything inside the `with` block uses fake time, even third-party libraries.
+
 When you cannot inject the clock directly -- for example, when testing third-party code that calls `time.time()` -- use `clock.patch()`:
 
 ```python
@@ -74,6 +86,9 @@ This is useful when you cannot modify the code under test to accept a clock para
 
 ## FileSystem
 
+!!! quote "Think of it this way"
+    The simulated FileSystem is a tiny in-memory filesystem that your code reads and writes to as if it were real. No actual files are created on disk. You can write data, read it back, then inject faults like corruption or permission errors to see how your code handles them. It's a sandbox where you control everything.
+
 ```python
 from ordeal.simulate import FileSystem
 
@@ -87,6 +102,9 @@ fs.delete("/data.json")
 The filesystem is entirely in-memory. No disk I/O occurs. Reads return bytes; use `read_text()` if you need a decoded string. `list_dir(prefix)` returns sorted paths under a given prefix.
 
 ### Fault injection
+
+!!! quote "What you can do with this"
+    Real filesystems fail in specific ways: files get corrupted, disks fill up, permissions change. The simulated FileSystem lets you trigger each of these failures on demand. You can test how your code handles a corrupted config file, a full disk during a write, or a file that vanishes between checking and reading -- all without touching a real filesystem.
 
 ```python
 fs.inject_fault("/data.json", "corrupt")
@@ -116,6 +134,9 @@ fs.reset()                      # remove all files and all faults
 `clear_fault` removes the fault from a single path, restoring normal behavior for that file. `clear_all_faults` removes every injected fault but leaves the file contents intact. `reset` wipes everything -- files and faults -- returning the filesystem to its initial empty state. Use `reset()` in test teardown to ensure a clean slate.
 
 ## With ChaosTest
+
+!!! quote "How to explore this"
+    When you combine simulation primitives with ChaosTest, the explorer can find failure sequences a human would never think to test. It might advance time past a cache expiry, then corrupt the backing file, then trigger a read -- all in one test run. Each rule becomes a lever the explorer can pull in any order, and the invariant is checked after every step.
 
 ```python
 from ordeal import ChaosTest, rule, invariant
@@ -153,6 +174,9 @@ Simulation primitives become part of the ChaosTest state. Rules can advance time
 This is powerful because the explorer can find sequences that a human would not think to test. For example: advance time past a cache TTL, then corrupt the underlying file, then trigger a cache miss. The combination matters even if each individual operation is safe.
 
 ## When to use simulations
+
+!!! quote "In plain English"
+    If your code cares about time or touches files, simulation is almost always better than mocking. It's faster, more realistic, and won't break when you refactor internals. The lists below give you concrete situations where Clock and FileSystem shine -- if your code does any of these things, reach for `ordeal.simulate`.
 
 Use the simulated Clock for any test that depends on time:
 

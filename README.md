@@ -385,35 +385,66 @@ ordeal replay --shrink trace.json       # minimize a failure trace
 ordeal explore --generate-tests tests/test_gen.py  # turn traces into pytest tests
 ```
 
-## Documentation
+## Find what you need
 
-- **[Philosophy](https://docs.byordeal.com/philosophy)** — Why ordeal exists and what it means for code quality
-- **[Getting Started](https://docs.byordeal.com/getting-started)** — Your first chaos test in 5 minutes
-- **[Core Concepts](https://docs.byordeal.com/concepts/chaos-testing)** — How ordeal thinks
-- **[Guides](https://docs.byordeal.com/guides/explorer)** — Explorer, simulation, mutations, integrations
-- **[API Reference](https://docs.byordeal.com/reference/api)** — Every function, every parameter
-- **[Full docs](https://docs.byordeal.com/)**
+Every goal maps to a starting point — a command to run, a module to import, and a page to read. Nothing is hidden.
 
-## Architecture
+| I want to... | Start here | In the codebase | Docs |
+|---|---|---|---|
+| Find bugs without writing tests | `ordeal mine mymodule` | `ordeal/auto.py` | [Auto Testing](https://docs.byordeal.com/guides/auto) |
+| Check if my tests are good enough | `ordeal audit mymodule` | `ordeal/mutations.py` | [Mutations](https://docs.byordeal.com/guides/mutations) |
+| Write a chaos test | `from ordeal import ChaosTest` | `ordeal/chaos.py` | [Getting Started](https://docs.byordeal.com/getting-started) |
+| Inject specific failures (timeout, NaN, ...) | `from ordeal.faults import timing` | `ordeal/faults/` directory | [Fault Injection](https://docs.byordeal.com/concepts/fault-injection) |
+| Explore all failure combinations | `ordeal explore` | `ordeal/explore.py` | [Explorer](https://docs.byordeal.com/guides/explorer) |
+| Reproduce and shrink a failure | `ordeal replay trace.json` | `ordeal/trace.py` | [Shrinking](https://docs.byordeal.com/concepts/shrinking) |
+| Add fail-safe gates to production code | `from ordeal.buggify import buggify` | `ordeal/buggify.py` | [Fault Injection](https://docs.byordeal.com/concepts/fault-injection) |
+| Make assertions across all runs | `from ordeal import always, sometimes` | `ordeal/assertions.py` | [Assertions](https://docs.byordeal.com/concepts/property-assertions) |
+| Control time / filesystem in tests | `from ordeal.simulate import Clock` | `ordeal/simulate.py` | [Simulation](https://docs.byordeal.com/guides/simulate) |
+| Compare two implementations | `ordeal mine-pair mod.fn1 mod.fn2` | `ordeal/diff.py` | [Auto Testing](https://docs.byordeal.com/guides/auto) |
+| Compose validation rules | `from ordeal.invariants import no_nan` | `ordeal/invariants.py` | [API Reference](https://docs.byordeal.com/reference/api) |
+| Test API endpoints for faults | Schemathesis integration | `ordeal/integrations/` | [Integrations](https://docs.byordeal.com/guides/integrations) |
+| Extend ordeal with a new fault | Follow the pattern in `faults/*.py` | `ordeal/faults/` | [Fault Injection](https://docs.byordeal.com/concepts/fault-injection) |
+| Configure reproducible runs | Create `ordeal.toml` | `ordeal/config.py` | [Configuration](https://docs.byordeal.com/guides/configuration) |
+
+> **New to ordeal?** Start with `ordeal mine ordeal.demo` to see it in action, then read [Getting Started](https://docs.byordeal.com/getting-started).
+> **Have existing tests?** Run `ordeal audit mymodule --test-dir tests/` to see how they compare.
+> **Want the full picture?** Browse the [full documentation](https://docs.byordeal.com/).**
+
+## Architecture — code map
+
+Every module does one thing. When you want to understand, use, or extend ordeal, this tells you where to look.
 
 ```
 ordeal/
-├── chaos.py           ChaosTest + nemesis + swarm            Hypothesis + Jepsen
-├── explore.py         Coverage-guided explorer               Antithesis
-├── assertions.py      always/sometimes/reachable             Antithesis
-├── buggify.py         Inline fault injection                 FoundationDB
-├── quickcheck.py      @quickcheck + boundary bias            Jane Street
-├── simulate.py        Clock, FileSystem                      Deterministic sim
-├── invariants.py      Composable: no_nan & bounded(0,1)
-├── mutations.py       AST mutation testing                   Meta ACH
-├── trace.py           Trace recording + shrinking
-├── config.py          TOML configuration
-├── cli.py             ordeal explore / replay
-├── plugin.py          pytest --chaos
-├── strategies.py      Adversarial data generation
-├── faults/            io, numerical, timing, network, concurrency
-└── integrations/      atheris, openapi
+├── chaos.py           Your tests extend this — ChaosTest base class, nemesis, swarm mode
+├── explore.py         The exploration engine — coverage tracking, checkpoints, energy scheduling
+├── assertions.py      always / sometimes / reachable / unreachable — the assertion model
+├── buggify.py         Inline fault gates — thread-local, seed-controlled, no-op when inactive
+├── quickcheck.py      @quickcheck — type-driven strategies with boundary bias
+├── simulate.py        Deterministic Clock and FileSystem — no mocks, no real I/O
+├── invariants.py      Composable checks — no_nan & bounded(0, 1), works with numpy
+├── mutations.py       AST mutation testing — 14 operators, count-and-apply pattern
+├── auto.py            Auto-testing — scan_module, fuzz, mine, diff, chaos_for
+├── trace.py           Trace recording, JSON serialization, replay, delta-debugging shrink
+├── config.py          ordeal.toml loader — strict validation
+├── cli.py             CLI entry point — explore, replay, mine, audit
+├── plugin.py          Pytest plugin — --chaos, --chaos-seed, --buggify-prob
+├── strategies.py      Adversarial Hypothesis strategies for fuzzing
+├── faults/            All fault types, organized by what can go wrong:
+│   ├── io.py              disk_full, corrupt_output, permission_denied
+│   ├── numerical.py       nan_injection, inf_injection, wrong_shape
+│   ├── timing.py          timeout, slow, intermittent_crash, jitter
+│   ├── network.py         http_error, connection_reset, dns_failure
+│   └── concurrency.py     contended_call, thread_boundary, stale_state
+└── integrations/      Optional bridges to specialized tools:
+    ├── openapi.py         Built-in API chaos testing (no extra deps)
+    ├── atheris_engine.py  Coverage-guided fuzzing (pip install ordeal[atheris])
+    └── schemathesis_ext.py  Schemathesis bridge (pip install ordeal[api])
 ```
+
+> **Want to add a new fault?** Look at any function in `ordeal/faults/` — they all follow the same pattern: take a dotted target path, return a `PatchFault` or `LambdaFault`. Adding a new fault type means adding a new function that follows this pattern.
+>
+> **Want to understand how something works?** Every module is self-contained. Read the module you're interested in — the code matches the documentation.
 
 ## License
 

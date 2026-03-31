@@ -1,5 +1,8 @@
 # Chaos Testing
 
+!!! quote "In plain English"
+    Chaos testing is a way to test your code by **breaking things on purpose**. Instead of writing one test for each bug you can imagine, you tell ordeal what can go wrong, what should always be true, and let it explore thousands of failure combinations automatically. It's like hiring an adversary whose only job is to find the thing you missed.
+
 ## The idea
 
 Think about how you'd test a bridge. The obvious approach: park a car on it, check that it holds. That's a unit test. Then park a truck on it. Then two trucks. You're testing specific loads you thought of.
@@ -11,6 +14,11 @@ Traditional tests are the car on the bridge. They verify scenarios you imagined.
 That's the core idea. You don't write test cases for failures. You describe the world your code lives in, define what "correct" means, and let an engine systematically explore the space of things that can go wrong.
 
 ## ChaosTest
+
+!!! quote "Think of it this way"
+    A `ChaosTest` is your **crash-test arena**. You describe three things: what can break (faults), what your code does (rules), and what must always be true (invariants). Then ordeal runs your code thousands of times, mixing operations and failures in every order it can think of. When something breaks, it hands you the shortest possible replay so you know exactly what went wrong.
+
+    The class lives in `ordeal/chaos.py` and extends Hypothesis's state machine, so you get all of Hypothesis's power for free.
 
 `ChaosTest` is the base class for chaos tests in ordeal. It extends Hypothesis's `RuleBasedStateMachine`, which means it inherits a powerful exploration engine: Hypothesis generates random sequences of method calls, tracks state, and when something fails, it shrinks the sequence to the minimal reproduction.
 
@@ -67,11 +75,17 @@ You wrote 30 lines. The machine explores a space you couldn't cover with 300 han
 
 ### Why RuleBasedStateMachine
 
+!!! quote "Why this matters"
+    You don't have to learn a new testing framework from scratch. If you've ever used Hypothesis, you already know 90% of how ordeal works. Rules, invariants, bundles, preconditions -- they all work exactly the same way. Ordeal just adds the concept of **faults** (things that break) and a **nemesis** (the thing that decides when to break them). Everything else is Hypothesis under the hood.
+
 Hypothesis's `RuleBasedStateMachine` was designed for exactly this kind of testing: explore sequences of operations on a stateful system, check properties after each step, and shrink failures to minimal examples. Ordeal doesn't reinvent this. It extends it by adding the concept of faults -- things that go wrong -- and a nemesis that controls them.
 
 Everything Hypothesis provides works inside a `ChaosTest`: `@rule()`, `@invariant()`, `@initialize()`, `@precondition()`, `Bundle` for passing state between rules. If you know Hypothesis stateful testing, you already know how `ChaosTest` works. The only new thing is the faults list and the nemesis.
 
 ## The nemesis
+
+!!! quote "The key insight"
+    The nemesis is your code's **personal adversary**. It's an invisible rule that ordeal adds to every chaos test -- you never write it, it just exists. Each time it runs, it flips a fault on or off. Because it's mixed in with your own rules, failures happen *during* your operations, not before or after. That's what makes it realistic: in production, things break mid-operation, not at convenient moments.
 
 The nemesis is the most important idea in ordeal. It comes from [Jepsen](https://jepsen.io), Kyle Kingsbury's framework for testing distributed systems. In Jepsen, a "nemesis" is an adversary process that injects failures -- network partitions, node crashes, clock skew -- while the system is running. The insight: real failures don't wait for a convenient moment. They happen *during* operations.
 
@@ -126,6 +140,9 @@ state.data_is_consistent()     # invariant violated
 Three steps. Minimal. Actionable.
 
 ## Swarm mode
+
+!!! quote "What this unlocks"
+    Swarm mode makes ordeal **smarter about which faults to combine**. Instead of turning everything on at once (which just floods your code with errors), each test run picks a random subset of faults. Over hundreds of runs, ordeal covers far more interesting combinations than brute force ever could. And when a failure happens, it tells you exactly which faults were necessary to trigger it -- not just "everything was broken."
 
 Swarm mode solves a subtle problem with fault injection.
 
@@ -201,6 +218,9 @@ Use swarm mode when you have three or more faults. With one or two faults, the s
 
 ## How a run works, step by step
 
+!!! quote "How to explore this"
+    Don't worry about memorizing these steps. The loop is simple: **initialize, run a mix of your rules and the nemesis, check invariants after every step, clean up**. If anything breaks, Hypothesis rewinds and finds the shortest path to the failure. Think of it like a video game replay -- ordeal records every move, then edits out everything that wasn't necessary to trigger the bug.
+
 Here's exactly what happens when Hypothesis executes one test case of a `ChaosTest`:
 
 **Step 1: Initialization.** Ordeal copies the fault list and resets all faults to inactive. If swarm mode is on, it draws the fault subset.
@@ -238,6 +258,9 @@ Here's a diagram of one execution:
 
 ## When to use chaos testing
 
+!!! quote "What you can do with this"
+    If your code talks to APIs, databases, file systems, or ML models -- anything that can fail, lag, or return garbage -- chaos testing is built for you. You don't need a distributed system or a huge codebase. Even a small service with two API calls and a cache is enough to start. The faults you need are already in `ordeal/faults/` -- timing issues, I/O errors, and numerical corruption, ready to use.
+
 Chaos testing is most valuable when your system is **stateful** and **depends on things that fail**.
 
 **Strong fit:**
@@ -255,6 +278,9 @@ Chaos testing is most valuable when your system is **stateful** and **depends on
 The rule of thumb: if your system can be in different states and bad things can happen to its dependencies, chaos testing will find bugs that nothing else will.
 
 ## Putting it all together
+
+!!! quote "The big picture"
+    Everything you've read on this page -- faults, nemesis, swarm mode, invariants, assertions -- comes together in a single class, usually under 50 lines. You declare what can go wrong, what your code does, and what must stay true. Ordeal handles the rest: exploring thousands of scenarios, finding failures, and shrinking them to the smallest possible reproduction. One class replaces dozens of hand-written tests.
 
 Here's a realistic example that uses everything: faults, nemesis, swarm mode, invariants, and property assertions.
 
@@ -326,6 +352,9 @@ TestInventoryServiceChaos = InventoryServiceChaos.TestCase
 ```
 
 Four faults, swarm mode, three rules, two invariants, two `sometimes` assertions. This single class generates more meaningful test coverage than dozens of hand-written test cases, and when it finds a failure, it hands you the minimal reproduction.
+
+!!! quote "You're ready"
+    You now understand how chaos testing works — faults, rules, invariants, the nemesis, and swarm mode. That's everything you need to write your first chaos test. Go to [Writing Tests](../guides/writing-tests.md) for patterns you can copy and adapt to your system. Or run `ordeal mine` on your code and let ordeal write the first test for you.
 
 ## What's next
 

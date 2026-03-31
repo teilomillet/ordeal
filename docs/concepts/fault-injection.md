@@ -1,5 +1,10 @@
 # Fault Injection
 
+!!! quote "In plain English"
+    Fault injection is controlled sabotage. You pick exactly which parts of your system can break, you break them on purpose, and you watch what happens. It's like a fire drill for your code -- you don't wait for a real fire to find out if the exits work.
+
+    The faults live in `ordeal/faults/`, organized by category: `io.py` for disk and network failures, `numerical.py` for corrupt numbers, `timing.py` for slowdowns and timeouts.
+
 ## The idea
 
 Every system depends on things that can fail. The network drops a packet. A disk runs out of space. An API returns garbage. A function takes ten seconds instead of ten milliseconds.
@@ -17,6 +22,9 @@ ordeal gives you two ways to inject faults. They serve different purposes and wo
 ---
 
 ## External faults: PatchFault
+
+!!! quote "Think of it this way"
+    PatchFault wraps a function from the outside, like putting a detour sign on a road. The real road is still there -- you're just rerouting traffic through your "broken" version. When you remove the sign, traffic flows normally again. You never touch the original code.
 
 External faults target a specific function from the outside. You give ordeal a dotted path -- like `"myapp.api.call"` or `"myservice.db.query"` -- and it replaces that function with a version that misbehaves. When the fault is deactivated, the original function is restored. Nothing permanent. Nothing leaks.
 
@@ -87,6 +95,9 @@ You list the faults. ordeal's nemesis -- an automatically injected rule -- toggl
 
 ## Inline faults: buggify
 
+!!! quote "The key insight"
+    PatchFault wraps things from the outside. buggify works from the inside -- you place `if buggify():` directly in your own code, right where you know something could go wrong. It's like an author leaving margin notes in a manuscript: "this part could break here." During testing, those notes come alive. In production, they're invisible.
+
 The second approach comes from FoundationDB. Instead of targeting a function from outside, you place fault injection points directly inside your own code.
 
 ```python
@@ -135,6 +146,9 @@ The RNG is **seed-controlled**. When you set a seed, the sequence of True/False 
 
 ## When to use which
 
+!!! quote "How to think about choosing"
+    Ask yourself one question: **do I own this code?** If you don't own it (a database driver, a third-party API), use PatchFault to intercept it from the outside. If you do own it and you know where it could break, put a `buggify()` right there. For the strongest testing, use both at the same time.
+
 **External faults (PatchFault)** are for things you don't own. Third-party libraries, system calls, network boundaries, database drivers. You can't (or shouldn't) modify their source code, so you intercept them at the edge.
 
 **Inline faults (buggify)** are for code you own, where you know the failure modes. You know your cache might be cold. You know your parser might receive truncated input. You know your retry logic might hit the maximum. Put a `buggify()` there.
@@ -159,6 +173,9 @@ class FullChaosTest(ChaosTest):
 ---
 
 ## How PatchFault works under the hood
+
+!!! quote "Why this matters"
+    You don't need to understand internals to use faults. But if a fault doesn't fire when you expect it to, or fires when it shouldn't, knowing the lifecycle -- resolve the path, swap the function, restore it later -- lets you debug quickly. The mechanism is simple: save the original, replace it, put it back.
 
 Understanding the mechanism helps when you need to debug unexpected behavior or write custom faults.
 
@@ -205,6 +222,9 @@ The `wrapper_fn` is a function that receives the original function and returns a
 
 ## LambdaFault
 
+!!! quote "What you can do with this"
+    LambdaFault is your escape hatch. PatchFault replaces functions, but what if you need to clear a cache, flip a feature flag, corrupt shared state, or simulate a configuration change? LambdaFault lets you inject *any* custom behavior -- just give it a "do this when activated" and a "do this when deactivated" function. If you can write it in Python, you can inject it as a fault.
+
 Not every fault fits the "patch a function" model. Sometimes you need to clear a cache, flip a feature flag, corrupt some shared state, or toggle a circuit breaker.
 
 `LambdaFault` takes two callables: what to do on activation, what to do on deactivation.
@@ -226,6 +246,9 @@ It participates in the same lifecycle as PatchFault. The nemesis can toggle it. 
 ---
 
 ## The Fault lifecycle
+
+!!! quote "In plain English"
+    Every fault follows three steps: turn on, run, turn off. It's like a light switch -- flipping it twice doesn't break anything, and when the test ends, everything goes back to exactly how it was. The base class in `ordeal/faults/__init__.py` guarantees this cleanup, so you never have to worry about a fault leaking into the next test.
 
 Every fault -- whether `PatchFault`, `LambdaFault`, or a custom subclass -- follows the same lifecycle managed by the `Fault` base class:
 
@@ -262,6 +285,9 @@ The `active` boolean guard means double-activation and double-deactivation are s
 
 ## Production safety
 
+!!! quote "Why you can trust this in production"
+    Every fault injection point in ordeal is a no-op when chaos mode is off. Your `buggify()` calls stay in production code, but they do nothing -- one quick check, then normal execution continues. PatchFaults are never activated, so original functions are never replaced. You ship the same code you test, with negligible overhead.
+
 This is the design constraint that makes fault injection practical: **zero overhead when chaos mode is off.**
 
 - `buggify()` checks a thread-local boolean and returns `False`. One attribute lookup. No branching into fault code. No RNG call.
@@ -272,6 +298,9 @@ This is the design constraint that makes fault injection practical: **zero overh
 Nothing to remove before shipping. The `buggify()` calls stay in your production code. They're documentation of failure modes that happens to also be executable during testing.
 
 ---
+
+!!! quote "You're ready"
+    You know two ways to inject faults: PatchFault for external wrapping and buggify for inline gates. You know when to use each. Browse the full fault library in `ordeal/faults/` — every fault follows the same pattern, so once you've seen one, you've seen them all. Or create your own with LambdaFault.
 
 ## Further reading
 

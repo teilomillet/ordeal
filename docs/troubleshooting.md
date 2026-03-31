@@ -1,8 +1,14 @@
 # Troubleshooting
 
+!!! quote "Find your symptom, follow the fix"
+    Something not working? You're probably not alone. Scan the headings below to find your symptom -- each section explains why it happens and exactly how to fix it. Issues are ordered from most common (explorer configuration) to most specific (simulation edge cases). If nothing here matches, check the Getting Help section at the bottom.
+
 Common issues and how to fix them.
 
 ## The explorer runs but finds 0 failures
+
+!!! quote "Think of it this way"
+    Zero failures can mean your code is solid -- or that the explorer isn't looking in the right places. The edge count in your report is the clue: if edges plateau early, the explorer is stuck in shallow territory and needs more faults, more rules, or broader `target_modules` to see deeper.
 
 This can mean your code is correct under fault conditions — or that the explorer isn't reaching interesting states.
 
@@ -51,6 +57,9 @@ The `class` path in `ordeal.toml` must be importable from the working directory.
 
 ## Hypothesis shrinking takes too long
 
+!!! quote "What's happening"
+    When ordeal finds a failure, Hypothesis tries to simplify the failing sequence to the shortest possible reproduction. With many faults and long rule chains, this can take minutes. You don't have to wait -- skip shrinking during exploration and do it later on just the traces that matter.
+
 Shrinking is Hypothesis finding the minimal reproducing example. It can be slow with many faults and long rule sequences.
 
 - Use `--no-shrink` during exploration: `ordeal explore --no-shrink`
@@ -59,6 +68,9 @@ Shrinking is Hypothesis finding the minimal reproducing example. It can be slow 
 - Reduce `steps_per_run` to produce shorter traces
 
 ## buggify() always returns False
+
+!!! quote "Why this matters"
+    `buggify()` is designed to be safe in production -- it does nothing unless you explicitly turn it on. This is a feature, not a bug. You need either `--chaos`, `auto_configure()`, or `activate()` to make it active. See `ordeal/buggify.py` for the activation logic.
 
 `buggify()` is a no-op unless explicitly activated. Check:
 
@@ -100,6 +112,9 @@ The `CoverageCollector` uses `sys.settrace` to track execution. If it shows 0 ed
 - Some C extensions bypass `sys.settrace` — coverage only tracks Python code.
 
 ## Mutation testing: all mutants survive
+
+!!! quote "What this means"
+    Mutation testing changes small things in your code (like swapping `+` to `-`) and checks if your tests notice. If all mutants survive, your tests aren't checking the function's actual behavior -- they might only check that it runs without crashing. You need assertions that verify specific output values.
 
 If `mutate_function_and_test` returns a 0% kill score, your tests aren't checking the function's behavior:
 

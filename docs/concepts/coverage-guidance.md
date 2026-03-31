@@ -1,5 +1,10 @@
 # Coverage Guidance
 
+!!! quote "In plain English"
+    Imagine exploring a dark building with a flashlight. Random testing wanders aimlessly, often revisiting the same rooms. Coverage-guided testing keeps a map of everywhere it has been and deliberately heads toward doors it hasn't opened yet. ordeal remembers which code paths it has explored and spends more time on the ones that lead somewhere new.
+
+    The explorer lives in `ordeal/explore.py`.
+
 How ordeal's Explorer uses code coverage to find bugs that random testing cannot.
 
 ---
@@ -15,6 +20,9 @@ This is not a theoretical problem. It is the reason random testing plateaus. Aft
 You need guidance.
 
 ## Edge coverage (AFL-style)
+
+!!! quote "Think of it this way"
+    An "edge" is a fingerprint for a specific code path -- not just *which* lines ran, but *how* the program moved between them. Two test runs can visit the same lines but take completely different routes through your code. Edge tracking sees the difference, which is why it catches bugs that line coverage misses. This is the same technique used by AFL, one of the most successful fuzz testing tools ever built.
 
 ordeal tracks **edges**, not lines.
 
@@ -36,6 +44,9 @@ The `CoverageCollector` only traces files that match your `target_modules`. If y
 
 ## Checkpoints
 
+!!! quote "What this unlocks"
+    Without checkpoints, every test run starts from scratch. With checkpoints, ordeal saves its progress at interesting moments -- like dropping a pin on a map when you find a new trail. Future runs can start from any saved pin instead of walking all the way from the beginning. This is the difference between exploring randomly and exploring with memory.
+
 When a run discovers edges that have never been seen before, ordeal saves a **checkpoint**: a lightweight snapshot of the ChaosTest machine at that moment -- all user state variables and which faults are active.
 
 Future runs can start FROM that checkpoint instead of from scratch. This means the Explorer does not have to re-discover the rare state every time. It saves its progress and branches forward into unknown territory.
@@ -52,6 +63,9 @@ A checkpoint stores:
 - **energy**: A scheduling weight (explained next)
 
 ## Energy scheduling
+
+!!! quote "The key insight"
+    ordeal doesn't explore all directions equally -- it spends more time on areas that keep producing results. A checkpoint that led to many new code paths gets a higher "energy" score, so ordeal revisits it more often. A checkpoint that stops producing anything new gradually fades in priority, but never to zero. It's like a search-and-rescue team focusing on sectors where signals were last detected, while still occasionally sweeping quiet sectors.
 
 Not all checkpoints are equally promising. A checkpoint that led to 15 new edges is more interesting than one that led to 1. A checkpoint that has been explored 50 times without finding anything new is less interesting than a fresh one.
 
@@ -88,6 +102,9 @@ ordeal offers three checkpoint selection strategies:
 When the checkpoint corpus reaches capacity (`max_checkpoints`, default 256), the lowest-energy checkpoint is evicted. The corpus is always full of the most promising states.
 
 ## The exploration loop
+
+!!! quote "How to explore this"
+    The loop below looks complicated, but the idea is simple: pick a starting point, take some steps (toggling faults and running rules), check if anything new happened, save progress if it did, and repeat. Each run is a short expedition. Over hundreds of runs, ordeal builds a detailed map of your system's behavior -- including the dark corners where bugs hide.
 
 Here is the full loop, step by step.
 
@@ -186,6 +203,9 @@ In detail:
 
 ## Why this works
 
+!!! quote "Why this matters"
+    Most bugs don't live in simple, obvious places -- they hide where two features interact in a way nobody anticipated. A timeout during a write. A NaN leaking into a cache. Coverage guidance finds these automatically because those interactions produce new code paths that ordeal has never seen before. It doesn't need to understand your system -- it just follows the signal of "this is new" and digs deeper.
+
 Most real bugs live at **feature intersections** -- two features interacting in a way nobody anticipated. A timeout during a write. A NaN flowing through a cache update. A retry loop hitting a closed connection.
 
 These intersections produce new edges because the code follows a path it has not followed before. The timeout handler runs for the first time during a write, or the NaN propagates through a branch that usually gets normal floats. These are new control-flow transitions -- new edges.
@@ -195,6 +215,9 @@ Coverage guidance pushes exploration toward these intersections automatically. T
 This is why coverage-guided testing finds bugs that random testing does not. Random testing treats all directions equally. Coverage-guided testing allocates more runs to directions that are producing new information. Over time, it tunnels into the deep corners of your state space -- exactly where the bugs are.
 
 ## Parallel exploration and shared edges
+
+!!! quote "What you can do with this"
+    When you run multiple workers, they collaborate automatically. If one worker discovers a rare state deep in your system, every other worker gets access to that discovery and can branch forward from it. Think of it as a team of explorers who share their maps in real time -- nobody wastes time re-discovering what a teammate already found.
 
 When running with multiple workers (`workers=N`), each worker has its own checkpoint corpus and runs independently. Workers collaborate through two shared data structures:
 
@@ -207,6 +230,9 @@ The pool matters most on deep targets. If reaching phase 3 of your service requi
 Pool overhead is small: one `pickle.dump` per significant discovery (capped at 20 publishes per worker), one `glob` + `pickle.load` per sync (every 2 seconds). For typical ChaosTest state dicts (a few kilobytes), this adds negligible latency.
 
 ## Comparison with pure Hypothesis
+
+!!! quote "In plain English"
+    Hypothesis is a fantastic testing tool, but it explores blindly -- it doesn't know which test runs discovered new code paths. The Explorer adds a coverage layer on top: it watches where your code actually goes and steers future runs toward unexplored territory. Use Hypothesis in CI for fast, broad checks. Use the Explorer when you want to go deep -- before a release or after a big refactor.
 
 Hypothesis is excellent at what it does: exploring rule interleavings with algebraic shrinking. When you write a `ChaosTest` and run it with pytest, Hypothesis explores different orderings of your rules and faults, and when it finds a failure, it shrinks it to a minimal example.
 
@@ -226,6 +252,9 @@ The Explorer adds the coverage layer:
 The practical difference: Hypothesis might need 100,000 runs to find a bug that requires a specific 8-step sequence. The Explorer finds it in 500 runs because it checkpoints at step 4 (when it first hits a new edge) and then only needs to find the remaining 4 steps from there.
 
 **Use both.** Run `ChaosTest` with pytest in CI for fast, broad coverage. Run the Explorer when you want to go deep -- before releases, after major refactors, or when you suspect there are interaction bugs that CI has not caught.
+
+!!! quote "You're ready"
+    You understand how the explorer maps code paths, saves checkpoints, and focuses energy on promising areas. To run it: `ordeal explore` with an `ordeal.toml` config. See the [Explorer guide](../guides/explorer.md) for configuration options and CI integration.
 
 ---
 

@@ -1,5 +1,8 @@
 # Mutation Testing
 
+!!! quote "In plain English"
+    How do you know your tests are actually good? Mutation testing answers that question. Ordeal makes small, deliberate changes to your code -- like swapping a `+` to a `-` -- and checks whether your tests catch the change. If they don't, you've found a blind spot. This is about test quality, not code quality.
+
 ## Why mutation testing
 
 Your chaos tests found zero bugs. That's either very good news or very bad news. Mutation testing tells you which.
@@ -9,6 +12,9 @@ The idea is simple: change the code (mutate it) and run the tests. If the tests 
 This is how Meta validates test quality at scale. Write the tests, then prove they work by checking that they fail when the code is wrong. If they don't fail, the tests are incomplete.
 
 ### The question coverage can't answer
+
+!!! quote "Think of it this way"
+    Imagine a security guard who walks through every room but never checks if the doors are locked. That's code coverage without mutation testing. The guard was there (the line ran), but nothing was actually verified. Mutation testing checks whether the guard would notice if someone swapped a lock.
 
 Code coverage tells you "this line ran." Mutation testing tells you "if this line were wrong, would any test notice?" A line can have 100% coverage and still have zero meaningful assertions checking its output. Consider:
 
@@ -34,6 +40,9 @@ If your chaos tests have a 95%+ mutation score, you can trust them. If not, the 
 
 ## Quick start
 
+!!! quote "What you can do with this"
+    In three lines of code, you can find out exactly where your tests are weak. Each surviving mutant points you to a specific line, a specific change, and a specific missing assertion. You don't have to guess what to test next -- the survivors tell you.
+
 ```python
 from ordeal.mutations import mutate_function_and_test
 
@@ -51,6 +60,9 @@ print(result.summary())
 Each SURVIVED line is a specific test gap. Line 42 had a `+` swapped to `-` and no test noticed. That means no test checks the sign of that computation.
 
 ## Operators
+
+!!! quote "In plain English"
+    Each operator is a different way of breaking your code on purpose. Swapping `+` to `-` tests whether you check math results. Replacing a return value with `None` tests whether you check what functions give back. Together, they cover the most common categories of real bugs. The operators live in `ordeal/mutations.py`.
 
 ordeal ships seven mutation operators. Each targets a different class of bugs.
 
@@ -81,6 +93,9 @@ ordeal ships seven mutation operators. Each targets a different class of bugs.
 **delete** -- Finds unnecessary or untested statements. If deleting an assignment and replacing it with `pass` survives, either the statement has no observable effect or the tests do not observe it. This catches dead code and undertested side effects.
 
 ## Function-level vs module-level
+
+!!! quote "Why this matters"
+    You can mutate one function at a time (safe, precise) or a whole module at once (fast, broad). Start with `mutate_function_and_test` for the functions you care about most, then use `mutate_and_test` when you want a quick sweep of an entire file.
 
 ordeal provides two entry points. They test the same mutations but differ in how they swap the code.
 
@@ -121,6 +136,14 @@ Use this when:
 
 ## Interpreting results
 
+!!! quote "The key insight"
+    A high mutation score means your tests actually verify behavior, not just that code runs. A low score means your tests would still pass even if the code were broken. The survivors are not failures to fix in your code -- they are gaps to fill in your tests.
+
+!!! quote "What mutation scores mean for your team"
+    For a startup shipping fast: focus on the surviving mutants. Each one is a specific blind spot — a bug that could ship and your tests wouldn't catch it. Fix the top 3 survivors and your test suite gets meaningfully stronger in 15 minutes.
+
+    For an established team: track mutation scores over time. A score that climbs from 75% to 92% over a quarter means your testing culture is improving. A score that drops after a refactor means the new code shipped without adequate assertions. The number measures testing discipline, not just test count.
+
 The mutation score is the percentage of mutants your tests killed. Here is how to read it.
 
 **100% score**: Every mutant was caught. Your tests are strong for this function. No change to the code can slip past unnoticed (within the scope of the operators tested).
@@ -157,6 +180,9 @@ This means: on line 42, column 8, the `+` operator was changed to `-`, and all t
 
 ## validate_mined_properties — close the loop with mine()
 
+!!! quote "What this unlocks"
+    This is where auto-testing and mutation testing meet. `mine()` discovers properties of your function. `validate_mined_properties` then checks whether those discovered properties are strong enough to catch bugs. If a mutant survives, the mined properties missed it -- and you know exactly what kind of assertion to add.
+
 `mine()` discovers properties. Mutation testing checks whether those properties actually catch bugs. `validate_mined_properties` does both in one call:
 
 ```python
@@ -180,6 +206,9 @@ It mines the original function, then mutates it and re-mines each mutant. If a m
 This answers the question: "are the properties mine() found strong enough to be useful as tests?"
 
 ## mutation_faults — mutations as faults for the Explorer
+
+!!! quote "How to explore this"
+    Instead of testing one mutant at a time in a loop, you can turn mutants into faults and let the Explorer combine them with other faults during chaos testing. The nemesis toggles mutations on and off alongside network timeouts, disk failures, and everything else. This finds bugs that only appear when a mutation interacts with a fault -- something sequential mutation testing would never catch.
 
 `mutation_faults()` bridges mutation testing with the Explorer. Instead of running mutations in a loop, it generates PatchFault objects — one per mutant. You can add these to a ChaosTest's fault list, and the nemesis will toggle them during exploration:
 
@@ -222,6 +251,9 @@ This is powerful: instead of testing mutants one at a time, the Explorer combine
 | `mutation_faults` + Explorer | Slower (coverage-guided) | Deep (mutations combined with faults + interleavings) | Pre-release, finding subtle interaction bugs |
 
 ## Workflow
+
+!!! quote "Think of it this way"
+    Chaos tests find bugs in your code. Mutation testing finds bugs in your tests. The workflow is a loop: write tests, mutate, fix the gaps the survivors reveal, mutate again. Each cycle makes your test suite stronger. When you hit 95%+ mutation score, you can trust your tests to catch real regressions.
 
 Mutation testing fits into a validation loop:
 

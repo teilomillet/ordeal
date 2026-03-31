@@ -1,5 +1,8 @@
 # Integrations
 
+!!! quote "In plain English"
+    ordeal connects to other testing tools so you can combine their strengths. The built-in Explorer handles most chaos testing. Integrations are for when you need something specialized: Atheris for deep coverage-guided fuzzing, Schemathesis for testing APIs against their schema. Think of them as power tools you reach for when the basics aren't enough.
+
 ## When to use integrations
 
 ordeal's core -- ChaosTest, buggify, the Explorer -- works standalone with no extra dependencies beyond Hypothesis. Integrations extend it with specialized engines for specific problem domains:
@@ -12,6 +15,9 @@ If you are testing a stateful service or data pipeline, the built-in Explorer is
 ---
 
 ## Atheris (coverage-guided fuzzing)
+
+!!! quote "What this unlocks"
+    Atheris is Google's fuzzing engine. Where the Explorer tries random fault combinations, Atheris watches which lines of code each combination reaches and steers toward combinations that reach new code. It's slower but more systematic -- it will eventually find fault combinations that random exploration misses. Best for parsers, security-critical code, and anything where "we tried hard and found nothing" needs to mean something. The bridge lives in `ordeal/integrations/atheris_engine.py`.
 
 ### Install
 

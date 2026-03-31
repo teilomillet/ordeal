@@ -1,5 +1,10 @@
 # Explorer
 
+!!! quote "The big picture"
+    The Explorer is your automated bug hunter. You point it at your code, it systematically searches for failures by running hundreds of thousands of action sequences, watching which code paths get executed, and steering toward the ones it hasn't seen before. Think of it as a tireless QA engineer who never gets bored, never forgets what it already tried, and gets smarter the longer it runs.
+
+    The engine lives in `ordeal/explore.py` and is configured via `ordeal.toml`. The workflow is simple: **configure, run, read results, fix, repeat.**
+
 The Explorer is ordeal's coverage-guided exploration engine. It runs your ChaosTest classes with code coverage feedback, checkpointing interesting states and branching from them to reach deep, rare bugs that random testing misses.
 
 This page covers practical usage. For the theory behind edge coverage, energy scheduling, and why coverage guidance finds bugs that random testing cannot, see [Coverage Guidance](../concepts/coverage-guidance.md).
@@ -21,6 +26,9 @@ If your ChaosTest already fails reliably under `pytest --chaos`, you do not need
 
 
 ## Quick start
+
+!!! quote "In plain English"
+    You can start the Explorer two ways: write a few lines of Python, or create a small config file and run a CLI command. Either way, you get back a report telling you how many code paths were found, how many bugs surfaced, and exactly how to reproduce each one.
 
 ### Python API
 
@@ -84,6 +92,9 @@ Resuming restores the checkpoint corpus, discovered edges, and RNG state so expl
 
 ## Configuration reference
 
+!!! quote "Why this matters"
+    Every setting below is a knob that controls how the Explorer searches. You do not need to touch most of them — the defaults are tuned for common use cases. But when you want to go deeper, run faster, or focus on a specific part of your code, these knobs let you shape the search. Think of it like adjusting a microscope: the defaults give you a good view, and the settings let you zoom in or out.
+
 All settings live in `ordeal.toml` under the `[explorer]` section. Every parameter has a default, so you only need to set the ones you want to change. For the full configuration schema including `[[tests]]` and `[report]` sections, see [Configuration](configuration.md).
 
 ### `target_modules`
@@ -125,6 +136,9 @@ max_time = 3600     # pre-release: go deep
 - The `max_runs` parameter (default: `null`) provides a run-count limit as an alternative to time. When both are set, whichever is reached first stops exploration.
 
 ### `checkpoint_strategy`
+
+!!! quote "The key insight"
+    The Explorer saves snapshots of interesting states it discovers — these are checkpoints. When it starts a new run, it can pick up from one of those saved states instead of starting from scratch. The checkpoint strategy controls **which** saved state it picks. The default, `"energy"`, means the Explorer learns from experience: states that led to new discoveries in the past get picked more often. It is how the Explorer gets smarter over time.
 
 **Type:** `str` -- **Default:** `"energy"`
 
@@ -212,6 +226,9 @@ RNG seed for the Explorer. Controls all random decisions: checkpoint selection, 
 
 ### `workers`
 
+!!! quote "What you can do with this"
+    Instead of one Explorer searching alone, you can have many running at the same time across your CPU cores. They share what they find so nobody wastes time re-discovering the same code paths. More workers means more ground covered in less time. On a typical 8-core machine, you get roughly 5-7x the throughput of a single worker.
+
 **Type:** `int` -- **Default:** `0` (auto: uses all CPU cores)
 
 Number of parallel worker processes. Each worker explores independently with a unique seed. Set to `1` for sequential exploration, or `0` (the default) to automatically use all available CPU cores.
@@ -231,6 +248,9 @@ Workers share discoveries through two mechanisms enabled by default:
 
 
 ## Reading the output
+
+!!! quote "Think of it this way"
+    The Explorer talks to you in two ways. While it is running, it shows a live ticker with key numbers — how many runs it has done, how many new code paths it found, and whether it hit any bugs. When it finishes, it gives you a summary with every failure it found and how many steps it takes to reproduce each one. Learning to read these numbers is the fastest way to know whether the Explorer is making progress or stuck.
 
 ### Live progress line
 
@@ -277,6 +297,9 @@ The step counts in parentheses after each failure are the **shrunk** trace lengt
 
 ## Shrinking
 
+!!! quote "Why this matters"
+    When the Explorer finds a bug, the sequence that triggered it is usually long and full of irrelevant steps. Shrinking strips away everything that does not matter, leaving you with the **shortest possible recipe** to reproduce the failure. A 50-step mess becomes a clean 3-step story: "do this, then this, then it breaks." That is the difference between a confusing stack trace and an obvious bug report.
+
 When the Explorer finds failures, it shrinks each one after exploration completes. Shrinking reduces a failing trace to the minimal sequence of steps that still reproduces the failure.
 
 The shrinking process has three phases, applied iteratively until no more steps can be removed:
@@ -313,6 +336,9 @@ minimal.save("minimal.json")
 
 
 ## Traces
+
+!!! quote "In plain English"
+    A trace is a complete recording of everything the Explorer did during a run — every action, every parameter, every fault toggle. It is saved as a simple JSON file. You can replay it to reproduce a failure on any machine, share it with a teammate, or shrink it down to the minimum steps. Think of traces as bug receipts: they prove exactly how a failure happened and let anyone reproduce it. The trace system lives in `ordeal/trace.py`.
 
 Every failure found by the Explorer is recorded as a JSON trace file. A trace captures every decision made during the run: which rules fired, what parameters were drawn, which faults were toggled, and at which step the failure occurred.
 
@@ -379,6 +405,9 @@ The trace file includes the `test_class` field (e.g., `"tests.test_chaos:MyServi
 
 
 ## Generating tests from exploration
+
+!!! quote "What this unlocks"
+    The Explorer can automatically write test functions for you. After it finishes exploring, it takes its best discoveries — the failures it found and the deepest code paths it reached — and turns each one into a standalone pytest test. You commit those tests, and now your CI permanently guards those deep paths. Your test suite grows smarter every time you run the Explorer.
 
 The Explorer can turn its traces into standalone pytest test functions. Each generated test replays an exact sequence of rules and fault toggles -- the sequences the Explorer found most valuable during exploration.
 
@@ -455,6 +484,9 @@ The file is overwritten each time. Do not edit it by hand -- your edits will be 
 
 ## CI integration
 
+!!! quote "How to explore this"
+    The Explorer fits naturally into your CI pipeline. You add a step that runs it, and if it finds bugs, the build fails — just like any other test. Failure traces are saved as artifacts so you can download and replay them locally. The pattern is: explore in CI, review the report, fix what it found, push again. Over time, you can also generate regression tests from the Explorer's discoveries so those deep paths stay covered permanently.
+
 For CI, configure the Explorer with a longer time limit, JSON report output, and trace saving. The exit code is non-zero when failures are found, so it integrates with any CI system that checks exit codes.
 
 ### ordeal.toml for CI
@@ -514,6 +546,9 @@ The `ordeal explore` command returns exit code 1 when any failure is found. No s
 
 ## Explorer vs Hypothesis
 
+!!! quote "Think of it this way"
+    Hypothesis and the Explorer are teammates, not competitors. Hypothesis is fast and lightweight — it runs during every CI push and catches the obvious bugs. The Explorer is slower but deeper — it remembers what it has seen, learns which directions look promising, and tunnels into corners that random testing would take years to reach. Use Hypothesis for everyday testing and the Explorer for periodic deep dives.
+
 | | Hypothesis (`pytest --chaos`) | Explorer (`ordeal explore`) |
 |---|---|---|
 | **Guidance** | None. Random rule selection with Hypothesis's internal heuristics for diversity. | Edge coverage feedback. Biases exploration toward sequences that discover new code paths. |
@@ -530,6 +565,9 @@ Run `pytest --chaos` in your CI pipeline for every push. It catches the easy bug
 
 
 ## Tuning tips
+
+!!! quote "The key insight"
+    Tuning the Explorer is about reading its output and adjusting one knob at a time. If edges stop climbing, you need to widen what it watches or let it run longer sequences. If it is too slow, narrow the focus. If failures are flaky, pin the seed. Each tip below matches a symptom to its fix. You do not need to understand all of this upfront — come back here when you see a specific problem.
 
 **Edges plateau early?**
 Add more `target_modules`. If you are only tracking `myapp.core` but many bugs live in `myapp.api` or `myapp.cache`, the Explorer cannot see edge transitions in those modules. Widen the target to give it more signal.
@@ -556,6 +594,12 @@ Increase `fault_toggle_prob` from 0.3 to 0.5. This means faults toggle more freq
 Decrease `fault_toggle_prob` to 0.1. The system runs longer without fault interference, building up more complex state before faults are injected.
 
 ## Parallel exploration
+
+!!! quote "At any scale"
+    One developer exploring on a laptop with 4 cores. A CI pipeline with 16 workers grinding through a pre-release check. A nightly job with 64 workers on a beefy machine. Same configuration, same `ordeal.toml`, same deterministic seeds — just more coverage per minute. The Explorer scales from "quick local check" to "deep organizational sweep" without changing how you use it.
+
+!!! quote "In plain English"
+    Parallel exploration means running multiple Explorers at the same time, each on its own CPU core. They automatically share their discoveries — when one worker finds a new code path, the others see it and skip that path. When one worker reaches a deep, interesting state, the others can pick up from that state and push even deeper. You do not need to configure anything special: by default it uses all your cores.
 
 By default, `ordeal explore` uses all CPU cores (`workers = 0` means auto-detect). Each worker explores independently with a unique seed. Results are aggregated: runs and steps are summed, edges are unioned for the true unique count.
 

@@ -132,8 +132,7 @@ def stale_state(
     attr: str,
     stale_value: Any,
 ) -> Fault:
-    """When active, overwrite *obj.attr* with *stale_value* on activate,
-    restore the original on deactivate.
+    """Overwrite *obj.attr* with *stale_value* while active (simulates stale cache/config).
 
     Simulates stale caches, expired tokens, outdated config — any
     scenario where an in-memory value drifts from the source of truth.

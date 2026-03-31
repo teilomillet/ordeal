@@ -133,7 +133,7 @@ class _CorruptedFloatsFault(Fault):
 
 
 def corrupted_floats(corrupt_type: CorruptType = "nan") -> _CorruptedFloatsFault:
-    """Fault that provides corrupt float values when active.
+    """Provide corrupt floats (NaN/Inf/zero/subnormal) via ``fault.value()`` when active.
 
     Unlike the ``*_injection`` faults, this doesn't patch a function.
     Instead, use ``fault.value()`` in your rules to get corrupt data.

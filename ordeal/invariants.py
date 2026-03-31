@@ -102,12 +102,12 @@ def _check_no_inf(value: Any, name: str = "no_inf") -> None:
             pass
 
 
-# Rejects NaN in scalars, sequences, and numpy arrays.
 no_nan = Invariant("no_nan", _check_no_nan)
-# Rejects Inf / -Inf in scalars, sequences, and numpy arrays.
+no_nan.__doc__ = "Rejects NaN in scalars, sequences, and numpy arrays."
 no_inf = Invariant("no_inf", _check_no_inf)
-# Shorthand for no_nan & no_inf -- rejects any non-finite float.
+no_inf.__doc__ = "Rejects Inf / -Inf in scalars, sequences, and numpy arrays."
 finite = no_nan & no_inf
+finite.__doc__ = "Rejects any non-finite float (NaN or Inf). Shorthand for no_nan & no_inf."
 
 
 # ---------------------------------------------------------------------------
@@ -402,7 +402,7 @@ def catalog() -> list[dict[str, str]]:
                 {
                     "name": attr_name,
                     "type": "instance",
-                    "doc": repr(obj),
+                    "doc": getattr(obj, "__doc__", None) or repr(obj),
                     "signature": "(value, *, name=None)",
                 }
             )

@@ -349,6 +349,7 @@ class TestWithChaosIntegration:
         @h_settings(
             max_examples=3,
             database=None,
+            deadline=None,
             suppress_health_check=[HealthCheck.too_slow, HealthCheck.filter_too_much],
         )
         def run(case):
@@ -373,6 +374,7 @@ class TestWithChaosIntegration:
         @h_settings(
             max_examples=3,
             database=None,
+            deadline=None,
             suppress_health_check=[HealthCheck.too_slow, HealthCheck.filter_too_much],
         )
         def run(case):
@@ -403,6 +405,7 @@ class TestChaosAPIHookIntegration:
             @h_settings(
                 max_examples=3,
                 database=None,
+                deadline=None,
                 suppress_health_check=[HealthCheck.too_slow, HealthCheck.filter_too_much],
             )
             def run(case):

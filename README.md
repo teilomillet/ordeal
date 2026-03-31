@@ -8,41 +8,39 @@
 
 **Your tests pass. Your code still breaks.**
 
-From your project root — no install needed:
+Ordeal finds what you missed — edge cases, untested code paths, bugs that only show up in production. No test code to write. Just point and run.
+
+Open a terminal and paste this ([uvx](https://docs.astral.sh/uv/guides/tools/) runs Python tools without installing them):
 
 ```bash
-uvx ordeal mine myapp.scoring
+uvx ordeal mine ordeal.demo
 ```
 
 ```
-mine(compute): 500 examples
-  ALWAYS  output in [0, 1] (500/500)
-  ALWAYS  monotonically non-decreasing (499/499)
+mine(score): 500 examples
+  ALWAYS  output in [0, 1] (500/500)         ← always returns a value between 0 and 1
+  ALWAYS  monotonically non-decreasing        ← bigger input = bigger output, always
 
 mine(normalize): 500 examples
-  ALWAYS  len(output) == len(xs) (500/500)
-     97%  idempotent (29/30)              ← normalize(normalize(x)) != normalize(x)
+     97%  idempotent (29/30)                  ← normalizing twice should give the same result
+                                                 ...but ordeal found a case where it doesn't
 ```
+
+Now point it at your code. If you have `myapp/scoring.py`, the module path is `myapp.scoring`:
 
 ```bash
-uvx ordeal audit myapp.scoring
+uvx ordeal mine myapp.scoring       # what do my functions actually do?
+uvx ordeal audit myapp.scoring      # what are my tests missing?
 ```
 
-```
-myapp.scoring
-  current:   33 tests |   343 lines | 98% coverage [verified]
-  migrated:  12 tests |   130 lines | 96% coverage [verified]
-  mutation: 14/18 (78%)                   ← 4 mutations survived — tests have blind spots
-  suggest:
-    - L42 in compute(): test when x < 0
-    - L67 in normalize(): test that ValueError is raised
-```
+Or let your AI assistant do it — open Claude Code, Cursor, or any coding assistant and paste:
 
-`mine` discovers what your functions actually do. `audit` compares your existing tests to what ordeal finds — the `suggest` lines are real gaps. Want to try it without your own code? `uvx ordeal mine ordeal.demo` runs against a built-in module.
+> "Run `uvx ordeal mine` and `uvx ordeal audit` on my main modules. Explain what it finds and fix the issues."
+
+ordeal ships with an [AGENTS.md](https://github.com/teilomillet/ordeal/blob/main/AGENTS.md) — your AI reads it automatically and knows how to use every command.
 
 ```
-pip install ordeal                        # or: uv add ordeal
-ordeal explore                            # deep stateful exploration (reads ordeal.toml)
+pip install ordeal                        # or: uv tool install ordeal
 ```
 
 ## 30-second example

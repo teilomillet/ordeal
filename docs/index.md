@@ -1,32 +1,84 @@
 # ordeal — Chaos testing for Python
 
-Your tests pass. Your code still breaks in production. The gap between "tests pass" and "code works" is the space of failures you never thought to test — timeouts during retries, NaN inside recovery paths, permission errors after partial writes. That space is enormous, and traditional testing doesn't cover it.
+Your tests pass. Your code still breaks in production. Ordeal finds what you missed.
 
-Ordeal closes this gap. You describe your system, declare what can go wrong, state what must stay true — and ordeal explores thousands of failure combinations automatically, with coverage guidance, until it either finds a violation or gives you confidence that your code handles adversity.
+## What ordeal does
 
-```python
-from ordeal import ChaosTest, rule, always
-from ordeal.faults import timing, numerical
+You give it your Python code. It gives you back:
 
-class MyServiceChaos(ChaosTest):
-    faults = [
-        timing.timeout("myapp.api.call"),
-        numerical.nan_injection("myapp.model.predict"),
-    ]
+- **What your functions actually do** — not what you think they do, what they *provably* do across hundreds of random inputs
+- **What your tests miss** — gaps in coverage, mutations your tests don't catch, edge cases you haven't considered
+- **Exactly what to fix** — line numbers, specific inputs, concrete suggestions
 
-    @rule()
-    def call_service(self):
-        result = self.service.process("input")
-        always(result is not None, "process never returns None")
+No test code to write. No configuration. Just point and run.
 
-TestMyServiceChaos = MyServiceChaos.TestCase
-```
+## Try it right now
+
+Open a terminal and paste this ([uvx](https://docs.astral.sh/uv/guides/tools/) runs Python tools without installing them):
 
 ```bash
-pytest --chaos
+uvx ordeal mine ordeal.demo
 ```
 
-When ordeal passes, it means something. Not "the tests pass" — but that the code was explored under adversity, with faults injected in combinations no human would write, and the invariants held.
+This analyzes ordeal's built-in demo module. You'll see output like:
+
+```
+mine(score): 500 examples
+  ALWAYS  output in [0, 1] (500/500)         ← score() always returns a value between 0 and 1
+  ALWAYS  monotonically non-decreasing        ← bigger input = bigger output, always
+
+mine(normalize): 500 examples
+  ALWAYS  len(output) == len(xs) (500/500)    ← output is always the same length as input
+     97%  idempotent (29/30)                  ← normalizing twice SHOULD give the same result
+                                                 ...but ordeal found 1 case where it doesn't
+```
+
+Ordeal called each function hundreds of times with random inputs and told you what's always true — and what isn't. That `97% idempotent` is a real finding: there's an edge case where `normalize(normalize(x))` gives a different result than `normalize(x)`.
+
+## Point it at your code
+
+If your project has a file like `myapp/scoring.py`, the module path is `myapp.scoring` — the file path with slashes replaced by dots, without the `.py`:
+
+```bash
+uvx ordeal mine myapp.scoring       # what do my functions actually do?
+uvx ordeal audit myapp.scoring      # what are my tests missing?
+```
+
+`audit` goes further — it generates tests for you, measures coverage, and mutation-tests the result:
+
+```
+myapp.scoring
+  migrated:  12 tests |   130 lines | 96% coverage [verified]
+  mutation: 14/18 (78%)                   ← ordeal flipped operators in your code;
+                                             4 changes went undetected by your tests
+  suggest:
+    - L42 in compute(): test when x < 0
+    - L67 in normalize(): test that ValueError is raised
+```
+
+Those `suggest` lines are real. Line 42 of `compute()` behaves differently with negative inputs, and your tests never check that.
+
+## Let your AI assistant do it
+
+You don't need to learn ordeal's API. Open Claude Code, Cursor, Copilot, or any AI coding assistant and paste:
+
+> "Run `uv tool install ordeal` to install ordeal. Then run `ordeal mine` on each module in my project and `ordeal audit` on the ones with existing tests. Read the output, explain what it found, and fix the issues it suggests."
+
+Or without installing anything:
+
+> "Run `uvx ordeal mine` on my main modules. Show me the output and explain what the findings mean."
+
+ordeal ships with an [AGENTS.md](https://github.com/teilomillet/ordeal/blob/main/AGENTS.md) — your AI assistant reads it automatically and knows every command, every option, and how to interpret every result.
+
+## Install
+
+When you're ready to make ordeal part of your workflow:
+
+```bash
+pip install ordeal           # or: uv tool install ordeal
+```
+
+Then `ordeal mine`, `ordeal audit`, and `ordeal explore` are available directly from your terminal.
 
 ## Start here
 

@@ -634,9 +634,7 @@ class TestValidateResponse:
         assert fail["status_code"] == 500
 
     def test_200_is_ok(self):
-        resp = _Response(
-            status_code=200, headers={"content-type": "application/json"}, body=b"[]"
-        )
+        resp = _Response(status_code=200, headers={"content-type": "application/json"}, body=b"[]")
         ep = _Endpoint(method="GET", path="/items", response_codes={200})
         assert _validate_response(resp, ep, []) is None
 

@@ -153,7 +153,7 @@ This isn't an arbitrary split. It follows from the semantics.
 ## The PropertyTracker
 
 !!! quote "How to think about this"
-    The PropertyTracker is ordeal's memory. Every time you call `always`, `sometimes`, `reachable`, or `unreachable`, ordeal writes it down. At the end of your test session, it reviews everything it recorded and gives you a clear report: which properties held, which ones failed, and how many times each was checked. You don't manage it yourself -- it works automatically behind the scenes.
+    Ordeal keeps track of every assertion call automatically. Every time you call `always`, `sometimes`, `reachable`, or `unreachable`, ordeal writes it down. At the end of your test session, it reviews everything it recorded and gives you a clear report: which properties held, which ones failed, and how many times each was checked. You don't manage it yourself — it works behind the scenes.
 
 Behind the scenes, every assertion call records data in a global `PropertyTracker`. This is a thread-safe singleton that accumulates results across the entire test session.
 

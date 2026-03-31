@@ -8,7 +8,7 @@ Complete public API with signatures, parameters, and usage.
 ## Core
 
 !!! quote "Stateful chaos testing"
-    ChaosTest is the foundation of ordeal. You define rules (things your system does), faults (things that go wrong), and invariants (things that must stay true). Hypothesis then explores thousands of interleavings automatically, finding the exact sequence of operations and failures that breaks your system.
+    ChaosTest is the foundation of ordeal. You define rules (things your system does), faults (things that go wrong), and invariants (things that must stay true). Ordeal then explores thousands of interleavings automatically, finding the exact sequence of operations and failures that breaks your system.
 
 ### ChaosTest
 

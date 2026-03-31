@@ -18,7 +18,7 @@ That's the core idea. You don't write test cases for failures. You describe the 
 !!! quote "Think of it this way"
     A `ChaosTest` is your **crash-test arena**. You describe three things: what can break (faults), what your code does (rules), and what must always be true (invariants). Then ordeal runs your code thousands of times, mixing operations and failures in every order it can think of. When something breaks, it hands you the shortest possible replay so you know exactly what went wrong.
 
-    The class lives in `ordeal/chaos.py` and extends Hypothesis's state machine, so you get all of Hypothesis's power for free.
+    The class lives in `ordeal/chaos.py`. It handles the exploration, shrinking, and fault coordination — you just fill in the pieces.
 
 `ChaosTest` is the base class for chaos tests in ordeal. It extends Hypothesis's `RuleBasedStateMachine`, which means it inherits a powerful exploration engine: Hypothesis generates random sequences of method calls, tracks state, and when something fails, it shrinks the sequence to the minimal reproduction.
 
@@ -219,7 +219,7 @@ Use swarm mode when you have three or more faults. With one or two faults, the s
 ## How a run works, step by step
 
 !!! quote "How to explore this"
-    Don't worry about memorizing these steps. The loop is simple: **initialize, run a mix of your rules and the nemesis, check invariants after every step, clean up**. If anything breaks, Hypothesis rewinds and finds the shortest path to the failure. Think of it like a video game replay -- ordeal records every move, then edits out everything that wasn't necessary to trigger the bug.
+    Don't worry about memorizing these steps. The loop is simple: **initialize, run a mix of your rules and the nemesis, check invariants after every step, clean up**. If anything breaks, ordeal rewinds and finds the shortest path to the failure. Think of it like a video game replay — ordeal records every move, then edits out everything that wasn't necessary to trigger the bug.
 
 Here's exactly what happens when Hypothesis executes one test case of a `ChaosTest`:
 

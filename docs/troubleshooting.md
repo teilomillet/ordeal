@@ -58,7 +58,7 @@ The `class` path in `ordeal.toml` must be importable from the working directory.
 ## Hypothesis shrinking takes too long
 
 !!! quote "What's happening"
-    When ordeal finds a failure, Hypothesis tries to simplify the failing sequence to the shortest possible reproduction. With many faults and long rule chains, this can take minutes. You don't have to wait -- skip shrinking during exploration and do it later on just the traces that matter.
+    When ordeal finds a failure, it tries to simplify the failing sequence to the shortest possible reproduction. With many faults and long rule chains, this can take minutes. You don't have to wait — skip shrinking during exploration and do it later on just the traces that matter.
 
 Shrinking is Hypothesis finding the minimal reproducing example. It can be slow with many faults and long rule sequences.
 

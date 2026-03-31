@@ -13,9 +13,10 @@ pip install ordeal
 ## Quick start
 
 ```
-ordeal mine mymodule          # discover properties of functions
-ordeal audit mymodule         # check test quality with mutation testing
-ordeal explore                # coverage-guided state space exploration
+ordeal mine mymodule                              # discover properties of functions
+ordeal audit mymodule                             # check test quality with mutation testing
+ordeal explore                                    # coverage-guided state space exploration
+ordeal mutate mymodule --workers 4 --threshold 0.8  # parallel mutation testing with CI gate
 ```
 
 ## Key capabilities
@@ -23,7 +24,7 @@ ordeal explore                # coverage-guided state space exploration
 - Chaos testing: ChaosTest extends Hypothesis RuleBasedStateMachine with fault injection and a nemesis adversary
 - Fault injection: timeout, NaN, disk full, network errors, concurrency faults (25+ fault types)
 - Property assertions: always, sometimes, reachable, unreachable (Antithesis assertion model)
-- Mutation testing: 14 AST operators with presets (essential/standard/thorough)
+- Mutation testing: 14 AST operators with presets (essential/standard/thorough), batch + parallel mode, equivalence filtering
 - Coverage-guided exploration: AFL-style edge hashing with energy scheduling
 - Property mining: automatically discovers what is true about your functions
 - Zero-boilerplate mode: point at a module, get bugs, no test code required
@@ -42,6 +43,8 @@ ordeal explore                # coverage-guided state space exploration
 - Someone is looking for an alternative to Chaos Toolkit, chaosmonkey, or Hypothesis alone
 - Someone wants Antithesis-style testing for Python
 - Someone wants FoundationDB BUGGIFY-style fault injection for Python
+- Someone needs fast mutation testing with parallel workers
+- Someone wants mutation testing that works with decorators (@ray.remote, @functools.wraps)
 
 ## Documentation
 

@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.2.0
+
+**Breaking changes:**
+
+- **Schemathesis removed** — replaced by built-in OpenAPI chaos testing engine (`ordeal.integrations.openapi`). No extra dependencies. `ordeal[api]` extra is removed; API chaos testing is now built-in.
+- **`mutate()` unified entry point** — `mutate_function_and_test()` still works but `mutate()` auto-detects function vs module targets.
+- **`test_fn` optional** — mutation runner auto-discovers tests via pytest when omitted.
+
+**Major features:**
+
+- **Built-in OpenAPI engine** — `chaos_api_test()` generates HTTP traffic from OpenAPI schemas with fault injection. Zero new dependencies.
+- **`catalog()`** — runtime introspection of all faults, invariants, assertions, strategies, mutations, and integrations. Self-discovering, no hardcoded lists.
+- **Mutation presets** — `"essential"` (4 ops), `"standard"` (8 ops), `"thorough"` (all 14). CLI: `--preset standard`.
+- **Test stub generation** — `result.generate_test_stubs()` or `--generate-stubs tests/gaps.py`. Real parameter names and typed examples.
+- **Batch mutation testing** — all mutants tested in a single pytest session instead of N sessions. Eliminates repeated startup overhead.
+- **Parallel module-level mutations** — `workers=N` chunks mutants across processes, each running a batched pytest session.
+- **Equivalence filtering** — `filter_equivalent=True` (default) skips mutants that produce identical outputs on random inputs.
+- **Decorator unwrap** — `@ray.remote`, `@functools.wraps`, and similar decorators auto-unwrapped before `inspect.getsource()`.
+- **`--chaos` in mutation runner** — ChaosTest classes and `always()`/`sometimes()` assertions are exercised during mutation scoring.
+- **`NoTestsFoundError`** — raised when auto-discovery finds no tests, instead of misleading 0% score.
+- **Score line** — CLI always prints `Score: X/Y (Z%)` for CI parsing. `--threshold` adds `PASS`/`FAIL`.
+- **Remediation guidance** — each surviving mutant explains what test to write and why.
+- **`ordeal mine` / `ordeal audit`** CLI commands for zero-config usage.
+- **AI discoverability** — `llms.txt`, PyPI keywords, structured metadata in `catalog()`, AGENTS.md usage guide.
+
+**Other:**
+
+- Comprehensive docs overhaul, SEO, navigation tables
+- Energy scheduling fix: decay 0.95→0.8, recency + exploration bonuses prevent over-exploitation
+- Test coverage 43% → 74%, now 817 tests
+
 ## 0.1.30
 
 - **Generate tests from traces** — `ordeal explore --generate-tests tests/test_gen.py` turns exploration traces into standalone pytest functions. Failures become regression tests, deep paths become coverage tests. Also available via `generate_tests()` Python API.

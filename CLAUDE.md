@@ -25,6 +25,10 @@ uv run ordeal mine <target>      # discover properties of a function
 uv run ordeal replay <trace>     # replay a failure trace
 ```
 
+## Discovery
+
+See [AGENTS.md § Discovery](AGENTS.md#discovery) for the full reference. Quick start: `from ordeal import catalog; catalog()` returns all capabilities (faults, invariants, assertions, strategies, integrations) via runtime introspection.
+
 ## Architecture
 
 ```
@@ -77,8 +81,8 @@ ordeal/
 - **Required**: hypothesis >= 6.100.0, pytest >= 8.0.0
 - **Optional extras**:
   - `ordeal[atheris]` — coverage-guided fuzzing via Google Atheris
-  - `ordeal[api]` — API chaos testing via Schemathesis
   - `ordeal[all]` — everything including numpy
+- **API chaos testing** is built-in (no extra install)
 - **Dev**: ruff, pytest-cov (`pip install ordeal[dev]`)
 
 ## Using ordeal

@@ -394,34 +394,9 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
-def _is_function_target(target: str) -> bool:
-    """Determine if a dotted path refers to a callable (vs a module)."""
-    from importlib import import_module
-
-    try:
-        import_module(target)
-        return False  # imported as module — not a function
-    except ImportError:
-        pass
-
-    parts = target.rsplit(".", 1)
-    if len(parts) < 2:
-        return False
-    try:
-        mod = import_module(parts[0])
-        attr = getattr(mod, parts[1], None)
-        return callable(attr)
-    except ImportError:
-        return False
-
-
 def _cmd_mutate(args: argparse.Namespace) -> int:
     """Run mutation testing on specified targets."""
-    from ordeal.mutations import (
-        MutationResult,
-        mutate_and_test,
-        mutate_function_and_test,
-    )
+    from ordeal.mutations import MutationResult, mutate
 
     targets: list[str] = args.targets or []
     preset: str | None = args.preset
@@ -480,25 +455,15 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
     for target in targets:
         _stderr(f"Mutating {target}...\n")
 
-        is_func = _is_function_target(target)
-
         try:
-            if is_func:
-                result = mutate_function_and_test(
-                    target,
-                    operators=operators,
-                    preset=preset,
-                    workers=workers,
-                    filter_equivalent=filter_equivalent,
-                    equivalence_samples=equivalence_samples,
-                )
-            else:
-                result = mutate_and_test(
-                    target,
-                    operators=operators,
-                    preset=preset,
-                    workers=workers,
-                )
+            result = mutate(
+                target,
+                operators=operators,
+                preset=preset,
+                workers=workers,
+                filter_equivalent=filter_equivalent,
+                equivalence_samples=equivalence_samples,
+            )
         except (ImportError, AttributeError, ValueError) as e:
             _stderr(f"  Error: {e}\n")
             exit_code = 1

@@ -46,9 +46,9 @@ Capabilities (each is independent — use one or all):
 
 5. **Mutation testing** — verify your tests catch real bugs::
 
-    from ordeal import mutate_function_and_test
+    from ordeal import mutate
 
-    result = mutate_function_and_test("mymodule.func", preset="standard")
+    result = mutate("mymodule.func", preset="standard")  # function or module
     print(result.summary())   # test gaps + how to fix them
 
     # CLI: ordeal mutate mymodule.func --preset standard
@@ -90,6 +90,7 @@ from ordeal.mutations import (
     OPERATORS,
     PRESETS,
     MutationResult,
+    mutate,
     mutate_function_and_test,
 )
 
@@ -118,6 +119,7 @@ __all__ = [
     # Config
     "auto_configure",
     # Mutations
+    "mutate",
     "mutate_function_and_test",
     "MutationResult",
     "PRESETS",

@@ -83,31 +83,34 @@ ordeal/
 
 ## Using ordeal
 
-Intent-based guide — match what the developer wants to the right ordeal tool.
+| Developer intent | Tool | One-liner |
+|---|---|---|
+| "Are my tests good enough?" | `mutate()` | `mutate("myapp.func", preset="standard")` |
+| "Test under failure conditions" | `ChaosTest` | `class MyChaos(ChaosTest): faults = [...]` |
+| "What if this call fails?" | `buggify()` | `if buggify(): corrupt(data)` |
+| "Explore all reachable states" | CLI | `ordeal explore` |
+| "Audit test coverage" | CLI | `ordeal audit myapp.scoring` |
+| "Discover properties" | CLI | `ordeal mine myapp.scoring.compute` |
 
-### "Are my tests good enough?" / "Check test quality"
-
-Mutation testing. Mutates the code and checks if tests catch the changes.
+### Mutation testing — `mutate()`
 
 ```python
-from ordeal import mutate_function_and_test
+from ordeal import mutate
 
-result = mutate_function_and_test("myapp.scoring.compute", preset="standard")
-print(result.summary())
+result = mutate("myapp.scoring.compute", preset="standard")  # or a module path
+print(result.summary())  # test gaps with cause + fix guidance
 ```
 
-- `preset="essential"` — 4 operators, fast. `"standard"` — 8 operators, CI default. `"thorough"` — all 14.
-- `test_fn` is optional — pytest auto-discovers relevant tests when omitted.
-- Each gap in `result.survived` has `.operator`, `.description`, `.source_line`, `.remediation`.
+- Auto-detects function vs module. Tests auto-discovered via pytest when `test_fn` is omitted.
+- Presets: `"essential"` (4 ops, fast), `"standard"` (8 ops, CI default), `"thorough"` (all 14).
+- `result.survived` — list of gaps, each with `.operator`, `.source_line`, `.remediation`.
 - CLI: `uv run ordeal mutate myapp.scoring.compute --preset standard`
 - Config: `[mutations]` section in `ordeal.toml` (see `ordeal.toml.example`).
 
-### "Test my code under failure conditions" / "Chaos test"
-
-Stateful chaos testing with fault injection.
+### Chaos testing — `ChaosTest`
 
 ```python
-from ordeal import ChaosTest, rule, invariant, always
+from ordeal import ChaosTest, rule, always
 from ordeal.faults import timing, io
 
 class MyServiceChaos(ChaosTest):
@@ -115,45 +118,9 @@ class MyServiceChaos(ChaosTest):
 
     @rule()
     def call_service(self):
-        result = my_service.process("input")
-        always(result is not None, "never returns None")
+        always(my_service.process("input") is not None, "never returns None")
 
-TestMyService = MyServiceChaos.TestCase  # run with: pytest --chaos
-```
-
-### "Inject faults inline" / "What if this call fails?"
-
-Inline fault injection — no-op in production, active under `--chaos`.
-
-```python
-from ordeal import buggify
-if buggify():
-    data = corrupt(data)  # only runs during chaos testing
-```
-
-### "Explore all reachable states" / "Deep testing"
-
-Coverage-guided exploration — AFL-style edge discovery.
-
-```bash
-uv run ordeal explore              # reads ordeal.toml
-uv run ordeal explore -v -w 4      # verbose, 4 workers
-```
-
-### "Audit a module" / "What's the test coverage?"
-
-Module audit — mutation score, property coverage, test gaps.
-
-```bash
-uv run ordeal audit myapp.scoring
-```
-
-### "Discover properties" / "What invariants hold?"
-
-Property mining — automatically discovers what's true about a function.
-
-```bash
-uv run ordeal mine myapp.scoring.compute
+TestMyService = MyServiceChaos.TestCase  # pytest --chaos
 ```
 
 ## Extending ordeal

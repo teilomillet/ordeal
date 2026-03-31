@@ -366,7 +366,11 @@ def test_generate_test_stubs_for_surviving_mutants():
     if result.survived:
         assert f"from {__name__} import _add" in stubs
         assert "def test_" in stubs
-        assert "TODO" in stubs
+        # Uses real param names from inspect.signature
+        assert "a=" in stubs
+        assert "b=" in stubs
+        # Includes function signature in header
+        assert "Function signature:" in stubs
     else:
         assert stubs == ""
 

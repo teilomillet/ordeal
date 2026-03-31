@@ -511,6 +511,19 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
         if threshold > 0.0 and result.score < threshold:
             exit_code = 1
 
+    # Generate test stubs if requested
+    if args.generate_stubs:
+        stubs_path = Path(args.generate_stubs)
+        all_stubs: list[str] = []
+        for _, result in all_results:
+            stub = result.generate_test_stubs()
+            if stub:
+                all_stubs.append(stub)
+        if all_stubs:
+            stubs_path.parent.mkdir(parents=True, exist_ok=True)
+            stubs_path.write_text("\n\n".join(all_stubs))
+            _stderr(f"Test stubs written: {stubs_path}\n")
+
     # Overall summary for multiple targets
     if len(all_results) > 1:
         total_mutants = sum(r.total for _, r in all_results)
@@ -734,6 +747,13 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=10,
         help="Samples for equivalence filtering (default: 10)",
+    )
+    mutate_p.add_argument(
+        "--generate-stubs",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Write test stubs for surviving mutants to PATH",
     )
 
     args = parser.parse_args(argv)

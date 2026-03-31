@@ -422,6 +422,7 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
     """Run mutation testing on specified targets."""
     from ordeal.mutations import (
         MutationResult,
+        NoTestsFoundError,
         mutate_and_test,
         mutate_function_and_test,
     )
@@ -504,6 +505,10 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
                     filter_equivalent=filter_equivalent,
                     equivalence_samples=equivalence_samples,
                 )
+        except NoTestsFoundError as e:
+            _stderr(f"  WARNING: {e}\n")
+            exit_code = 1
+            continue
         except (ImportError, AttributeError, ValueError) as e:
             _stderr(f"  Error: {e}\n")
             exit_code = 1

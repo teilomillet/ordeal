@@ -102,6 +102,10 @@ def _unwrap_func(func: object) -> object:
     return func
 
 
+class NoTestsFoundError(RuntimeError):
+    """Raised when auto-discovery finds no tests for a mutation target."""
+
+
 # ============================================================================
 # Data structures
 # ============================================================================
@@ -1269,6 +1273,12 @@ def _batch_module_test(
         def pytest_runtestloop(self, session: pytest.Session) -> bool:
             """Override the default test loop to iterate mutants."""
             if not session.config.option.collectonly:
+                if not session.items:
+                    raise NoTestsFoundError(
+                        f"No tests found for {target!r}. "
+                        "Mutation score is meaningless without tests. "
+                        "Pass test_fn= or ensure test files match the module name."
+                    )
                 for mutant, mutated_tree in mutant_pairs:
                     killed = False
                     error = None
@@ -1509,6 +1519,12 @@ def _auto_test_fn(target: str) -> Callable[[], None]:
         module_name = parts[0] if len(parts) >= 2 else target
         short_name = module_name.split(".")[-1]
         rc = pytest.main(["-x", "-q", "--tb=short", "--no-header", "--chaos", "-k", short_name])
+        if rc == 5:
+            raise NoTestsFoundError(
+                f"No tests found for {target!r}. "
+                "Mutation score is meaningless without tests. "
+                "Pass test_fn= or ensure test files match the module name."
+            )
         if rc != 0:
             raise AssertionError(f"pytest returned exit code {rc}")
 

@@ -81,6 +81,33 @@ def _cmd_catalog(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_scan(args: argparse.Namespace) -> int:
+    """Run unified exploration: mine + scan + mutate + chaos in one pass.
+
+    This is the recommended entry point for AI assistants.  Point it
+    at a module and it does everything: discovers properties, checks
+    for crashes, mutation-tests, and chaos-tests.  Returns confidence,
+    findings, and frontier.
+    """
+    from ordeal.state import explore
+
+    _stderr(f"Scanning {args.target} (seed={args.seed})...\n")
+    state = explore(
+        args.target,
+        seed=args.seed,
+        max_examples=args.max_examples,
+        workers=args.workers,
+        time_limit=args.time_limit,
+    )
+
+    if args.json:
+        print(state.to_json())
+    else:
+        print(state.summary())
+
+    return 1 if state.findings else 0
+
+
 def _cmd_explore(args: argparse.Namespace) -> int:
     """Run coverage-guided exploration from ordeal.toml."""
     try:
@@ -941,7 +968,7 @@ def main(argv: list[str] | None = None) -> int:
         description=(
             "Ordeal — explores the state space of Python code.\n\n"
             "Run 'ordeal catalog' to see every capability.\n"
-            "Run 'ordeal mine mymod' to discover what functions do.\n"
+            "Run 'ordeal scan mymod' to explore a module fully.\n"
             "Use catalog() in Python for the full API."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -953,6 +980,26 @@ def main(argv: list[str] | None = None) -> int:
         "catalog",
         help="Show all capabilities — faults, mining, mutations, exploration, ...",
     )
+
+    # -- ordeal scan (unified explore — the recommended entry point) --
+    scan_p = sub.add_parser(
+        "scan",
+        help="Explore a module: mine + scan + mutate + chaos in one pass",
+    )
+    scan_p.add_argument("target", help="Module path (e.g. myapp.scoring)")
+    scan_p.add_argument(
+        "--seed", type=int, default=42, help="RNG seed for reproducibility (default: 42)"
+    )
+    scan_p.add_argument(
+        "--max-examples", "-n", type=int, default=50, help="Examples per function (default: 50)"
+    )
+    scan_p.add_argument(
+        "--workers", "-w", type=int, default=1, help="Parallel workers for mutation testing"
+    )
+    scan_p.add_argument(
+        "--time-limit", "-t", type=float, default=None, help="Time budget in seconds"
+    )
+    scan_p.add_argument("--json", action="store_true", help="Output JSON instead of text")
 
     # -- ordeal explore --
     explore_p = sub.add_parser("explore", help="Run coverage-guided exploration")
@@ -1133,6 +1180,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "catalog":
         return _cmd_catalog(args)
+    elif args.command == "scan":
+        return _cmd_scan(args)
     elif args.command == "explore":
         return _cmd_explore(args)
     elif args.command == "replay":

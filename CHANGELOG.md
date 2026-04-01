@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.84
+
+**Features:**
+
+- add output literacy + vocabulary to skill
+
+**Docs:**
+
+- link to docs.byordeal.com in skill
+
+
 ## 0.2.83
 
 **Features:**

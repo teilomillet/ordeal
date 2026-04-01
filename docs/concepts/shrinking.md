@@ -193,12 +193,29 @@ Ordeal shrinks *sequences of operations* combined with *fault schedules*. This i
 
 This is what makes ordeal's shrinking useful for real system debugging. The bugs you find in distributed systems, stateful services, and concurrent code are not about bad input values. They are about specific sequences of events happening under specific failure conditions. Shrinking gives you the minimal event sequence.
 
+## Fault ablation
+
+Shrinking tells you the minimal *steps*. Fault ablation tells you the minimal *faults*.
+
+After shrinking, the Explorer runs fault ablation: for each fault in the shrunk trace, it replays without that fault. If the failure disappears, the fault is necessary. This answers: *"which faults caused this bug?"*
+
+Ablation has two phases: individual (remove one fault at a time) and pairwise (test pairs of individually-unnecessary faults that might be jointly necessary). See the [Explorer Guide](../guides/explorer.md#fault-ablation) for details and examples.
+
+```bash
+ordeal replay --shrink --ablate trace.json
+```
+
+```python
+from ordeal import ablate_faults
+faults = ablate_faults(trace)  # {"timeout": True, "disk_full": False}
+```
+
 !!! quote "You're ready"
-    You understand how ordeal turns a 50-step failure into a 3-step reproduction. When you see a shrunk trace, you know what each step means and how to read it. Use `ordeal replay trace.json` to reproduce any failure, or `ordeal replay --shrink` to minimize it further.
+    You understand how ordeal turns a 50-step failure into a 3-step reproduction, and how fault ablation narrows down which faults are responsible. Use `ordeal replay trace.json` to reproduce any failure, `ordeal replay --shrink` to minimize it, and `ordeal replay --ablate` to identify necessary faults.
 
 ---
 
 **Next:**
 - [Coverage Guidance](coverage-guidance.md) -- how the explorer finds failures in the first place
 - [Chaos Testing](chaos-testing.md) -- how test sequences and fault schedules are generated
-- [Explorer Guide](../guides/explorer.md) -- using shrinking in practice from the CLI
+- [Explorer Guide](../guides/explorer.md) -- using shrinking, ablation, swarm, and seeds in practice

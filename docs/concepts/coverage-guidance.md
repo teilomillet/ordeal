@@ -260,8 +260,26 @@ The practical difference: Hypothesis might need 100,000 runs to find a bug that 
 
 **Use both.** Run `ChaosTest` with pytest in CI for fast, broad coverage. Run the Explorer when you want to go deep -- before releases, after major refactors, or when you suspect there are interaction bugs that CI has not caught.
 
+## Coverage gap reporting
+
+After exploration, the Explorer reports which branch statements in target modules were **not reached**. These are branches the Explorer tried to reach but could not, given its configuration, faults, and rule sequences. They are not necessarily unreachable -- a longer run, different faults, or different swarm configuration might reach them.
+
+For each gap, the Explorer suggests a `reachable()` assertion:
+
+```
+Not reached in 200 runs: 3 branch(es) in target modules
+  myapp/api.py:42 if response.status >= 500:
+    add: reachable("myapp/api.py:42: if response.status >= 500:")
+```
+
+Adding `reachable()` to your code lets future runs prove whether the branch is reachable or genuinely dead code. See the [Explorer guide](../guides/explorer.md#coverage-gap-reporting) for the full API.
+
+## Unified swarm
+
+Coverage guidance tells the Explorer *what* paths it hasn't seen. Unified swarm tells it *how* to reach them: by randomly disabling features per run, the remaining features dominate and push the system into states that all-features-on testing rarely reaches. The Explorer combines coverage gaps with swarm configuration selection to steer toward unreached branches. See the [Explorer guide](../guides/explorer.md#unified-swarm) for the three-layer swarm architecture.
+
 !!! quote "You're ready"
-    You understand how the explorer maps code paths, saves checkpoints, and focuses energy on promising areas. To run it: `ordeal explore` with an `ordeal.toml` config. See the [Explorer guide](../guides/explorer.md) for configuration options and CI integration.
+    You understand how the explorer maps code paths, saves checkpoints, focuses energy on promising areas, reports coverage gaps, and uses swarm configurations to reach deeper states. To run it: `ordeal explore` with an `ordeal.toml` config. See the [Explorer guide](../guides/explorer.md) for configuration options and CI integration.
 
 ---
 
@@ -269,4 +287,4 @@ The practical difference: Hypothesis might need 100,000 runs to find a bug that 
 
 - [Shrinking](shrinking.md) -- how ordeal minimizes failure traces to the smallest reproducing case
 - [Chaos Testing](chaos-testing.md) -- how ChaosTest, faults, and the nemesis work together
-- [Explorer Guide](../guides/explorer.md) -- practical usage: CLI, configuration, interpreting results
+- [Explorer Guide](../guides/explorer.md) -- swarm, seeds, ablation, coverage gaps, and more

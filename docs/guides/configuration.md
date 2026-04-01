@@ -39,6 +39,8 @@ One file, checked into your repo, that anyone (or anything) can read and modify.
 | `steps_per_run` | `int` | `50` | Max rule steps per run |
 | `fault_toggle_prob` | `float` | `0.3` | Nemesis action probability per step |
 | `workers` | `int` | `1` | Parallel workers (0 = auto: `os.cpu_count()`) |
+| `ngram` | `int` | `2` | N-gram depth for edge hashing (1=AFL classic, 2+=path context) |
+| `rule_swarm` | `bool` | `false` | Unified swarm: random rule+fault subsets per run |
 
 ### `[[tests]]`
 
@@ -57,6 +59,7 @@ One file, checked into your repo, that anyone (or anything) can read and modify.
 | `traces` | `bool` | `false` | Save full traces for replay |
 | `traces_dir` | `str` | `".ordeal/traces"` | Trace output directory |
 | `verbose` | `bool` | `false` | Live progress to stderr |
+| `corpus_dir` | `str` | `".ordeal/seeds"` | Persistent seed corpus directory |
 
 ### `[[scan]]`
 

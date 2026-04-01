@@ -215,6 +215,44 @@ class TestAblation:
         assert result["fault_a"] is True
         assert result["fault_b"] is True
 
+    def test_return_type_is_dict(self):
+        """ablate_faults always returns a dict, never None."""
+        # With faults
+        trace = _make_trace_with_faults(_NeedsFaultA, ["fault_a"])
+        result = ablate_faults(trace, _NeedsFaultA)
+        assert isinstance(result, dict)
+        assert result is not None
+
+        # Without faults
+        trace2 = Trace(
+            run_id=1,
+            seed=42,
+            test_class=_class_path(_NeedsNoFaults),
+            from_checkpoint=None,
+            steps=[TraceStep(kind="rule", name="tick", params={})],
+        )
+        result2 = ablate_faults(trace2, _NeedsNoFaults)
+        assert isinstance(result2, dict)
+        assert result2 is not None
+
+    def test_explicit_test_class_overrides_import(self):
+        """Passing test_class explicitly should skip _import_class."""
+        trace = _make_trace_with_faults(_NeedsFaultA, ["fault_a", "fault_b"])
+        # Pass test_class explicitly (exercises the if test_class is None branch)
+        result_explicit = ablate_faults(trace, _NeedsFaultA)
+        assert isinstance(result_explicit, dict)
+        assert "fault_a" in result_explicit
+
+    def test_pairwise_with_exactly_two_unnecessary(self):
+        """Pairwise ablation fires when exactly 2 faults are individually unnecessary."""
+        trace = _make_trace_with_faults(_NeedsEitherFault, ["fault_a", "fault_b"])
+        result = ablate_faults(trace, _NeedsEitherFault)
+        # Both should be promoted to necessary by pairwise ablation
+        assert result["fault_a"] is True
+        assert result["fault_b"] is True
+        # Verify the dict has exactly 2 entries
+        assert len(result) == 2
+
     def test_ablation_in_failure_str(self):
         """Failure.__str__ includes necessary faults when ablation is set."""
         from ordeal.explore import Failure

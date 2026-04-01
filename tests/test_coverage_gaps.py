@@ -70,10 +70,20 @@ def foo():
         assert 3 in lines
 
     def test_empty_source(self):
-        assert _find_branch_lines("") == []
+        result = _find_branch_lines("")
+        assert result == []
+        assert isinstance(result, list)
 
     def test_syntax_error_returns_empty(self):
-        assert _find_branch_lines("def broken(") == []
+        result = _find_branch_lines("def broken(")
+        assert result == []
+        assert isinstance(result, list)
+
+    def test_return_type_is_always_list(self):
+        """_find_branch_lines always returns a list, never None."""
+        assert isinstance(_find_branch_lines(""), list)
+        assert isinstance(_find_branch_lines("x = 1"), list)
+        assert isinstance(_find_branch_lines("if True: pass"), list)
 
 
 class TestCoverageCollectorLineTracking:

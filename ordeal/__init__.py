@@ -1,18 +1,12 @@
-"""ordeal — Automated chaos testing for Python.
+"""ordeal — explores the state space of Python code.
 
-::
+Discovers properties, tests mutations, injects faults, tracks coverage.
+Each tool explores one dimension; together they build confidence that
+code behaves correctly under all reachable conditions.
 
-    from ordeal import catalog
-    catalog()  # returns every capability — faults, mining, mutations, ...
-
-    from ordeal.state import explore
-    explore("myapp")  # explores the state space, returns what it found
-
-    from ordeal import mine
-    mine(my_function)  # discovers what the function actually does
-
-Everything is discoverable at runtime via ``catalog()``.
-Everything works on ``ordeal.demo`` — try it to learn by experiment.
+``catalog()`` returns every capability at runtime.
+``explore(module)`` runs all exploration strategies on a module.
+``ordeal.demo`` is a sandbox — any tool works on it.
 """
 
 from __future__ import annotations

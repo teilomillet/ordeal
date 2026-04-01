@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.34
+
+**Features:**
+
+- faults as context managers + ChaosTest works with subprocesses
+
+**Docs:**
+
+- document fault context managers across all references
+
+
 ## 0.2.31
 
 **Features:**

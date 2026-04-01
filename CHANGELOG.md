@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.85
+
+**Features:**
+
+- reserve 10% of swarm runs for full config C_D (paper §2.2)
+
+
 ## 0.2.84
 
 **Features:**

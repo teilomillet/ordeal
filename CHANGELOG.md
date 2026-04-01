@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.66
+
+**Fixes:**
+
+- Optional[T] no longer double-wraps with none()
+
+
 ## 0.2.65
 
 **Fixes:**

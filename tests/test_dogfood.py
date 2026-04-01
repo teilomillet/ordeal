@@ -7,9 +7,11 @@ and explore() on ordeal's own modules.
 
 from __future__ import annotations
 
+import os
 import random
 
 import hypothesis.strategies as st
+import pytest
 
 from ordeal import ChaosTest, always, chaos_test, invariant, rule
 from ordeal.auto import chaos_for
@@ -244,6 +246,10 @@ class TestDeterministicSupervisor:
         )
         always(forked.seed == 99, "fork has new seed")
 
+    @pytest.mark.skipif(
+        "PYTEST_XDIST_WORKER" in os.environ,
+        reason="Reproducibility test requires isolation from xdist workers",
+    )
     def test_explore_reproducibility(self):
         """Same seed produces identical in-process results.
 

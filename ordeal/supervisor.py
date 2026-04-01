@@ -126,12 +126,44 @@ class DeterministicSupervisor:
         self._saved_random_state: Any = None
 
     def __enter__(self) -> DeterministicSupervisor:
-        """Activate deterministic mode: seed RNGs, patch time, start logging."""
+        """Activate deterministic mode: seed ALL RNGs, patch time, start logging.
+
+        Seeds: Python random, Hypothesis, buggify, numpy.
+        Patches: time.time, time.sleep → deterministic Clock.
+
+        What IS deterministic (same seed = identical results):
+        - random.random() and all random module functions
+        - buggify() decisions (which faults fire)
+        - Hypothesis example generation (via derandomize + seed)
+        - numpy random (if installed)
+        - time.time() and time.sleep()
+
+        What is NOT deterministic (even with same seed):
+        - OS thread scheduling (GIL release timing)
+        - Garbage collection timing
+        - dict iteration order across Python versions
+        - External I/O (network, disk)
+        """
         # 1. Seed Python's random module
         self._saved_random_state = random.getstate()
         random.seed(self.seed)
 
-        # 2. Seed buggify's thread-local RNG
+        # 2. Seed Hypothesis — use derandomize mode with fixed seed.
+        # This makes @given and .example() fully deterministic.
+        try:
+            from hypothesis import Phase, settings
+
+            self._saved_hypothesis_settings = settings.default
+            settings.default = settings(
+                settings.default,
+                derandomize=True,
+                database=None,
+                phases=[Phase.explicit, Phase.generate, Phase.shrink],
+            )
+        except Exception:
+            self._saved_hypothesis_settings = None
+
+        # 3. Seed buggify's thread-local RNG
         try:
             from ordeal.buggify import activate, set_seed
 
@@ -140,7 +172,7 @@ class DeterministicSupervisor:
         except Exception:
             pass
 
-        # 3. Seed numpy if available
+        # 4. Seed numpy if available
         try:
             import numpy as np
 
@@ -148,14 +180,11 @@ class DeterministicSupervisor:
         except ImportError:
             pass
 
-        # 4. Patch time with deterministic Clock
+        # 5. Patch time with deterministic Clock
         self._time_patch = unittest.mock.patch("time.time", side_effect=self.clock.time)
         self._sleep_patch = unittest.mock.patch("time.sleep", side_effect=self.clock.sleep)
         self._time_patch.start()
         self._sleep_patch.start()
-
-        # 5. Patch random.random for non-ordeal code that uses it
-        # (ordeal's own RNGs are already seeded above)
 
         return self
 
@@ -167,6 +196,15 @@ class DeterministicSupervisor:
         # Restore random state
         if self._saved_random_state is not None:
             random.setstate(self._saved_random_state)
+
+        # Restore Hypothesis settings
+        if getattr(self, "_saved_hypothesis_settings", None) is not None:
+            try:
+                from hypothesis import settings
+
+                settings.default = self._saved_hypothesis_settings
+            except Exception:
+                pass
 
         # Deactivate buggify
         try:

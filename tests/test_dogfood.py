@@ -244,6 +244,60 @@ class TestDeterministicSupervisor:
         )
         always(forked.seed == 99, "fork has new seed")
 
+    def test_explore_reproducibility(self):
+        """Same seed MUST produce identical exploration results.
+
+        This is the epistemic guarantee: if the AI runs explore()
+        with seed=42 twice, it gets the same confidence, same
+        findings, same per-function results. Without this, the
+        exploration state is meaningless — you can't build on
+        previous results if they change between runs.
+
+        What IS deterministic (enforced here):
+        - Per-function mutation scores
+        - Per-function edge counts
+        - Function set discovered
+        - Crash-free status
+
+        What MAY vary (not enforced — Hypothesis internal state):
+        - Exact property confidence bounds (mine() examples)
+        """
+        from ordeal.state import explore
+
+        s1 = explore("ordeal.demo", time_limit=15, seed=42, max_examples=20)
+        s2 = explore("ordeal.demo", time_limit=15, seed=42, max_examples=20)
+
+        always(
+            set(s1.functions.keys()) == set(s2.functions.keys()),
+            "same seed discovers same functions",
+        )
+        for name in s1.functions:
+            f1, f2 = s1.functions[name], s2.functions[name]
+            always(
+                f1.mutation_score == f2.mutation_score,
+                f"same seed, same mutation score for {name}",
+            )
+            always(
+                f1.edges_discovered == f2.edges_discovered,
+                f"same seed, same edges for {name}",
+            )
+            always(
+                f1.crash_free == f2.crash_free,
+                f"same seed, same crash status for {name}",
+            )
+
+    def test_different_seeds_different_exploration(self):
+        """Different seeds explore different regions."""
+        from ordeal.state import explore
+
+        s1 = explore("ordeal.demo", time_limit=10, seed=42, max_examples=10)
+        s2 = explore("ordeal.demo", time_limit=10, seed=99, max_examples=10)
+
+        always(
+            s1.supervisor_info.get("seed") != s2.supervisor_info.get("seed"),
+            "supervisor records different seeds",
+        )
+
 
 # ============================================================================
 # 5. mine() on ordeal's own functions — properties of our own code

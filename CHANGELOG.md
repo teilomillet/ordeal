@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.47
+
+**Features:**
+
+- wire hardening into ExplorationState + concern through explore_mutate
+- LLM-enhanced mutation testing with extra_mutants, concern, and hardening
+
+**Fixes:**
+
+- three production friction points from real-world usage
+
+
 ## 0.2.45
 
 **Features:**

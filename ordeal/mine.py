@@ -17,15 +17,18 @@ real — turning observed regularities into tested invariants::
 
 from __future__ import annotations
 
+import importlib
+import inspect
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from types import ModuleType
+from typing import Any, get_args, get_origin, get_type_hints
 
 import hypothesis.strategies as st
 from hypothesis import given, settings
 
-from ordeal.auto import _infer_strategies
+from ordeal.auto import _get_public_functions, _infer_strategies
 
 _REL_TOL = 1e-9
 _ABS_TOL = 1e-12
@@ -68,6 +71,51 @@ class MinedProperty:
         pct = f"{self.confidence:.0%}"
         status = "ALWAYS" if self.universal else pct
         return f"  {status:>6}  {self.name} ({self.holds}/{self.total})"
+
+
+@dataclass
+class CrossFunctionProperty:
+    """A relationship discovered between two functions.
+
+    Cross-function properties capture structural relationships that no
+    single-function analysis can find.  These are the most valuable
+    properties for regression testing because they encode *contracts*
+    between components:
+
+    - **roundtrip**: ``g(f(x)) == x`` — encoding/decoding, serialize/deserialize,
+      compress/decompress.  If this breaks, data is being lost or corrupted.
+    - **commutative_composition**: ``f(g(x)) == g(f(x))`` — the two functions
+      can be applied in either order.  Rare but powerful when it holds.
+    - **equivalent**: ``f(x) == g(x)`` — both produce identical output for
+      all tested inputs.  Often signals duplicate implementations, or a
+      fast-path that should match a reference implementation.
+
+    Attributes:
+        function_a: Qualified name of the first function.
+        function_b: Qualified name of the second function.
+        relation: Kind of relationship: ``"roundtrip"``,
+            ``"commutative_composition"``, or ``"equivalent"``.
+        confidence: Fraction of tested inputs where the relation held
+            (0.0 to 1.0).
+        holds: Number of inputs where the relation held.
+        total: Number of inputs tested.
+        counterexample: If the relation failed, one example showing the
+            disagreement.  ``None`` when the relation held universally.
+    """
+
+    function_a: str
+    function_b: str
+    relation: str
+    confidence: float
+    holds: int
+    total: int
+    counterexample: dict[str, Any] | None = None
+
+    def __str__(self) -> str:
+        pct = f"{self.confidence:.0%}"
+        status = "ALWAYS" if self.confidence == 1.0 and self.total > 0 else pct
+        label = f"{self.function_a} <-> {self.function_b}: {self.relation}"
+        return f"  {status:>6}  {label} ({self.holds}/{self.total})"
 
 
 # Properties that mine() structurally cannot check.
@@ -113,6 +161,8 @@ class MineResult:
     collected_outputs: list[object] = field(default_factory=list, repr=False)
     edges_discovered: int = 0
     saturated: bool = False
+    branch_points: dict[str, list[object]] = field(default_factory=dict)
+    branches_cracked: int = 0
 
     @property
     def universal(self) -> list[MinedProperty]:
@@ -129,12 +179,67 @@ class MineResult:
         header = f"mine({self.function}): {self.examples} examples"
         if self.edges_discovered:
             header += f", {self.edges_discovered} edges"
+        if self.branch_points:
+            total_bp = sum(len(v) for v in self.branch_points.values())
+            header += f", {total_bp} branch points"
+            if self.branches_cracked:
+                header += f" ({self.branches_cracked} cracked)"
         if self.saturated:
             header += " (saturated)"
         lines = [header]
         for p in sorted(self.properties, key=lambda p: -p.confidence):
             if p.confidence >= 0.5:
                 lines.append(str(p))
+        return "\n".join(lines)
+
+
+@dataclass
+class MineModuleResult:
+    """Results of mining an entire module for both per-function and cross-function properties.
+
+    Combines individual ``MineResult`` per function with ``CrossFunctionProperty``
+    relationships discovered between function pairs.  The ``summary()`` method
+    produces a single report covering both, so developers and AI assistants can
+    see the full picture at a glance.
+
+    Attributes:
+        module: Dotted module path (e.g. ``"myapp.scoring"``).
+        per_function: Individual mining results keyed by function name.
+        cross_function: Relationships discovered between function pairs.
+    """
+
+    module: str
+    per_function: dict[str, MineResult] = field(default_factory=dict)
+    cross_function: list[CrossFunctionProperty] = field(default_factory=list)
+
+    def summary(self) -> str:
+        """Human-readable report covering per-function and cross-function properties.
+
+        Per-function properties are listed first (one section per function),
+        followed by cross-function relationships grouped by confidence.
+        """
+        lines = [f"mine_module({self.module})"]
+        lines.append(
+            f"  {len(self.per_function)} functions, "
+            f"{len(self.cross_function)} cross-function relationships"
+        )
+        lines.append("")
+
+        # Per-function summaries
+        for name in sorted(self.per_function):
+            result = self.per_function[name]
+            lines.append(result.summary())
+            lines.append("")
+
+        # Cross-function relationships
+        if self.cross_function:
+            lines.append("Cross-function relationships:")
+            for prop in sorted(self.cross_function, key=lambda p: -p.confidence):
+                if prop.total > 0:
+                    lines.append(str(prop))
+        else:
+            lines.append("Cross-function relationships: none discovered")
+
         return "\n".join(lines)
 
 
@@ -536,6 +641,20 @@ def mine(
             f"Cannot infer strategies for {fname}. Provide fixtures for untyped parameters."
         )
 
+    # CMPLOG: extract comparison values from the function's AST and inject
+    # them into strategies.  This cracks guarded branches like `if x == 42`
+    # that random testing will never reach.  Each extracted value is a
+    # "branch point" — a fork in the state space we can spot epistemically
+    # by reading the code, then systematically explore both sides.
+    branch_points: dict[str, list[Any]] = {}
+    try:
+        from ordeal.cmplog import enhance_strategies, extract_comparison_values
+
+        branch_points = extract_comparison_values(fn)
+        strategies = enhance_strategies(strategies, fn)
+    except Exception:
+        pass  # CMPLOG is best-effort; fall back to blind strategies
+
     # Collect outputs and inputs with coverage tracking.
     # The CoverageCollector detects when new code paths are reached,
     # so we can report saturation (more examples won't help).
@@ -630,6 +749,8 @@ def mine(
         collected_outputs=outputs,
         edges_discovered=len(edges_seen),
         saturated=is_saturated,
+        branch_points=branch_points,
+        branches_cracked=new_edge_count,
     )
 
 
@@ -772,4 +893,446 @@ def mine_pair(
         examples=max(len(inputs), 0),
         properties=props,
         not_applicable=not_applicable,
+    )
+
+
+# ============================================================================
+# Cross-function mining
+# ============================================================================
+
+
+def _return_type(fn: Callable[..., Any]) -> type | None:
+    """Extract the return type annotation from a function, or None if absent."""
+    try:
+        hints = get_type_hints(fn)
+    except Exception:
+        return None
+    return hints.get("return")
+
+
+def _first_param_type(fn: Callable[..., Any]) -> tuple[str | None, type | None]:
+    """Return (name, type) of the first non-self/cls parameter, or (None, None)."""
+    try:
+        hints = get_type_hints(fn)
+    except Exception:
+        hints = {}
+    sig = inspect.signature(fn)
+    for name, _param in sig.parameters.items():
+        if name in ("self", "cls"):
+            continue
+        return name, hints.get(name)
+    return None, None
+
+
+def _types_compatible(source_type: type | None, target_type: type | None) -> bool:
+    """Check whether *source_type* can plausibly be fed into *target_type*.
+
+    Returns ``True`` when the types are identical, when the target is a
+    supertype, or when both are the same generic origin (e.g. both
+    ``list[...]``).  Returns ``False`` when either is ``None`` (unknown)
+    to avoid false positives from untyped code.
+    """
+    if source_type is None or target_type is None:
+        return False
+    # Exact match
+    if source_type is target_type:
+        return True
+    # Unwrap Optional / Union — check any branch
+    import types as pytypes
+
+    src_origin = get_origin(source_type)
+    tgt_origin = get_origin(target_type)
+    is_tgt_union = tgt_origin is type(int | str) or (
+        hasattr(pytypes, "UnionType") and isinstance(target_type, pytypes.UnionType)
+    )
+    if is_tgt_union:
+        return any(_types_compatible(source_type, a) for a in get_args(target_type))
+    # Generic containers — match on origin (list[int] vs list[str] both list)
+    if src_origin is not None and tgt_origin is not None:
+        return src_origin is tgt_origin
+    if src_origin is not None:
+        try:
+            return issubclass(src_origin, target_type)
+        except TypeError:
+            return False
+    # Plain class inheritance
+    try:
+        return issubclass(source_type, target_type)
+    except TypeError:
+        return False
+
+
+def _check_roundtrip(
+    f: Callable[..., Any],
+    g: Callable[..., Any],
+    fname: str,
+    gname: str,
+    *,
+    max_examples: int = 30,
+) -> CrossFunctionProperty | None:
+    """Test whether ``g(f(x)) == x`` — the roundtrip property.
+
+    Only attempted when f's return type is compatible with g's first
+    parameter type.  Returns ``None`` if the pair is not type-compatible
+    or if no examples could be generated.
+    """
+    ret_f = _return_type(f)
+    g_param_name, g_param_type = _first_param_type(g)
+    if not _types_compatible(ret_f, g_param_type) or g_param_name is None:
+        return None
+
+    strategies = _infer_strategies(f)
+    if strategies is None:
+        return None
+
+    f_param_name, _f_param_type = _first_param_type(f)
+    if f_param_name is None:
+        return None
+
+    inputs: list[dict[str, Any]] = []
+    outputs_f: list[Any] = []
+    try:
+
+        @given(**strategies)
+        @settings(max_examples=max_examples, database=None)
+        def collect(**kwargs: Any) -> None:
+            out = f(**kwargs)
+            outputs_f.append(out)
+            inputs.append(dict(kwargs))
+
+        collect()
+    except Exception:
+        pass
+
+    if not inputs:
+        return None
+
+    holds = total = 0
+    counterexample: dict[str, Any] | None = None
+    cap = min(len(inputs), max_examples)
+    for kwargs, out_f in zip(inputs[:cap], outputs_f[:cap]):
+        if out_f is None:
+            continue
+        try:
+            back = g(**{g_param_name: out_f})
+            total += 1
+            if _approx_equal(back, kwargs[f_param_name]):
+                holds += 1
+            elif counterexample is None:
+                counterexample = {
+                    "input": kwargs[f_param_name],
+                    f"{fname}_output": out_f,
+                    f"{gname}_output": back,
+                }
+        except Exception:
+            pass
+
+    if total == 0:
+        return None
+
+    return CrossFunctionProperty(
+        function_a=fname,
+        function_b=gname,
+        relation="roundtrip",
+        confidence=holds / total,
+        holds=holds,
+        total=total,
+        counterexample=counterexample,
+    )
+
+
+def _check_composition_commutativity(
+    f: Callable[..., Any],
+    g: Callable[..., Any],
+    fname: str,
+    gname: str,
+    *,
+    max_examples: int = 30,
+) -> CrossFunctionProperty | None:
+    """Test whether ``f(g(x)) == g(f(x))`` — commutative composition.
+
+    Only attempted when both functions accept the same first-parameter
+    type and each function's return type is compatible with the other's
+    input.  Returns ``None`` if the pair is not type-compatible or if
+    no examples could be generated.
+    """
+    f_param_name, f_param_type = _first_param_type(f)
+    g_param_name, g_param_type = _first_param_type(g)
+    ret_f = _return_type(f)
+    ret_g = _return_type(g)
+
+    # Both must accept the same type, and each output must feed into the other
+    if not _types_compatible(f_param_type, g_param_type):
+        return None
+    if not _types_compatible(ret_f, g_param_type):
+        return None
+    if not _types_compatible(ret_g, f_param_type):
+        return None
+    if f_param_name is None or g_param_name is None:
+        return None
+
+    strategies = _infer_strategies(f)
+    if strategies is None:
+        return None
+
+    inputs: list[dict[str, Any]] = []
+    try:
+
+        @given(**strategies)
+        @settings(max_examples=max_examples, database=None)
+        def collect(**kwargs: Any) -> None:
+            inputs.append(dict(kwargs))
+
+        collect()
+    except Exception:
+        pass
+
+    if not inputs:
+        return None
+
+    holds = total = 0
+    counterexample: dict[str, Any] | None = None
+    cap = min(len(inputs), max_examples)
+    for kwargs in inputs[:cap]:
+        x = kwargs[f_param_name]
+        try:
+            fx = f(**{f_param_name: x})
+            gx = g(**{g_param_name: x})
+            g_of_fx = g(**{g_param_name: fx})  # g(f(x))
+            f_of_gx = f(**{f_param_name: gx})  # f(g(x))
+            total += 1
+            if _approx_equal(g_of_fx, f_of_gx):
+                holds += 1
+            elif counterexample is None:
+                counterexample = {
+                    "input": x,
+                    f"g({fname}(x))": g_of_fx,
+                    f"f({gname}(x))": f_of_gx,
+                }
+        except Exception:
+            pass
+
+    if total == 0:
+        return None
+
+    return CrossFunctionProperty(
+        function_a=fname,
+        function_b=gname,
+        relation="commutative_composition",
+        confidence=holds / total,
+        holds=holds,
+        total=total,
+        counterexample=counterexample,
+    )
+
+
+def _check_output_equivalence(
+    f: Callable[..., Any],
+    g: Callable[..., Any],
+    fname: str,
+    gname: str,
+    *,
+    max_examples: int = 30,
+) -> CrossFunctionProperty | None:
+    """Test whether ``f(x) == g(x)`` — output equivalence.
+
+    Only attempted when both functions accept the same parameter types.
+    Detects duplicate implementations, reference/optimized pairs, or
+    accidental copies.  Returns ``None`` if the pair is not
+    type-compatible or if no examples could be generated.
+    """
+    f_param_name, f_param_type = _first_param_type(f)
+    g_param_name, g_param_type = _first_param_type(g)
+
+    if not _types_compatible(f_param_type, g_param_type):
+        return None
+    if f_param_name is None or g_param_name is None:
+        return None
+
+    strategies = _infer_strategies(f)
+    if strategies is None:
+        return None
+
+    inputs: list[dict[str, Any]] = []
+    try:
+
+        @given(**strategies)
+        @settings(max_examples=max_examples, database=None)
+        def collect(**kwargs: Any) -> None:
+            inputs.append(dict(kwargs))
+
+        collect()
+    except Exception:
+        pass
+
+    if not inputs:
+        return None
+
+    holds = total = 0
+    counterexample: dict[str, Any] | None = None
+    cap = min(len(inputs), max_examples)
+    for kwargs in inputs[:cap]:
+        x = kwargs[f_param_name]
+        try:
+            out_f = f(**{f_param_name: x})
+            out_g = g(**{g_param_name: x})
+            total += 1
+            if _approx_equal(out_f, out_g):
+                holds += 1
+            elif counterexample is None:
+                counterexample = {
+                    "input": x,
+                    f"{fname}_output": out_f,
+                    f"{gname}_output": out_g,
+                }
+        except Exception:
+            pass
+
+    if total == 0:
+        return None
+
+    return CrossFunctionProperty(
+        function_a=fname,
+        function_b=gname,
+        relation="equivalent",
+        confidence=holds / total,
+        holds=holds,
+        total=total,
+        counterexample=counterexample,
+    )
+
+
+def mine_module(
+    module: str | ModuleType,
+    *,
+    max_examples: int = 200,
+    cross_max_examples: int = 30,
+    mine_per_function: bool = True,
+    **fixtures: st.SearchStrategy[Any] | Any,
+) -> MineModuleResult:
+    """Discover properties across an entire module — both per-function and cross-function.
+
+    Single-function mining (via ``mine()``) finds properties like "output >= 0"
+    or "deterministic".  Cross-function mining finds relationships that only
+    exist *between* functions — the kind of properties that break during
+    refactoring because no single unit test covers the contract.
+
+    Three cross-function relationships are checked for every compatible pair:
+
+    - **roundtrip**: ``g(f(x)) == x``.  Discovered when f's return type matches
+      g's parameter type.  Classic examples: ``decode(encode(x))``,
+      ``deserialize(serialize(x))``, ``decompress(compress(x))``.
+
+    - **commutative_composition**: ``f(g(x)) == g(f(x))``.  Discovered when
+      both functions accept and return the same type.  Examples: two
+      normalization passes that can be applied in either order, or
+      ``sort(reverse(xs)) == reverse(sort(xs))`` (which would *not* hold
+      and produce a counterexample).
+
+    - **equivalent**: ``f(x) == g(x)``.  Discovered when both functions
+      accept the same input types.  Flags duplicate implementations,
+      reference/optimized pairs, or accidental copies that should be
+      consolidated.
+
+    Because the number of pairs grows as O(n^2), ``cross_max_examples`` is
+    kept low (default 30) to avoid combinatorial blowup.  For a module with
+    10 functions there are 45 directed pairs; at 30 examples each that is
+    1350 calls per relationship check — fast enough for CI.
+
+    Args:
+        module: Dotted module path (``"myapp.scoring"``) or an already-imported
+            module object.
+        max_examples: Examples per function for individual ``mine()`` calls.
+        cross_max_examples: Examples per function pair for cross-function checks.
+            Kept low because there are O(n^2) pairs.
+        mine_per_function: If ``True`` (default), also run ``mine()`` on each
+            function individually.  Set to ``False`` to only discover
+            cross-function relationships.
+        **fixtures: Strategy overrides or plain values passed through to
+            ``mine()`` and ``_infer_strategies()``.
+
+    Returns:
+        A ``MineModuleResult`` containing per-function ``MineResult`` objects
+        and a list of ``CrossFunctionProperty`` relationships.
+
+    Example::
+
+        result = mine_module("myapp.codecs")
+        print(result.summary())
+        # mine_module(myapp.codecs)
+        #   4 functions, 2 cross-function relationships
+        #
+        #   mine(encode): 200 examples
+        #     ALWAYS  output type is bytes (200/200)
+        #     ...
+        #
+        #   Cross-function relationships:
+        #     ALWAYS  encode <-> decode: roundtrip (30/30)
+        #      97%    fast_encode <-> encode: equivalent (29/30)
+    """
+    if isinstance(module, str):
+        mod = importlib.import_module(module)
+        mod_name = module
+    else:
+        mod = module
+        mod_name = getattr(mod, "__name__", str(mod))
+
+    funcs = _get_public_functions(mod)
+
+    # --- Per-function mining ---
+    per_function: dict[str, MineResult] = {}
+    if mine_per_function:
+        for name, fn in funcs:
+            try:
+                per_function[name] = mine(fn, max_examples=max_examples, **fixtures)
+            except (ValueError, TypeError):
+                pass  # can't infer strategies — skip
+
+    # --- Cross-function mining ---
+    # Build a lookup of functions with their signatures resolved
+    typed_funcs: list[tuple[str, Callable[..., Any]]] = []
+    for name, fn in funcs:
+        # Only include functions where we can infer at least the first param
+        param_name, _param_type = _first_param_type(fn)
+        if param_name is not None:
+            typed_funcs.append((name, fn))
+
+    cross_function: list[CrossFunctionProperty] = []
+
+    for i, (fname, f) in enumerate(typed_funcs):
+        for j, (gname, g) in enumerate(typed_funcs):
+            if i == j:
+                continue
+
+            # Roundtrip: g(f(x)) == x — directed, so check both (i,j) and (j,i)
+            # Only check (i,j) direction here; (j,i) is checked when i/j swap
+            if i < j:
+                prop = _check_roundtrip(f, g, fname, gname, max_examples=cross_max_examples)
+                if prop is not None and prop.total > 0:
+                    cross_function.append(prop)
+
+                prop = _check_roundtrip(g, f, gname, fname, max_examples=cross_max_examples)
+                if prop is not None and prop.total > 0:
+                    cross_function.append(prop)
+
+            # Commutative composition: f(g(x)) == g(f(x)) — symmetric, check once
+            if i < j:
+                prop = _check_composition_commutativity(
+                    f, g, fname, gname, max_examples=cross_max_examples
+                )
+                if prop is not None and prop.total > 0:
+                    cross_function.append(prop)
+
+            # Output equivalence: f(x) == g(x) — symmetric, check once
+            if i < j:
+                prop = _check_output_equivalence(
+                    f, g, fname, gname, max_examples=cross_max_examples
+                )
+                if prop is not None and prop.total > 0:
+                    cross_function.append(prop)
+
+    return MineModuleResult(
+        module=mod_name,
+        per_function=per_function,
+        cross_function=cross_function,
     )

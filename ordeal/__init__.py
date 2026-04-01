@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _get_version
+from pathlib import Path
 
 # Re-export Hypothesis stateful testing API for convenience
 from hypothesis.stateful import (
@@ -238,6 +239,20 @@ def catalog() -> dict[str, list]:
             },
         ),
     }
+    # AI agent skill — discoverable via catalog()
+    skill_path = Path(__file__).parent / "SKILL.md"
+    if skill_path.exists():
+        installed = Path(".claude/skills/ordeal/SKILL.md").exists()
+        result["skill"] = [
+            {
+                "qualname": "ordeal.SKILL.md",
+                "doc": "AI agent skill — teaches coding agents how to use ordeal",
+                "installed": installed,
+                "install": "ordeal skill" if not installed else None,
+                "bundled_path": str(skill_path),
+            }
+        ]
+
     try:
         result["integrations"].extend(
             _introspect_module(

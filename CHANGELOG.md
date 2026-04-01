@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.55
+
+**Features:**
+
+- final SOTA frontier — N-gram coverage, grammar strategies, equivalence
+
+**Fixes:**
+
+- mutation testing no longer returns 0/0 on decorated or pure helper functions
+
+
 ## 0.2.54
 
 **Features:**

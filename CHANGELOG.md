@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.36
+
+**Features:**
+
+- chaos_for() auto-discovers faults and invariants
+
+
 ## 0.2.34
 
 **Features:**

@@ -1522,3 +1522,214 @@ Load and validate an `ordeal.toml`. Raises `FileNotFoundError` if missing, `Conf
 | `module` | `str` | required |
 | `max_examples` | `int` | `50` |
 | `fixtures` | `dict[str, str]` | `{}` |
+
+---
+
+## Exploration State
+
+!!! quote "Unified view of what ordeal knows about your code"
+    Every tool (mine, mutate, scan, chaos) explores one dimension of the state space. `ExplorationState` accumulates their results into a single, persistent, queryable picture. AI assistants read this to understand what's been explored, what's missing, and how confident the results are.
+
+```python
+from ordeal.state import explore, ExplorationState
+from ordeal.state import explore_mine, explore_scan, explore_mutate, explore_chaos
+```
+
+### explore
+
+```python
+explore(
+    module: str,
+    *,
+    state: ExplorationState | None = None,  # resume from previous
+    time_limit: float | None = None,
+    workers: int = 1,                       # parallel mutation testing
+    max_examples: int = 50,                 # input space sampling depth
+) -> ExplorationState
+```
+
+Runs all exploration strategies in sequence: mine → scan → mutate → chaos. Each step enriches the shared `ExplorationState`. Scales with `workers` (mutation parallelism) and `max_examples` (input sampling depth). Resume from a previous state to accumulate confidence across sessions.
+
+Individual steps (`explore_mine`, `explore_scan`, `explore_mutate`, `explore_chaos`) are available for finer control.
+
+### ExplorationState
+
+| Attribute | Type | Description |
+|---|---|---|
+| `module` | `str` | Module being explored |
+| `functions` | `dict[str, FunctionState]` | Per-function exploration state |
+| `confidence` | `float` | Aggregate confidence [0, 1] across all functions |
+| `frontier` | `dict[str, list[str]]` | Per-function gaps — what's unexplored |
+| `findings` | `list[str]` | Bugs and anomalies found |
+| `summary()` | `str` | Human-readable exploration report |
+| `to_json()` | `str` | Serialize for persistence across sessions |
+| `from_json(data)` | `ExplorationState` | Deserialize |
+
+### FunctionState
+
+| Attribute | Type | Description |
+|---|---|---|
+| `mined` | `bool` | Whether mine() has been run |
+| `properties` | `list[dict]` | Discovered properties with confidence |
+| `mutation_score` | `float | None` | Kill ratio from mutation testing |
+| `crash_free` | `bool | None` | Whether random inputs crashed |
+| `chaos_tested` | `bool` | Whether chaos testing has been run |
+| `edges_discovered` | `int` | Unique code paths reached |
+| `saturated` | `bool` | True when more mining won't find new paths |
+| `confidence` | `float` | Per-function confidence [0, 1] |
+| `frontier` | `list[str]` | What's unexplored for this function |
+
+---
+
+## Deterministic Supervisor
+
+!!! quote "Control non-determinism for reproducible exploration"
+    Execution is non-deterministic: RNG state, time, GC timing all vary between runs. The same code can produce different behavior. `DeterministicSupervisor` fixes this by seeding every entropy source and replacing time with a deterministic clock. Same seed = same execution. Different seeds = different exploration trajectories.
+
+```python
+from ordeal.supervisor import DeterministicSupervisor, StateTree, StateNode
+```
+
+### DeterministicSupervisor
+
+```python
+with DeterministicSupervisor(seed=42) as sup:
+    # random, buggify, numpy all seeded
+    # time.time() and time.sleep() are deterministic
+    result = my_function()
+    sup.log_transition("called my_function", state_hash=hash(result))
+```
+
+| Method | Description |
+|---|---|
+| `log_transition(action, state_hash=)` | Record a state transition |
+| `fork(new_seed=)` | Create a new supervisor from current state with different seed |
+| `state` | Current state hash |
+| `trajectory` | List of `Transition` objects |
+| `visited_states` | All states visited |
+| `reproduction_info()` | Dict with seed, hash_seed, steps — everything needed to replay |
+| `summary()` | Human-readable trajectory report |
+
+### StateTree
+
+Navigable exploration tree with checkpoint and rollback. Each node is a checkpointed state; edges are actions taken. The AI can checkpoint, explore a branch, roll back, and try a different branch.
+
+```python
+tree = StateTree()
+tree.checkpoint(state_id=0, snapshot=my_state)
+tree.checkpoint(state_id=1, parent=0, action="deposit(50)", snapshot=new_state)
+
+old = tree.rollback(0)  # returns deepcopy of checkpointed state
+tree.checkpoint(state_id=2, parent=0, action="withdraw(50)", snapshot=other_state)
+```
+
+| Method | Description |
+|---|---|
+| `checkpoint(state_id, snapshot=, parent=, action=, edges=, seed=)` | Save a state as a tree node |
+| `rollback(state_id)` | Return deepcopy of a previous checkpoint |
+| `frontier()` | Nodes that can be explored further |
+| `leaves()` | Deepest explored states |
+| `path_to(state_id)` | Sequence of actions from root to a node |
+| `summary()` | Visual tree structure |
+| `to_json()` | Serialize tree (without snapshots) |
+
+---
+
+## CMPLOG
+
+!!! quote "Crack guarded branches that random testing can't reach"
+    When code has `if x == 42 and mode == "admin"`, random testing will almost never generate those exact values. CMPLOG parses the function's AST, extracts literal values from comparisons, and injects them into Hypothesis strategies. This is the Python equivalent of AFL++'s CMPLOG/RedQueen technique.
+
+```python
+from ordeal.cmplog import extract_comparison_values, enhance_strategies
+```
+
+### extract_comparison_values
+
+```python
+extract_comparison_values(fn: Callable) -> dict[str, list[Any]]
+```
+
+Returns `{"param_name": [literal_values]}` extracted from `==`, `!=`, `in`, `>=`, etc. in the function source.
+
+### enhance_strategies
+
+```python
+enhance_strategies(
+    strategies: dict[str, SearchStrategy],
+    fn: Callable,
+) -> dict[str, SearchStrategy]
+```
+
+Merges extracted magic values into Hypothesis strategies. The enhanced strategy generates branch-cracking values alongside random exploration.
+
+Automatically wired into `mine()` — no manual usage needed. Available for custom fuzzing loops.
+
+---
+
+## Mutagen
+
+!!! quote "AFL's bit-flip loop for Python values"
+    Real fuzzers don't generate random inputs from scratch — they mutate known-good inputs. `mutagen` applies type-aware perturbation to Python values: bit-flips for ints, mantissa perturbation for floats, character swaps for strings. Combined with coverage feedback, mutations that reach new code paths become seeds for further mutation.
+
+```python
+from ordeal.mutagen import mutate_value, mutate_inputs
+```
+
+### mutate_value
+
+```python
+mutate_value(value: Any, rng: random.Random, intensity: float = 0.3) -> Any
+```
+
+Mutate a single value. Type-aware: ints get bit-flips and arithmetic perturbation, floats get mantissa perturbation and special values (NaN, Inf), strings get character swaps and boundary strings, lists/dicts get element mutation.
+
+### mutate_inputs
+
+```python
+mutate_inputs(
+    inputs: dict[str, Any],
+    rng: random.Random,
+    intensity: float = 0.3,
+) -> dict[str, Any]
+```
+
+Mutate a full kwargs dict (like those in `MineResult.collected_inputs`). Returns a new dict with mutated values. Keys are preserved.
+
+Automatically wired into `mine()` Phase 2 — after Hypothesis sampling, productive inputs are mutated to explore nearby state space. Available for custom fuzzing loops.
+
+---
+
+## Cross-Function Mining
+
+!!! quote "Discover relationships between functions automatically"
+    Single-function mining finds properties like "output >= 0". Cross-function mining finds relationships like "decode(encode(x)) == x" — roundtrips, composition commutativity, output equivalence. Tests all compatible function pairs automatically.
+
+```python
+from ordeal.mine import mine_module, MineModuleResult, CrossFunctionProperty
+```
+
+### mine_module
+
+```python
+mine_module(
+    module: str | ModuleType,
+    *,
+    max_examples: int = 30,
+    mine_per_function: bool = True,
+) -> MineModuleResult
+```
+
+Discovers per-function properties (via `mine()`) and cross-function relationships for all compatible pairs.
+
+### CrossFunctionProperty
+
+| Attribute | Type | Description |
+|---|---|---|
+| `function_a` | `str` | First function |
+| `function_b` | `str` | Second function |
+| `relation` | `str` | `"roundtrip"`, `"commutative_composition"`, or `"equivalent"` |
+| `confidence` | `float` | Fraction of inputs where the relation held |
+| `holds` | `int` | Number of inputs where it held |
+| `total` | `int` | Number of inputs tested |
+| `counterexample` | `dict | None` | One failing input if relation doesn't hold universally |

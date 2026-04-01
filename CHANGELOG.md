@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.81
+
+**Fixes:**
+
+- rule swarm uses paper's coin-flip algorithm, not uniform subset size
+- rule swarm soundness — uniform size distribution + trace recording
+
+
 ## 0.2.79
 
 **Features:**

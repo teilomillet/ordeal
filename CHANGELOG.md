@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.77
+
+**Fixes:**
+
+- epistemic soundness — params, ablation, coverage semantics
+
+
 ## 0.2.76
 
 **Features:**

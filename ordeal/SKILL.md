@@ -40,13 +40,23 @@ ordeal replay --shrink --ablate <trace.json>  # shrink + find which faults matte
 ordeal benchmark                   # USL scaling analysis
 ```
 
+## Living reference
+
+`catalog()` returns every fault, invariant, strategy, and capability at runtime — always up-to-date even when this skill isn't. When in doubt, call it.
+
+```python
+from ordeal import catalog
+c = catalog()
+for key in sorted(c):
+    print(f"\n{key}:")
+    for item in c[key]:
+        print(f"  {item['qualname']}  -- {item['doc']}")
+```
+
 ## Python API (when you need more control)
 
 ```python
-from ordeal import mutate, catalog
-
-# See everything ordeal can do
-catalog()
+from ordeal import mutate
 
 # Mutation testing — are tests strong enough?
 result = mutate("myapp.scoring.compute")

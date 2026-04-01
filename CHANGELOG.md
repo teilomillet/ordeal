@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.50
+
+**Fixes:**
+
+- constrain test_with_invariants fixture to avoid Inf
+
+**Other:**
+
+- test: ordeal tests itself — dogfood chaos testing (10 tests)
+
+
 ## 0.2.49
 
 **Features:**

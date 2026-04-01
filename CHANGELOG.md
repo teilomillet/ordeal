@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.57
+
+**Features:**
+
+- supervisor controls I/O and threads for full determinism
+- test_filter parameter — run only relevant tests per mutant
+- enforce reproducibility — seed Hypothesis, add epistemic tests
+
+
 ## 0.2.56
 
 **Features:**

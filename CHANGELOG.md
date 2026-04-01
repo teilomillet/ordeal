@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.75
+
+**Features:**
+
+- persistent seed corpus, fault ablation, coverage gap reporting
+
+
 ## 0.2.73
 
 **Features:**

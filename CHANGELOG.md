@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.65
+
+**Fixes:**
+
+- private functions + Dict[str, Any] — two real-world gaps
+
+
 ## 0.2.64
 
 **Features:**

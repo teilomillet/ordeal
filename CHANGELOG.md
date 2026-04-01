@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.63
+
+**Features:**
+
+- auto-derived capability suggestions in all output
+
+
 ## 0.2.62
 
 **Features:**

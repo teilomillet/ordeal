@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.70
+
+**Features:**
+
+- contract mode + richer counterexamples + skip visibility
+
+
 ## 0.2.69
 
 **Features:**

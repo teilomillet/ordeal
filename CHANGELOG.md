@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.39
+
+**Features:**
+
+- close the coverage feedback loop in mine()
+- coverage-aware mining — honest about when compute helps
+
+
 ## 0.2.38
 
 **Features:**

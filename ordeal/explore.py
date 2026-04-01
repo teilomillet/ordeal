@@ -1690,8 +1690,10 @@ class Explorer:
     def _update_swarm_energy(self, new_edges: int) -> None:
         """Update energy for the current run's swarm config.
 
-        Rewards the config that was used this run if it found new edges.
-        Decays all other configs slightly to favor fresh discoveries.
+        Rewards the config that found new edges.  Previously-productive
+        configs (``edges_found > 0``) decay slower than never-productive
+        ones — a config that found 15 edges on run 5 is still likely
+        to find more on run 50, even if it hasn't found any recently.
         """
         cfg = self._current_swarm_config
         if cfg is None:
@@ -1699,7 +1701,11 @@ class Explorer:
         if new_edges > 0:
             cfg.energy = min(cfg.energy * _SWARM_ENERGY_REWARD, 10.0)
             cfg.edges_found += new_edges
+        elif cfg.edges_found > 0:
+            # Previously productive — slow decay (keep exploring this config)
+            cfg.energy = max(cfg.energy * 0.98, _SWARM_ENERGY_MIN)
         else:
+            # Never productive — fast decay
             cfg.energy = max(cfg.energy * _SWARM_ENERGY_DECAY, _SWARM_ENERGY_MIN)
 
     # -- Step execution helpers (extracted from run() for readability) -----

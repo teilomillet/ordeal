@@ -758,6 +758,56 @@ class OverloadedChaos(ChaosTest):
     swarm = True  # each run uses a random subset
 ```
 
+### External processes and long-lived state
+
+ChaosTest rules fire in an order controlled by Hypothesis — you cannot predict which rule runs when, or how many times. This makes ChaosTest a poor fit for systems that require strict lifecycle management: subprocesses, database connections with transactions, gRPC channels, or anything that needs "start once, use many times, stop once."
+
+The symptoms: `setup()` spawns a subprocess, rules interact with it, but teardown timing is unclear. The subprocess outlives the test, or gets killed mid-operation, or rules fire before setup finishes.
+
+```python
+# Problematic: subprocess lifecycle doesn't compose with stateful rules
+class KernelChaos(ChaosTest):
+    faults = [timing.timeout("subprocess.run")]
+
+    def __init__(self):
+        super().__init__()
+        self.proc = subprocess.Popen(["my-service", "--port", "9000"])  # long-lived
+
+    @rule()
+    def call_service(self):
+        # Which call hits the timeout fault? In what order? What if the
+        # process crashed from a previous faulted call?
+        requests.post("http://localhost:9000/api", json={"action": "go"})
+
+    def teardown(self):
+        self.proc.terminate()  # too late? too early? races with rules?
+        super().teardown()
+```
+
+**The fix:** wrap the subprocess interaction in a single function and test that with `always()` + subprocess faults. Let the function manage the process lifecycle internally.
+
+```python
+from ordeal import always, sometimes
+from ordeal.faults import io
+
+def test_kernel_under_faults(chaos_enabled):
+    """Regular pytest test — full control over lifecycle."""
+    result = run_kernel_episode(steps=100)  # manages subprocess internally
+    always(result.exit_code == 0, "kernel exits cleanly")
+    always(result.reward is not None, "reward is always computed")
+    sometimes(result.steps_completed == 100, "sometimes completes all steps")
+```
+
+Use ChaosTest for **in-process** state machines where rules drive the system directly. Use regular pytest + `always()`/`sometimes()` + subprocess faults for anything that crosses a process boundary.
+
+| System under test | Use ChaosTest? | Use instead |
+|---|---|---|
+| In-process service with methods | Yes | — |
+| Cache, queue, state machine | Yes | — |
+| Subprocess / FFI bridge | No | `always()` + `subprocess_timeout()` / `subprocess_delay()` |
+| Database with transactions | No | `always()` + `error_on_call("myapp.db.commit")` |
+| Long-lived server (gRPC, HTTP) | No | `always()` + `chaos_enabled` fixture |
+
 ---
 
 ## Scaling up

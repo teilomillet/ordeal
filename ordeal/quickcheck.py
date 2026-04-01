@@ -210,6 +210,18 @@ def strategy_for_type(tp: type, *, _depth: int = 0) -> st.SearchStrategy:
     if _depth > 5:
         return st.just(None)
 
+    # Any — generate a mix of common Python types.
+    # This is critical for Dict[str, Any] and List[Any] which are
+    # extremely common in real codebases.
+    if tp is Any:
+        return st.one_of(
+            st.integers(min_value=-100, max_value=100),
+            st.floats(min_value=-100, max_value=100, allow_nan=False),
+            st.text(max_size=20),
+            st.booleans(),
+            st.none(),
+        )
+
     # NoneType
     if tp is type(None):
         return st.none()

@@ -269,8 +269,15 @@ def _unwrap(func: Any) -> Any:
     return func
 
 
-def _get_public_functions(mod: ModuleType) -> list[tuple[str, Any]]:
-    """Return (name, callable) pairs for public, non-class callables.
+def _get_public_functions(
+    mod: ModuleType, *, include_private: bool = False
+) -> list[tuple[str, Any]]:
+    """Return (name, callable) pairs for testable callables.
+
+    By default only public functions (no ``_`` prefix).  Set
+    *include_private* to also include ``_single_underscore``
+    functions — many real codebases have most logic there.
+    ``__dunder__`` methods are always excluded.
 
     Decorated functions (``@ray.remote``, ``@functools.wraps``, etc.)
     are auto-unwrapped so that ``mine()``, ``fuzz()``, and ``scan_module()``
@@ -278,10 +285,16 @@ def _get_public_functions(mod: ModuleType) -> list[tuple[str, Any]]:
     """
     results = []
     for name in sorted(dir(mod)):
-        if name.startswith("_"):
+        if name.startswith("__"):
+            continue
+        if name.startswith("_") and not include_private:
             continue
         obj = getattr(mod, name)
         if callable(obj) and not isinstance(obj, type):
+            # Skip re-imports from other modules
+            obj_mod = getattr(obj, "__module__", None)
+            if include_private and obj_mod and obj_mod != mod.__name__:
+                continue
             results.append((name, _unwrap(obj)))
     return results
 

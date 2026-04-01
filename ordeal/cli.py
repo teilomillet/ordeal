@@ -325,9 +325,11 @@ def _cmd_mine(args: argparse.Namespace) -> int:
             mod = import_module(target)
         except ImportError:
             mod = import_module(mod_path)
-        funcs = _get_public_functions(mod)
+        inc_private = getattr(args, "include_private", False)
+        funcs = _get_public_functions(mod, include_private=inc_private)
         if not funcs:
-            _stderr(f"No public functions found in {target}\n")
+            hint = " (try --include-private for _prefixed functions)" if not inc_private else ""
+            _stderr(f"No testable functions found in {target}{hint}\n")
             return 1
 
     for name, func in funcs:
@@ -1036,6 +1038,11 @@ def main(argv: list[str] | None = None) -> int:
         "--time-limit", "-t", type=float, default=None, help="Time budget in seconds"
     )
     scan_p.add_argument("--json", action="store_true", help="Output JSON instead of text")
+    scan_p.add_argument(
+        "--include-private",
+        action="store_true",
+        help="Include _private functions (many codebases have logic there)",
+    )
 
     # -- ordeal explore --
     explore_p = sub.add_parser(
@@ -1109,6 +1116,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     mine_p.add_argument(
         "--verbose", "-v", action="store_true", help="Show n/a properties and extra detail"
+    )
+    mine_p.add_argument(
+        "--include-private",
+        action="store_true",
+        help="Include _private functions (many codebases have logic there)",
     )
 
     # -- ordeal mine-pair --

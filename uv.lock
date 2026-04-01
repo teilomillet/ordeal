@@ -498,7 +498,7 @@ wheels = [
 
 [[package]]
 name = "ordeal"
-version = "0.2.59"
+version = "0.2.61"
 source = { editable = "." }
 dependencies = [
     { name = "hypothesis" },

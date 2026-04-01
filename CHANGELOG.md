@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.67
+
+**Fixes:**
+
+- scan surfaces skipped functions + focused JSON output
+
+
 ## 0.2.66
 
 **Fixes:**

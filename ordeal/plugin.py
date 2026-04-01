@@ -194,6 +194,22 @@ def _replay_seed_corpus() -> list[dict[str, Any]]:
     return results
 
 
+def pytest_report_header(config: pytest.Config) -> str | None:
+    """Show ordeal version in pytest header so AI agents discover it."""
+    from ordeal import __version__
+
+    parts = [f"ordeal {__version__}"]
+
+    chaos = config.getoption("chaos", default=False)
+    if chaos:
+        seed = config.getoption("chaos_seed", default=None)
+        parts.append(f"chaos={'seed=' + str(seed) if seed else 'on'}")
+
+    parts.append("ordeal --help | from ordeal import catalog; catalog()")
+
+    return " — ".join(parts)
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Activate assertions + buggify when ``--chaos`` is passed."""
     config.addinivalue_line("markers", "chaos: mark test for chaos mode")

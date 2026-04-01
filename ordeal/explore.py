@@ -787,11 +787,14 @@ class Explorer:
                 elif hasattr(rule_meta, "arguments"):
                     strategies = dict(rule_meta.arguments)
 
-                # Detect data=st.data() parameter
+                # Detect Hypothesis's st.data() strategy (NOT user params named "data").
+                # Previously: param_name == "data" matched user params like
+                # @rule(data=st.binary()), silently replacing them with _DataProxy
+                # and causing 96%+ false failure rate.
                 for param_name, strat in strategies.items():
                     strat_repr = repr(strat).lower()
                     is_data = "dataobject" in strat_repr or "data()" in strat_repr
-                    if param_name == "data" or is_data:
+                    if is_data:
                         has_data = True
 
                 # Skip Bundle-consuming rules (can't execute outside Hypothesis)
@@ -824,8 +827,12 @@ class Explorer:
         required_count = 0
 
         for param_name, strategy in rule.strategies.items():
-            if param_name == "data" or rule.has_data and param_name == "data":
-                params["data"] = _DataProxy()
+            # Only substitute _DataProxy for Hypothesis's st.data() strategy,
+            # NOT for user parameters that happen to be named "data".
+            strat_repr = repr(strategy).lower()
+            is_hyp_data = "dataobject" in strat_repr or "data()" in strat_repr
+            if rule.has_data and is_hyp_data:
+                params[param_name] = _DataProxy()
             else:
                 required_count += 1
                 with warnings.catch_warnings():
@@ -1038,10 +1045,10 @@ class Explorer:
             # Detect skipped rules: required params missing means strategy
             # generation failed. Don't log as a real step — prevents the
             # "spinning" problem where run counts inflate with no-op calls.
-            required = sum(1 for p in rule_info.strategies if p != "data")
-            generated = sum(
-                1 for k, v in params.items() if k != "data" and not isinstance(v, _DataProxy)
+            required = sum(
+                1 for p in rule_info.strategies if not isinstance(params.get(p), _DataProxy)
             )
+            generated = sum(1 for k, v in params.items() if not isinstance(v, _DataProxy))
             if required > 0 and generated < required:
                 return False  # skip — strategy generation failed
             rule_log.append(rule_info.name)

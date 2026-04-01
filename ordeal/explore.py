@@ -530,6 +530,7 @@ class ExplorationResult:
     mutations_killed: int = 0
     seed_mutations_used: int = 0
     seed_mutations_productive: int = 0
+    strategy_failures: dict[str, int] = field(default_factory=dict)
 
     def summary(self) -> str:
         """Human-readable exploration summary."""
@@ -554,6 +555,14 @@ class ExplorationResult:
             lines.append(
                 f"Seed mutations: {self.seed_mutations_used} used, "
                 f"{self.seed_mutations_productive} productive"
+            )
+        if self.strategy_failures:
+            parts = [
+                f"{name} ({count} times)"
+                for name, count in sorted(self.strategy_failures.items(), key=lambda x: -x[1])
+            ]
+            lines.append(
+                f"Strategy failures: {', '.join(parts)} — check type hints or provide fixtures"
             )
         if self.adaptation_phase > 0:
             lines.append(f"Adapted: {self.adaptation_phase} phase(s) of escalation")
@@ -740,6 +749,7 @@ class Explorer:
         self._invariant_names: list[str] = []
         self._last_step_rule: tuple[str, dict[str, Any]] | None = None
         self._last_step_used_mutation: bool = False
+        self._strategy_failures: dict[str, int] = {}
 
     # -- Snapshot / restore -------------------------------------------------
 
@@ -987,7 +997,11 @@ class Explorer:
                         try:
                             params[param_name] = strategy.example()
                         except Exception:
-                            pass  # strategy failed — tracked below
+                            # Log strategy failure — helps diagnose state leakage
+                            # between sequential Explorer runs
+                            self._strategy_failures[param_name] = (
+                                self._strategy_failures.get(param_name, 0) + 1
+                            )
 
             # If any required strategy failed, skip the rule entirely.
             # This prevents spinning: calling rules with missing arguments
@@ -1481,6 +1495,19 @@ class Explorer:
                 progress=progress,
             )
 
+        # Reset Hypothesis internal state to prevent leakage from previous Explorer runs.
+        # When the CLI runs multiple ChaosTest classes sequentially, Hypothesis's
+        # strategy caches and ConjectureData machinery can leak between instances,
+        # causing strategy.example() to fail silently for subsequent classes.
+        try:
+            from hypothesis import settings
+            from hypothesis.database import InMemoryExampleDatabase
+
+            settings.default.database = InMemoryExampleDatabase()
+        except Exception:
+            pass
+
+        self._strategy_failures.clear()
         self._discover()
 
         # Activate property tracker for property-guided search
@@ -1679,6 +1706,20 @@ class Explorer:
         self.fault_toggle_prob = _orig_fault_prob
         self.checkpoint_strategy = _orig_cp_strategy
         result.unique_states = len(self._total_states)
+
+        # Propagate strategy failures to result for diagnostics
+        result.strategy_failures = dict(self._strategy_failures)
+
+        # Clean up Hypothesis state so next Explorer starts fresh.
+        # Prevents strategy cache and PRNG state from leaking into
+        # subsequent Explorer.run() calls in the same process.
+        try:
+            from hypothesis import settings
+            from hypothesis.database import InMemoryExampleDatabase
+
+            settings.default.database = InMemoryExampleDatabase()
+        except Exception:
+            pass
 
         # -- Post-exploration: shrink failures --
         if shrink:

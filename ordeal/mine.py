@@ -597,6 +597,270 @@ def _check_associative(
     return MinedProperty("associative", holds, total)
 
 
+def _check_output_subset_of_input(
+    inputs: list[dict[str, Any]],
+    outputs: list[Any],
+) -> list[MinedProperty]:
+    """Check if the output collection is always a subset of an input collection."""
+    if not inputs or not outputs:
+        return []
+
+    results: list[MinedProperty] = []
+    for param_name in inputs[0]:
+        total = 0
+        holds = 0
+        ce = None
+        for inp, out in zip(inputs, outputs):
+            v = inp[param_name]
+            if not isinstance(v, (list, tuple, set, frozenset)):
+                continue
+            if not isinstance(out, (list, tuple, set, frozenset)):
+                continue
+            total += 1
+            try:
+                if set(out) <= set(v):
+                    holds += 1
+                elif ce is None:
+                    extra = set(out) - set(v)
+                    ce = {
+                        param_name: v,
+                        "output": out,
+                        "extra_in_output": extra,
+                    }
+            except TypeError:
+                # unhashable elements — skip
+                total -= 1
+
+        if total == 0:
+            continue
+        results.append(MinedProperty(f"output subset of {param_name}", holds, total, ce))
+    return results
+
+
+def _check_sorted(outputs: list[Any]) -> MinedProperty:
+    """Check if the output is always sorted (for list returns)."""
+    total = 0
+    holds = 0
+    for o in outputs:
+        if not isinstance(o, (list, tuple)):
+            continue
+        if len(o) <= 1:
+            total += 1
+            holds += 1
+            continue
+        total += 1
+        try:
+            if list(o) == sorted(o):
+                holds += 1
+        except TypeError:
+            # uncomparable elements — skip this sample
+            total -= 1
+    if total == 0:
+        return MinedProperty("output is sorted", 0, 0)
+    return MinedProperty("output is sorted", holds, total)
+
+
+def _check_constant_output(outputs: list[Any]) -> MinedProperty:
+    """Check if the function always returns the same value regardless of input."""
+    if len(outputs) < 2:
+        return MinedProperty("constant output", 0, 0)
+    first = outputs[0]
+    holds = sum(1 for o in outputs if _approx_equal(o, first))
+    return MinedProperty("constant output", holds, len(outputs))
+
+
+def _check_linear_relationship(
+    inputs: list[dict[str, Any]],
+    outputs: list[Any],
+) -> list[MinedProperty]:
+    """Check if output = a*input + b holds for numeric single-param functions.
+
+    Fits a linear model from two data points and checks whether it
+    predicts the remaining outputs within tolerance.
+    """
+    if len(inputs) < 3 or len(outputs) < 3:
+        return []
+
+    results: list[MinedProperty] = []
+    for param_name in inputs[0]:
+        pairs: list[tuple[float, float]] = []
+        for inp, out in zip(inputs, outputs):
+            v = inp[param_name]
+            if (
+                isinstance(v, (int, float))
+                and not isinstance(v, bool)
+                and isinstance(out, (int, float))
+                and not isinstance(out, bool)
+                and math.isfinite(v)
+                and math.isfinite(out)
+            ):
+                pairs.append((float(v), float(out)))
+
+        if len(pairs) < 3:
+            continue
+
+        # Pick two distinct points to fit y = a*x + b
+        x0, y0 = pairs[0]
+        x1, y1 = None, None
+        for x, y in pairs[1:]:
+            if not _approx_equal(x, x0):
+                x1, y1 = x, y
+                break
+        if x1 is None:
+            continue
+
+        a = (y1 - y0) / (x1 - x0)
+        b = y0 - a * x0
+
+        # Check prediction on all points
+        total = len(pairs)
+        holds = 0
+        for x, y in pairs:
+            predicted = a * x + b
+            if _approx_equal(predicted, y):
+                holds += 1
+
+        if holds == total:
+
+            def _fmt(v: float) -> str:
+                if v == int(v):
+                    return str(int(v))
+                return f"{v:.4g}"
+
+            results.append(
+                MinedProperty(
+                    f"linear: output = {_fmt(a)}*{param_name} + {_fmt(b)}",
+                    holds,
+                    total,
+                )
+            )
+    return results
+
+
+def _check_output_length_constant(outputs: list[Any]) -> MinedProperty:
+    """Check if len(output) is always the same regardless of input."""
+    lengths: list[int] = []
+    for o in outputs:
+        try:
+            lengths.append(len(o))
+        except TypeError:
+            pass
+    if len(lengths) < 2:
+        return MinedProperty("output length constant", 0, 0)
+    first = lengths[0]
+    holds = sum(1 for ln in lengths if ln == first)
+    return MinedProperty(f"output length always {first}", holds, len(lengths))
+
+
+def _check_bijective(
+    inputs: list[dict[str, Any]],
+    outputs: list[Any],
+) -> MinedProperty:
+    """Check if each unique input produces a unique output (no collisions).
+
+    Only considers inputs/outputs that are hashable.
+    """
+    if len(inputs) < 2 or len(outputs) < 2:
+        return MinedProperty("bijective", 0, 0)
+
+    # Build (input_tuple, output) pairs, filtering unhashable values
+    seen_inputs: dict[Any, Any] = {}
+    total = 0
+    for inp, out in zip(inputs, outputs):
+        try:
+            key = tuple(sorted(inp.items()))
+            h_out = out  # test hashability
+            hash(h_out)
+        except TypeError:
+            continue
+        total += 1
+        if key in seen_inputs:
+            # Same input seen before — skip (determinism, not bijectivity)
+            if _approx_equal(seen_inputs[key], out):
+                continue
+            total -= 1
+            continue
+        seen_inputs[key] = out
+
+    if total < 2:
+        return MinedProperty("bijective", 0, 0)
+
+    # Check for output collisions among distinct inputs
+    try:
+        unique_outputs = len({v for v in seen_inputs.values()})
+    except TypeError:
+        return MinedProperty("bijective", 0, 0)
+
+    unique_inputs = len(seen_inputs)
+    if unique_outputs == unique_inputs:
+        return MinedProperty("bijective", unique_inputs, unique_inputs)
+    else:
+        return MinedProperty("bijective", unique_outputs, unique_inputs)
+
+
+def _check_preserves_type(
+    inputs: list[dict[str, Any]],
+    outputs: list[Any],
+) -> MinedProperty:
+    """Check if the output type always matches the type of the first input parameter."""
+    if not inputs or not outputs:
+        return MinedProperty("preserves type", 0, 0)
+
+    # Use the first parameter
+    param_names = list(inputs[0].keys())
+    if not param_names:
+        return MinedProperty("preserves type", 0, 0)
+
+    first_param = param_names[0]
+    total = 0
+    holds = 0
+    for inp, out in zip(inputs, outputs):
+        v = inp[first_param]
+        if v is None or out is None:
+            continue
+        total += 1
+        if type(v) is type(out):
+            holds += 1
+    if total == 0:
+        return MinedProperty("preserves type", 0, 0)
+    return MinedProperty("preserves type", holds, total)
+
+
+def _check_null_on_null(
+    fn: Callable[..., Any],
+    inputs: list[dict[str, Any]],
+) -> MinedProperty:
+    """Check if passing None for any parameter returns None.
+
+    Tests the common defensive pattern where null inputs produce null output.
+    """
+    if not inputs:
+        return MinedProperty("None in -> None out", 0, 0)
+
+    param_names = list(inputs[0].keys())
+    if not param_names:
+        return MinedProperty("None in -> None out", 0, 0)
+
+    total = 0
+    holds = 0
+    for param_name in param_names:
+        # Build kwargs with one param set to None, others from first sample
+        base_kwargs = dict(inputs[0])
+        base_kwargs[param_name] = None
+        try:
+            result = fn(**base_kwargs)
+            total += 1
+            if result is None:
+                holds += 1
+        except (TypeError, ValueError, AttributeError):
+            # Function doesn't accept None — that's fine, skip
+            pass
+
+    if total == 0:
+        return MinedProperty("None in -> None out", 0, 0)
+    return MinedProperty("None in -> None out", holds, total)
+
+
 # ============================================================================
 # Main entry point
 # ============================================================================
@@ -769,9 +1033,17 @@ def mine(
         _check_idempotent(fn, outputs, inputs),
         _check_involution(fn, outputs, inputs),
         _check_observed_bounds(outputs),
+        _check_sorted(outputs),
+        _check_constant_output(outputs),
+        _check_output_length_constant(outputs),
+        _check_bijective(inputs, outputs),
+        _check_preserves_type(inputs, outputs),
+        _check_null_on_null(fn, inputs),
     ]
     all_props.extend(_check_monotonic(inputs, outputs))
     all_props.extend(_check_length_relationship(inputs, outputs))
+    all_props.extend(_check_output_subset_of_input(inputs, outputs))
+    all_props.extend(_check_linear_relationship(inputs, outputs))
     all_props.append(_check_commutative(fn, inputs, outputs))
     all_props.append(_check_associative(fn, inputs))
 

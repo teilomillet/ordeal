@@ -93,6 +93,7 @@ _LAZY_SUBMODULES = (
     "ordeal.supervisor",
     "ordeal.mutagen",
     "ordeal.cmplog",
+    "ordeal.concolic",
 )
 
 _SENTINEL = object()
@@ -145,7 +146,7 @@ def catalog() -> dict[str, list]:
     dicts describing the available items.  Keys: ``faults``, ``invariants``,
     ``assertions``, ``strategies``, ``mutations``, ``integrations``,
     ``mining``, ``audit``, ``auto``, ``metamorphic``, ``diff``, ``scaling``,
-    ``exploration``, ``supervisor``, ``mutagen``, ``cmplog``.
+    ``exploration``, ``supervisor``, ``mutagen``, ``cmplog``, ``concolic``.
 
     Everything is derived from the source code via ``inspect``; adding a new
     fault, invariant, or capability makes it appear here automatically.
@@ -212,6 +213,9 @@ def catalog() -> dict[str, list]:
         ),
         "cmplog": _introspect_module(
             __import__("ordeal.cmplog", fromlist=["cmplog"]),
+        ),
+        "concolic": _introspect_module(
+            __import__("ordeal.concolic", fromlist=["concolic"]),
         ),
     }
     try:

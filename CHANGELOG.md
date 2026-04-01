@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.59
+
+**Features:**
+
+- mutant_timeout — abort generation on complex AST expressions
+
+
 ## 0.2.57
 
 **Features:**

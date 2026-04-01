@@ -690,3 +690,69 @@ class TestMutantSourceStored:
     def test_extra_mutants_have_source(self):
         results = _validate_extra_mutants(_SAMPLE_SOURCE, [_EXTRA_MUTANT_OFF_BY_ONE])
         assert results[0][0]._mutant_source is not None
+
+
+# ============================================================================
+# ExplorationState + hardening integration
+# ============================================================================
+
+
+class TestFunctionStateHardening:
+    def test_hardened_fields_default_false(self):
+        from ordeal.state import FunctionState
+
+        fs = FunctionState(name="f")
+        assert fs.hardened is False
+        assert fs.hardened_kills == 0
+
+    def test_hardening_boosts_confidence(self):
+        from ordeal.state import FunctionState
+
+        # Function with low mutation score: 2/4 killed
+        fs = FunctionState(
+            name="f",
+            mined=True,
+            properties=[{"universal": True}],
+            mutated=True,
+            mutation_score=0.5,
+            killed_mutants=2,
+            survived_mutants=2,
+        )
+        conf_before = fs.confidence
+
+        # Harden: 1 more survivor killed
+        fs.hardened = True
+        fs.hardened_kills = 1
+        conf_after = fs.confidence
+
+        # Effective score: (2 + 1) / 4 = 0.75 > 0.5
+        assert conf_after > conf_before
+
+    def test_frontier_shows_unhardened_survivors(self):
+        from ordeal.state import FunctionState
+
+        fs = FunctionState(
+            name="f",
+            mutated=True,
+            mutation_score=0.5,
+            killed_mutants=2,
+            survived_mutants=2,
+        )
+        frontier = fs.frontier
+        assert any("unhardened" in g for g in frontier)
+
+    def test_frontier_no_unhardened_when_all_hardened(self):
+        from ordeal.state import FunctionState
+
+        fs = FunctionState(
+            name="f",
+            mutated=True,
+            mutation_score=0.5,
+            killed_mutants=2,
+            survived_mutants=2,
+            hardened=True,
+            hardened_kills=2,
+        )
+        frontier = fs.frontier
+        # mutation score is still < 0.8, but no unhardened survivors
+        assert not any("unhardened" in g for g in frontier)

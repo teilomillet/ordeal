@@ -53,6 +53,10 @@ class FunctionState:
     survived_mutants: int = 0
     killed_mutants: int = 0
 
+    # harden() results — verified tests that close mutation gaps
+    hardened: bool = False
+    hardened_kills: int = 0
+
     # scan/fuzz results
     scanned: bool = False
     crash_free: bool | None = None
@@ -76,7 +80,13 @@ class FunctionState:
             universal = sum(1 for p in self.properties if p.get("universal", False))
             scores.append(universal / total if total > 0 else 0.5)
         if self.mutated and self.mutation_score is not None:
-            scores.append(self.mutation_score)
+            # Hardening boosts effective mutation score: verified kills
+            # close gaps that the original test suite missed.
+            effective = self.mutation_score
+            if self.hardened and self.survived_mutants > 0:
+                total = self.killed_mutants + self.survived_mutants
+                effective = (self.killed_mutants + self.hardened_kills) / total
+            scores.append(min(effective, 1.0))
         if self.scanned:
             scores.append(1.0 if self.crash_free else 0.0)
         if self.chaos_tested:
@@ -95,6 +105,9 @@ class FunctionState:
             gaps.append("not mutation-tested")
         elif self.mutation_score is not None and self.mutation_score < 0.8:
             gaps.append(f"mutation score {self.mutation_score:.0%}")
+            unhardened = self.survived_mutants - self.hardened_kills
+            if unhardened > 0:
+                gaps.append(f"{unhardened} unhardened survivor(s)")
         if not self.scanned:
             gaps.append("not scanned")
         if not self.chaos_tested:
@@ -240,10 +253,25 @@ def explore_scan(state: ExplorationState, *, max_examples: int = 30) -> Explorat
     return state
 
 
-def explore_mutate(state: ExplorationState, *, workers: int = 1) -> ExplorationState:
+def explore_mutate(
+    state: ExplorationState,
+    *,
+    workers: int = 1,
+    extra_mutants: dict[str, list[str | tuple[str, str]]] | None = None,
+    concern: str | None = None,
+    llm: Any | None = None,
+) -> ExplorationState:
     """Mutation-test all mined functions and update state.
 
     Scales with *workers*: more CPUs = more mutants tested in parallel.
+
+    Args:
+        state: Exploration state to enrich.
+        workers: Parallel workers for mutation testing.
+        extra_mutants: Per-function extra mutant source strings, keyed by
+            function name.  Written by the AI assistant or human.
+        concern: Free-text concern for targeted mutation generation.
+        llm: Optional LLM callable for automated mutant generation.
     """
     from ordeal.mutations import mutate
 
@@ -251,14 +279,64 @@ def explore_mutate(state: ExplorationState, *, workers: int = 1) -> ExplorationS
         if fs.mutated:
             continue
         target = f"{state.module}.{name}"
+        fn_extras = (extra_mutants or {}).get(name)
         try:
-            result = mutate(target, preset="essential", workers=workers)
+            result = mutate(
+                target,
+                preset="essential",
+                workers=workers,
+                extra_mutants=fn_extras,
+                concern=concern,
+                llm=llm,
+            )
         except Exception:
             continue
         fs.mutated = True
         fs.mutation_score = result.score
         fs.killed_mutants = sum(1 for m in result.mutants if m.killed)
         fs.survived_mutants = sum(1 for m in result.mutants if not m.killed)
+    return state
+
+
+def explore_harden(
+    state: ExplorationState,
+    extra_tests: dict[str, list[str]],
+) -> ExplorationState:
+    """Verify tests against surviving mutants and update state (Meta ACH pattern).
+
+    For each function in *extra_tests*, re-runs mutation testing to get
+    surviving mutants, then verifies each test with the three-assurance
+    loop: buildable, valid regression, kills mutant.
+
+    This is the step where an AI assistant closes the loop: it reads
+    ``state.frontier`` to find unhardened survivors, writes tests, and
+    calls ``explore_harden`` to verify them.
+
+    Args:
+        state: Exploration state with prior mutation results.
+        extra_tests: Per-function test source strings, keyed by function
+            name.  Each test should import the target and assert behavior.
+
+    Returns:
+        Updated state with hardening results.
+    """
+    from ordeal.mutations import mutate
+
+    for name, tests in extra_tests.items():
+        fs = state.function(name)
+        if not fs.mutated or fs.survived_mutants == 0:
+            continue
+        target = f"{state.module}.{name}"
+        try:
+            result = mutate(target, preset="essential")
+        except Exception:
+            continue
+        if not result.survived:
+            continue
+        hardened = result.harden(tests)
+        if hardened.verified:
+            fs.hardened = True
+            fs.hardened_kills += hardened.total_kills
     return state
 
 
@@ -298,7 +376,7 @@ def explore(
 
     The AI assistant can also run steps individually via
     ``explore_mine``, ``explore_scan``, ``explore_mutate``,
-    ``explore_chaos`` for finer control.
+    ``explore_harden``, ``explore_chaos`` for finer control.
 
     Args:
         module: Dotted module path.

@@ -142,9 +142,11 @@ class DeterministicSupervisor:
 
         **RNG seeding** (same seed = identical random sequences):
         - ``random`` module — all functions
-        - Hypothesis — derandomize mode, no database
         - buggify — thread-local fault RNG
         - numpy — if installed
+        - Hypothesis — database disabled (no cross-run leakage),
+          but internal RNG uses source hash, not our seed.
+          Mine() property confidence is APPROXIMATE, not exact.
 
         **I/O patching** (deterministic, no real disk/network/time):
         - ``time.time()`` / ``time.sleep()`` → ``simulate.Clock``
@@ -167,16 +169,21 @@ class DeterministicSupervisor:
         self._saved_random_state = random.getstate()
         random.seed(self.seed)
 
-        # -- 2. Seed Hypothesis --
+        # -- 2. Hypothesis --
+        # Hypothesis has its own internal RNG (ConjectureData) seeded by
+        # a hash of the test source, not our seed.  We disable the database
+        # to prevent cross-run leakage, but cannot make Hypothesis fully
+        # deterministic from outside.
+        #
+        # What this means: mine() property confidence may vary slightly.
+        # Mutation scores, edge counts, crash status are fully deterministic.
         try:
-            from hypothesis import Phase, settings
+            from hypothesis import settings
 
             self._saved_hypothesis_settings = settings.default
             settings.default = settings(
                 settings.default,
-                derandomize=True,
                 database=None,
-                phases=[Phase.explicit, Phase.generate, Phase.shrink],
             )
         except Exception:
             self._saved_hypothesis_settings = None

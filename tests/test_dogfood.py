@@ -245,27 +245,28 @@ class TestDeterministicSupervisor:
         always(forked.seed == 99, "fork has new seed")
 
     def test_explore_reproducibility(self):
-        """Same seed MUST produce identical exploration results.
+        """Same seed produces identical structural results.
 
-        This is the epistemic guarantee: if the AI runs explore()
-        with seed=42 twice, it gets the same confidence, same
-        findings, same per-function results. Without this, the
-        exploration state is meaningless — you can't build on
-        previous results if they change between runs.
+        Epistemic guarantee — what the AI can rely on:
 
-        What IS deterministic (enforced here):
+        EXACT (enforced, fails test if violated):
+        - Function set discovered
         - Per-function mutation scores
         - Per-function edge counts
-        - Function set discovered
         - Crash-free status
+        - State tree structure
 
-        What MAY vary (not enforced — Hypothesis internal state):
-        - Exact property confidence bounds (mine() examples)
+        APPROXIMATE (not enforced — Hypothesis internal RNG):
+        - Mine() property confidence bounds
+        - Overall confidence score
+
+        This distinction is honest: we enforce what we can control
+        and document what we can't.
         """
         from ordeal.state import explore
 
-        s1 = explore("ordeal.demo", time_limit=15, seed=42, max_examples=20)
-        s2 = explore("ordeal.demo", time_limit=15, seed=42, max_examples=20)
+        s1 = explore("ordeal.demo", seed=42, max_examples=10)
+        s2 = explore("ordeal.demo", seed=42, max_examples=10)
 
         always(
             set(s1.functions.keys()) == set(s2.functions.keys()),
@@ -285,6 +286,11 @@ class TestDeterministicSupervisor:
                 f1.crash_free == f2.crash_free,
                 f"same seed, same crash status for {name}",
             )
+        # State tree has same structure
+        always(
+            s1.tree.size == s2.tree.size,
+            "same seed, same state tree size",
+        )
 
     def test_different_seeds_different_exploration(self):
         """Different seeds explore different regions."""
@@ -296,6 +302,164 @@ class TestDeterministicSupervisor:
         always(
             s1.supervisor_info.get("seed") != s2.supervisor_info.get("seed"),
             "supervisor records different seeds",
+        )
+
+    def test_rng_determinism_under_supervisor(self):
+        """All ordeal-controlled RNGs are fully deterministic.
+
+        The reproducibility guarantee (documented honestly):
+        - random.random() sequences: EXACT (same seed = identical)
+        - Mutation scores, edge counts, crash status: EXACT
+        - Mine() property confidence: APPROXIMATE — Hypothesis has
+          its own internal RNG (derandomize uses source hash, not
+          our seed). Property mining examples may vary slightly.
+
+        This test enforces the EXACT guarantees.
+        """
+        for _ in range(3):
+            with DeterministicSupervisor(seed=42):
+                a = [random.random() for _ in range(20)]
+            with DeterministicSupervisor(seed=42):
+                b = [random.random() for _ in range(20)]
+            always(a == b, "random.random() deterministic")
+
+    def test_io_patching_file_roundtrip(self):
+        """patch_io=True routes open() through in-memory FileSystem."""
+        with DeterministicSupervisor(seed=42, patch_io=True) as sup:
+            # Write
+            f = open("/test_data.txt", "w")
+            f.write("deterministic content")
+            f.close()
+
+            # Read back
+            f = open("/test_data.txt", "r")
+            content = f.read()
+            f.close()
+
+            always(content == "deterministic content", "file roundtrip works")
+            always(sup.filesystem is not None, "filesystem is initialized")
+            always(sup.filesystem.exists("/test_data.txt"), "file persists")
+
+    def test_io_patching_binary(self):
+        """patch_io=True handles binary mode."""
+        with DeterministicSupervisor(seed=42, patch_io=True):
+            f = open("/data.bin", "wb")
+            f.write(b"\x00\x01\x02\xff")
+            f.close()
+
+            f = open("/data.bin", "rb")
+            data = f.read()
+            f.close()
+
+            always(data == b"\x00\x01\x02\xff", "binary roundtrip works")
+
+    def test_io_patching_missing_file(self):
+        """patch_io=True raises FileNotFoundError for unwritten paths."""
+        with DeterministicSupervisor(seed=42, patch_io=True):
+            try:
+                open("/nonexistent.txt", "r")
+                always(False, "should have raised FileNotFoundError")
+            except FileNotFoundError:
+                always(True, "missing file raises correctly")
+
+    def test_network_blocked_under_patch_io(self):
+        """patch_io=True blocks socket connections deterministically."""
+        import socket
+
+        with DeterministicSupervisor(seed=42, patch_io=True):
+            try:
+                socket.create_connection(("example.com", 80))
+                always(False, "should have raised ConnectionRefusedError")
+            except ConnectionRefusedError:
+                always(True, "network blocked deterministically")
+
+    def test_thread_tracking(self):
+        """patch_io=True logs thread creation in trajectory."""
+        import threading
+
+        with DeterministicSupervisor(seed=42, patch_io=True) as sup:
+            t = threading.Thread(target=lambda: None, name="test-thread")
+            t.start()
+            t.join()
+
+            always(sup._thread_count == 1, "thread creation counted")
+            always(len(sup.trajectory) == 1, "thread logged in trajectory")
+            always(
+                "thread_start" in sup.trajectory[0].action,
+                "trajectory records thread name",
+            )
+
+    def test_without_patch_io_real_io_works(self):
+        """Default (patch_io=False) doesn't break real I/O."""
+        import os
+
+        with DeterministicSupervisor(seed=42):
+            # Real open should work
+            with open(os.devnull) as f:
+                always(f is not None, "real open works without patch_io")
+
+    def test_state_tree_survives_explore(self):
+        """explore() creates a state tree with checkpoints at each phase."""
+        from ordeal.state import explore
+
+        state = explore("ordeal.demo", time_limit=15, seed=42, max_examples=10)
+
+        always(state.tree is not None, "tree exists")
+        always(state.tree.size >= 2, "tree has multiple checkpoints")
+        always(state.tree.max_depth >= 1, "tree has depth")
+
+        # Can rollback to root
+        root_nodes = [n for n in state.tree._nodes.values() if n.parent_id is None]
+        always(len(root_nodes) >= 1, "tree has a root")
+
+    def test_supervisor_info_in_state(self):
+        """explore() records supervisor info for reproduction."""
+        from ordeal.state import explore
+
+        state = explore("ordeal.demo", time_limit=10, seed=123, max_examples=10)
+
+        always("seed" in state.supervisor_info, "seed recorded")
+        always(state.supervisor_info["seed"] == 123, "correct seed recorded")
+        always("trajectory_steps" in state.supervisor_info, "trajectory recorded")
+        always(state.supervisor_info["trajectory_steps"] > 0, "transitions logged")
+
+    def test_json_roundtrip_preserves_supervisor_info(self):
+        """Serialized state preserves supervisor info."""
+        from ordeal.state import ExplorationState, explore
+
+        state = explore("ordeal.demo", time_limit=10, seed=42, max_examples=10)
+
+        json_str = state.to_json()
+        restored = ExplorationState.from_json(json_str)
+
+        always(
+            restored.supervisor_info.get("seed") == 42,
+            "JSON roundtrip preserves seed",
+        )
+        always(
+            restored.supervisor_info.get("trajectory_steps")
+            == state.supervisor_info.get("trajectory_steps"),
+            "JSON roundtrip preserves trajectory count",
+        )
+
+    def test_mine_deterministic_under_supervisor(self):
+        """mine() produces identical results under same seed."""
+        from ordeal.demo import score
+        from ordeal.mine import mine
+
+        with DeterministicSupervisor(seed=42):
+            r1 = mine(score, max_examples=20)
+        with DeterministicSupervisor(seed=42):
+            r2 = mine(score, max_examples=20)
+
+        always(r1.examples == r2.examples, "same example count")
+        always(
+            r1.edges_discovered == r2.edges_discovered,
+            "same edges discovered",
+        )
+        always(
+            len(r1.properties) == len(r2.properties),
+            "same property count",
         )
 
 

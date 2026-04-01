@@ -109,6 +109,61 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_check(args: argparse.Namespace) -> int:
+    """Mine a function and verify a specific property — one-step workflow.
+
+    Collapses: mine() → spot property → fuzz with assertion → confirm
+    into a single command.  Exit code 0 if property holds, 1 if violated.
+    """
+    from ordeal.auto import _unwrap
+    from ordeal.mine import mine
+
+    target = args.target
+    prop = args.property
+
+    # Resolve the function
+    mod_path, _, func_name = target.rpartition(".")
+    if not mod_path:
+        _stderr("Target must be dotted path: module.function\n")
+        return 1
+
+    try:
+        from importlib import import_module
+
+        mod = import_module(mod_path)
+        func = _unwrap(getattr(mod, func_name))
+    except (ImportError, AttributeError) as e:
+        _stderr(f"Cannot resolve {target}: {e}\n")
+        return 1
+
+    max_examples = args.max_examples
+    _stderr(f"Checking {target} for '{prop}' ({max_examples} examples)...\n")
+
+    result = mine(func, max_examples=max_examples)
+    print(result.summary())
+
+    # Find the requested property
+    matching = [p for p in result.properties if prop.lower() in p.name.lower()]
+    if not matching:
+        _stderr(
+            f"\n  Property '{prop}' not found. Available: "
+            f"{', '.join(p.name for p in result.properties if p.total > 0)}\n"
+        )
+        return 1
+
+    violations = [p for p in matching if not p.universal]
+    if violations:
+        print(f"\n  VIOLATION: {violations[0].name} ({violations[0].holds}/{violations[0].total})")
+        if violations[0].counterexample:
+            print(f"  Counterexample: {violations[0].counterexample}")
+        return 1
+
+    holds = [p for p in matching if p.universal]
+    if holds:
+        print(f"\n  HOLDS: {holds[0].name} ({holds[0].holds}/{holds[0].total})")
+    return 0
+
+
 def _cmd_scan(args: argparse.Namespace) -> int:
     """Run unified exploration: mine + scan + mutate + chaos in one pass.
 
@@ -1015,6 +1070,26 @@ def main(argv: list[str] | None = None) -> int:
     )
     cat_p.add_argument("--detail", action="store_true", help="Show full signatures and docstrings")
 
+    # -- ordeal check (targeted property verification) --
+    check_p = sub.add_parser(
+        "check",
+        help="Verify a specific property on a function (mine + assert in one step)",
+    )
+    check_p.add_argument("target", help="Dotted path: mymod.func")
+    check_p.add_argument(
+        "--property",
+        "-p",
+        required=True,
+        help="Property: never_empty, deterministic, idempotent, ...",
+    )
+    check_p.add_argument(
+        "--max-examples",
+        "-n",
+        type=int,
+        default=200,
+        help="Examples to test (default: 200)",
+    )
+
     # -- ordeal scan (unified explore) --
     # Description auto-derived from explore().__doc__
     from ordeal.state import explore as _explore_fn
@@ -1236,6 +1311,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "catalog":
         return _cmd_catalog(args)
+    elif args.command == "check":
+        return _cmd_check(args)
     elif args.command == "scan":
         return _cmd_scan(args)
     elif args.command == "explore":

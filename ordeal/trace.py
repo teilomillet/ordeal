@@ -332,9 +332,7 @@ def _import_class(class_path: str) -> type:
     import importlib
 
     if ":" not in class_path:
-        raise ValueError(
-            f"Invalid class path: {class_path!r} — expected 'module.path:ClassName'"
-        )
+        raise ValueError(f"Invalid class path: {class_path!r} — expected 'module.path:ClassName'")
     module_path, class_name = class_path.rsplit(":", 1)
     module = importlib.import_module(module_path)
     return getattr(module, class_name)

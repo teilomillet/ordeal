@@ -129,6 +129,8 @@ class ExplorationState:
     functions: dict[str, FunctionState] = field(default_factory=dict)
     edge_coverage: float | None = None
     exploration_time: float = 0.0
+    supervisor_info: dict[str, Any] = field(default_factory=dict)
+    tree: Any = field(default=None, repr=False)
 
     def function(self, name: str) -> FunctionState:
         """Get or create state for a function."""
@@ -166,6 +168,15 @@ class ExplorationState:
         lines = [f"Exploration: {self.module}"]
         lines.append(f"  confidence: {self.confidence:.0%}")
         lines.append(f"  functions:  {len(self.functions)}")
+        if self.supervisor_info:
+            seed = self.supervisor_info.get("seed", "?")
+            traj = self.supervisor_info.get("trajectory_steps", 0)
+            states = self.supervisor_info.get("unique_states", 0)
+            lines.append(f"  seed: {seed} ({traj} transitions, {states} states)")
+        if self.tree and self.tree.size > 0:
+            lines.append(
+                f"  state tree: {self.tree.size} checkpoints, depth {self.tree.max_depth}"
+            )
         if self.findings:
             lines.append(f"  findings:   {len(self.findings)}")
             for f in self.findings:
@@ -178,8 +189,21 @@ class ExplorationState:
         return "\n".join(lines)
 
     def to_json(self) -> str:
-        """Serialize to JSON for persistence."""
-        return json.dumps(asdict(self), indent=2)
+        """Serialize to JSON for persistence.
+
+        The state tree's snapshots are excluded (not JSON-serializable).
+        The tree structure is preserved via ``tree.to_json()``.
+        """
+        data = {
+            "module": self.module,
+            "functions": {name: asdict(fs) for name, fs in self.functions.items()},
+            "edge_coverage": self.edge_coverage,
+            "exploration_time": self.exploration_time,
+            "supervisor_info": self.supervisor_info,
+        }
+        if self.tree and self.tree.size > 0:
+            data["tree"] = json.loads(self.tree.to_json())
+        return json.dumps(data, indent=2)
 
     @classmethod
     def from_json(cls, data: str) -> ExplorationState:
@@ -188,6 +212,7 @@ class ExplorationState:
         state = cls(module=raw["module"])
         state.edge_coverage = raw.get("edge_coverage")
         state.exploration_time = raw.get("exploration_time", 0.0)
+        state.supervisor_info = raw.get("supervisor_info", {})
         for name, fdata in raw.get("functions", {}).items():
             fs = FunctionState(**fdata)
             state.functions[name] = fs
@@ -364,22 +389,24 @@ def explore(
     time_limit: float | None = None,
     workers: int = 1,
     max_examples: int = 50,
+    seed: int = 42,
 ) -> ExplorationState:
     """Run all exploration strategies on a module.
 
     Assembles mine → scan → mutate → chaos into one pass.
-    Each step enriches the shared ``ExplorationState``.
+    Each step enriches the shared ``ExplorationState``.  The entire
+    exploration runs inside a ``DeterministicSupervisor`` for
+    reproducibility, and checkpoints into a ``StateTree`` so the
+    AI can navigate the exploration trajectory.
 
     Scales with compute: more *workers* → more mutations tested
     in parallel, more *max_examples* → more input space sampled.
     Confidence grows with both.
 
-    For deeper, coverage-guided stateful exploration, use
-    ``ordeal.explore.Explorer`` directly — it runs ChaosTest rule
-    sequences with AFL-style edge coverage, energy-based checkpoint
-    scheduling, swarm fault selection, and **seed mutation** (productive
-    rule parameters are stored on checkpoints and mutated on the next
-    branch, closing the AFL feedback loop for typed stateful testing).
+    Deterministic: same *seed* + same code = same exploration.
+    Different seeds explore different regions of the state space.
+    The trajectory is logged in ``state.supervisor`` and the
+    state tree is in ``state.tree``.
 
     The AI assistant can also run steps individually via
     ``explore_mine``, ``explore_scan``, ``explore_mutate``,
@@ -393,28 +420,92 @@ def explore(
             state space explored per unit time.
         max_examples: Hypothesis examples for mining and scanning. More
             examples = more input space sampled = higher confidence.
+        seed: RNG seed for deterministic exploration. Same seed = same
+            trajectory. Default 42.
     """
     import time as _time
+
+    from ordeal.supervisor import DeterministicSupervisor, StateTree
 
     if state is None:
         state = ExplorationState(module=module)
 
-    start = _time.monotonic()
+    # Initialize supervisor and state tree if not already present
+    if not hasattr(state, "supervisor") or state.supervisor is None:
+        state.supervisor = None  # set below inside context
+    if not hasattr(state, "tree") or state.tree is None:
+        state.tree = StateTree()
 
-    # Step 1: Mine properties — scales with max_examples
-    state = explore_mine(state, max_examples=max_examples)
+    sup = DeterministicSupervisor(seed=seed)
+    sup.__enter__()
 
-    # Step 2: Crash safety — scales with max_examples
-    if time_limit is None or (_time.monotonic() - start) < time_limit:
-        state = explore_scan(state, max_examples=max_examples)
+    try:
+        start = _time.monotonic()
 
-    # Step 3: Mutation testing — scales with workers
-    if time_limit is None or (_time.monotonic() - start) < time_limit:
-        state = explore_mutate(state, workers=workers)
+        # Checkpoint: initial state
+        state_hash = hash(("init", module, seed))
+        state.tree.checkpoint(state_hash, snapshot=state, action="start", seed=seed)
+        sup.log_transition("explore_start", state_hash=state_hash)
 
-    # Step 4: Chaos testing
-    if time_limit is None or (_time.monotonic() - start) < time_limit:
-        state = explore_chaos(state, max_examples=max_examples)
+        # Step 1: Mine properties
+        state = explore_mine(state, max_examples=max_examples)
+        mine_hash = hash(("mined", len(state.functions), state.confidence))
+        state.tree.checkpoint(
+            mine_hash,
+            parent=state_hash,
+            action="mine",
+            snapshot=None,
+            edges=sum(f.edges_discovered for f in state.functions.values()),
+            seed=seed,
+        )
+        sup.log_transition("explore_mine", state_hash=mine_hash)
+        prev_hash = mine_hash
 
-    state.exploration_time += _time.monotonic() - start
+        # Step 2: Crash safety
+        if time_limit is None or (_time.monotonic() - start) < time_limit:
+            state = explore_scan(state, max_examples=max_examples)
+            scan_hash = hash(("scanned", state.confidence))
+            state.tree.checkpoint(
+                scan_hash,
+                parent=prev_hash,
+                action="scan",
+                seed=seed,
+            )
+            sup.log_transition("explore_scan", state_hash=scan_hash)
+            prev_hash = scan_hash
+
+        # Step 3: Mutation testing
+        if time_limit is None or (_time.monotonic() - start) < time_limit:
+            state = explore_mutate(state, workers=workers)
+            mutate_hash = hash(("mutated", state.confidence))
+            state.tree.checkpoint(
+                mutate_hash,
+                parent=prev_hash,
+                action="mutate",
+                seed=seed,
+            )
+            sup.log_transition("explore_mutate", state_hash=mutate_hash)
+            prev_hash = mutate_hash
+
+        # Step 4: Chaos testing
+        if time_limit is None or (_time.monotonic() - start) < time_limit:
+            state = explore_chaos(state, max_examples=max_examples)
+            chaos_hash = hash(("chaos", state.confidence))
+            state.tree.checkpoint(
+                chaos_hash,
+                parent=prev_hash,
+                action="chaos",
+                seed=seed,
+            )
+            sup.log_transition("explore_chaos", state_hash=chaos_hash)
+
+        state.exploration_time += _time.monotonic() - start
+
+    finally:
+        # Store supervisor info on the state for inspection
+        state.supervisor_info = sup.reproduction_info()
+        state.supervisor_info["trajectory_steps"] = len(sup.trajectory)
+        state.supervisor_info["unique_states"] = len(sup.visited_states)
+        sup.__exit__(None, None, None)
+
     return state

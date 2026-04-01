@@ -60,24 +60,52 @@ class _ProgressPrinter:
 # ============================================================================
 
 
-def _cmd_catalog(_args: argparse.Namespace) -> int:
+def _cmd_catalog(args: argparse.Namespace) -> int:
     """Print all ordeal capabilities, organized by subsystem."""
     from ordeal import catalog
 
     c = catalog()
+    total = sum(len(v) for v in c.values())
+    print(f"{total} capabilities across {len(c)} subsystems:\n")
+
+    # Derive subsystem descriptions from the first entry's module docstring
     for key in sorted(c):
         entries = c[key]
-        print(f"\n{key} ({len(entries)}):")
-        for item in entries:
-            doc = item["doc"]
-            sig = item.get("signature", "")
-            print(f"  {item['name']}{sig}")
-            if doc:
-                print(f"    {doc}")
+        # Get the module docstring's first line as description
+        first_doc = ""
+        if entries:
+            qualname = entries[0].get("qualname", "")
+            mod_path = qualname.rsplit(".", 1)[0] if "." in qualname else ""
+            if mod_path:
+                try:
+                    mod = __import__(mod_path, fromlist=["_"])
+                    first_doc = (mod.__doc__ or "").strip().split("\n")[0]
+                except Exception:
+                    pass
+        if not first_doc:
+            # Fallback: first entry's doc
+            first_doc = entries[0]["doc"] if entries else ""
+        names = ", ".join(e["name"] for e in entries[:4])
+        if len(entries) > 4:
+            names += ", ..."
+        print(f"  {key} ({len(entries)}) — {first_doc}")
+        print(f"    {names}")
 
-    total = sum(len(v) for v in c.values())
-    print(f"\n{total} capabilities across {len(c)} subsystems.")
-    print("Use in Python: from ordeal import catalog; catalog()")
+    print("\nRun 'ordeal scan <module>' to explore a module fully.")
+    print("Run 'ordeal catalog --detail' for signatures and docs.")
+    print("Python: from ordeal import catalog; catalog()")
+
+    if getattr(args, "detail", False):
+        for key in sorted(c):
+            entries = c[key]
+            print(f"\n{key} ({len(entries)}):")
+            for item in entries:
+                doc = item["doc"]
+                sig = item.get("signature", "")
+                print(f"  {item['name']}{sig}")
+                if doc:
+                    print(f"    {doc}")
+
     return 0
 
 
@@ -966,25 +994,33 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="ordeal",
         description=(
-            "Ordeal — explores the state space of Python code.\n\n"
-            "Run 'ordeal catalog' to see every capability.\n"
-            "Run 'ordeal scan mymod' to explore a module fully.\n"
-            "Use catalog() in Python for the full API."
+            "Ordeal — discovers what's true about your code.\n\n"
+            "Start here:\n"
+            "  ordeal scan mymod           Run everything: mine + scan + mutate + chaos\n"
+            "  ordeal catalog              See every capability\n"
+            "  catalog() in Python         Full API reference"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="command")
 
     # -- ordeal catalog --
-    sub.add_parser(
+    cat_p = sub.add_parser(
         "catalog",
         help="Show all capabilities — faults, mining, mutations, exploration, ...",
     )
+    cat_p.add_argument("--detail", action="store_true", help="Show full signatures and docstrings")
 
-    # -- ordeal scan (unified explore — the recommended entry point) --
+    # -- ordeal scan (unified explore) --
+    # Description auto-derived from explore().__doc__
+    from ordeal.state import explore as _explore_fn
+
+    scan_desc = (_explore_fn.__doc__ or "").strip().split("\n\n")[0]
     scan_p = sub.add_parser(
         "scan",
         help="Explore a module: mine + scan + mutate + chaos in one pass",
+        description=scan_desc,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     scan_p.add_argument("target", help="Module path (e.g. myapp.scoring)")
     scan_p.add_argument(
@@ -1002,7 +1038,10 @@ def main(argv: list[str] | None = None) -> int:
     scan_p.add_argument("--json", action="store_true", help="Output JSON instead of text")
 
     # -- ordeal explore --
-    explore_p = sub.add_parser("explore", help="Run coverage-guided exploration")
+    explore_p = sub.add_parser(
+        "explore",
+        help="Coverage-guided state exploration (reads ordeal.toml)",
+    )
     explore_p.add_argument(
         "--config", "-c", default="ordeal.toml", help="Config file (default: ordeal.toml)"
     )
@@ -1117,7 +1156,10 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # -- ordeal mutate --
-    mutate_p = sub.add_parser("mutate", help="Run mutation testing")
+    mutate_p = sub.add_parser(
+        "mutate",
+        help="Test whether your tests catch code changes",
+    )
     mutate_p.add_argument(
         "targets", nargs="*", help="Dotted paths: myapp.scoring.compute or myapp.scoring"
     )

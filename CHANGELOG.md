@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.68
+
+**Features:**
+
+- ordeal check — verify a property in one command
+- source-hash invalidation — stale exploration results auto-reset on code change
+
+
 ## 0.2.67
 
 **Fixes:**

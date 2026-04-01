@@ -1,6 +1,6 @@
 [project]
 name = "ordeal"
-version = "0.2.41"
+version = "0.2.42"
 description = "Automated chaos testing for Python — fault injection, property assertions, and stateful exploration."
 readme = "README.md"
 requires-python = ">=3.12"

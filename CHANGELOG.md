@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.42
+
+**Features:**
+
+- deterministic supervisor + AFL-style value mutation
+
+
 ## 0.2.41
 
 **Features:**

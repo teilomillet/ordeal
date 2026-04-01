@@ -56,6 +56,10 @@ ordeal/
 ├── config.py           ordeal.toml loader with strict validation
 ├── cli.py              CLI: ordeal explore / mutate / audit / mine / replay / benchmark
 ├── plugin.py           Pytest plugin: --chaos, --chaos-seed, --buggify-prob, --mutate
+├── state.py            Unified ExplorationState — what ordeal knows about your code
+├── supervisor.py       DeterministicSupervisor + StateTree — reproducible exploration with rollback
+├── mutagen.py          AFL-style value mutation — bit-flip loop for Python types
+├── cmplog.py           Comparison logging — crack guarded branches (AFL++ CMPLOG/RedQueen)
 ├── strategies.py       Adversarial Hypothesis strategies for fuzzing
 ├── demo.py             Demo utility functions for examples and testing
 ├── faults/
@@ -111,11 +115,18 @@ Quick reference — match what the developer wants to the right tool:
 - **"What if this call fails?"** → `buggify()`
 - **"What if a subprocess fails?"** → `faults.io.subprocess_timeout("cargo run")`, `corrupt_stdout("my_binary")`, or `subprocess_delay("cargo run", delay=5.0)`
 - **"Explore all reachable states"** → `ordeal explore`
+- **"Deep-explore a module"** → `from ordeal.state import explore; state = explore("myapp")` (unified mine + scan + mutate + chaos, returns ExplorationState with confidence/frontier)
 - **"Audit test coverage"** → `ordeal audit myapp.scoring`
 - **"Discover properties"** → `ordeal mine myapp.scoring.compute`
+- **"Discover properties across a module"** → `from ordeal import mine_module; mine_module("myapp")` (single-function + cross-function relations)
+- **"Discover algebraic relations automatically"** → `from ordeal.metamorphic import discover_relations; discover_relations(my_fn)`
 - **"Smoke-test a whole module"** → `scan_module("myapp.scoring", expected_failures=["known_broken"])`
 - **"Does my refactor change behavior?"** → `diff(old_fn, new_fn)`
-- **"Test algebraic relations"** → `@metamorphic(Relation(...))`
+- **"Test algebraic relations"** → `@metamorphic(Relation(...))` or `@metamorphic()` (auto-discovers relations)
+- **"Reproducible exploration"** → `from ordeal.supervisor import DeterministicSupervisor; with DeterministicSupervisor(seed=42):`
+- **"Navigate the state space"** → `from ordeal.supervisor import StateTree` (checkpoint, rollback, branch, frontier)
+- **"Crack guarded branches"** → `from ordeal.cmplog import extract_comparison_values` (finds magic values in AST)
+- **"Mutate known-good inputs"** → `from ordeal.mutagen import mutate_inputs` (AFL-style value mutation)
 - **"How does my system scale?"** → `ordeal benchmark` or `fit_usl(measurements)` or `@scales_linearly`
 - **"Get a preflight report"** → `from ordeal import report; report()` (structured pass/fail summary)
 - **"What can ordeal do?"** → `from ordeal import catalog; catalog()`
@@ -252,6 +263,20 @@ for p in r["failed"]:
 - **`sometimes(warn=True)` prints to stdout** — captured by pytest, includes details
 - **Faults as context managers** — `with fault:` activates on enter, deactivates on exit
 - **ChaosTest + subprocess faults** — subprocess_timeout/delay/corrupt_stdout work in ChaosTest when code calls subprocess.run per rule
+- **`chaos_for()` auto-discovers faults and invariants** — scans AST for subprocess/file/network calls → generates faults; mines each function → generates invariants; zero config
+- **`mutate()` mine-based oracle** — when no tests exist, falls back to mine() as the test oracle; zero-test mutation testing
+- **`scan_module()` property checks** — reports semantic anomalies (suspicious non-universal properties), not just crashes
+- **`@metamorphic()` auto-discovers relations** — when called with no arguments, mines the function to find commutative/deterministic/etc relations
+- **`discover_relations(fn)`** — standalone relation discovery for metamorphic testing
+- **`mine_module(module)`** — cross-function property mining: roundtrip, composition commutativity, output equivalence across all function pairs
+- **`ExplorationState`** — unified state across all tools (mine, scan, mutate, chaos), JSON-serializable, tracks confidence and frontier
+- **`explore(module)`** — assembles mine → scan → mutate → chaos in one pass; scales with `workers` and `max_examples`
+- **CMPLOG for Python** — extracts comparison values from AST (`if x == 42`) and injects into strategies to crack guarded branches
+- **Adaptive fault scheduling** — nemesis tracks per-fault energy: productive faults toggled more often (AFL++ MOpt equivalent)
+- **Value-level mutation** — AFL bit-flip pattern for Python types (int, float, str, bytes, list, dict); wired into mine() Phase 2
+- **Coverage-aware mining** — mine() tracks edge coverage per input, reports saturation, feeds coverage back to Hypothesis via target()
+- **`DeterministicSupervisor`** — seeds all RNGs, patches time, logs state trajectory as Markov chain; same seed = same execution
+- **`StateTree`** — navigable exploration tree with checkpoint, rollback, and branching; the AI navigates the state space
 
 ## Extending ordeal
 

@@ -177,6 +177,8 @@ _LAZY_SUBMODULES = (
     "ordeal.scaling",
     "ordeal.state",
     "ordeal.supervisor",
+    "ordeal.mutagen",
+    "ordeal.cmplog",
 )
 
 _SENTINEL = object()
@@ -228,7 +230,8 @@ def catalog() -> dict[str, list]:
     Returns a dict with one key per subsystem — each value is a list of
     dicts describing the available items.  Keys: ``faults``, ``invariants``,
     ``assertions``, ``strategies``, ``mutations``, ``integrations``,
-    ``mining``, ``audit``, ``auto``, ``metamorphic``, ``diff``, ``scaling``.
+    ``mining``, ``audit``, ``auto``, ``metamorphic``, ``diff``, ``scaling``,
+    ``exploration``, ``supervisor``, ``mutagen``, ``cmplog``.
 
     Everything is derived from the source code via ``inspect``; adding a new
     fault, invariant, or capability makes it appear here automatically.
@@ -278,6 +281,15 @@ def catalog() -> dict[str, list]:
         "exploration": _introspect_module(
             __import__("ordeal.state", fromlist=["state"]),
         ),
+        "supervisor": _introspect_module(
+            __import__("ordeal.supervisor", fromlist=["supervisor"]),
+        ),
+        "mutagen": _introspect_module(
+            __import__("ordeal.mutagen", fromlist=["mutagen"]),
+        ),
+        "cmplog": _introspect_module(
+            __import__("ordeal.cmplog", fromlist=["cmplog"]),
+        ),
     }
     try:
         result["integrations"].extend(
@@ -305,7 +317,7 @@ def _introspect_module(mod: object, include: set[str] | None = None) -> list[dic
         if attr_name.startswith("_"):
             continue
         obj = getattr(mod, attr_name)
-        if not callable(obj) or _inspect.isclass(obj):
+        if not callable(obj):
             continue
         # Skip re-imports: only keep functions defined in this module
         obj_mod = getattr(obj, "__module__", None)

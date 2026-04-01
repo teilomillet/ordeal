@@ -27,6 +27,9 @@ class TestTopLevelCatalog:
             "diff",
             "scaling",
             "exploration",
+            "supervisor",
+            "mutagen",
+            "cmplog",
         }
         always(set(c.keys()) == expected, "catalog has all categories")
 

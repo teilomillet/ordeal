@@ -92,10 +92,13 @@ class TestChaosFor:
     def test_with_invariants(self):
         import hypothesis.strategies as st
 
-        # Exclude divide (crashes on b=0) by providing safe fixtures
+        # Constrain both a and b to avoid Inf from large/small divisions
         TestCase = chaos_for(
             "tests._auto_target",
-            fixtures={"b": st.floats(min_value=0.1, max_value=10.0)},
+            fixtures={
+                "a": st.floats(min_value=-1e6, max_value=1e6),
+                "b": st.floats(min_value=0.1, max_value=10.0),
+            },
             invariants=[finite],
             max_examples=10,
             stateful_step_count=5,

@@ -1,89 +1,18 @@
 """ordeal — Automated chaos testing for Python.
 
-Start here — discover everything ordeal can do::
+::
 
     from ordeal import catalog
-    c = catalog()  # 16 subsystems, every function and class
-    for key in sorted(c):
-        for item in c[key]:
-            print(f"{item['qualname']}  -- {item['doc']}")
-
-Explore a module's state space (mine + scan + mutate + chaos, zero config)::
+    catalog()  # returns every capability — faults, mining, mutations, ...
 
     from ordeal.state import explore
-    state = explore("myapp.scoring")
-    print(state.confidence)   # 0.72
-    print(state.frontier)     # what's unexplored
-    print(state.findings)     # bugs and anomalies
+    explore("myapp")  # explores the state space, returns what it found
 
-Quick start — match what you want to the right tool:
+    from ordeal import mine
+    mine(my_function)  # discovers what the function actually does
 
-- **"I have no tests"** → ``ordeal init``
-- **"Explore a module deeply"** → ``explore("myapp")``
-- **"Test under failure conditions"** → ``chaos_for("myapp")`` (auto-discovers faults + invariants)
-- **"What properties hold?"** → ``mine(my_fn)`` or ``mine_module("myapp")``
-- **"Are my tests good enough?"** → ``mutate("myapp.fn")`` (zero tests OK)
-- **"Reproducible exploration"** → ``DeterministicSupervisor(seed=42)``
-- **"Navigate the state space"** → ``StateTree`` (checkpoint, rollback, branch)
-- **"What can ordeal do?"** → ``catalog()``
-
-Capabilities (each is independent — use one or all):
-
-1. **Unified exploration** — mine + scan + mutate + chaos in one pass::
-
-    from ordeal.state import explore
-    state = explore("myapp.scoring", workers=4, max_examples=200)
-
-2. **Stateful chaos testing** — Hypothesis-powered rule exploration::
-
-    from ordeal import ChaosTest, chaos_test, rule, always
-    from ordeal.faults import timing, io
-
-    @chaos_test
-    class MyServiceChaos(ChaosTest):
-        faults = [timing.timeout("myapp.db.query")]
-
-        @rule()
-        def call_service(self):
-            result = my_service.process("input")
-            always(result is not None, "never returns None")
-
-3. **Auto chaos testing** — zero config, discovers faults + invariants::
-
-    from ordeal.auto import chaos_for
-    TestCase = chaos_for("myapp.scoring")  # AST scan → faults, mine → invariants
-
-4. **Property mining** — discover what functions actually do::
-
-    from ordeal import mine, mine_module
-    result = mine(my_function)          # single function
-    result = mine_module("myapp")       # whole module + cross-function relations
-
-5. **Mutation testing** — verify your tests catch real bugs::
-
-    from ordeal import mutate
-    result = mutate("myapp.fn", preset="standard")  # works with or without tests
-
-6. **Property assertions** (Antithesis-style)::
-
-    always(condition, "name")                 # must hold every time
-    sometimes(condition, "name", warn=True)   # visible without --chaos
-
-7. **Deterministic exploration** — reproducible, navigable state space::
-
-    from ordeal.supervisor import DeterministicSupervisor, StateTree
-    with DeterministicSupervisor(seed=42) as sup:
-        ...  # all RNGs seeded, time patched, trajectory logged
-
-8. **Coverage-guided mining** — closes the AFL feedback loop::
-
-    mine(fn)  # CMPLOG extracts branch points, coverage steers generation,
-              # value mutation explores near productive inputs, saturation detected
-
-Running chaos tests::
-
-    pytest --chaos                  # enable chaos mode globally
-    pytest --chaos --chaos-seed 42  # reproducible chaos
+Everything is discoverable at runtime via ``catalog()``.
+Everything works on ``ordeal.demo`` — try it to learn by experiment.
 """
 
 from __future__ import annotations

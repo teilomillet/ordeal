@@ -73,6 +73,46 @@ class RelationSet:
         return RelationSet(relations)
 
 
+# Mined property names → Relation objects (actual instances, not code strings)
+_MINED_RELATIONS: dict[str, Relation] = {
+    "commutative": Relation(
+        "commutative",
+        transform=lambda args: (args[1], args[0]),
+        check=lambda a, b: a == b,
+    ),
+    "deterministic": Relation(
+        "deterministic",
+        transform=lambda args: args,
+        check=lambda a, b: a == b,
+    ),
+}
+
+
+def discover_relations(fn: Callable[..., Any], *, max_examples: int = 30) -> list[Relation]:
+    """Auto-discover metamorphic relations by mining a function.
+
+    Runs ``mine()`` on *fn* and converts universal properties into
+    ``Relation`` objects that ``@metamorphic`` can use directly::
+
+        from ordeal.metamorphic import discover_relations, metamorphic
+
+        @metamorphic(*discover_relations(my_add))
+        def test_add(x: int, y: int):
+            return my_add(x, y)
+
+    Or let ``@metamorphic()`` discover automatically (no arguments).
+    """
+    from ordeal.mine import mine
+
+    result = mine(fn, max_examples=max_examples)
+    relations: list[Relation] = []
+    for prop in result.universal:
+        rel = _MINED_RELATIONS.get(prop.name)
+        if rel is not None:
+            relations.append(rel)
+    return relations
+
+
 def metamorphic(
     *relations: Relation | RelationSet,
     max_examples: int = 100,
@@ -88,7 +128,14 @@ def metamorphic(
     the original input and on each transformed input, then asserts the
     relation's ``check`` holds.
 
-    Example::
+    When called with no relations, auto-discovers them via ``mine()``::
+
+        @metamorphic()
+        def test_add(x: int, y: int):
+            return x + y
+        # Discovers: commutative, deterministic
+
+    Example with explicit relation::
 
         negate_involution = Relation(
             "negate_involution",
@@ -109,6 +156,11 @@ def metamorphic(
             flat.append(r)
 
     def decorator(fn: Callable[..., Any]) -> Callable[..., None]:
+        # Auto-discover relations when none provided
+        effective = flat
+        if not effective:
+            effective = discover_relations(fn)
+
         sig = inspect.signature(fn)
         params = [
             p
@@ -128,7 +180,7 @@ def metamorphic(
             args_tuple = tuple(kwargs[p.name] for p in params)
             original_output = fn(**kwargs)
 
-            for relation in flat:
+            for relation in effective:
                 transformed_args = relation.transform(args_tuple)
                 if not isinstance(transformed_args, tuple):
                     transformed_args = (transformed_args,)

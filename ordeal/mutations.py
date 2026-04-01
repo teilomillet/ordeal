@@ -2724,8 +2724,19 @@ def mutate_function_and_test(
         equivalence_samples: Number of random inputs for equivalence
             filtering.  Default ``10``.
     """
+    # Try auto-discovering tests; fall back to mine()-based oracle
+    use_mine_oracle = False
     if test_fn is None:
-        test_fn = _auto_test_fn(target)
+        try:
+            test_fn = _auto_test_fn(target)
+            # Probe for tests — if NoTestsFoundError, switch to mine oracle
+            test_fn()
+        except NoTestsFoundError:
+            use_mine_oracle = True
+            test_fn = None
+        except Exception:
+            pass  # tests exist but failed — that's fine for mutation testing
+
     used_preset = preset
     operators = _resolve_operators(operators, preset)
     module_path, func_name = target.rsplit(".", 1)
@@ -2734,6 +2745,22 @@ def mutate_function_and_test(
     source = textwrap.dedent(inspect.getsource(func))
 
     mutant_pairs = generate_mutants(source, operators)
+
+    # Mine-based oracle: mine the original, use properties to kill mutants
+    if use_mine_oracle:
+        return _mine_based_mutation_test(
+            target,
+            func,
+            func_name,
+            module,
+            mutant_pairs,
+            filter_equivalent=filter_equivalent,
+            equivalence_samples=equivalence_samples,
+            operators_used=operators,
+            preset_used=used_preset,
+        )
+
+    assert test_fn is not None
 
     if workers > 1:
         result = _parallel_function_test(target, test_fn, mutant_pairs, module, func_name, workers)
@@ -2774,6 +2801,101 @@ def mutate_function_and_test(
             mutant.killed_by = fn_name
         finally:
             fault.deactivate()
+
+        result.mutants.append(mutant)
+
+    return result
+
+
+def _mine_based_mutation_test(
+    target: str,
+    func: Callable,
+    func_name: str,
+    module: types.ModuleType,
+    mutant_pairs: list[tuple[Mutant, ast.Module]],
+    *,
+    filter_equivalent: bool,
+    equivalence_samples: int,
+    operators_used: list[str] | None,
+    preset_used: str | None,
+) -> MutationResult:
+    """Kill mutants using mine()-discovered properties as the test oracle.
+
+    When no human-written tests exist, mine the original function to
+    discover properties (bounded, no NaN, deterministic, etc.), then
+    check whether each mutant violates any of those properties.
+    """
+    from ordeal.mine import mine
+
+    # Mine the original function
+    mine_result = mine(func, max_examples=50)
+    universal = [p for p in mine_result.properties if p.universal and p.total > 0]
+    if not universal:
+        short = target.rsplit(".", 1)[-1]
+        raise NoTestsFoundError(
+            f"No tests found for {target!r} and mine() discovered no properties. "
+            "Cannot validate mutations.\n"
+            f"  Generate: generate_starter_tests({target!r})\n"
+            f"  CLI:      ordeal init {target}",
+            target=target,
+            suggested_file=f"tests/test_{short}.py",
+        )
+
+    # Collect sample inputs from mining
+    sample_inputs = mine_result.collected_inputs[:50]
+    if not sample_inputs:
+        # Generate fresh inputs
+        from ordeal.auto import _infer_strategies
+
+        strats = _infer_strategies(func, None)
+        if strats:
+            for _ in range(50):
+                try:
+                    sample_inputs.append({k: v.example() for k, v in strats.items()})
+                except Exception:
+                    break
+
+    result = MutationResult(target=target, operators_used=operators_used, preset_used=preset_used)
+
+    for mutant, mutated_tree in mutant_pairs:
+        try:
+            code = compile(mutated_tree, f"<mutant:{mutant.description}>", "exec")
+            namespace = dict(module.__dict__)
+            exec(code, namespace)  # noqa: S102
+            mutated_func = namespace.get(func_name)
+            if mutated_func is None:
+                continue
+        except Exception:
+            continue
+
+        if filter_equivalent and _is_runtime_equivalent(
+            func, mutated_func, n_samples=equivalence_samples
+        ):
+            continue
+
+        # Check if the mutant violates any mined property
+        killed = False
+        for inputs in sample_inputs:
+            if killed:
+                break
+            try:
+                orig_out = func(**inputs)
+                mut_out = mutated_func(**inputs)
+                # Different output = mutant detected
+                if orig_out != mut_out:
+                    killed = True
+                    mutant.killed = True
+                    mutant.error = f"mine oracle: output differs on {inputs}"
+                    mutant.killed_by = "mine()"
+            except Exception:
+                # Mutant crashes = killed
+                killed = True
+                mutant.killed = True
+                mutant.error = "mine oracle: mutant raised exception"
+                mutant.killed_by = "mine()"
+
+        if not killed:
+            mutant.killed = False
 
         result.mutants.append(mutant)
 

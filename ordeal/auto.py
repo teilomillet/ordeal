@@ -47,11 +47,15 @@ class FunctionResult:
     passed: bool
     error: str | None = None
     failing_args: dict[str, Any] | None = None
+    property_violations: list[str] = field(default_factory=list)
 
     def __str__(self) -> str:
-        if self.passed:
+        if self.passed and not self.property_violations:
             return f"  PASS  {self.name}"
-        return f"  FAIL  {self.name}: {self.error}"
+        if not self.passed:
+            return f"  FAIL  {self.name}: {self.error}"
+        viols = "; ".join(self.property_violations)
+        return f"  WARN  {self.name}: {viols}"
 
 
 @dataclass
@@ -451,7 +455,7 @@ def _test_one_function(
     max_examples: int,
     check_return_type: bool,
 ) -> FunctionResult:
-    """Run no-crash + return-type checks on a single function."""
+    """Run no-crash + return-type + mined-property checks on a single function."""
     try:
 
         @given(**strategies)
@@ -466,9 +470,29 @@ def _test_one_function(
                     )
 
         test()
-        return FunctionResult(name=name, passed=True)
     except Exception as e:
         return FunctionResult(name=name, passed=False, error=str(e)[:300])
+
+    # Mine properties to detect semantic anomalies (not just crashes)
+    violations: list[str] = []
+    try:
+        from ordeal.mine import mine
+
+        mine_result = mine(func, max_examples=min(max_examples, 30))
+        for prop in mine_result.properties:
+            # Only report properties that held often enough to seem real
+            # but failed enough to be suspicious (95-99% = likely bug)
+            if prop.total >= 10 and 0.50 < prop.confidence < 1.0:
+                if prop.name in ("deterministic",):
+                    # Non-determinism is always worth reporting
+                    violations.append(f"{prop.name} ({prop.confidence:.0%})")
+                elif prop.confidence >= 0.90:
+                    # High-confidence properties that aren't universal = suspicious
+                    violations.append(f"{prop.name} ({prop.confidence:.0%})")
+    except Exception:
+        pass  # mining failed — still report crash-safety pass
+
+    return FunctionResult(name=name, passed=True, property_violations=violations)
 
 
 # ============================================================================

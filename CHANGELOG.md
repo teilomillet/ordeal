@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.83
+
+**Features:**
+
+- skill points to catalog() as living reference
+- unified swarm with adaptive energy and coverage direction
+
+**Fixes:**
+
+- swarm energy decay — productive configs retain energy
+- update catalog tests for skill category from upstream
+
+**Other:**
+
+- refactor: trim skill to discovery + guardrails only
+
+
 ## 0.2.82
 
 **Features:**

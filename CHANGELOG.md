@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.44
+
+**Features:**
+
+- module docstring is the AI gateway — catalog() first
+
+**Docs:**
+
+- make all new features discoverable via catalog and CLAUDE.md
+
+
 ## 0.2.43
 
 **Features:**

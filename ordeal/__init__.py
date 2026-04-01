@@ -235,6 +235,15 @@ def catalog() -> dict[str, list]:
         )
     except ImportError:
         pass
+    # HTTP endpoint fuzzing (optional: httpx)
+    try:
+        result["integrations"].extend(
+            _introspect_module(
+                __import__("ordeal.integrations.http", fromlist=["http"]),
+            )
+        )
+    except ImportError:
+        pass
     return result
 
 

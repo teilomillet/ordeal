@@ -1,4 +1,4 @@
-"""Coverage-guided exploration engine with checkpointing.
+"""Coverage-guided exploration engine with checkpointing and seed mutation.
 
 This is ordeal's answer to Antithesis's exploration engine.  It:
 
@@ -7,8 +7,40 @@ This is ordeal's answer to Antithesis's exploration engine.  It:
 3. **Checkpoints** interesting states when new coverage is found
 4. **Branches** from checkpoints — exploring many different actions
    from the same rare state
-5. **Shrinks** failing traces to the minimal reproducing sequence
-6. **Records traces** for replay and post-hoc analysis
+5. **Mutates** productive rule parameters instead of always generating
+   fresh ones — the AFL closed-loop pattern adapted for stateful testing
+6. **Shrinks** failing traces to the minimal reproducing sequence
+7. **Records traces** for replay and post-hoc analysis
+
+The mutation loop closes the feedback gap between coverage discovery and
+input generation.  When a rule execution with specific parameters leads
+to new edges, those parameters become seeds on the checkpoint.  On the
+next branch from that checkpoint, the explorer sometimes mutates those
+seeds instead of generating fresh values via Hypothesis strategies::
+
+    checkpoint restored → select productive seed → mutate params → execute rule
+         ↑                                                              ↓
+    save checkpoint ← new edges found? ← coverage feedback ← coverage check
+
+This is the same three-dimensional exploration that AFL++ uses — but
+adapted for typed, stateful property testing:
+
+- **Swarm** selects which faults are active (the environment)
+- **Energy** selects which checkpoint to branch from (the state)
+- **Mutation** selects which parameter values to try (the input)
+
+Each dimension is orthogonal: different faults × different states ×
+different parameter mutations = coverage at the intersection of features.
+
+See also:
+
+- Zest (Padhye et al., ISSTA 2019): parametric generator mutation for
+  structured inputs — the closest published analog, but function-level only
+- AFLNet (Pham et al., ICST 2020): stateful protocol fuzzing with
+  message-sequence mutation — byte-level, not typed
+- ``ordeal.mutagen``: the value-level mutation engine used here
+
+Example::
 
     from ordeal.explore import Explorer
 
@@ -248,6 +280,13 @@ _ENERGY_REWARD = 2.0
 _ENERGY_DECAY = 0.8
 _ENERGY_MIN = 0.01
 
+# Seed mutation: when branching from a checkpoint that has productive seeds,
+# mutate one of them instead of generating fresh via strategy.example().
+# This is the AFL closed-loop adapted for typed stateful testing.
+# See module docstring for the full rationale and literature references.
+_SEED_MUTATION_PROB = 0.25  # 25% of rule executions use mutation (mine.py uses same ratio)
+_MAX_SEEDS_PER_CHECKPOINT = 16  # bounded to prevent memory growth
+
 # Shared-memory edge bitmap: one byte per 16-bit edge hash.
 # Single-byte writes are atomic — no locks needed.
 _EDGE_BITMAP_SIZE = 65536
@@ -383,7 +422,31 @@ class _MachineSnapshot:
 
 @dataclass
 class Checkpoint:
-    """A saved machine state with energy-based scheduling weight."""
+    """A saved machine state with energy-based scheduling weight and seed corpus.
+
+    Each checkpoint stores the machine state *and* the rule parameters that
+    led to new coverage from that state.  When the explorer branches from
+    this checkpoint, it can either generate fresh parameters (Hypothesis
+    strategies) or **mutate** a productive seed — the AFL closed-loop
+    pattern adapted for stateful testing.
+
+    The ``seed_params`` list is bounded by ``_MAX_SEEDS_PER_CHECKPOINT``
+    to prevent memory growth.  When full, new seeds replace the lowest-energy
+    entry (the one that was mutated most without finding new coverage).
+
+    Attributes:
+        snapshot: The machine state at checkpoint time.
+        new_edge_count: Number of new edges found when this checkpoint was created.
+        step: The step index within the run where this checkpoint was taken.
+        run_id: The run that produced this checkpoint.
+        energy: Energy-based scheduling weight (AFL++ power schedule analog).
+            Checkpoints that lead to new edges get rewarded; others decay.
+        times_selected: How many times this checkpoint has been branched from.
+            Used in energy selection to penalize over-exploitation.
+        seed_params: Productive ``(rule_name, params_dict)`` pairs that led
+            to new coverage from this checkpoint's state.  Used as mutation
+            seeds when branching from this checkpoint.
+    """
 
     snapshot: _MachineSnapshot
     new_edge_count: int
@@ -391,6 +454,7 @@ class Checkpoint:
     run_id: int
     energy: float = 1.0
     times_selected: int = 0
+    seed_params: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     _pool_slot: int = -1  # ring buffer slot (-1 = local checkpoint)
 
 
@@ -464,6 +528,8 @@ class ExplorationResult:
     properties_satisfied: int = 0
     mutations_total: int = 0
     mutations_killed: int = 0
+    seed_mutations_used: int = 0
+    seed_mutations_productive: int = 0
 
     def summary(self) -> str:
         """Human-readable exploration summary."""
@@ -483,6 +549,11 @@ class ExplorationResult:
             lines.append(
                 f"Mutations: {self.mutations_killed}/{self.mutations_total} killed"
                 f" ({survived} survived)"
+            )
+        if self.seed_mutations_used > 0:
+            lines.append(
+                f"Seed mutations: {self.seed_mutations_used} used, "
+                f"{self.seed_mutations_productive} productive"
             )
         if self.adaptation_phase > 0:
             lines.append(f"Adapted: {self.adaptation_phase} phase(s) of escalation")
@@ -564,6 +635,7 @@ class Explorer:
         share_edges: bool = True,
         share_checkpoints: bool = True,
         mutation_targets: list[str] | None = None,
+        seed_mutation_prob: float | None = None,
     ) -> None:
         """Initialize the exploration engine.
 
@@ -593,6 +665,14 @@ class Explorer:
                 global energy propagation — a checkpoint that leads to
                 new edges for any worker gets higher priority for all.
                 Default ``True``.
+            seed_mutation_prob: Probability of mutating a productive seed
+                instead of generating fresh parameters when branching from
+                a checkpoint.  Default ``0.25`` (25%), matching the ratio
+                used in ``mine()``'s Phase 2.  Set to ``0.0`` to disable
+                seed mutation entirely.  Higher values (up to ``1.0``)
+                make the explorer more exploitation-focused — useful when
+                the rule parameter space is large relative to the state
+                space.  See ``ordeal.mutagen`` for the mutation engine.
         """
         self.test_class = test_class
         self.target_paths = [m.replace(".", "/") for m in (target_modules or [])]
@@ -608,6 +688,9 @@ class Explorer:
         self.share_edges = share_edges
         self.share_checkpoints = share_checkpoints
         self.mutation_targets = mutation_targets or []
+        self.seed_mutation_prob = (
+            seed_mutation_prob if seed_mutation_prob is not None else _SEED_MUTATION_PROB
+        )
 
         # Shared-memory edge bitmap (set by _run_parallel / _worker_fn)
         # 65536 bytes — one byte per possible 16-bit edge hash.
@@ -635,6 +718,8 @@ class Explorer:
         self._checkpoints: list[Checkpoint] = []
         self._rules: list[_RuleInfo] = []
         self._invariant_names: list[str] = []
+        self._last_step_rule: tuple[str, dict[str, Any]] | None = None
+        self._last_step_used_mutation: bool = False
 
     # -- Snapshot / restore -------------------------------------------------
 
@@ -815,39 +900,83 @@ class Explorer:
 
     # -- Execution ----------------------------------------------------------
 
-    def _execute_rule(self, machine: ChaosTest, rule: _RuleInfo) -> dict[str, Any]:
-        """Execute a rule, drawing parameters from strategies.
+    def _execute_rule(
+        self,
+        machine: ChaosTest,
+        rule: _RuleInfo,
+        source_cp: Checkpoint | None = None,
+    ) -> dict[str, Any]:
+        """Execute a rule, drawing parameters from strategies or seed mutation.
 
-        Returns drawn params.  If a required strategy fails to generate,
-        skips the rule entirely (returns empty dict) rather than calling
-        the rule with missing arguments — prevents "spinning" where the
-        explorer counts thousands of no-op runs.
+        When ``source_cp`` is provided and has productive seeds for this
+        rule, there is a ``seed_mutation_prob`` chance of mutating one of
+        those seeds instead of generating fresh parameters.  This is the
+        AFL closed-loop pattern: productive inputs are perturbed to find
+        nearby coverage, while fresh generation maintains exploration
+        diversity.
+
+        The decision between mutation and fresh generation happens per
+        rule execution, not per run — so a single run from a checkpoint
+        may mix mutated and fresh parameters across different steps.
+
+        Args:
+            machine: The ChaosTest instance to execute the rule on.
+            rule: The rule to execute (name, strategies, has_data).
+            source_cp: The checkpoint this run branched from, if any.
+                Used to look up productive seeds for mutation.
+
+        Returns:
+            The drawn or mutated parameters.  If a required strategy
+            fails to generate, returns incomplete params (caller skips
+            the rule).
         """
         params: dict[str, Any] = {}
         required_count = 0
+        used_mutation = False
 
-        for param_name, strategy in rule.strategies.items():
-            # Only substitute _DataProxy for Hypothesis's st.data() strategy,
-            # NOT for user parameters that happen to be named "data".
-            strat_repr = repr(strategy).lower()
-            is_hyp_data = "dataobject" in strat_repr or "data()" in strat_repr
-            if rule.has_data and is_hyp_data:
-                params[param_name] = _DataProxy()
-            else:
-                required_count += 1
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    try:
-                        params[param_name] = strategy.example()
-                    except Exception:
-                        pass  # strategy failed — tracked below
+        # Seed mutation path: if we branched from a checkpoint with seeds
+        # for this rule, sometimes mutate instead of generating fresh.
+        if (
+            source_cp is not None
+            and source_cp.seed_params
+            and self.seed_mutation_prob > 0
+            and self.rng.random() < self.seed_mutation_prob
+        ):
+            # Filter seeds to those matching this rule
+            matching = [(n, p) for n, p in source_cp.seed_params if n == rule.name]
+            if matching:
+                from ordeal.mutagen import mutate_inputs
 
-        # If any required strategy failed, skip the rule entirely.
-        # This prevents spinning: calling rules with missing arguments
-        # that return immediately and inflate run counts.
-        generated = len(params) - (1 if "data" in params else 0)
-        if required_count > 0 and generated < required_count:
-            return params  # caller sees incomplete params
+                _, seed = self.rng.choice(matching)
+                params = mutate_inputs(seed, self.rng)
+                used_mutation = True
+
+        # Fresh generation path (default, or fallback if no seeds matched)
+        if not used_mutation:
+            for param_name, strategy in rule.strategies.items():
+                # Only substitute _DataProxy for Hypothesis's st.data() strategy,
+                # NOT for user parameters that happen to be named "data".
+                strat_repr = repr(strategy).lower()
+                is_hyp_data = "dataobject" in strat_repr or "data()" in strat_repr
+                if rule.has_data and is_hyp_data:
+                    params[param_name] = _DataProxy()
+                else:
+                    required_count += 1
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        try:
+                            params[param_name] = strategy.example()
+                        except Exception:
+                            pass  # strategy failed — tracked below
+
+            # If any required strategy failed, skip the rule entirely.
+            # This prevents spinning: calling rules with missing arguments
+            # that return immediately and inflate run counts.
+            generated = len(params) - (1 if "data" in params else 0)
+            if required_count > 0 and generated < required_count:
+                return params  # caller sees incomplete params
+
+        self._last_step_used_mutation = used_mutation
 
         try:
             getattr(machine, rule.name)(**params)
@@ -919,6 +1048,41 @@ class Explorer:
         # Propagate to ring buffer — other workers see the updated energy
         if cp._pool_slot >= 0 and self._pool_ring is not None:
             _ring_update_energy(self._pool_ring, cp._pool_slot, cp.energy)
+
+    def _record_productive_seed(
+        self, source_cp: Checkpoint | None, result: ExplorationResult
+    ) -> None:
+        """Record the last step's rule params as a productive seed on the checkpoint.
+
+        Called when new edge coverage is found.  The params that produced
+        that coverage become seeds for future mutation — closing the
+        AFL-style feedback loop at the rule-parameter level.
+
+        If the productive step used seed mutation (rather than fresh
+        generation), increments ``result.seed_mutations_productive`` —
+        this tracks the mutation hit rate for diagnostics.
+
+        Seeds are bounded by ``_MAX_SEEDS_PER_CHECKPOINT``.  When full,
+        the oldest seed is evicted (FIFO), favoring recent discoveries
+        over stale ones.
+
+        Only records if:
+        - The last step was a rule execution (not a fault toggle)
+        - A source checkpoint exists to store the seed on
+        - The params are non-empty (no-arg rules produce nothing useful)
+        """
+        if source_cp is None or self._last_step_rule is None:
+            return
+        rule_name, params = self._last_step_rule
+        if not params:
+            return
+        # Track productive mutations for diagnostics
+        if self._last_step_used_mutation:
+            result.seed_mutations_productive += 1
+        # Bound the corpus — evict oldest when full (FIFO)
+        if len(source_cp.seed_params) >= _MAX_SEEDS_PER_CHECKPOINT:
+            source_cp.seed_params.pop(0)
+        source_cp.seed_params.append((rule_name, params))
 
     def _pool_publish(self, machine: ChaosTest, new_count: int, step: int, run_id: int) -> None:
         """Publish a checkpoint to the shared-memory ring buffer.
@@ -1020,12 +1184,22 @@ class Explorer:
         trace_steps: list[TraceStep],
         ts_offset: float,
         new_edges_this_run: int,
+        source_cp: Checkpoint | None = None,
     ) -> bool:
         """Execute one exploration step: either a fault toggle or a rule.
+
+        When ``source_cp`` is provided, rule executions may use seed
+        mutation (see ``_execute_rule``).  The executed rule name and
+        params are stored in ``self._last_step_rule`` so that
+        ``_process_coverage`` can record productive params on the
+        checkpoint when new edges are found.
 
         Returns ``True`` if the step executed, ``False`` if it was
         skipped (strategy generation failed for required parameters).
         """
+        self._last_step_rule = None
+        self._last_step_used_mutation = False
+
         if machine._faults and self.rng.random() < self.fault_toggle_prob:
             toggle_name = self._toggle_fault(machine)
             rule_log.append(toggle_name)
@@ -1041,7 +1215,7 @@ class Explorer:
             return True
         else:
             rule_info = self.rng.choice(self._rules)
-            params = self._execute_rule(machine, rule_info)
+            params = self._execute_rule(machine, rule_info, source_cp=source_cp)
             # Detect skipped rules: required params missing means strategy
             # generation failed. Don't log as a real step — prevents the
             # "spinning" problem where run counts inflate with no-op calls.
@@ -1053,9 +1227,13 @@ class Explorer:
                 return False  # skip — strategy generation failed
             rule_log.append(rule_info.name)
 
+            # Store for seed feedback — _process_coverage may promote these
+            # params onto the source checkpoint if they lead to new edges.
             serializable_params = {
                 k: v for k, v in params.items() if not isinstance(v, _DataProxy)
             }
+            self._last_step_rule = (rule_info.name, serializable_params)
+
             # active_faults omitted on rule steps (derivable from
             # fault_toggle sequence, saves ~70% of list comprehensions)
             trace_steps.append(
@@ -1079,8 +1257,15 @@ class Explorer:
         result: ExplorationResult,
         use_coverage: bool,
         _assertions: Any,
+        source_cp: Checkpoint | None = None,
     ) -> int:
         """Check for new edges, states, and properties after a step.
+
+        When new edges are found and the last step was a rule execution,
+        the rule's parameters are recorded as a productive seed on the
+        source checkpoint (if any).  This feeds the mutation loop: next
+        time the explorer branches from this checkpoint, it may mutate
+        these parameters instead of generating fresh ones.
 
         Returns the updated ``new_edges_this_run`` count.
         """
@@ -1099,6 +1284,11 @@ class Explorer:
                 self._save_checkpoint(machine, len(new), step, run_id)
                 self._pool_publish(machine, len(new), step, run_id)
                 result.checkpoints_saved += 1
+
+                # Record productive params as seeds on the source checkpoint.
+                # These become mutation targets when branching from this
+                # checkpoint again — the AFL closed-loop for stateful testing.
+                self._record_productive_seed(source_cp, result)
 
         # State-aware coverage (with global dedup via shared state bitmap)
         if hasattr(machine, "state_hash"):
@@ -1193,7 +1383,15 @@ class Explorer:
         return min_i
 
     def _save_checkpoint(self, machine: ChaosTest, new_count: int, step: int, run_id: int) -> None:
-        """Save a checkpoint. Evicts lowest-energy checkpoint if at capacity."""
+        """Save a checkpoint with the productive seed that led here.
+
+        When a rule execution triggers new edge coverage, the checkpoint
+        is created with that rule's params as its initial seed.  This
+        means the very first branch from this checkpoint can already
+        mutate — no warm-up period needed.
+
+        Evicts lowest-energy checkpoint if at capacity.
+        """
         if self.max_checkpoints <= 0:
             return
         if len(self._checkpoints) >= self.max_checkpoints:
@@ -1203,12 +1401,20 @@ class Explorer:
                 idx = self.rng.randint(0, max(0, len(self._checkpoints) - 2))
                 self._checkpoints.pop(idx)
 
+        # Seed the new checkpoint with the rule params that led to its creation.
+        initial_seeds: list[tuple[str, dict[str, Any]]] = []
+        if self._last_step_rule is not None:
+            rule_name, params = self._last_step_rule
+            if params:
+                initial_seeds.append((rule_name, params))
+
         self._checkpoints.append(
             Checkpoint(
                 snapshot=self._snapshot_machine(machine),
                 new_edge_count=new_count,
                 step=step,
                 run_id=run_id,
+                seed_params=initial_seeds,
             )
         )
 
@@ -1357,11 +1563,18 @@ class Explorer:
                     ts_offset = _time.monotonic() - run_start
 
                     executed = self._execute_step(
-                        machine, rule_log, trace_steps, ts_offset, new_edges_this_run
+                        machine,
+                        rule_log,
+                        trace_steps,
+                        ts_offset,
+                        new_edges_this_run,
+                        source_cp=source_cp,
                     )
                     if not executed:
                         result.skipped_steps += 1
                         continue
+                    if self._last_step_used_mutation:
+                        result.seed_mutations_used += 1
                     self._check_invariants(machine)
                     new_edges_this_run = self._process_coverage(
                         machine,
@@ -1372,6 +1585,7 @@ class Explorer:
                         result,
                         use_coverage,
                         _assertions,
+                        source_cp=source_cp,
                     )
 
             except Exception as e:

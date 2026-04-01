@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.38
+
+**Features:**
+
+- ExplorationState — unified state space exploration
+
+
 ## 0.2.37
 
 **Features:**

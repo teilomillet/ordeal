@@ -195,11 +195,11 @@ This is what makes ordeal's shrinking useful for real system debugging. The bugs
 
 ## Fault ablation
 
-Shrinking tells you the minimal *steps*. Fault ablation tells you the minimal *faults*.
+Shrinking minimizes steps. Ablation minimizes faults.
 
-After shrinking, the Explorer runs fault ablation: for each fault in the shrunk trace, it replays without that fault. If the failure disappears, the fault is necessary. This answers: *"which faults caused this bug?"*
+After shrinking, the Explorer replays the trace without each fault in turn. If removing a fault causes the failure to disappear, that fault is necessary for the bug. If the failure persists, the fault is incidental.
 
-Ablation has two phases: individual (remove one fault at a time) and pairwise (test pairs of individually-unnecessary faults that might be jointly necessary). See the [Explorer Guide](../guides/explorer.md#fault-ablation) for details and examples.
+This extends naturally to pairwise interactions: if faults A and B are each individually unnecessary (removing either still fails, because the other compensates), but removing both together prevents the failure, then A and B are jointly necessary. The Explorer tests this automatically.
 
 ```bash
 ordeal replay --shrink --ablate trace.json
@@ -210,12 +210,11 @@ from ordeal import ablate_faults
 faults = ablate_faults(trace)  # {"timeout": True, "disk_full": False}
 ```
 
-!!! quote "You're ready"
-    You understand how ordeal turns a 50-step failure into a 3-step reproduction, and how fault ablation narrows down which faults are responsible. Use `ordeal replay trace.json` to reproduce any failure, `ordeal replay --shrink` to minimize it, and `ordeal replay --ablate` to identify necessary faults.
+See the [Explorer Guide](../guides/explorer.md#fault-ablation) for the full algorithm and epistemic scope.
 
 ---
 
 **Next:**
 - [Coverage Guidance](coverage-guidance.md) -- how the explorer finds failures in the first place
 - [Chaos Testing](chaos-testing.md) -- how test sequences and fault schedules are generated
-- [Explorer Guide](../guides/explorer.md) -- using shrinking, ablation, swarm, and seeds in practice
+- [Explorer Guide](../guides/explorer.md) -- shrinking, ablation, swarm, seeds, and coverage gaps in practice

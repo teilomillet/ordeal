@@ -413,55 +413,58 @@ The trace file includes the `test_class` field (e.g., `"tests.test_chaos:MyServi
 
 ## Unified swarm
 
-!!! quote "The key insight"
-    Sometimes the best way to find a bug is to *not* use some of your features. A cache with insert and delete operations never grows large enough to trigger its garbage collection -- because deletes keep the size down. Disable deletes, and suddenly the cache overflows and the GC bug surfaces. Swarm testing formalizes this: each run randomly disables some features, forcing the others to dominate. This finds bugs that live behind feature suppression -- one feature actively preventing another from reaching its failure mode.
+Swarm testing (Groce et al., ISSTA 2012) improves fault detection by deliberately omitting features from each test run. The insight is that features can **actively suppress** bugs — deletes prevent a cache from growing large enough to trigger GC, close calls mask file descriptor exhaustion, pop operations keep a stack from overflowing. By randomly disabling some features per run, the remaining ones dominate and push the system into states that all-features-on testing rarely reaches.
 
-    The theory is from Groce et al. (ISSTA 2012). ordeal extends it with adaptive energy and coverage direction.
+The paper validated this on YAFFS2, five production C compilers, and Sglib — 42% more distinct crash signatures than the default all-features-on configuration over one week of testing.
 
-When `rule_swarm = true`, the Explorer generates a **joint configuration** per run that determines both which rules are callable and which faults the nemesis can toggle. Each feature is included with independent probability 0.5 (fair coin flip), following the swarm testing paper.
+ordeal extends the paper's algorithm with two additional layers:
 
-### Three-layer architecture
+### Architecture
 
-The swarm system has three layers, each building on the one below:
+```
+Layer 3: Coverage-directed (steer)
+    Rules that exercise files with uncovered branches → boosted inclusion
+    ↓ biases configuration probabilities
+Layer 2: Adaptive energy (exploit)
+    Configs that found new edges → energy boost, slower decay
+    ↓ weights configuration selection
+Layer 1: Unified coin-flip (explore)
+    Independent Bernoulli(0.5) per feature → joint rule+fault config
+    ↓ per-run configuration
+Explorer main loop
+```
 
-**Layer 1 — Unified coin-flip (explore).** One bitmask covers rules + faults. At least one rule is always kept. This is the paper's algorithm, validated on YAFFS2, five C compilers, and Sglib (42% more bugs than the all-features-on default).
+**Layer 1 — Coin-flip.** Each rule and each fault is included with independent probability 0.5. One bitmask covers both dimensions — a "configuration" in the paper's sense. At least one rule is always retained.
 
-**Layer 2 — Adaptive energy (exploit).** After a 20-run warmup, configurations that led to new edge coverage get energy boosts (2×), while unproductive ones decay. Previously productive configs decay slowly (0.98/run) so they remain available. The Explorer selects from history with energy-weighted probability 65% of the time.
+**Layer 2 — Adaptive energy.** After a 20-run warmup, the Explorer tracks which configurations led to new edge coverage. Productive configs get a 2× energy boost; never-productive ones decay at 0.9/run to a floor of 0.1. Previously productive configs decay slowly (0.98/run) so the Explorer doesn't abandon configurations that found edges early but haven't found new ones recently.
 
-**Layer 3 — Coverage-directed (steer).** 10% of post-warmup runs use coverage gap data to bias configuration selection. Rules that exercise files with uncovered branches get 80% inclusion probability (vs 30% for others). This closes the loop: gaps → steer explorer → reach gap → discover new edges.
+**Layer 3 — Coverage-directed.** When coverage gap data is available, the Explorer identifies which rules exercise files containing unreached branches (via the `_rule_file_coverage` map built during exploration). Those rules get 80% inclusion probability vs 30% for others. This closes the feedback loop: gaps → steer → reach gap → new edges.
 
-A further 10% of runs use the **full configuration C_D** (all rules + all faults), following the paper's §2.2 mitigation strategy. This guarantees bugs that require all features in sequence are always findable.
+### Post-warmup allocation
+
+| Share | Strategy | Purpose |
+|---|---|---|
+| 10% | C_D (full config) | Paper §2.2 mitigation — all rules + all faults. Guarantees sequence bugs remain findable. |
+| 15% | Coin-flip | Fresh diverse configurations. Accumulation/suppression bugs. |
+| 10% | Coverage-directed | Bias toward rules that exercise uncovered files. |
+| 65% | Energy-weighted | Exploit productive configurations from history. |
+
+### Tradeoffs
+
+Swarm is strictly better for **suppression bugs** (one feature preventing another from reaching its failure mode). It is worse for **sequence bugs** that require all features in a specific order — the C_D reservation mitigates this but does not eliminate it. Empirically on ordeal's own test classes: swarm finds 77% more accumulation bugs (`_CacheWithGC`: 367 vs 207) while finding 76% fewer sequence bugs (`_ComplexBomb`: 91 vs 385). The aggregate across diverse bug types favors swarm.
 
 ### Configuration
 
 ```toml
 [explorer]
-rule_swarm = true   # enable unified swarm (default: false)
+rule_swarm = true
 ```
-
-Or from Python:
 
 ```python
-explorer = Explorer(MyServiceChaos, target_modules=["myapp"], rule_swarm=True)
+Explorer(MyServiceChaos, target_modules=["myapp"], rule_swarm=True)
 ```
 
-### When to use swarm
-
-- **Accumulation bugs**: a rule that builds up state (insert, create, allocate) is suppressed by a rule that tears it down (delete, cancel, free). Swarm disables the teardown rule, letting state accumulate to trigger overflow/GC/threshold bugs.
-- **Feature suppression**: one feature actively prevents another from reaching its failure mode. Swarm removes the suppressor.
-- **Diverse configurations**: swarm naturally tests many different subsets of your rules and faults, increasing the diversity of states explored.
-
-Swarm is less effective for **sequence bugs** that require all features in a specific order. The C_D reservation (10% of runs use all features) mitigates this, but pure random testing is still better when the bug needs every rule.
-
-### Reading swarm output
-
-The summary reports swarm activity:
-
-```
-Swarm: 200/200 runs used joint rule+fault configs
-```
-
-Failure traces record which configuration was active:
+Traces record the active configuration per run:
 
 ```
 [swarm rules=2 faults=1]
@@ -473,37 +476,25 @@ rule: insert
 
 ## Seed corpus
 
-!!! quote "In plain English"
-    Every time the Explorer finds a bug, it saves the recipe to a file. Next time you run *any* test -- not just the Explorer, any `pytest` run -- those saved recipes are automatically replayed. If the bug is still there, you see it instantly. If you fixed it, the replay tells you it's gone. You never need to re-explore to catch a regression. This is the same model used by Go's built-in fuzzer and Hypothesis's test database.
+The seed corpus is a persistent regression cache modeled after Go's `testdata/fuzz/` directory and Hypothesis's `.hypothesis/` database. Failing traces are content-addressed and saved to disk; subsequent test runs replay them before doing anything else.
 
-Failing traces are automatically saved to `.ordeal/seeds/` and replayed on every subsequent `pytest` run. No configuration needed -- it just works.
+### Mechanism
 
-### How it works
+1. **Capture.** After shrinking, each failing trace is saved to `.ordeal/seeds/<TestClass>/seed-<sha256[:12]>.json`. Content addressing prevents duplicates.
 
-1. **Save**: when the Explorer finds a failure (after shrinking), the trace is saved to `.ordeal/seeds/<TestClass>/seed-<hash>.json`. The hash is derived from the trace content, so identical failures don't create duplicate files.
+2. **Replay.** The pytest plugin replays all saved seeds on *every* `pytest` invocation — not just `--chaos` runs. This is the Go fuzzing model: crashers become permanent regression tests with zero user action.
 
-2. **Replay**: on every `pytest` run (with or without `--chaos`), all saved seeds are loaded and replayed. If a seed still reproduces, it's reported as `REGRESSION`. If it no longer fails, it's reported as `fixed`.
-
-3. **Prune**: `ordeal seeds --prune-fixed` removes seeds that no longer reproduce.
+3. **Lifecycle.** Seeds that no longer reproduce are reported as `fixed` but kept on disk (the code change may be reverted). `ordeal seeds --prune-fixed` cleans them up.
 
 ### CLI
 
 ```bash
-ordeal seeds                 # list all seeds with status
-ordeal seeds --prune-fixed   # remove fixed seeds
+ordeal seeds                 # list all seeds, replay each, show status
+ordeal seeds --prune-fixed   # remove seeds that no longer reproduce
 ordeal explore --no-seeds    # skip seed replay during exploration
 ```
 
-### Configuration
-
-```toml
-[report]
-corpus_dir = ".ordeal/seeds"   # default location
-```
-
-### pytest integration
-
-Seeds replay automatically in the pytest terminal summary:
+### pytest output
 
 ```
 ===== Ordeal Seed Corpus =====
@@ -513,23 +504,27 @@ Seeds replay automatically in the pytest terminal summary:
   1 regression(s) still reproduce
 ```
 
+### Configuration
+
+```toml
+[report]
+corpus_dir = ".ordeal/seeds"   # default
+```
+
 
 ## Fault ablation
 
-!!! quote "In plain English"
-    When the Explorer finds a bug with 5 faults active, which ones actually caused it? Fault ablation answers this by trying to reproduce the failure without each fault. If removing the timeout fault makes the bug disappear, the timeout is necessary. If removing the disk-full fault doesn't matter, it's not involved. This is the question the Antithesis team calls the most useful for root-causing: *"Is it possible to find the bug without fiddling with the clock?"*
+Shrinking minimizes the *step sequence*. Fault ablation minimizes the *fault set*. After shrinking, the Explorer determines which faults are necessary for each failure to reproduce — the root-cause question from Antithesis: *"Is it possible to find the bug without fiddling with the clock?"*
 
-After shrinking, the Explorer runs **fault ablation** on each failure: for each fault in the trace, it replays without that fault and checks if the failure still reproduces.
+### Algorithm
 
-### Two phases
+**Phase 1 — Individual ablation.** For each fault F in the trace, replay without F's toggles (all other faults remain). If the failure disappears, F is individually necessary.
 
-**Phase 1 — Individual ablation**: remove each fault one at a time. If the failure disappears, that fault is *individually necessary*.
+**Phase 2 — Pairwise ablation.** If faults A and B both appear individually unnecessary (removing either alone still fails, because the other compensates), replay without both A and B. If the failure disappears, A and B are *jointly necessary*. This catches the pattern where either fault alone is sufficient but the bug requires at least one.
 
-**Phase 2 — Pairwise ablation**: if multiple faults appear individually unnecessary (A or B alone suffices, but removing both fixes the bug), test removing them in pairs. This catches *jointly necessary* faults that compensate for each other.
+**Epistemic scope.** Ablation identifies faults necessary for *this specific trace*. A different execution path might reproduce the same bug with a different fault set.
 
 ### Output
-
-Failure output includes the necessary faults:
 
 ```
 Run 3, step 5: ValueError: balance negative
@@ -538,20 +533,15 @@ Run 3, step 5: ValueError: balance negative
   Sequence: call_api -> write_data -> call_api
 ```
 
-### CLI
+### Usage
 
 ```bash
-ordeal replay --ablate trace.json    # ablate faults on a saved trace
-ordeal replay --shrink --ablate trace.json   # shrink first, then ablate
+ordeal replay --ablate trace.json
+ordeal replay --shrink --ablate trace.json
 ```
-
-### Python API
 
 ```python
 from ordeal import ablate_faults
-from ordeal.trace import Trace
-
-trace = Trace.load("fail-run-42.json")
 faults = ablate_faults(trace)
 # {"timeout": True, "disk_full": True, "rate_limit": False}
 ```
@@ -559,10 +549,9 @@ faults = ablate_faults(trace)
 
 ## Coverage gap reporting
 
-!!! quote "In plain English"
-    After the Explorer finishes, it tells you which branches in your code it never reached. These aren't "uncovered" in the absolute sense — a longer run might reach them. But they're branches the Explorer tried to reach and couldn't, which makes them interesting targets for investigation. For each gap, ordeal suggests a `reachable()` assertion you can add to prove whether the branch is reachable or dead code.
+The Explorer collects line-level coverage alongside its edge bitmap. After exploration, it identifies branch statements (`if`, `for`, `while`, `try`, `except`, `assert`, `raise`, `match`) in target modules that were never executed, and emits structured gap data with `reachable()` suggestions.
 
-The Explorer tracks line-level coverage alongside edge coverage. After exploration, it compares visited lines against branch statements (if/for/while/try/except/assert/raise/match) in target modules and reports gaps.
+These are branches the Explorer did not reach in N runs — not necessarily unreachable code. A longer run, different seed, or different swarm configuration might reach them. The `confidence` field makes this explicit: it is always `"not_reached"`, never `"unreachable"`.
 
 ### Output
 
@@ -571,28 +560,23 @@ Line coverage: 45/60 (75%)
 Not reached in 200 runs: 3 branch(es) in target modules
   myapp/api.py:42 if response.status >= 500:
     add: reachable("myapp/api.py:42: if response.status >= 500:")
-  myapp/cache.py:88 except ConnectionError:
-    add: reachable("myapp/cache.py:88: except ConnectionError:")
 ```
 
-### Python API
+### API
 
 ```python
 result = explorer.run(max_time=60)
 
-# Structured gap data
 for gap in result.coverage_gaps:
     print(f"{gap['file']}:{gap['line']} {gap['code']}")
 
-# Suggested reachable() assertions
 for s in result.reachability_suggestions():
-    print(s["suggestion"])
-    # reachable("myapp/api.py:42: if response.status >= 500:")
-    print(f"confidence: {s['confidence']}, runs: {s['runs']}")
-    # confidence: not_reached, runs: 200
+    print(s["suggestion"])    # reachable("myapp/api.py:42: ...")
+    print(s["confidence"])    # "not_reached"
+    print(s["runs"])          # 200
 ```
 
-The `confidence` field is always `"not_reached"` — ordeal is epistemically honest about the difference between "not reached in N runs" and "unreachable."
+Adding the suggested `reachable()` calls to your code lets future exploration runs prove whether each branch is reachable or genuinely dead.
 
 
 ## Generating tests from exploration

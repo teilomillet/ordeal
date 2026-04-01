@@ -262,9 +262,9 @@ The practical difference: Hypothesis might need 100,000 runs to find a bug that 
 
 ## Coverage gap reporting
 
-After exploration, the Explorer reports which branch statements in target modules were **not reached**. These are branches the Explorer tried to reach but could not, given its configuration, faults, and rule sequences. They are not necessarily unreachable -- a longer run, different faults, or different swarm configuration might reach them.
+After exploration, the Explorer reports which branch statements in target modules were not reached. For each gap, it suggests a `reachable()` assertion that future runs can use to prove the branch is reachable — or confirm it is dead code.
 
-For each gap, the Explorer suggests a `reachable()` assertion:
+The distinction matters: "not reached in 200 runs" is not the same as "unreachable." A longer run, different seed, or different swarm configuration might reach it. ordeal labels gaps as `not_reached`, never `unreachable`.
 
 ```
 Not reached in 200 runs: 3 branch(es) in target modules
@@ -272,19 +272,18 @@ Not reached in 200 runs: 3 branch(es) in target modules
     add: reachable("myapp/api.py:42: if response.status >= 500:")
 ```
 
-Adding `reachable()` to your code lets future runs prove whether the branch is reachable or genuinely dead code. See the [Explorer guide](../guides/explorer.md#coverage-gap-reporting) for the full API.
+See the [Explorer guide](../guides/explorer.md#coverage-gap-reporting) for the API.
 
 ## Unified swarm
 
-Coverage guidance tells the Explorer *what* paths it hasn't seen. Unified swarm tells it *how* to reach them: by randomly disabling features per run, the remaining features dominate and push the system into states that all-features-on testing rarely reaches. The Explorer combines coverage gaps with swarm configuration selection to steer toward unreached branches. See the [Explorer guide](../guides/explorer.md#unified-swarm) for the three-layer swarm architecture.
+Coverage guidance tells the Explorer *what* paths it hasn't seen. Swarm testing (Groce et al., ISSTA 2012) tells it *how* to reach them: by randomly disabling features per run, the remaining features dominate and reach states that all-features-on testing misses.
 
-!!! quote "You're ready"
-    You understand how the explorer maps code paths, saves checkpoints, focuses energy on promising areas, reports coverage gaps, and uses swarm configurations to reach deeper states. To run it: `ordeal explore` with an `ordeal.toml` config. See the [Explorer guide](../guides/explorer.md) for configuration options and CI integration.
+ordeal extends the paper's coin-flip algorithm with adaptive energy scheduling (productive configurations are selected more often) and coverage-directed bias (rules that exercise files with uncovered branches get boosted inclusion probability). The three layers — explore, exploit, steer — compose into a single configuration selection step per run. See the [Explorer guide](../guides/explorer.md#unified-swarm) for the architecture and tradeoffs.
 
 ---
 
-**Next steps:**
+**Next:**
 
-- [Shrinking](shrinking.md) -- how ordeal minimizes failure traces to the smallest reproducing case
+- [Shrinking](shrinking.md) -- minimizing failure traces and fault sets
 - [Chaos Testing](chaos-testing.md) -- how ChaosTest, faults, and the nemesis work together
-- [Explorer Guide](../guides/explorer.md) -- swarm, seeds, ablation, coverage gaps, and more
+- [Explorer Guide](../guides/explorer.md) -- swarm, seeds, ablation, coverage gaps in practice

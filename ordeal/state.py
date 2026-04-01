@@ -186,6 +186,17 @@ class ExplorationState:
             lines.append(f"  frontier:   {sum(len(v) for v in frontier.values())} gaps")
             for name, gaps in frontier.items():
                 lines.append(f"    {name}: {', '.join(gaps)}")
+        # Show available capabilities the AI might not know about
+        available: list[str] = []
+        if not self.supervisor_info.get("patch_io"):
+            available.append("patch_io (deterministic file/network I/O)")
+        any_saturated = any(f.saturated for f in self.functions.values())
+        if any_saturated:
+            available.append("concolic (crack saturated branches: pip install crosshair-tool)")
+        if self.tree and self.tree.size > 1:
+            available.append(f"state tree rollback ({self.tree.size} checkpoints available)")
+        if available:
+            lines.append(f"  available:  {', '.join(available)}")
         return "\n".join(lines)
 
     def to_json(self) -> str:

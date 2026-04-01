@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.64
+
+**Features:**
+
+- catalog and scan --help auto-derived from code, no hardcoding
+
+**Docs:**
+
+- CLI help guides users to the right tool for their codebase
+
+
 ## 0.2.63
 
 **Features:**

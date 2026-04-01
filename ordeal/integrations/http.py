@@ -67,6 +67,7 @@ class EndpointFuzzResult:
     errors: list[dict[str, Any]] = field(default_factory=list)
     status_distribution: dict[int, int] = field(default_factory=dict)
     avg_response_ms: float = 0.0
+    fault_activations: int = 0
 
     @property
     def passed(self) -> bool:
@@ -79,6 +80,8 @@ class EndpointFuzzResult:
             lines.append(f"  status: {dist}")
         if self.avg_response_ms > 0:
             lines.append(f"  avg response: {self.avg_response_ms:.0f}ms")
+        if self.fault_activations > 0:
+            lines.append(f"  fault activations: {self.fault_activations}")
         if self.failures:
             lines.append(f"  {len(self.failures)} assertion failure(s):")
             for f in self.failures[:5]:
@@ -203,40 +206,61 @@ def fuzz_endpoint(
     data: bytes | None = None,
     files: dict[str, tuple[str, bytes, str]] | None = None,
     headers: dict[str, str] | None = None,
+    faults: list[Any] | None = None,
     max_requests: int = 100,
     rps_limit: float | str | None = None,
     assert_status: Callable[[int], bool] | None = None,
     assert_body: Callable[[str], bool] | None = None,
     timeout: float = 10.0,
+    seed: int = 42,
 ) -> EndpointFuzzResult:
-    """Fuzz an HTTP endpoint with adversarial inputs.
+    """Fuzz an HTTP endpoint with adversarial inputs and fault injection.
 
-    Sends a mix of adversarial payloads: empty bodies, oversized
-    payloads, malformed JSON, encoding attacks, and random bytes.
-    Checks response status and body against optional assertions.
+    Works with any HTTP server — no OpenAPI schema needed.
+    Combines chaos_api_test's fault injection with raw HTTP fuzzing.
+
+    Without faults (pure fuzzing)::
+
+        result = fuzz_endpoint("POST", "http://localhost:8081/detect",
+                               files={"image": ("test.jpg", data, "image/jpeg")})
+
+    With fault injection (chaos testing against live server)::
+
+        from ordeal.faults import timing, network
+
+        result = fuzz_endpoint("POST", "http://localhost:8081/detect",
+                               files={"image": ("test.jpg", data, "image/jpeg")},
+                               faults=[
+                                   timing.timeout("myapp.db.query"),
+                                   network.connection_reset("myapp.cache.get"),
+                               ])
+
+    Faults are toggled probabilistically during the fuzz loop — some
+    requests hit the server while a dependency is faulted, others
+    don't.  This finds bugs that only manifest under partial failure.
 
     Args:
         method: HTTP method (GET, POST, PUT, DELETE, PATCH).
         url: Full URL to the endpoint.
-        json: Base JSON payload to mutate. If provided, the fuzzer
-            sends JSON variants (null fields, wrong types, deep nesting).
-        data: Base binary payload. If provided, the fuzzer sends
-            corrupted/truncated/oversized variants.
-        files: Base multipart files. If provided, the fuzzer sends
-            malformed file uploads.
-        headers: Extra headers to include on every request.
-        max_requests: Maximum number of requests to send.
-        rps_limit: Rate limit in requests/second. ``"auto"`` adjusts
-            to server response time. ``None`` = no limit.
-        assert_status: Function that returns True for acceptable status
-            codes. Default: ``lambda s: s < 500`` (5xx = failure).
-        assert_body: Function that returns True for acceptable response
-            bodies. Default: no body assertion.
+        json: Base JSON payload to mutate.
+        data: Base binary payload to corrupt/truncate.
+        files: Base multipart files to malform.
+        headers: Extra headers on every request.
+        faults: Fault instances to toggle during fuzzing. The nemesis
+            activates/deactivates them probabilistically between
+            requests. ``None`` = pure fuzzing, no fault injection.
+        max_requests: Maximum requests to send.
+        rps_limit: Rate limit (requests/sec). ``"auto"`` adapts to
+            server response time. ``None`` = no limit.
+        assert_status: Returns True for acceptable status codes.
+            Default: ``lambda s: s < 500``.
+        assert_body: Returns True for acceptable response bodies.
         timeout: Request timeout in seconds.
+        seed: RNG seed for deterministic fault toggling and mutation.
 
     Returns:
         ``EndpointFuzzResult`` with status distribution, failures,
-        and errors.
+        errors, and fault activation log.
     """
     try:
         import httpx
@@ -250,6 +274,13 @@ def fuzz_endpoint(
     limiter: _TokenBucket | None = None
     if rps_limit is not None and rps_limit != "auto":
         limiter = _TokenBucket(float(rps_limit))
+
+    # Set up fault injection (nemesis-style toggling)
+    import random as _rng
+
+    fault_rng = _rng.Random(seed)
+    fault_list = list(faults or [])
+    fault_toggle_prob = 0.3  # same as ChaosTest default
 
     result = EndpointFuzzResult(method=method, url=url)
     total_ms = 0.0
@@ -275,13 +306,20 @@ def fuzz_endpoint(
         if limiter:
             limiter.wait()
 
+        # Toggle faults probabilistically (nemesis pattern)
+        if fault_list and fault_rng.random() < fault_toggle_prob:
+            fault = fault_rng.choice(fault_list)
+            if fault.active:
+                fault.deactivate()
+            else:
+                fault.activate()
+                result.fault_activations += 1
+
         # Pick a variant
         req_kwargs: dict[str, Any] = {"headers": dict(base_headers)}
         try:
             if json is not None and i % 3 == 0:
                 # Mutate the JSON body
-                import random as _rng
-
                 from ordeal.mutagen import mutate_value
 
                 mutated = mutate_value(json, _rng.Random(i), intensity=0.5)
@@ -360,6 +398,13 @@ def fuzz_endpoint(
             result.errors.append({"error": f"timeout: {e}"})
         except Exception as e:
             result.errors.append({"error": str(e)[:200]})
+
+    # Clean up: deactivate all faults
+    for fault in fault_list:
+        try:
+            fault.deactivate()
+        except Exception:
+            pass
 
     if result.total_requests > 0:
         result.avg_response_ms = total_ms / result.total_requests

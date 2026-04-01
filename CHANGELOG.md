@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.43
+
+**Features:**
+
+- StateTree — navigable exploration tree with rollback
+
+
 ## 0.2.42
 
 **Features:**

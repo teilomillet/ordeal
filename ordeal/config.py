@@ -135,6 +135,7 @@ class MutationConfig:
     threshold: float = 0.0  # 0.0 = no threshold enforcement
     filter_equivalent: bool = True
     equivalence_samples: int = 10
+    test_filter: str | None = None  # pytest -k expression
 
 
 @dataclass
@@ -358,6 +359,7 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
             threshold=m_threshold,
             filter_equivalent=m_raw.get("filter_equivalent", True),
             equivalence_samples=int(m_raw.get("equivalence_samples", 10)),
+            test_filter=m_raw.get("test_filter"),
         )
 
     return OrdealConfig(

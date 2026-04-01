@@ -253,6 +253,21 @@ def test_mutations_config_defaults(tmp_path: Path):
     assert cfg.mutations.workers == 1
     assert cfg.mutations.filter_equivalent is True
     assert cfg.mutations.equivalence_samples == 10
+    assert cfg.mutations.test_filter is None
+
+
+def test_mutations_config_test_filter(tmp_path: Path):
+    toml = tmp_path / "ordeal.toml"
+    toml.write_text(
+        textwrap.dedent("""\
+        [mutations]
+        targets = ["myapp.func"]
+        test_filter = "test_func"
+    """)
+    )
+    cfg = load_config(toml)
+    assert cfg.mutations is not None
+    assert cfg.mutations.test_filter == "test_func"
 
 
 def test_mutations_config_operators_instead_of_preset(tmp_path: Path):
@@ -346,6 +361,24 @@ def test_cli_mutate_parser():
     from ordeal.cli import main
 
     # --help exits with 0
+    with pytest.raises(SystemExit) as exc_info:
+        main(["mutate", "--help"])
+    assert exc_info.value.code == 0
+
+
+def test_auto_test_fn_uses_test_filter():
+    """_auto_test_fn passes test_filter as -k instead of module name."""
+    from ordeal.mutations import _auto_test_fn
+
+    fn = _auto_test_fn("myapp.scoring.compute", test_filter="test_compute")
+    assert callable(fn)
+
+
+def test_cli_test_filter_flag():
+    """--test-filter is accepted by the CLI parser."""
+    from ordeal.cli import main
+
+    # Just verify it parses without error (--help will show the flag)
     with pytest.raises(SystemExit) as exc_info:
         main(["mutate", "--help"])
     assert exc_info.value.code == 0

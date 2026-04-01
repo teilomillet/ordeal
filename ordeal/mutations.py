@@ -3152,6 +3152,7 @@ def mutate_and_test(
     llm: Callable[[str], str] | None = None,
     llm_equivalence: bool = False,
     concern: str | None = None,
+    test_filter: str | None = None,
 ) -> MutationResult:
     """Apply mutations to an entire module and run *test_fn* against each.
 
@@ -3179,10 +3180,13 @@ def mutate_and_test(
         llm: Optional callable for automated mutant generation.
         llm_equivalence: If ``True`` and *llm* is provided, use the LLM
             to filter surviving mutants for semantic equivalence.
+        test_filter: Pytest ``-k`` expression to narrow which tests run
+            against each mutant.  When ``None`` (default), derives a filter
+            from the target module name.
     """
     use_batch = test_fn is None  # batch when auto-discovering tests
     if test_fn is None:
-        test_fn = _auto_test_fn(target)
+        test_fn = _auto_test_fn(target, test_filter=test_filter)
     used_preset = preset
     operators = _resolve_operators(operators, preset)
     module = importlib.import_module(target)
@@ -3405,21 +3409,28 @@ def _is_runtime_equivalent(
     return True
 
 
-def _auto_test_fn(target: str) -> Callable[[], None]:
+def _auto_test_fn(target: str, test_filter: str | None = None) -> Callable[[], None]:
     """Create a test function that runs pytest in-process for *target*.
 
-    Derives a ``-k`` filter from the target's module name so pytest
-    runs only the relevant tests.  Runs in-process so PatchFault
-    swaps are visible to the test code.
+    When *test_filter* is provided, it is passed as ``-k`` to pytest,
+    replacing the default broad module-name filter.  This avoids running
+    the entire test suite for each mutant when only a few tests are
+    relevant (e.g. ``test_filter="test_postprocess"`` instead of
+    matching all 1555 tests).
+
+    Runs in-process so PatchFault swaps are visible to the test code.
     """
 
     def run_tests() -> None:
         import pytest
 
-        parts = target.rsplit(".", 1)
-        module_name = parts[0] if len(parts) >= 2 else target
-        short_name = module_name.split(".")[-1]
-        rc = pytest.main(["-x", "-q", "--tb=short", "--no-header", "--chaos", "-k", short_name])
+        if test_filter is not None:
+            k_filter = test_filter
+        else:
+            parts = target.rsplit(".", 1)
+            module_name = parts[0] if len(parts) >= 2 else target
+            k_filter = module_name.split(".")[-1]
+        rc = pytest.main(["-x", "-q", "--tb=short", "--no-header", "--chaos", "-k", k_filter])
         if rc == 5:
             short = target.rsplit(".", 1)[-1]
             suggested = f"tests/test_{short}.py"
@@ -3451,6 +3462,7 @@ def mutate_function_and_test(
     llm: Callable[[str], str] | None = None,
     llm_equivalence: bool = False,
     concern: str | None = None,
+    test_filter: str | None = None,
 ) -> MutationResult:
     """Mutate a single function and run tests against each mutant.
 
@@ -3464,6 +3476,14 @@ def mutate_function_and_test(
 
         result = mutate_function_and_test("myapp.scoring.compute", preset="standard")
         print(result.summary())
+
+    Example — only run relevant tests (fast)::
+
+        result = mutate_function_and_test(
+            "myapp.scoring.compute",
+            preset="standard",
+            test_filter="test_compute",
+        )
 
     Example — AI assistant writes extra mutants directly::
 
@@ -3518,12 +3538,16 @@ def mutate_function_and_test(
             it feeds results through the same validation as *extra_mutants*.
         llm_equivalence: If ``True`` and *llm* is provided, use the LLM
             to filter surviving mutants that are semantically equivalent.
+        test_filter: Pytest ``-k`` expression to narrow which tests run
+            against each mutant.  When ``None`` (default), derives a filter
+            from the target module name.  Set this to avoid running the
+            entire test suite per mutant (e.g. ``"test_compute"``).
     """
     # Try auto-discovering tests; fall back to mine()-based oracle
     use_mine_oracle = False
     if test_fn is None:
         try:
-            test_fn = _auto_test_fn(target)
+            test_fn = _auto_test_fn(target, test_filter=test_filter)
             # Probe for tests — if NoTestsFoundError, switch to mine oracle
             test_fn()
         except NoTestsFoundError:
@@ -3826,6 +3850,7 @@ def mutate(
     llm: Callable[[str], str] | None = None,
     llm_equivalence: bool = False,
     concern: str | None = None,
+    test_filter: str | None = None,
 ) -> MutationResult:
     """Unified mutation testing entry point — auto-detects function vs module.
 
@@ -3840,6 +3865,10 @@ def mutate(
 
         result = mutate("myapp.scoring.compute", preset="standard")
         print(result.summary())
+
+    Run only relevant tests per mutant (fast)::
+
+        result = mutate("myapp.scoring.compute", test_filter="test_compute")
 
     With extra mutants written by an AI assistant or human::
 
@@ -3864,6 +3893,9 @@ def mutate(
         llm: Optional callable for automated mutant generation.
         llm_equivalence: If ``True`` and *llm* is provided, use the LLM
             to filter surviving mutants for semantic equivalence.
+        test_filter: Pytest ``-k`` expression to narrow which tests run
+            against each mutant.  When ``None`` (default), derives a filter
+            from the target module name.
     """
     dispatch = mutate_function_and_test if _is_function_target(target) else mutate_and_test
     return dispatch(
@@ -3878,6 +3910,7 @@ def mutate(
         llm=llm,
         llm_equivalence=llm_equivalence,
         concern=concern,
+        test_filter=test_filter,
     )
 
 

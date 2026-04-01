@@ -717,6 +717,7 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
     threshold: float = args.threshold
     filter_equivalent: bool = not args.no_filter
     equivalence_samples: int = args.equivalence_samples
+    test_filter: str | None = args.test_filter
 
     # Fall back to config file if no targets given
     if not targets:
@@ -756,6 +757,8 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
             filter_equivalent = cfg.mutations.filter_equivalent
         if args.equivalence_samples == 10 and cfg.mutations.equivalence_samples != 10:
             equivalence_samples = cfg.mutations.equivalence_samples
+        if test_filter is None and cfg.mutations.test_filter is not None:
+            test_filter = cfg.mutations.test_filter
 
     # Default preset when nothing specified
     if preset is None and operators is None:
@@ -778,6 +781,7 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
                     workers=workers,
                     filter_equivalent=filter_equivalent,
                     equivalence_samples=equivalence_samples,
+                    test_filter=test_filter,
                 )
             else:
                 result = mutate_and_test(
@@ -787,6 +791,7 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
                     workers=workers,
                     filter_equivalent=filter_equivalent,
                     equivalence_samples=equivalence_samples,
+                    test_filter=test_filter,
                 )
         except NoTestsFoundError as e:
             _stderr(f"  WARNING: No tests found for {target!r}\n")
@@ -1095,6 +1100,14 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=10,
         help="Samples for equivalence filtering (default: 10)",
+    )
+    mutate_p.add_argument(
+        "--test-filter",
+        "-k",
+        type=str,
+        default=None,
+        metavar="EXPR",
+        help="Pytest -k expression to select tests (avoids running full suite per mutant)",
     )
     mutate_p.add_argument(
         "--generate-stubs",

@@ -1056,6 +1056,16 @@ def mine(
     props = [p for p in all_props if p.total > 0]
     not_applicable = [p.name for p in all_props if p.total == 0]
 
+    # Enrich counterexamples with actual input/output values.
+    # Many checkers only record the index — we have the actual data.
+    for p in props:
+        if p.counterexample and "index" in p.counterexample:
+            idx = p.counterexample["index"]
+            if 0 <= idx < len(inputs):
+                p.counterexample["input"] = inputs[idx]
+            if 0 <= idx < len(outputs):
+                p.counterexample["output"] = outputs[idx]
+
     # Coverage saturation: if the last 50%+ of examples found no new edges,
     # more compute won't help — the input space is saturated for this function.
     is_saturated = len(edges_seen) > 0 and stale_count > max(len(outputs) // 2, 10)

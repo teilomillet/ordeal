@@ -137,12 +137,45 @@ def _cmd_check(args: argparse.Namespace) -> int:
         return 1
 
     max_examples = args.max_examples
-    _stderr(f"Checking {target} for '{prop}' ({max_examples} examples)...\n")
+    if prop:
+        _stderr(f"Checking {target} for '{prop}' ({max_examples} examples)...\n")
+    else:
+        _stderr(f"Checking {target} contracts ({max_examples} examples)...\n")
 
     result = mine(func, max_examples=max_examples)
     print(result.summary())
 
-    # Find the requested property
+    # --contract mode: check all standard properties that catch bugs
+    if not prop:
+        contracts = [
+            "never None",
+            "no NaN",
+            "never empty",
+            "deterministic",
+            "idempotent",
+            "finite",
+        ]
+        violations = []
+        for p in result.properties:
+            if p.total > 0 and not p.universal and p.name in contracts:
+                violations.append(p)
+        if violations:
+            print(f"\n  {len(violations)} contract violation(s):")
+            for v in violations:
+                print(f"    FAIL {v.name} ({v.holds}/{v.total})")
+                if v.counterexample:
+                    print(f"      input: {v.counterexample}")
+            return 1
+        passing = [
+            p for p in result.properties if p.total > 0 and p.universal and p.name in contracts
+        ]
+        if passing:
+            print(f"\n  {len(passing)} contract(s) verified:")
+            for p in passing:
+                print(f"    PASS {p.name} ({p.holds}/{p.total})")
+        return 0
+
+    # Single property mode
     matching = [p for p in result.properties if prop.lower() in p.name.lower()]
     if not matching:
         _stderr(
@@ -389,17 +422,24 @@ def _cmd_mine(args: argparse.Namespace) -> int:
             _stderr(f"No testable functions found in {target}{hint}\n")
             return 1
 
+    skipped: list[tuple[str, str]] = []
     for name, func in funcs:
         try:
             result = mine(func, max_examples=max_examples)
         except (ValueError, TypeError) as e:
-            _stderr(f"  skip {name}: {e}\n")
+            reason = str(e).split(".")[0]
+            skipped.append((name, reason))
             continue
 
         print(result.summary())
         if getattr(args, "verbose", False) and result.not_applicable:
             print(f"    n/a: {', '.join(result.not_applicable)}")
         print()
+
+    if skipped:
+        print(f"Skipped {len(skipped)} function(s):")
+        for name, reason in skipped:
+            print(f"  {name}: {reason}")
 
     return 0
 
@@ -1079,8 +1119,8 @@ def main(argv: list[str] | None = None) -> int:
     check_p.add_argument(
         "--property",
         "-p",
-        required=True,
-        help="Property: never_empty, deterministic, idempotent, ...",
+        default=None,
+        help="Property to verify. Omit to check all standard contracts.",
     )
     check_p.add_argument(
         "--max-examples",

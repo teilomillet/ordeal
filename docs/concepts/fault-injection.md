@@ -284,6 +284,15 @@ Every fault -- whether `PatchFault`, `LambdaFault`, or a custom subclass -- foll
 
 The `active` boolean guard means double-activation and double-deactivation are safe. You never patch twice or restore twice.
 
+**As a context manager**, faults activate on enter and deactivate on exit — useful for scoped fault injection in regular pytest tests:
+
+```python
+with io.subprocess_timeout("cargo run"):
+    result = run_kernel()
+    always(result is not None, "handles timeout")
+# fault is automatically deactivated here
+```
+
 **During a ChaosTest**, the lifecycle is:
 
 1. `ChaosTest.__init__()` calls `reset()` on every fault (clean slate).

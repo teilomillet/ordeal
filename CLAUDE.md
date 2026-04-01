@@ -250,6 +250,8 @@ for p in r["failed"]:
 - **`@scales_linearly`** — decorator that asserts a function scales linearly via USL fit
 - **Property report without `--chaos`** — prints whenever there are tracked results
 - **`sometimes(warn=True)` prints to stdout** — captured by pytest, includes details
+- **Faults as context managers** — `with fault:` activates on enter, deactivates on exit
+- **ChaosTest + subprocess faults** — subprocess_timeout/delay/corrupt_stdout work in ChaosTest when code calls subprocess.run per rule
 
 ## Extending ordeal
 

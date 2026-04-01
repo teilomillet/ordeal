@@ -301,6 +301,7 @@ from ordeal.faults import Fault, PatchFault, LambdaFault
 | `reset()` | Deactivate and clear state |
 | `name: str` | Human-readable name |
 | `active: bool` | Whether currently active |
+| `with fault:` | Context manager — activates on enter, deactivates on exit |
 
 **PatchFault**:
 
@@ -343,11 +344,17 @@ from ordeal.faults import io
 | `subprocess_delay` | `(target: str, *, delay: float = 1.0) -> PatchFault` | Adds delay to `subprocess.run` when command matches target |
 
 ```python
+# In ChaosTest — nemesis toggles automatically
 faults = [
     io.error_on_call("myapp.storage.save", IOError, "disk unreachable"),
     io.corrupt_output("myapp.cache.read"),
+    io.subprocess_timeout("cargo run"),
     io.disk_full(),
 ]
+
+# As context manager — scoped activation in regular tests
+with io.subprocess_timeout("cargo run"):
+    result = run_kernel()
 ```
 
 ### Numerical faults

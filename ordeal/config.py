@@ -136,6 +136,7 @@ class MutationConfig:
     filter_equivalent: bool = True
     equivalence_samples: int = 10
     test_filter: str | None = None  # pytest -k expression
+    mutant_timeout: float | None = None  # seconds; abort generation if exceeded
 
 
 @dataclass
@@ -360,6 +361,7 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
             filter_equivalent=m_raw.get("filter_equivalent", True),
             equivalence_samples=int(m_raw.get("equivalence_samples", 10)),
             test_filter=m_raw.get("test_filter"),
+            mutant_timeout=float(mt) if (mt := m_raw.get("mutant_timeout")) is not None else None,
         )
 
     return OrdealConfig(

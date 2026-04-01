@@ -74,6 +74,7 @@ import inspect
 import pkgutil
 import sys
 import textwrap
+import time
 import types
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -512,6 +513,8 @@ class MutationResult:
             count = d.get(key, 0)
             if count > 0:
                 lines.append(f"  - {count} {label}")
+        if d.get("generation_timed_out"):
+            lines.append("  ⚠ generation timed out — results are partial")
         lines.append(f"  → {d.get('tested', self.total)} tested")
         if self.total > 0:
             lines.append(f"  → {self.killed} killed, {len(self.survived)} survived")
@@ -2543,6 +2546,7 @@ def generate_mutants(
     llm: Callable[[str], str] | None = None,
     concern: str | None = None,
     _stats: dict[str, int] | None = None,
+    timeout: float | None = None,
 ) -> list[tuple[Mutant, ast.Module]]:
     """Generate mutants from source code, filtering out noise.
 
@@ -2575,16 +2579,23 @@ def generate_mutants(
         _stats: Optional mutable dict for diagnostic counters.  When
             provided, keys ``generated``, ``filtered_ast_equivalent``,
             and ``skipped_display_method`` are incremented in-place.
+        timeout: Maximum seconds for mutant generation.  When exceeded,
+            returns whatever mutants have been generated so far instead
+            of hanging on complex AST expressions (numpy, cv2, etc.).
 
     Returns a list of ``(Mutant, mutated_AST)`` pairs.
     """
+    deadline = time.monotonic() + timeout if timeout is not None else None
     tree = ast.parse(source)
     source_lines = source.splitlines()
     ops = operators or list(OPERATORS.keys())
     results: list[tuple[Mutant, ast.Module]] = []
     st = _stats  # alias for brevity
 
+    timed_out = False
     for op_name in ops:
+        if timed_out:
+            break
         if op_name not in OPERATORS:
             raise ValueError(f"Unknown operator: {op_name!r}. Available: {list(OPERATORS)}")
         counter_cls, applicator_cls = OPERATORS[op_name]
@@ -2593,6 +2604,13 @@ def generate_mutants(
         counter.visit(tree)
 
         for i in range(counter.count):
+            # Check deadline before each mutant (catches hangs on complex ASTs)
+            if deadline is not None and time.monotonic() > deadline:
+                timed_out = True
+                if st is not None:
+                    st["generation_timed_out"] = 1
+                break
+
             mutated_tree = ast.parse(source)
             applicator = applicator_cls(target_idx=i)
             applicator.visit(mutated_tree)
@@ -3153,6 +3171,7 @@ def mutate_and_test(
     llm_equivalence: bool = False,
     concern: str | None = None,
     test_filter: str | None = None,
+    mutant_timeout: float | None = None,
 ) -> MutationResult:
     """Apply mutations to an entire module and run *test_fn* against each.
 
@@ -3183,6 +3202,9 @@ def mutate_and_test(
         test_filter: Pytest ``-k`` expression to narrow which tests run
             against each mutant.  When ``None`` (default), derives a filter
             from the target module name.
+        mutant_timeout: Maximum seconds for the mutant generation step.
+            When exceeded, returns whatever mutants have been generated so
+            far.  Prevents hanging on complex AST expressions (numpy, cv2).
     """
     use_batch = test_fn is None  # batch when auto-discovering tests
     if test_fn is None:
@@ -3198,7 +3220,13 @@ def mutate_and_test(
 
     stats: dict[str, int] = {}
     mutant_pairs = generate_mutants(
-        source, operators, extra_mutants=extra_mutants, llm=llm, concern=concern, _stats=stats
+        source,
+        operators,
+        extra_mutants=extra_mutants,
+        llm=llm,
+        concern=concern,
+        _stats=stats,
+        timeout=mutant_timeout,
     )
 
     # Filter equivalent mutants (same outputs on random inputs)
@@ -3463,6 +3491,7 @@ def mutate_function_and_test(
     llm_equivalence: bool = False,
     concern: str | None = None,
     test_filter: str | None = None,
+    mutant_timeout: float | None = None,
 ) -> MutationResult:
     """Mutate a single function and run tests against each mutant.
 
@@ -3542,6 +3571,9 @@ def mutate_function_and_test(
             against each mutant.  When ``None`` (default), derives a filter
             from the target module name.  Set this to avoid running the
             entire test suite per mutant (e.g. ``"test_compute"``).
+        mutant_timeout: Maximum seconds for the mutant generation step.
+            When exceeded, returns whatever mutants have been generated so
+            far.  Prevents hanging on complex AST expressions (numpy, cv2).
     """
     # Try auto-discovering tests; fall back to mine()-based oracle
     use_mine_oracle = False
@@ -3565,7 +3597,13 @@ def mutate_function_and_test(
 
     stats: dict[str, int] = {}
     mutant_pairs = generate_mutants(
-        source, operators, extra_mutants=extra_mutants, llm=llm, concern=concern, _stats=stats
+        source,
+        operators,
+        extra_mutants=extra_mutants,
+        llm=llm,
+        concern=concern,
+        _stats=stats,
+        timeout=mutant_timeout,
     )
 
     # Mine-based oracle: mine the original, use properties to kill mutants
@@ -3851,6 +3889,7 @@ def mutate(
     llm_equivalence: bool = False,
     concern: str | None = None,
     test_filter: str | None = None,
+    mutant_timeout: float | None = None,
 ) -> MutationResult:
     """Unified mutation testing entry point — auto-detects function vs module.
 
@@ -3896,6 +3935,8 @@ def mutate(
         test_filter: Pytest ``-k`` expression to narrow which tests run
             against each mutant.  When ``None`` (default), derives a filter
             from the target module name.
+        mutant_timeout: Maximum seconds for the mutant generation step.
+            Prevents hanging on complex AST expressions (numpy, cv2).
     """
     dispatch = mutate_function_and_test if _is_function_target(target) else mutate_and_test
     return dispatch(
@@ -3911,6 +3952,7 @@ def mutate(
         llm_equivalence=llm_equivalence,
         concern=concern,
         test_filter=test_filter,
+        mutant_timeout=mutant_timeout,
     )
 
 

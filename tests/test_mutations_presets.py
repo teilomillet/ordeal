@@ -732,3 +732,63 @@ def test_filter_report_from_real_run():
     report = result.filter_report()
     assert "generated" in report
     assert "tested" in report
+
+
+# ============================================================================
+# mutant_timeout — generation step timeout
+# ============================================================================
+
+
+def test_mutant_timeout_returns_partial_results():
+    """generate_mutants with a very short timeout returns what it has so far."""
+    # Use a source with many mutation sites
+    source = textwrap.dedent("""\
+        def f(a, b, c, d, e):
+            if a > b and c < d:
+                return a + b - c * d / e
+            elif a == b or c != d:
+                return a - b + c * d
+            else:
+                return a * b + c - d
+    """)
+    stats: dict[str, int] = {}
+    # Timeout of 0 should abort immediately (or very quickly)
+    generate_mutants(source, _stats=stats, timeout=0)
+    # Should have timed out and returned partial (possibly empty) results
+    assert stats.get("generation_timed_out") == 1
+
+
+def test_mutant_timeout_none_means_no_limit():
+    """generate_mutants with timeout=None runs to completion."""
+    source = textwrap.dedent("""\
+        def f(a, b):
+            return a + b
+    """)
+    stats: dict[str, int] = {}
+    mutants = generate_mutants(source, operators=["arithmetic"], _stats=stats, timeout=None)
+    assert stats.get("generation_timed_out") is None
+    assert len(mutants) > 0
+
+
+def test_filter_report_shows_timeout():
+    """filter_report() mentions timeout when generation was cut short."""
+    result = MutationResult(target="fake.target")
+    result.diagnostics["generated"] = 3
+    result.diagnostics["generation_timed_out"] = 1
+    result.diagnostics["tested"] = 3
+    report = result.filter_report()
+    assert "timed out" in report
+
+
+def test_mutations_config_mutant_timeout(tmp_path: Path):
+    toml = tmp_path / "ordeal.toml"
+    toml.write_text(
+        textwrap.dedent("""\
+        [mutations]
+        targets = ["myapp.func"]
+        mutant_timeout = 30.0
+    """)
+    )
+    cfg = load_config(toml)
+    assert cfg.mutations is not None
+    assert cfg.mutations.mutant_timeout == 30.0

@@ -718,6 +718,7 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
     filter_equivalent: bool = not args.no_filter
     equivalence_samples: int = args.equivalence_samples
     test_filter: str | None = args.test_filter
+    mutant_timeout: float | None = args.mutant_timeout
 
     # Fall back to config file if no targets given
     if not targets:
@@ -759,6 +760,8 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
             equivalence_samples = cfg.mutations.equivalence_samples
         if test_filter is None and cfg.mutations.test_filter is not None:
             test_filter = cfg.mutations.test_filter
+        if mutant_timeout is None and cfg.mutations.mutant_timeout is not None:
+            mutant_timeout = cfg.mutations.mutant_timeout
 
     # Default preset when nothing specified
     if preset is None and operators is None:
@@ -782,6 +785,7 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
                     filter_equivalent=filter_equivalent,
                     equivalence_samples=equivalence_samples,
                     test_filter=test_filter,
+                    mutant_timeout=mutant_timeout,
                 )
             else:
                 result = mutate_and_test(
@@ -792,6 +796,7 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
                     filter_equivalent=filter_equivalent,
                     equivalence_samples=equivalence_samples,
                     test_filter=test_filter,
+                    mutant_timeout=mutant_timeout,
                 )
         except NoTestsFoundError as e:
             _stderr(f"  WARNING: No tests found for {target!r}\n")
@@ -1108,6 +1113,13 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         metavar="EXPR",
         help="Pytest -k expression to select tests (avoids running full suite per mutant)",
+    )
+    mutate_p.add_argument(
+        "--mutant-timeout",
+        type=float,
+        default=None,
+        metavar="SECS",
+        help="Timeout for mutant generation step in seconds (skip functions that hang)",
     )
     mutate_p.add_argument(
         "--generate-stubs",

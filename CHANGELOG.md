@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.78
+
+**Features:**
+
+- ordeal seeds command + save feedback for discoverability
+
+
 ## 0.2.77
 
 **Fixes:**

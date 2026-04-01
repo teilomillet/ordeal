@@ -985,13 +985,13 @@ class Explorer:
                 Higher values capture deeper path context but have
                 diminishing returns for Python's coarse line-level tracing.
                 See :class:`CoverageCollector` for the full rationale.
-            rule_swarm: When True, each exploration run uses a random
-                subset of rules.  This is the swarm testing pattern
-                applied to rule selection: disabling some rules per run
-                forces others to accumulate state (e.g. only inserts,
-                no deletes → cache grows large → GC triggers).  Better
-                aggregate coverage than all-rules-always-on.  At least
-                one rule is always kept.  Default ``False``.
+            rule_swarm: When True, each exploration run includes each
+                rule with independent probability 0.5 (fair coin flip),
+                per the swarm testing algorithm (Groce et al., ISSTA
+                2012).  Disabling some rules per run forces others to
+                accumulate state (e.g. only inserts, no deletes → cache
+                grows large → GC triggers).  At least one rule is always
+                kept.  Default ``False``.
             corpus_dir: Directory for the persistent seed corpus.  Failing
                 traces are saved here and replayed automatically on the
                 next run for instant regression detection.  Default
@@ -1974,16 +1974,20 @@ class Explorer:
 
             # Rule swarm: random rule subset per run.
             #
-            # Distribution: draw subset size k ~ Uniform(1, n), then sample
-            # k rules.  This gives equal probability to "only 1 rule" and
-            # "all n rules" — unlike a uniform bitmask which clusters around
-            # n/2.  Extreme subsets (1 rule, 2 rules) are the most valuable
-            # for swarm because they force the remaining rules to accumulate
-            # state (Groce et al., ISSTA 2012).
+            # Each rule is included with independent probability 0.5 (fair
+            # coin flip).  This is the algorithm from the swarm testing
+            # paper (Groce et al., ISSTA 2012, §2): "we toss a fair coin
+            # to determine feature presence or absence."  The mask range
+            # [1, 2^n - 1] excludes the empty set (at least one rule kept).
+            #
+            # With enough runs, even rare subsets appear: P(a given k-rule
+            # combo appears in n configs) = 1 - (1 - 0.5^k)^n.  At n=100
+            # runs, any given 5-rule combo has >95% chance of appearing.
             if self.rule_swarm and len(self._rules) > 1:
                 n = len(self._rules)
-                k = self.rng.randint(1, n)
-                self._active_rules = self.rng.sample(self._rules, k)
+                mask = self.rng.randint(1, (1 << n) - 1)
+                self._active_rules = [r for i, r in enumerate(self._rules) if mask & (1 << i)]
+                k = len(self._active_rules)
                 result.rule_swarm_runs += 1
                 # Record which rules are active so replay can reproduce
                 active_names = [r.name for r in self._active_rules]

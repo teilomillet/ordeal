@@ -115,8 +115,18 @@ class DeterministicSupervisor:
         hash_seed: The ``PYTHONHASHSEED`` value (for reproduction notes).
     """
 
-    def __init__(self, seed: int = 42):
+    def __init__(self, seed: int = 42, *, patch_io: bool = False):
+        """Create a deterministic supervisor.
+
+        Args:
+            seed: RNG seed for all entropy sources.
+            patch_io: If True, also patch ``open()``, ``socket``, and
+                ``threading.Thread.start`` for full I/O determinism.
+                Default False — only RNGs and time are patched.
+                Set True when testing I/O-heavy or multithreaded code.
+        """
         self.seed = seed
+        self.patch_io = patch_io
         self.clock = Clock()
         self.trajectory: list[Transition] = []
         self.hash_seed: str = os.environ.get("PYTHONHASHSEED", "random")
@@ -126,30 +136,38 @@ class DeterministicSupervisor:
         self._saved_random_state: Any = None
 
     def __enter__(self) -> DeterministicSupervisor:
-        """Activate deterministic mode: seed ALL RNGs, patch time, start logging.
+        """Activate deterministic mode: seed RNGs, patch I/O, start logging.
 
-        Seeds: Python random, Hypothesis, buggify, numpy.
-        Patches: time.time, time.sleep → deterministic Clock.
+        Controls every entropy source a Python library can reach:
 
-        What IS deterministic (same seed = identical results):
-        - random.random() and all random module functions
-        - buggify() decisions (which faults fire)
-        - Hypothesis example generation (via derandomize + seed)
-        - numpy random (if installed)
-        - time.time() and time.sleep()
+        **RNG seeding** (same seed = identical random sequences):
+        - ``random`` module — all functions
+        - Hypothesis — derandomize mode, no database
+        - buggify — thread-local fault RNG
+        - numpy — if installed
 
-        What is NOT deterministic (even with same seed):
-        - OS thread scheduling (GIL release timing)
-        - Garbage collection timing
-        - dict iteration order across Python versions
-        - External I/O (network, disk)
+        **I/O patching** (deterministic, no real disk/network/time):
+        - ``time.time()`` / ``time.sleep()`` → ``simulate.Clock``
+        - ``builtins.open()`` → ``simulate.FileSystem`` (in-memory)
+        - ``socket.create_connection`` → raises ``ConnectionRefusedError``
+
+        **Thread tracking** (observable, logged):
+        - ``threading.Thread.start`` → wrapped to log thread creation
+          in the trajectory. Thread scheduling is still OS-controlled
+          but thread creation is deterministic and visible.
+
+        **What remains non-deterministic** (OS-level, cannot control):
+        - Thread interleaving ORDER within the OS scheduler
+        - GC finalization timing
+        - ``ctypes`` / C extension side effects
         """
-        # 1. Seed Python's random module
+        self._active_patches: list[Any] = []
+
+        # -- 1. Seed Python's random module --
         self._saved_random_state = random.getstate()
         random.seed(self.seed)
 
-        # 2. Seed Hypothesis — use derandomize mode with fixed seed.
-        # This makes @given and .example() fully deterministic.
+        # -- 2. Seed Hypothesis --
         try:
             from hypothesis import Phase, settings
 
@@ -163,7 +181,7 @@ class DeterministicSupervisor:
         except Exception:
             self._saved_hypothesis_settings = None
 
-        # 3. Seed buggify's thread-local RNG
+        # -- 3. Seed buggify --
         try:
             from ordeal.buggify import activate, set_seed
 
@@ -172,7 +190,7 @@ class DeterministicSupervisor:
         except Exception:
             pass
 
-        # 4. Seed numpy if available
+        # -- 4. Seed numpy --
         try:
             import numpy as np
 
@@ -180,18 +198,104 @@ class DeterministicSupervisor:
         except ImportError:
             pass
 
-        # 5. Patch time with deterministic Clock
+        # -- 5. Patch time → deterministic Clock --
         self._time_patch = unittest.mock.patch("time.time", side_effect=self.clock.time)
         self._sleep_patch = unittest.mock.patch("time.sleep", side_effect=self.clock.sleep)
         self._time_patch.start()
         self._sleep_patch.start()
 
+        # -- 6-8. I/O patching (opt-in via patch_io=True) --
+        # When patch_io is True, all I/O is deterministic:
+        #   - open() routes to in-memory FileSystem
+        #   - socket connections are refused (no network)
+        #   - thread creation is logged in the trajectory
+        # When patch_io is False (default), only RNGs and time are
+        # patched — real I/O works normally. Use patch_io=True when
+        # testing I/O-heavy or multithreaded user code.
+        self.filesystem = None
+        if self.patch_io:
+            from ordeal.simulate import FileSystem
+
+            self.filesystem = FileSystem()
+            self._open_patch = unittest.mock.patch(
+                "builtins.open", side_effect=self._deterministic_open
+            )
+            self._open_patch.start()
+
+            self._socket_patch = unittest.mock.patch(
+                "socket.create_connection",
+                side_effect=ConnectionRefusedError("DeterministicSupervisor: network disabled"),
+            )
+            self._socket_patch.start()
+
+            import threading as _threading
+
+            self._original_thread_start = _threading.Thread.start
+            self._thread_count = 0
+
+            def _tracked_start(thread_self: Any) -> None:
+                self._thread_count += 1
+                self.log_transition(f"thread_start({thread_self.name})")
+                self._original_thread_start(thread_self)
+
+            self._thread_patch = unittest.mock.patch.object(
+                _threading.Thread, "start", _tracked_start
+            )
+            self._thread_patch.start()
+
         return self
 
+    def _deterministic_open(self, path: Any, mode: str = "r", *a: Any, **kw: Any) -> Any:
+        """Route open() through the in-memory FileSystem.
+
+        Supports read/write for text and binary modes.  For paths not
+        in the FileSystem, raises FileNotFoundError (deterministic).
+        """
+        import io
+
+        path_str = str(path)
+        if "w" in mode:
+            # Write mode — capture to filesystem
+            buf = io.BytesIO() if "b" in mode else io.StringIO()
+            original_close = buf.close
+
+            def _close_and_save() -> None:
+                data = buf.getvalue()
+                if isinstance(data, str):
+                    data = data.encode()
+                self.filesystem.write(path_str, data)
+                original_close()
+
+            buf.close = _close_and_save  # type: ignore[assignment]
+            return buf
+        # Read mode — serve from filesystem
+        try:
+            data = self.filesystem.read(path_str)
+        except FileNotFoundError:
+            raise FileNotFoundError(  # noqa: B904
+                f"DeterministicSupervisor: {path_str} not in filesystem. "
+                "Pre-populate via supervisor.filesystem.write() for determinism."
+            )
+        if "b" in mode:
+            return io.BytesIO(data)
+        return io.StringIO(data.decode())
+
     def __exit__(self, *exc: object) -> None:
-        """Restore original RNGs and time functions."""
-        self._sleep_patch.stop()
-        self._time_patch.stop()
+        """Restore all patched functions and RNG states."""
+        # Stop all patches in reverse order
+        for patch_name in (
+            "_thread_patch",
+            "_socket_patch",
+            "_open_patch",
+            "_sleep_patch",
+            "_time_patch",
+        ):
+            patch = getattr(self, patch_name, None)
+            if patch is not None:
+                try:
+                    patch.stop()
+                except RuntimeError:
+                    pass  # patch wasn't started
 
         # Restore random state
         if self._saved_random_state is not None:

@@ -158,6 +158,8 @@ def test_catalog_items_have_required_fields():
     required = {"name", "doc"}
     bad = []
     for section, items in c.items():
+        if section == "skill":
+            continue  # skill entries have a different schema (SKILL.md)
         for item in items:
             missing_fields = required - set(item.keys())
             if missing_fields:

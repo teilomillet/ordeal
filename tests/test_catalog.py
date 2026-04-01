@@ -34,6 +34,7 @@ class TestTopLevelCatalog:
             "grammar",
             "equivalence",
             "trace",
+            "skill",
         }
         always(set(c.keys()) == expected, "catalog has all categories")
 

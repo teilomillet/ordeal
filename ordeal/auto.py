@@ -332,8 +332,18 @@ def _infer_strategies(
         #    mine() on any function with Optional params.
         elif has_default and param.default is None:
             if name in hints:
-                # Optional[T] → sample T | None
-                strategies[name] = st.one_of(strategy_for_type(hints[name]), st.none())
+                # Optional[T] → sample T | None.
+                # If the type hint already includes None (e.g. Optional[str],
+                # str | None), strategy_for_type handles it via the Union path.
+                # Only add st.none() if the hint doesn't already include None.
+                hint = hints[name]
+                origin = get_origin(hint)
+                args = get_args(hint)
+                already_optional = (origin is Union and type(None) in args) or hint is type(None)
+                strat = strategy_for_type(hint)
+                if not already_optional:
+                    strat = st.one_of(strat, st.none())
+                strategies[name] = strat
             else:
                 continue
         # 3. Common name pattern

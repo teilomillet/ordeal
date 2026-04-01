@@ -733,6 +733,7 @@ class ExplorationResult:
     strategy_failures: dict[str, int] = field(default_factory=dict)
     ngram: int = 1
     seed_replays: list[dict[str, Any]] = field(default_factory=list)
+    rule_swarm_runs: int = 0
     coverage_gaps: list[dict[str, Any]] = field(default_factory=list)
     lines_covered: int = 0
     lines_total: int = 0
@@ -759,6 +760,10 @@ class ExplorationResult:
             lines.append(
                 f"Mutations: {self.mutations_killed}/{self.mutations_total} killed"
                 f" ({survived} survived)"
+            )
+        if self.rule_swarm_runs > 0:
+            lines.append(
+                f"Rule swarm: {self.rule_swarm_runs}/{self.total_runs} runs used rule subsets"
             )
         if self.seed_mutations_used > 0:
             lines.append(
@@ -935,6 +940,7 @@ class Explorer:
         seed_mutation_prob: float | None = None,
         ngram: int = 2,
         corpus_dir: str | Path | None = None,
+        rule_swarm: bool = False,
     ) -> None:
         """Initialize the exploration engine.
 
@@ -979,6 +985,13 @@ class Explorer:
                 Higher values capture deeper path context but have
                 diminishing returns for Python's coarse line-level tracing.
                 See :class:`CoverageCollector` for the full rationale.
+            rule_swarm: When True, each exploration run uses a random
+                subset of rules.  This is the swarm testing pattern
+                applied to rule selection: disabling some rules per run
+                forces others to accumulate state (e.g. only inserts,
+                no deletes → cache grows large → GC triggers).  Better
+                aggregate coverage than all-rules-always-on.  At least
+                one rule is always kept.  Default ``False``.
             corpus_dir: Directory for the persistent seed corpus.  Failing
                 traces are saved here and replayed automatically on the
                 next run for instant regression detection.  Default
@@ -1003,6 +1016,7 @@ class Explorer:
             seed_mutation_prob if seed_mutation_prob is not None else _SEED_MUTATION_PROB
         )
         self.corpus_dir: Path | None = Path(corpus_dir) if corpus_dir is not None else None
+        self.rule_swarm = rule_swarm
 
         # Shared-memory edge bitmap (set by _run_parallel / _worker_fn)
         # 65536 bytes — one byte per possible 16-bit edge hash.
@@ -1033,6 +1047,7 @@ class Explorer:
         self._last_step_rule: tuple[str, dict[str, Any]] | None = None
         self._last_step_used_mutation: bool = False
         self._last_generated_params: dict[str, Any] = {}
+        self._active_rules: list[_RuleInfo] = []  # set per run (swarm or full)
         self._strategy_failures: dict[str, int] = {}
 
     # -- Snapshot / restore -------------------------------------------------
@@ -1538,7 +1553,7 @@ class Explorer:
             )
             return True
         else:
-            rule_info = self.rng.choice(self._rules)
+            rule_info = self.rng.choice(self._active_rules)
             try:
                 params = self._execute_rule(machine, rule_info, source_cp=source_cp)
             except Exception:
@@ -1956,6 +1971,15 @@ class Explorer:
                 rule_log.append(f"[checkpoint r{source_cp.run_id}s{source_cp.step}]")
             else:
                 machine = self.test_class()
+
+            # Rule swarm: random rule subset per run
+            if self.rule_swarm and len(self._rules) > 1:
+                n = len(self._rules)
+                mask = self.rng.randint(1, (1 << n) - 1)
+                self._active_rules = [r for i, r in enumerate(self._rules) if mask & (1 << i)]
+                result.rule_swarm_runs += 1
+            else:
+                self._active_rules = self._rules
 
             n_steps = self.rng.randint(1, steps_per_run)
             collector = (

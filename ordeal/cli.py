@@ -276,6 +276,7 @@ def _cmd_explore(args: argparse.Namespace) -> int:
             workers=cfg.explorer.workers,
             ngram=cfg.explorer.ngram,
             corpus_dir=corpus_dir,
+            rule_swarm=cfg.explorer.rule_swarm,
         )
 
         result = explorer.run(

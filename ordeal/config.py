@@ -48,6 +48,7 @@ class ExplorerConfig:
     fault_toggle_prob: float = 0.3
     workers: int = 0  # 0 = auto (os.cpu_count())
     ngram: int = 2  # N-gram depth for edge coverage (1=classic AFL, 2+=path-context)
+    rule_swarm: bool = False  # random rule subsets per run (swarm testing for rules)
 
 
 @dataclass
@@ -255,6 +256,7 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
         fault_toggle_prob=float(explorer_raw.get("fault_toggle_prob", 0.3)),
         workers=int(explorer_raw.get("workers", 1)),
         ngram=ngram_val,
+        rule_swarm=explorer_raw.get("rule_swarm", False),
     )
 
     if explorer.checkpoint_strategy not in _VALID_CHECKPOINT_STRATEGIES:

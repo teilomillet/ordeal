@@ -43,6 +43,11 @@ fault_toggle_prob = 0.3
 #       than C basic blocks — ngram=2 already captures the important signal).
 ngram = 2
 
+# Rule swarm: each run uses a random subset of rules.
+# Disabling some rules per run forces others to accumulate state
+# (e.g. only inserts, no deletes → cache grows → GC triggers).
+# rule_swarm = true
+
 
 # Each [[tests]] entry is a ChaosTest class to explore.
 # Format: "module.path:ClassName"

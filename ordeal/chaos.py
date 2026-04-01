@@ -82,14 +82,22 @@ class ChaosTest(RuleBasedStateMachine):
           checkpointing and energy scheduling (reads ordeal.toml)
         - ``swarm = True`` tests random fault subsets per run
 
-    Not suited for external processes:
-        Rules fire in unpredictable order — Hypothesis controls the
-        schedule. Systems that need strict lifecycle management
-        (subprocesses, database transactions, gRPC channels) should
-        use regular pytest tests with ``always()``/``sometimes()`` and
-        subprocess faults (``subprocess_timeout``, ``subprocess_delay``)
-        instead. See the "External processes" section in the writing
-        tests guide.
+    Subprocess / FFI testing:
+        Subprocess faults (``subprocess_timeout``, ``subprocess_delay``,
+        ``corrupt_stdout``) work in ChaosTest — they patch
+        ``subprocess.run`` and the nemesis toggles them like any fault.
+        The code under test should call ``subprocess.run`` per rule
+        invocation (not start a long-lived ``Popen`` in ``__init__``).
+        Wrap the full subprocess lifecycle in a function and call that
+        from rules::
+
+            class KernelChaos(ChaosTest):
+                faults = [subprocess_timeout("cargo run")]
+
+                @rule()
+                def run_episode(self):
+                    result = run_kernel(steps=10)  # calls subprocess.run
+                    always(result.exit_code == 0, "clean exit")
     """
 
     faults: ClassVar[list[Fault]] = []

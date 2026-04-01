@@ -194,15 +194,20 @@ def subprocess_timeout(target: str, *, timeout_sec: float = 0.001) -> PatchFault
     raises ``subprocess.TimeoutExpired`` instead of running the process.
     Useful for testing Python↔Rust/C/Go bridges under chaos.
 
-    Best used with regular pytest + ``always()`` (not ChaosTest, since
-    subprocess lifecycle doesn't compose with stateful rules)::
+    Works in ChaosTest (nemesis toggles the fault) or as a context manager::
 
-        from ordeal.faults.io import subprocess_timeout
+        # In ChaosTest — nemesis toggles automatically
+        class KernelChaos(ChaosTest):
+            faults = [subprocess_timeout("cargo run")]
 
-        def test_kernel_timeout(chaos_enabled):
-            with subprocess_timeout("cargo run"):
-                result = run_kernel()
-            always(result is not None, "handles timeout gracefully")
+            @rule()
+            def run_episode(self):
+                result = run_kernel(steps=10)  # calls subprocess.run
+                always(result.exit_code == 0, "clean exit")
+
+        # As context manager — scoped activation
+        with subprocess_timeout("cargo run"):
+            result = run_kernel()
 
     Args:
         target: Substring to match in the command (e.g. ``"cargo run"``).
@@ -229,15 +234,14 @@ def corrupt_stdout(target: str) -> PatchFault:
     Replaces ``stdout`` in the ``CompletedProcess`` with random bytes,
     simulating garbled FFI output.
 
-    Best used with regular pytest + ``always()`` (not ChaosTest, since
-    subprocess lifecycle doesn't compose with stateful rules)::
+    Works in ChaosTest (nemesis toggles the fault) or as a context manager::
 
-        from ordeal.faults.io import corrupt_stdout
+        # In ChaosTest
+        faults = [corrupt_stdout("my_binary")]
 
-        def test_garbled_output(chaos_enabled):
-            with corrupt_stdout("my_binary"):
-                result = parse_binary_output()
-            always(result is not None, "handles corrupt output")
+        # As context manager
+        with corrupt_stdout("my_binary"):
+            result = parse_binary_output()
 
     Args:
         target: Substring to match in the command.
@@ -265,15 +269,14 @@ def subprocess_delay(target: str, *, delay: float = 1.0) -> PatchFault:
     Simulates slow FFI responses — tests timeout handling and
     progress reporting in Python↔Rust/C/Go bridges.
 
-    Best used with regular pytest + ``always()`` (not ChaosTest, since
-    subprocess lifecycle doesn't compose with stateful rules)::
+    Works in ChaosTest (nemesis toggles the fault) or as a context manager::
 
-        from ordeal.faults.io import subprocess_delay
+        # In ChaosTest
+        faults = [subprocess_delay("cargo run", delay=5.0)]
 
-        def test_kernel_slow(chaos_enabled):
-            with subprocess_delay("cargo run", delay=5.0):
-                result = run_kernel()
-            always(result.completed, "completes despite delay")
+        # As context manager
+        with subprocess_delay("cargo run", delay=5.0):
+            result = run_kernel()
 
     Args:
         target: Substring to match in the command.

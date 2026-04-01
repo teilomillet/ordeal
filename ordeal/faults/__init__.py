@@ -77,6 +77,15 @@ class Fault(ABC):
         """Deactivate and clear any internal state."""
         self.deactivate()
 
+    def __enter__(self) -> Fault:
+        """Activate the fault as a context manager."""
+        self.activate()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        """Deactivate the fault on context exit."""
+        self.deactivate()
+
     def __deepcopy__(self, memo: dict) -> Fault:
         """Deep-copy with fresh locks (locks can't be copied/pickled)."""
         cls = self.__class__

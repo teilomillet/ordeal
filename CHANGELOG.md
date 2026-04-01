@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.41
+
+**Features:**
+
+- SOTA exploration — CMPLOG, adaptive scheduling, cross-function mining
+
+
 ## 0.2.39
 
 **Features:**

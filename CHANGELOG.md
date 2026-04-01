@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.72
+
+**Features:**
+
+- HTTP endpoint fuzzing with rate limiting
+
+
 ## 0.2.70
 
 **Features:**

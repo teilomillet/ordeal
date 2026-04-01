@@ -60,6 +60,27 @@ class _ProgressPrinter:
 # ============================================================================
 
 
+def _cmd_catalog(_args: argparse.Namespace) -> int:
+    """Print all ordeal capabilities, organized by subsystem."""
+    from ordeal import catalog
+
+    c = catalog()
+    for key in sorted(c):
+        entries = c[key]
+        print(f"\n{key} ({len(entries)}):")
+        for item in entries:
+            doc = item["doc"]
+            sig = item.get("signature", "")
+            print(f"  {item['name']}{sig}")
+            if doc:
+                print(f"    {doc}")
+
+    total = sum(len(v) for v in c.values())
+    print(f"\n{total} capabilities across {len(c)} subsystems.")
+    print("Use in Python: from ordeal import catalog; catalog()")
+    return 0
+
+
 def _cmd_explore(args: argparse.Namespace) -> int:
     """Run coverage-guided exploration from ordeal.toml."""
     try:
@@ -900,9 +921,21 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry point for ``ordeal``."""
     parser = argparse.ArgumentParser(
         prog="ordeal",
-        description="Ordeal — automated chaos testing for Python",
+        description=(
+            "Ordeal — explores the state space of Python code.\n\n"
+            "Run 'ordeal catalog' to see every capability.\n"
+            "Run 'ordeal mine mymod' to discover what functions do.\n"
+            "Use catalog() in Python for the full API."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="command")
+
+    # -- ordeal catalog --
+    sub.add_parser(
+        "catalog",
+        help="Show all capabilities — faults, mining, mutations, exploration, ...",
+    )
 
     # -- ordeal explore --
     explore_p = sub.add_parser("explore", help="Run coverage-guided exploration")
@@ -1066,7 +1099,9 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
-    if args.command == "explore":
+    if args.command == "catalog":
+        return _cmd_catalog(args)
+    elif args.command == "explore":
         return _cmd_explore(args)
     elif args.command == "replay":
         return _cmd_replay(args)

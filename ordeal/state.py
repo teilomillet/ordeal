@@ -374,6 +374,13 @@ def explore(
     in parallel, more *max_examples* → more input space sampled.
     Confidence grows with both.
 
+    For deeper, coverage-guided stateful exploration, use
+    ``ordeal.explore.Explorer`` directly — it runs ChaosTest rule
+    sequences with AFL-style edge coverage, energy-based checkpoint
+    scheduling, swarm fault selection, and **seed mutation** (productive
+    rule parameters are stored on checkpoints and mutated on the next
+    branch, closing the AFL feedback loop for typed stateful testing).
+
     The AI assistant can also run steps individually via
     ``explore_mine``, ``explore_scan``, ``explore_mutate``,
     ``explore_harden``, ``explore_chaos`` for finer control.

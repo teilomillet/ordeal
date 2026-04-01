@@ -89,6 +89,7 @@ _LAZY_SUBMODULES = (
     "ordeal.diff",
     "ordeal.scaling",
     "ordeal.state",
+    "ordeal.explore",
     "ordeal.supervisor",
     "ordeal.mutagen",
     "ordeal.cmplog",
@@ -193,6 +194,15 @@ def catalog() -> dict[str, list]:
         ),
         "exploration": _introspect_module(
             __import__("ordeal.state", fromlist=["state"]),
+        )
+        + _introspect_module(
+            __import__("ordeal.explore", fromlist=["explore"]),
+            include={
+                "Explorer",
+                "ExplorationResult",
+                "CoverageCollector",
+                "Checkpoint",
+            },
         ),
         "supervisor": _introspect_module(
             __import__("ordeal.supervisor", fromlist=["supervisor"]),

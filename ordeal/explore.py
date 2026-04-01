@@ -612,12 +612,32 @@ def _qualified_name(cls: type) -> str:
 
 
 class Explorer:
-    """Coverage-guided exploration engine for ChaosTest.
+    """Coverage-guided stateful exploration with checkpoints, energy scheduling, and seed mutation.
 
-    Compared to Hypothesis (random search + shrinking), the Explorer uses
-    coverage feedback and energy-based checkpoint scheduling to find bugs
+    The core exploration engine.  Runs ChaosTest rule sequences while tracking
+    edge coverage (AFL-style), checkpointing interesting states, and branching
+    from them with three orthogonal exploration dimensions:
+
+    - **Swarm**: each run uses a random fault subset (different failure environments)
+    - **Energy**: checkpoints that led to new edges are selected more often
+    - **Seed mutation**: rule parameters that led to new coverage are stored on
+      checkpoints and mutated (via ``ordeal.mutagen``) on the next branch —
+      the AFL closed-loop adapted for typed stateful testing
+
+    Compared to Hypothesis (random search + shrinking), the Explorer finds bugs
     at the intersection of features — the class of bugs that random testing
     almost never reaches.
+
+    Example::
+
+        from ordeal.explore import Explorer
+
+        explorer = Explorer(MyChaosTest, target_modules=["myapp"])
+        result = explorer.run(max_time=60)
+        print(result.summary())
+        # → Exploration: 500 runs, 25000 steps, 60.0s
+        # → Coverage: 142 edges, 38 checkpoints
+        # → Seed mutations: 312 used, 47 productive
     """
 
     def __init__(

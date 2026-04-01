@@ -44,7 +44,10 @@ from typing import Any
 
 
 def mutate_value(value: Any, rng: _random.Random, intensity: float = 0.3) -> Any:
-    """Mutate a single Python value.
+    """Mutate a single Python value — the core AFL bit-flip adapted for Python types.
+
+    Used by ``mine()`` Phase 2 (coverage-guided input mutation) and
+    ``Explorer`` (seed mutation from productive checkpoints).
 
     The mutation is type-aware: integers get bit-flips and arithmetic
     perturbations, strings get character swaps and truncation, floats
@@ -244,7 +247,7 @@ def mutate_inputs(
     rng: _random.Random,
     intensity: float = 0.3,
 ) -> dict[str, Any]:
-    """Mutate a full kwargs dict (like MineResult.collected_inputs entries).
+    """Mutate a full kwargs dict — used by mine() and Explorer's seed mutation loop.
 
     Takes a known-good input that reached interesting coverage and
     perturbs it.  The coverage feedback loop then checks if the

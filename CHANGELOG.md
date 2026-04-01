@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.52
+
+**Fixes:**
+
+- 'data' is no longer a reserved parameter name in explorer
+- explorer spinning — skip rules when strategy generation fails
+- add CWD to sys.path in CLI so imports resolve without PYTHONPATH
+
+
 ## 0.2.50
 
 **Fixes:**

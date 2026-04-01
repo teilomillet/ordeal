@@ -576,6 +576,15 @@ def mine(
                         edges_seen.update(new)
                         new_edge_count += 1
                         stale_count = 0
+                        # Close the feedback loop: tell Hypothesis this input
+                        # was valuable. Hypothesis steers generation toward
+                        # inputs that maximize this value → more new edges.
+                        try:
+                            from hypothesis import target as _ht
+
+                            _ht(float(len(new)), label="new_edges")
+                        except Exception:
+                            pass
                     else:
                         stale_count += 1
             outputs.append(result)

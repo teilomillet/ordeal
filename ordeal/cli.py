@@ -303,6 +303,15 @@ def _cmd_explore(args: argparse.Namespace) -> int:
 
         if result.failures:
             exit_code = 1
+            # Report saved seeds
+            if not args.no_seeds:
+                seed_dir = Path(cfg.report.corpus_dir)
+                seed_files = list(seed_dir.rglob("seed-*.json")) if seed_dir.exists() else []
+                if seed_files:
+                    _stderr(
+                        f"  Seeds saved: {len(seed_files)} in {seed_dir}/"
+                        f" (auto-replay on next run)\n"
+                    )
 
         # Save traces
         if cfg.report.traces:
@@ -371,6 +380,52 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     else:
         _stderr("Failure did not reproduce.\n")
         return 0
+
+
+def _cmd_seeds(args: argparse.Namespace) -> int:
+    """List or manage the persistent seed corpus."""
+    from ordeal.trace import Trace
+    from ordeal.trace import replay as _replay
+
+    corpus = Path(args.dir)
+    if not corpus.exists():
+        _stderr("No seed corpus found.\n")
+        _stderr("  Seeds are saved automatically when ordeal explore finds failures.\n")
+        _stderr(f"  Directory: {corpus}/\n")
+        return 0
+
+    seed_files = sorted(corpus.rglob("seed-*.json"))
+    if not seed_files:
+        _stderr("Seed corpus is empty.\n")
+        return 0
+
+    _stderr(f"Seed corpus: {len(seed_files)} seed(s) in {corpus}/\n\n")
+
+    pruned = 0
+    for sf in seed_files:
+        try:
+            trace = Trace.load(sf)
+        except Exception:
+            _stderr(f"  {sf.name}: corrupt (cannot load)\n")
+            continue
+
+        error = _replay(trace)
+        class_name = trace.test_class.rsplit(":", 1)[-1] if ":" in trace.test_class else ""
+        steps = len(trace.steps)
+
+        if error is not None:
+            err_short = f"{type(error).__name__}: {str(error)[:60]}"
+            _stderr(f"  REPRODUCES  {sf.name}  {class_name} ({steps} steps) — {err_short}\n")
+        else:
+            _stderr(f"  fixed       {sf.name}  {class_name} ({steps} steps)\n")
+            if args.prune_fixed:
+                sf.unlink()
+                pruned += 1
+
+    if args.prune_fixed and pruned:
+        _stderr(f"\nPruned {pruned} fixed seed(s).\n")
+
+    return 0
 
 
 def _cmd_audit(args: argparse.Namespace) -> int:
@@ -1296,6 +1351,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     replay_p.add_argument("--output", "-o", help="Save shrunk trace to this path")
 
+    # -- ordeal seeds --
+    seeds_p = sub.add_parser("seeds", help="List or manage the persistent seed corpus")
+    seeds_p.add_argument(
+        "--dir", default=".ordeal/seeds", help="Seed corpus directory (default: .ordeal/seeds)"
+    )
+    seeds_p.add_argument(
+        "--prune-fixed", action="store_true", help="Remove seeds that no longer reproduce"
+    )
+
     # -- ordeal audit --
     audit_p = sub.add_parser("audit", help="Audit test coverage vs ordeal migration")
     audit_p.add_argument("modules", nargs="+", help="Module paths to audit")
@@ -1462,6 +1526,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_explore(args)
     elif args.command == "replay":
         return _cmd_replay(args)
+    elif args.command == "seeds":
+        return _cmd_seeds(args)
     elif args.command == "audit":
         return _cmd_audit(args)
     elif args.command == "mine":

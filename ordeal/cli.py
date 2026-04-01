@@ -601,6 +601,41 @@ def _is_function_target(target: str) -> bool:
         return False
 
 
+def _generate_ci_workflow(pkg: str) -> str:
+    """Generate a GitHub Actions workflow for ordeal CI."""
+    has_uv_lock = Path("uv.lock").exists()
+
+    if has_uv_lock:
+        install_steps = """\
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync"""
+        run_prefix = "uv run "
+    else:
+        install_steps = """\
+      - run: pip install -e ".[dev]" """
+        run_prefix = ""
+
+    return f"""\
+name: ordeal
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  ordeal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+{install_steps}
+      - run: {run_prefix}pytest --chaos
+      - run: {run_prefix}ordeal mutate {pkg} --preset standard --threshold 0.8
+"""
+
+
 def _cmd_init(args: argparse.Namespace) -> int:
     """Bootstrap test files for untested modules."""
     import re
@@ -611,6 +646,8 @@ def _cmd_init(args: argparse.Namespace) -> int:
     target: str | None = args.target or None
     output_dir: str = args.output_dir
     dry_run: bool = args.dry_run
+    ci: bool = args.ci
+    ci_name: str = args.ci_name
 
     results = init_project(target=target, output_dir=output_dir, dry_run=dry_run)
 
@@ -628,16 +665,38 @@ def _cmd_init(args: argparse.Namespace) -> int:
     generated = [r for r in results if r["status"] == "generated"]
     existed = sum(1 for r in results if r["status"] == "exists")
 
+    # --- CI workflow ---
+    ci_path: str | None = None
+    ci_content: str | None = None
+    if ci:
+        ci_path = f".github/workflows/{ci_name}.yml"
+        ci_content = _generate_ci_workflow(pkg)
+
     if dry_run:
         _stderr(f"\nordeal init — DRY RUN for {pkg}\n\n")
         for r in generated:
             print(f"\n# --- {r['path']} ---\n")
             print(r["content"])
-        _stderr(f"  Would generate {len(generated)} test file(s)\n\n")
+        if ci_content:
+            print(f"\n# --- {ci_path} ---\n")
+            print(ci_content)
+        n_files = len(generated) + (1 if ci_content else 0)
+        _stderr(f"  Would generate {n_files} file(s)\n\n")
         return 0
 
-    if not generated:
+    if not generated and not ci:
         _stderr(f"\nordeal init — {pkg}: all modules already have tests.\n\n")
+        return 0
+
+    # --- Write CI workflow ---
+    if ci_path and ci_content:
+        ci_p = Path(ci_path)
+        ci_p.parent.mkdir(parents=True, exist_ok=True)
+        ci_p.write_text(ci_content)
+
+    if not generated:
+        _stderr(f"\nordeal init — {pkg}: all modules already have tests.\n")
+        _stderr(f"  Generated: {ci_path}\n\n")
         return 0
 
     # --- Setup subprocess env ---
@@ -822,6 +881,8 @@ def _cmd_init(args: argparse.Namespace) -> int:
         _stderr(f"    {r['path']}\n")
     if Path("ordeal.toml").exists():
         _stderr("    ordeal.toml\n")
+    if ci_path:
+        _stderr(f"    {ci_path}\n")
     _stderr("\n")
 
     # --- Pinned values for review ---
@@ -842,8 +903,10 @@ def _cmd_init(args: argparse.Namespace) -> int:
         "properties_discovered": unique_props,
         "tests_pass": tests_pass,
         "mutation_score": mutation_score.removeprefix("Score: ") if mutation_score else None,
+        "ci_workflow": ci_path,
         "files": [r["path"] for r in generated]
-        + (["ordeal.toml"] if Path("ordeal.toml").exists() else []),
+        + (["ordeal.toml"] if Path("ordeal.toml").exists() else [])
+        + ([ci_path] if ci_path else []),
         "pinned_values": pinned_values,
         "functions": [
             {"module": r["module"], "status": r["status"], "test_file": r["path"]} for r in results
@@ -1282,6 +1345,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     init_p.add_argument(
         "--dry-run", action="store_true", help="Show what would be generated without writing files"
+    )
+    init_p.add_argument(
+        "--ci",
+        action="store_true",
+        help="Generate a GitHub Actions workflow (.github/workflows/<name>.yml)",
+    )
+    init_p.add_argument(
+        "--ci-name",
+        default="ordeal",
+        metavar="NAME",
+        help="Workflow filename (default: ordeal → .github/workflows/ordeal.yml)",
     )
 
     # -- ordeal mutate --

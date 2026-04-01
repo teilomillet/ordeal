@@ -220,6 +220,8 @@ One command: zero tests to validated test suite.
 ordeal init                    # auto-detect package, generate everything
 ordeal init myapp              # explicit target
 ordeal init --dry-run          # preview without writing
+ordeal init --ci               # also generate GitHub Actions workflow
+ordeal init --ci --ci-name qa  # custom workflow name → .github/workflows/qa.yml
 ```
 
 What it does (discovery-driven, no hand-crafted values):

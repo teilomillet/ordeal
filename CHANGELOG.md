@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.49
+
+**Features:**
+
+- ordeal catalog CLI — first subcommand, promotes full discovery
+
+
 ## 0.2.48
 
 **Fixes:**

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.79
+
+**Features:**
+
+- ordeal init enables rule_swarm by default
+- AI agent skill — ordeal skill command + auto-install in ordeal init
+- rule swarm — random rule subsets per exploration run
+
+
 ## 0.2.78
 
 **Features:**

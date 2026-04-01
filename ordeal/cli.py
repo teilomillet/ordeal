@@ -919,6 +919,11 @@ def _write_json_report(
 
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point for ``ordeal``."""
+    # Add CWD to sys.path so imports resolve the same way as pytest/python -m.
+    cwd = os.getcwd()
+    if cwd not in sys.path:
+        sys.path.insert(0, cwd)
+
     parser = argparse.ArgumentParser(
         prog="ordeal",
         description=(

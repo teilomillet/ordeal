@@ -176,6 +176,7 @@ _LAZY_SUBMODULES = (
     "ordeal.diff",
     "ordeal.scaling",
     "ordeal.state",
+    "ordeal.supervisor",
 )
 
 _SENTINEL = object()

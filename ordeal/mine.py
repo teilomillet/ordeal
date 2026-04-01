@@ -20,6 +20,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import math
+import random as _random
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from types import ModuleType
@@ -712,6 +713,43 @@ def mine(
         collect()
     except Exception:
         pass  # some inputs may crash — that's fine, we analyze what we got
+
+    is_saturated_early = len(edges_seen) > 0 and stale_count > max(len(outputs) // 2, 10)
+
+    # Phase 2: Mutation-based exploration.
+    # Take inputs that discovered new edges and mutate them — the AFL loop.
+    # This finds coverage near known-good inputs that Hypothesis's type-level
+    # strategies miss.  Each mutation is cheap (O(1) per value), and the
+    # coverage feedback loop prunes unproductive ones.
+    if collector and inputs and not is_saturated_early:
+        try:
+            from ordeal.mutagen import mutate_inputs
+
+            mutation_rng = _random.Random(42)
+            # Collect productive inputs (those that found new edges)
+            productive = inputs[: max(1, new_edge_count)]
+            mutation_budget = max_examples // 4  # spend 25% of budget on mutations
+            for _ in range(mutation_budget):
+                seed_input = productive[mutation_rng.randint(0, len(productive) - 1)]
+                mutated = mutate_inputs(seed_input, mutation_rng)
+                collector.start()
+                try:
+                    result = fn(**mutated)
+                except Exception:
+                    collector.stop()
+                    continue
+                edges = collector.stop()
+                new = edges - edges_seen
+                if new:
+                    edges_seen.update(new)
+                    new_edge_count += 1
+                    productive.append(mutated)
+                outputs.append(result)
+                inputs.append(mutated)
+        except Exception:
+            pass  # mutation phase is best-effort
+
+    is_saturated_early = False  # reset for final check below
 
     # Run all property checks
     all_props: list[MinedProperty] = [

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.37
+
+**Features:**
+
+- wire mine() into mutate, scan_module, and metamorphic
+
+
 ## 0.2.36
 
 **Features:**

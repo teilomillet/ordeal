@@ -112,6 +112,11 @@ class ScanResult:
             lines.append(f"  ({len(self.expected_failures)} expected failure(s))")
         if self.skipped:
             lines.append(f"  ({len(self.skipped)} skipped: no type hints)")
+        from ordeal.suggest import format_suggestions
+
+        avail = format_suggestions(self)
+        if avail:
+            lines.append(avail)
         return "\n".join(lines)
 
 

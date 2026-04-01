@@ -591,6 +591,11 @@ class MutationResult:
             for test, mutants in sorted(attr.items(), key=lambda x: -len(x[1])):
                 ops = ", ".join(sorted({m.operator for m in mutants}))
                 lines.append(f"    {test}: {len(mutants)} kill(s) [{ops}]")
+        from ordeal.suggest import format_suggestions
+
+        avail = format_suggestions(self)
+        if avail:
+            lines.append(f"\n{avail}")
         return "\n".join(lines)
 
     def generate_test_stubs(self) -> str:

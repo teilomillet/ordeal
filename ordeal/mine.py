@@ -191,6 +191,11 @@ class MineResult:
         for p in sorted(self.properties, key=lambda p: -p.confidence):
             if p.confidence >= 0.5:
                 lines.append(str(p))
+        from ordeal.suggest import format_suggestions
+
+        avail = format_suggestions(self)
+        if avail:
+            lines.append(avail)
         return "\n".join(lines)
 
 

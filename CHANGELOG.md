@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.48
+
+**Fixes:**
+
+- four pain points from production ML/vision usage
+
+
 ## 0.2.47
 
 **Features:**

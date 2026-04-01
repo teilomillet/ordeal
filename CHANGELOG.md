@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.60
+
+**Features:**
+
+- ordeal scan — unified exploration as CLI command
+
+**Fixes:**
+
+- reproducibility test — only assert in-process determinism
+
+
 ## 0.2.59
 
 **Features:**

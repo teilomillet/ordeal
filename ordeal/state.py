@@ -29,9 +29,20 @@ Use tools individually — they enrich the same state::
 
 from __future__ import annotations
 
+import hashlib
+import inspect
 import json
 from dataclasses import asdict, dataclass, field
 from typing import Any
+
+
+def _source_hash(func: Any) -> str | None:
+    """Hash a function's source code.  Returns ``None`` if unavailable."""
+    try:
+        source = inspect.getsource(func)
+        return hashlib.sha256(source.encode()).hexdigest()[:16]
+    except (OSError, TypeError):
+        return None
 
 
 @dataclass
@@ -39,6 +50,7 @@ class FunctionState:
     """Exploration state for a single function."""
 
     name: str
+    source_hash: str | None = None
 
     # mine() results
     mined: bool = False
@@ -93,6 +105,26 @@ class FunctionState:
             scores.append(min(1.0, len(self.faults_tested) / 3))
         return sum(scores) / max(len(scores), 1)
 
+    def reset(self) -> None:
+        """Clear all exploration results.  Called when source changes."""
+        self.source_hash = None
+        self.mined = False
+        self.properties = []
+        self.property_violations = []
+        self.edges_discovered = 0
+        self.saturated = False
+        self.mutated = False
+        self.mutation_score = None
+        self.survived_mutants = 0
+        self.killed_mutants = 0
+        self.hardened = False
+        self.hardened_kills = 0
+        self.scanned = False
+        self.crash_free = None
+        self.fuzz_examples = 0
+        self.chaos_tested = False
+        self.faults_tested = []
+
     @property
     def frontier(self) -> list[str]:
         """What's unexplored for this function."""
@@ -138,6 +170,42 @@ class ExplorationState:
         if name not in self.functions:
             self.functions[name] = FunctionState(name=name)
         return self.functions[name]
+
+    def refresh(self) -> list[str]:
+        """Invalidate functions whose source code changed since last exploration.
+
+        Compares stored ``source_hash`` on each function against the
+        current source.  Changed functions are :meth:`reset` — all
+        prior results are discarded so the next exploration redoes them
+        from scratch.  Fresh source hashes are stamped on every
+        function that can be resolved.
+
+        Returns the names of functions that were invalidated.
+        """
+        from ordeal.auto import _get_public_functions, _resolve_module
+
+        invalidated: list[str] = []
+        try:
+            mod = _resolve_module(self.module)
+            current = {name: func for name, func in _get_public_functions(mod)}
+        except Exception:
+            return invalidated
+
+        for name, fs in list(self.functions.items()):
+            func = current.get(name)
+            if func is None:
+                # Function removed — reset so frontier shows gaps.
+                fs.reset()
+                invalidated.append(name)
+                continue
+            h = _source_hash(func)
+            if fs.source_hash is not None and h != fs.source_hash:
+                fs.reset()
+                invalidated.append(name)
+            # Stamp fresh hash regardless (covers first-time and post-reset).
+            fs.source_hash = h
+
+        return invalidated
 
     @property
     def confidence(self) -> float:
@@ -261,6 +329,7 @@ def explore_mine(
         except Exception:
             continue
         fs = state.function(name)
+        fs.source_hash = _source_hash(func)
         fs.mined = True
         fs.properties = [
             {
@@ -454,6 +523,10 @@ def explore(
 
     if state is None:
         state = ExplorationState(module=module)
+    else:
+        # Resuming — invalidate any functions whose source changed so
+        # the pipeline redoes them from scratch instead of skipping.
+        state.refresh()
 
     # Initialize supervisor and state tree if not already present
     if not hasattr(state, "supervisor") or state.supervisor is None:

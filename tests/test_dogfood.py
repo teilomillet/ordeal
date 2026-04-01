@@ -533,3 +533,104 @@ class TestChaosForOrdeal:
             stateful_step_count=5,
         )
         assert TestCase is not None
+
+
+# ============================================================================
+# 7. Source-hash invalidation — stale results are discarded on code change
+# ============================================================================
+
+
+class TestSourceHashRefresh:
+    """ExplorationState.refresh() detects code changes and resets stale functions."""
+
+    def test_reset_clears_all_fields(self):
+        fs = FunctionState(name="f", source_hash="abc123")
+        fs.mined = True
+        fs.mutated = True
+        fs.mutation_score = 0.9
+        fs.scanned = True
+        fs.crash_free = True
+        fs.chaos_tested = True
+        fs.reset()
+        assert not fs.mined
+        assert not fs.mutated
+        assert fs.mutation_score is None
+        assert not fs.scanned
+        assert fs.crash_free is None
+        assert not fs.chaos_tested
+        assert fs.source_hash is None
+
+    def test_source_hash_stamped_on_mine(self):
+        """explore_mine stamps source_hash on each function it discovers."""
+        from ordeal.state import explore_mine
+
+        state = ExplorationState(module="ordeal.demo")
+        state = explore_mine(state, max_examples=5)
+        for fs in state.functions.values():
+            assert fs.source_hash is not None, f"{fs.name} has no source_hash"
+
+    def test_refresh_invalidates_changed_source(self):
+        """If source_hash doesn't match current source, function is reset."""
+        from ordeal.state import explore_mine
+
+        state = ExplorationState(module="ordeal.demo")
+        state = explore_mine(state, max_examples=5)
+
+        # Verify we have results
+        has_mined = any(fs.mined for fs in state.functions.values())
+        assert has_mined
+
+        # Corrupt a source hash to simulate a code change
+        changed = []
+        for fs in state.functions.values():
+            if fs.mined:
+                fs.source_hash = "fake_stale_hash"
+                changed.append(fs.name)
+                break
+
+        invalidated = state.refresh()
+        assert len(invalidated) > 0
+        assert invalidated[0] == changed[0]
+
+        # The invalidated function should be reset
+        fs = state.functions[changed[0]]
+        assert not fs.mined
+        assert fs.source_hash is not None  # re-stamped with fresh hash
+
+    def test_refresh_preserves_unchanged(self):
+        """Functions with matching source_hash keep their results."""
+        from ordeal.state import explore_mine
+
+        state = ExplorationState(module="ordeal.demo")
+        state = explore_mine(state, max_examples=5)
+
+        # Refresh without changing anything
+        invalidated = state.refresh()
+        assert len(invalidated) == 0
+
+        # All results should be preserved
+        for fs in state.functions.values():
+            if fs.mined:
+                assert fs.mined  # still mined
+
+    def test_json_roundtrip_preserves_source_hash(self):
+        """source_hash survives JSON serialization."""
+        state = ExplorationState(module="test.module")
+        fs = state.function("my_func")
+        fs.source_hash = "abc123def456"
+        fs.mined = True
+
+        restored = ExplorationState.from_json(state.to_json())
+        assert restored.functions["my_func"].source_hash == "abc123def456"
+
+    def test_refresh_no_source_hash_is_noop(self):
+        """Functions that were never hashed are not invalidated."""
+        state = ExplorationState(module="ordeal.demo")
+        fs = state.function("clamp")
+        fs.mined = True
+        fs.source_hash = None  # never stamped
+
+        invalidated = state.refresh()
+        assert "clamp" not in invalidated
+        assert fs.mined  # preserved
+        assert fs.source_hash is not None  # now stamped with fresh hash

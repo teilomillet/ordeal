@@ -1676,6 +1676,7 @@ def _generate_toml(
         f'target_modules = ["{top_pkg}"]',
         "max_time = 30",
         "seed = 42",
+        "rule_swarm = true",
         "verbose = true",
         "",
     ]

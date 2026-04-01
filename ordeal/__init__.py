@@ -175,6 +175,7 @@ _LAZY_SUBMODULES = (
     "ordeal.metamorphic",
     "ordeal.diff",
     "ordeal.scaling",
+    "ordeal.state",
 )
 
 _SENTINEL = object()
@@ -272,6 +273,9 @@ def catalog() -> dict[str, list]:
         ),
         "scaling": _introspect_module(
             __import__("ordeal.scaling", fromlist=["scaling"]),
+        ),
+        "exploration": _introspect_module(
+            __import__("ordeal.state", fromlist=["state"]),
         ),
     }
     try:

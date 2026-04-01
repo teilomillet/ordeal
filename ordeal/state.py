@@ -160,6 +160,7 @@ class ExplorationState:
     module: str
     functions: dict[str, FunctionState] = field(default_factory=dict)
     skipped: list[tuple[str, str]] = field(default_factory=list)
+    refreshed: list[str] = field(default_factory=list)
     edge_coverage: float | None = None
     exploration_time: float = 0.0
     supervisor_info: dict[str, Any] = field(default_factory=dict)
@@ -272,12 +273,15 @@ class ExplorationState:
         The state tree's snapshots are excluded (not JSON-serializable).
         The tree structure is preserved via ``tree.to_json()``.
         """
+        from ordeal.suggest import suggest
+
         data: dict[str, Any] = {
             "module": self.module,
             "confidence": round(self.confidence, 4),
             "functions": {name: asdict(fs) for name, fs in self.functions.items()},
             "findings": self.findings,
             "frontier": self.frontier,
+            "suggestions": suggest(self),
             "skipped": self.skipped,
             "exploration_time": round(self.exploration_time, 2),
             "seed": self.supervisor_info.get("seed"),
@@ -526,7 +530,7 @@ def explore(
     else:
         # Resuming — invalidate any functions whose source changed so
         # the pipeline redoes them from scratch instead of skipping.
-        state.refresh()
+        state.refreshed = state.refresh()
 
     # Initialize supervisor and state tree if not already present
     if not hasattr(state, "supervisor") or state.supervisor is None:

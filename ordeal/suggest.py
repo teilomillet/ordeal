@@ -99,6 +99,13 @@ def suggest(result: Any) -> list[str]:
     if tree and getattr(tree, "size", 0) > 1:
         suggestions.append(f"state tree rollback ({tree.size} checkpoints available)")
 
+    # Source-hash refresh — functions re-explored due to code changes
+    refreshed = getattr(result, "refreshed", [])
+    if refreshed:
+        names = ", ".join(refreshed[:5])
+        tail = f" +{len(refreshed) - 5} more" if len(refreshed) > 5 else ""
+        suggestions.append(f"refreshed ({len(refreshed)} source changed: {names}{tail})")
+
     return suggestions
 
 

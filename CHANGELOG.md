@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.82
+
+**Features:**
+
+- skill discoverable via catalog(), revert pytest header
+- pytest header shows ordeal version + discovery breadcrumbs
+
+
 ## 0.2.81
 
 **Fixes:**

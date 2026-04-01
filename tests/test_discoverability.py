@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import ordeal
 
-
 # ============================================================================
 # Top-level imports: ``from ordeal import X`` must work
 # ============================================================================
@@ -162,7 +161,7 @@ def test_catalog_items_have_required_fields():
             missing_fields = required - set(item.keys())
             if missing_fields:
                 bad.append(f"{section}/{item.get('name', '?')}: missing {missing_fields}")
-    assert not bad, f"Catalog items with missing fields:\n" + "\n".join(bad)
+    assert not bad, "Catalog items with missing fields:\n" + "\n".join(bad)
 
 
 def test_catalog_docs_are_not_empty():
@@ -173,9 +172,8 @@ def test_catalog_docs_are_not_empty():
         for item in items:
             if not item.get("doc", "").strip():
                 undocumented.append(f"{section}/{item['name']}")
-    assert not undocumented, (
-        f"Undocumented items in catalog (add a docstring):\n"
-        + "\n".join(f"  {u}" for u in undocumented)
+    assert not undocumented, "Undocumented items in catalog (add a docstring):\n" + "\n".join(
+        f"  {u}" for u in undocumented
     )
 
 
@@ -197,10 +195,7 @@ def test_catalog_exploration_contains_key_items():
     c = ordeal.catalog()
     names = {item["name"] for item in c["exploration"]}
     missing = [n for n in _EXPLORATION_MUST_CONTAIN if n not in names]
-    assert not missing, (
-        f"Missing from catalog['exploration']: {missing}\n"
-        f"Present: {sorted(names)}"
-    )
+    assert not missing, f"Missing from catalog['exploration']: {missing}\nPresent: {sorted(names)}"
 
 
 def test_explorer_docstring_mentions_seed_mutation():

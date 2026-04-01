@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.76
+
+**Features:**
+
+- always-on seed replay, public API exports, discoverability
+
+
 ## 0.2.75
 
 **Features:**

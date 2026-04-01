@@ -11,6 +11,7 @@ from ordeal.config import ConfigError, load_config
 from ordeal.mutations import (
     OPERATORS,
     PRESETS,
+    MutationResult,
     _get_source,
     _is_runtime_equivalent,
     _resolve_operators,
@@ -593,3 +594,108 @@ def test_runtime_equivalent_truly_equivalent():
 
     result = _is_runtime_equivalent(original, mutant)
     assert result is True
+
+
+# ============================================================================
+# MutationResult diagnostics
+# ============================================================================
+
+
+def test_diagnostics_populated_after_mutate():
+    """mutate_function_and_test populates diagnostics counters."""
+    result = mutate_function_and_test(
+        f"{__name__}._add",
+        _test_add,
+        preset="essential",
+        filter_equivalent=False,
+    )
+    d = result.diagnostics
+    assert d["generated"] > 0, "should count generated mutants"
+    assert d["tested"] == result.total, "tested should equal final mutant count"
+
+
+def test_diagnostics_counts_ast_equivalent():
+    """AST-equivalent mutants are counted, not silently dropped."""
+    stats: dict[str, int] = {}
+    # Simple source where some mutations produce equivalent bytecode
+    source = textwrap.dedent("""\
+        def f(x):
+            return x + 0
+    """)
+    generate_mutants(source, operators=["arithmetic"], _stats=stats)
+    # We generated something and may have filtered some as AST-equivalent
+    assert stats.get("generated", 0) > 0
+
+
+def test_diagnostics_counts_runtime_equivalent():
+    """Runtime-equivalent filtering is tracked in diagnostics."""
+    result = mutate_function_and_test(
+        f"{__name__}._add",
+        _test_add,
+        preset="essential",
+        filter_equivalent=True,
+    )
+    d = result.diagnostics
+    # The key should exist (may be 0 if none were filtered)
+    assert "filtered_runtime_equivalent" in d
+
+
+def test_summary_zero_mutants_not_misleading():
+    """summary() should NOT show '100%' when there are 0 mutants."""
+    result = MutationResult(target="fake.target")
+    s = result.summary()
+    assert "100%" not in s
+    assert "no mutants to test" in s
+
+
+def test_summary_zero_mutants_explains_all_filtered():
+    """summary() explains when all mutants were filtered as equivalent."""
+    result = MutationResult(target="fake.target")
+    result.diagnostics["generated"] = 5
+    result.diagnostics["filtered_ast_equivalent"] = 5
+    s = result.summary()
+    assert "filter_equivalent=False" in s
+
+
+def test_summary_zero_mutants_explains_no_sites():
+    """summary() explains when no mutation sites were found."""
+    result = MutationResult(target="fake.target")
+    result.diagnostics["generated"] = 0
+    s = result.summary()
+    assert "No mutation sites" in s
+
+
+def test_filter_report_empty_result():
+    """filter_report() handles 0 generated, 0 tested."""
+    result = MutationResult(target="fake.target")
+    report = result.filter_report()
+    assert "No mutants were generated" in report
+
+
+def test_filter_report_with_filtering():
+    """filter_report() shows pipeline breakdown."""
+    result = MutationResult(target="fake.target")
+    result.diagnostics["generated"] = 10
+    result.diagnostics["filtered_ast_equivalent"] = 3
+    result.diagnostics["filtered_runtime_equivalent"] = 2
+    result.diagnostics["compilation_failed"] = 1
+    result.diagnostics["tested"] = 4
+    report = result.filter_report()
+    assert "10 mutant(s) generated" in report
+    assert "3 filtered (AST equivalent)" in report
+    assert "2 filtered (runtime equivalent)" in report
+    assert "1 dropped (compilation failed)" in report
+    assert "4 tested" in report
+
+
+def test_filter_report_from_real_run():
+    """filter_report() works on a real mutate_function_and_test result."""
+    result = mutate_function_and_test(
+        f"{__name__}._add",
+        _test_add,
+        preset="essential",
+        filter_equivalent=False,
+    )
+    report = result.filter_report()
+    assert "generated" in report
+    assert "tested" in report

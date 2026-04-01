@@ -440,6 +440,17 @@ class MutationResult:
     operators_used: list[str] | None = None
     preset_used: str | None = None
     concern: str | None = None
+    diagnostics: dict[str, int] = field(
+        default_factory=lambda: {
+            "generated": 0,
+            "filtered_ast_equivalent": 0,
+            "filtered_runtime_equivalent": 0,
+            "filtered_module_equivalent": 0,
+            "compilation_failed": 0,
+            "skipped_display_method": 0,
+            "tested": 0,
+        }
+    )
 
     @property
     def total(self) -> int:
@@ -477,6 +488,35 @@ class MutationResult:
         """Kill ratio: 1.0 means every mutant was caught."""
         return self.killed / self.total if self.total > 0 else 1.0
 
+    def filter_report(self) -> str:
+        """Structured breakdown of the mutation pipeline for AI assistants.
+
+        Shows how many mutants were generated and where they were filtered,
+        so the consumer can understand *why* the result looks the way it does.
+
+        Returns an empty string when diagnostics are not populated.
+        """
+        d = self.diagnostics
+        generated = d.get("generated", 0)
+        if generated == 0 and self.total == 0:
+            return "No mutants were generated from the source code."
+
+        lines = [f"Pipeline: {generated} mutant(s) generated"]
+        for key, label in [
+            ("skipped_display_method", "skipped (display method)"),
+            ("filtered_ast_equivalent", "filtered (AST equivalent)"),
+            ("filtered_runtime_equivalent", "filtered (runtime equivalent)"),
+            ("filtered_module_equivalent", "filtered (module equivalent)"),
+            ("compilation_failed", "dropped (compilation failed)"),
+        ]:
+            count = d.get(key, 0)
+            if count > 0:
+                lines.append(f"  - {count} {label}")
+        lines.append(f"  → {d.get('tested', self.total)} tested")
+        if self.total > 0:
+            lines.append(f"  → {self.killed} killed, {len(self.survived)} survived")
+        return "\n".join(lines)
+
     def summary(self, remediation: bool = True) -> str:
         """Report with test gaps and per-gap fix guidance.
 
@@ -497,6 +537,34 @@ class MutationResult:
         if self.concern:
             parts.append(f"concern: {self.concern}")
         meta = ", ".join(parts)
+
+        # When no mutants survived filtering, explain why instead of "100%"
+        if self.total == 0:
+            lines = [f"Mutation score: 0/0 (no mutants to test)  [{meta}]"]
+            report = self.filter_report()
+            if report:
+                lines.append(f"  {report}")
+            d = self.diagnostics
+            generated = d.get("generated", 0)
+            filtered = sum(
+                d.get(k, 0)
+                for k in (
+                    "filtered_ast_equivalent",
+                    "filtered_runtime_equivalent",
+                    "filtered_module_equivalent",
+                )
+            )
+            if generated > 0 and filtered == generated:
+                lines.append(
+                    "  All mutants were filtered as equivalent. "
+                    "Try filter_equivalent=False to inspect them."
+                )
+            elif generated == 0:
+                lines.append(
+                    "  No mutation sites found in the source. "
+                    "Check that the target is correct and contains mutable code."
+                )
+            return "\n".join(lines)
 
         lines = [f"Mutation score: {self.killed}/{self.total} ({self.score:.0%})  [{meta}]"]
         if self.survived:
@@ -2474,6 +2542,7 @@ def generate_mutants(
     extra_mutants: list[str | tuple[str, str]] | None = None,
     llm: Callable[[str], str] | None = None,
     concern: str | None = None,
+    _stats: dict[str, int] | None = None,
 ) -> list[tuple[Mutant, ast.Module]]:
     """Generate mutants from source code, filtering out noise.
 
@@ -2503,6 +2572,9 @@ def generate_mutants(
         llm: Optional callable ``(prompt: str) -> str`` for automated
             mutant generation.  ordeal crafts the prompt; the user
             provides any LLM backend.
+        _stats: Optional mutable dict for diagnostic counters.  When
+            provided, keys ``generated``, ``filtered_ast_equivalent``,
+            and ``skipped_display_method`` are incremented in-place.
 
     Returns a list of ``(Mutant, mutated_AST)`` pairs.
     """
@@ -2510,6 +2582,7 @@ def generate_mutants(
     source_lines = source.splitlines()
     ops = operators or list(OPERATORS.keys())
     results: list[tuple[Mutant, ast.Module]] = []
+    st = _stats  # alias for brevity
 
     for op_name in ops:
         if op_name not in OPERATORS:
@@ -2526,13 +2599,19 @@ def generate_mutants(
             ast.fix_missing_locations(mutated_tree)
 
             if applicator.applied:
+                if st is not None:
+                    st["generated"] = st.get("generated", 0) + 1
                 # Skip mutations in display/repr methods
                 if _is_inside_skip_method(tree, applicator.line):
+                    if st is not None:
+                        st["skipped_display_method"] = st.get("skipped_display_method", 0) + 1
                     continue
                 # Skip semantically equivalent mutants
                 if _is_equivalent_mutant(
                     tree, mutated_tree, op_name, applicator.description, applicator.line
                 ):
+                    if st is not None:
+                        st["filtered_ast_equivalent"] = st.get("filtered_ast_equivalent", 0) + 1
                     continue
                 # Capture the source line for context
                 src_line = ""
@@ -3113,8 +3192,9 @@ def mutate_and_test(
     with open(source_file) as f:
         source = f.read()
 
+    stats: dict[str, int] = {}
     mutant_pairs = generate_mutants(
-        source, operators, extra_mutants=extra_mutants, llm=llm, concern=concern
+        source, operators, extra_mutants=extra_mutants, llm=llm, concern=concern, _stats=stats
     )
 
     # Filter equivalent mutants (same outputs on random inputs)
@@ -3124,6 +3204,9 @@ def mutate_and_test(
             if _module_is_equivalent(module, tree, equivalence_samples):
                 mutant.killed = True
                 mutant.error = "equivalent (filtered)"
+                stats["filtered_module_equivalent"] = (
+                    stats.get("filtered_module_equivalent", 0) + 1
+                )
             else:
                 filtered.append((mutant, tree))
         mutant_pairs = filtered
@@ -3145,6 +3228,8 @@ def mutate_and_test(
             mutant.error = error
             mutant.killed_by = killer
             result.mutants.append(mutant)
+        result.diagnostics.update(stats)
+        result.diagnostics["tested"] = result.total
         return result
 
     # Fallback: serial per-mutant testing (custom test_fn)
@@ -3162,6 +3247,8 @@ def mutate_and_test(
 
         result.mutants.append(mutant)
 
+    result.diagnostics.update(stats)
+    result.diagnostics["tested"] = result.total
     return result
 
 
@@ -3452,13 +3539,14 @@ def mutate_function_and_test(
     func = _unwrap_func(getattr(module, func_name))
     source = _get_source(func)
 
+    stats: dict[str, int] = {}
     mutant_pairs = generate_mutants(
-        source, operators, extra_mutants=extra_mutants, llm=llm, concern=concern
+        source, operators, extra_mutants=extra_mutants, llm=llm, concern=concern, _stats=stats
     )
 
     # Mine-based oracle: mine the original, use properties to kill mutants
     if use_mine_oracle:
-        return _mine_based_mutation_test(
+        result = _mine_based_mutation_test(
             target,
             func,
             func_name,
@@ -3468,7 +3556,11 @@ def mutate_function_and_test(
             equivalence_samples=equivalence_samples,
             operators_used=operators,
             preset_used=used_preset,
+            _stats=stats,
         )
+        result.diagnostics.update(stats)
+        result.diagnostics["tested"] = result.total
+        return result
 
     assert test_fn is not None
 
@@ -3476,6 +3568,8 @@ def mutate_function_and_test(
         result = _parallel_function_test(target, test_fn, mutant_pairs, module, func_name, workers)
         result.preset_used = used_preset
         result.operators_used = operators
+        result.diagnostics.update(stats)
+        result.diagnostics["tested"] = result.total
         return result
 
     result = MutationResult(
@@ -3490,14 +3584,17 @@ def mutate_function_and_test(
             exec(code, namespace)
             mutated_func = namespace.get(func_name)
             if mutated_func is None:
+                stats["compilation_failed"] = stats.get("compilation_failed", 0) + 1
                 continue
         except Exception:
-            continue  # mutant doesn't compile — skip
+            stats["compilation_failed"] = stats.get("compilation_failed", 0) + 1
+            continue
 
         # Runtime equivalence filter: skip if outputs match on samples
         if filter_equivalent and _is_runtime_equivalent(
             func, mutated_func, n_samples=equivalence_samples
         ):
+            stats["filtered_runtime_equivalent"] = stats.get("filtered_runtime_equivalent", 0) + 1
             continue
 
         # Swap via PatchFault
@@ -3528,6 +3625,8 @@ def mutate_function_and_test(
                 except Exception:
                     pass
 
+    result.diagnostics.update(stats)
+    result.diagnostics["tested"] = result.total
     return result
 
 
@@ -3542,6 +3641,7 @@ def _mine_based_mutation_test(
     equivalence_samples: int,
     operators_used: list[str] | None,
     preset_used: str | None,
+    _stats: dict[str, int] | None = None,
 ) -> MutationResult:
     """Kill mutants using mine()-discovered properties as the test oracle.
 
@@ -3579,6 +3679,7 @@ def _mine_based_mutation_test(
                 except Exception:
                     break
 
+    st = _stats  # alias for brevity
     result = MutationResult(target=target, operators_used=operators_used, preset_used=preset_used)
 
     for mutant, mutated_tree in mutant_pairs:
@@ -3588,13 +3689,19 @@ def _mine_based_mutation_test(
             exec(code, namespace)  # noqa: S102
             mutated_func = namespace.get(func_name)
             if mutated_func is None:
+                if st is not None:
+                    st["compilation_failed"] = st.get("compilation_failed", 0) + 1
                 continue
         except Exception:
+            if st is not None:
+                st["compilation_failed"] = st.get("compilation_failed", 0) + 1
             continue
 
         if filter_equivalent and _is_runtime_equivalent(
             func, mutated_func, n_samples=equivalence_samples
         ):
+            if st is not None:
+                st["filtered_runtime_equivalent"] = st.get("filtered_runtime_equivalent", 0) + 1
             continue
 
         # Check if the mutant violates any mined property

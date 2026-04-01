@@ -171,45 +171,21 @@ _KNOWN_SECTIONS = {
     "api",
     "mutations",
 }
-_KNOWN_API_KEYS = {
-    "schema_url",
-    "app",
-    "wsgi",
-    "schema_path",
-    "base_url",
-    "faults",
-    "fault_probability",
-    "seed",
-    "swarm",
-    "max_examples",
-    "headers",
-    "stateful",
-    "mutation_targets",
-    "auto_discover",
-}
-_KNOWN_EXPLORER_KEYS = {
-    "target_modules",
-    "max_time",
-    "max_runs",
-    "seed",
-    "max_checkpoints",
-    "checkpoint_prob",
-    "checkpoint_strategy",
-    "steps_per_run",
-    "fault_toggle_prob",
-    "workers",
-}
-_KNOWN_TEST_KEYS = {"class", "steps_per_run", "swarm"}
-_KNOWN_REPORT_KEYS = {"format", "output", "traces", "traces_dir", "verbose"}
-_KNOWN_MUTATIONS_KEYS = {
-    "targets",
-    "preset",
-    "operators",
-    "workers",
-    "threshold",
-    "filter_equivalent",
-    "equivalence_samples",
-}
+
+
+def _fields_of(cls: type) -> set[str]:
+    """Derive known keys from a dataclass's fields."""
+    from dataclasses import fields as _dc_fields
+
+    return {f.name for f in _dc_fields(cls)}
+
+
+_KNOWN_EXPLORER_KEYS = _fields_of(ExplorerConfig)
+_KNOWN_REPORT_KEYS = _fields_of(ReportConfig)
+_KNOWN_MUTATIONS_KEYS = _fields_of(MutationConfig)
+# API and Test configs have extra TOML-only keys not in the dataclass
+_KNOWN_API_KEYS = _fields_of(APIConfig) | {"stateful", "mutation_targets", "auto_discover"}
+_KNOWN_TEST_KEYS = (_fields_of(TestConfig) - {"class_path"}) | {"class"}
 
 
 class ConfigError(Exception):

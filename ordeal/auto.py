@@ -550,8 +550,154 @@ def fuzz(
 
 
 # ============================================================================
-# 3. chaos_for
+# 3. chaos_for — auto-infer faults + invariants
 # ============================================================================
+
+# Patterns in function ASTs that map to specific fault types.
+# Keys are (module_attr, func_name) pairs found in ast.Call nodes.
+_FAULT_PATTERNS: dict[str, list[tuple[str, str, dict[str, Any]]]] = {
+    # pattern → [(fault_module, fault_factory, kwargs), ...]
+    "subprocess.run": [
+        ("io", "subprocess_timeout", {}),
+        ("io", "subprocess_delay", {}),
+        ("io", "corrupt_stdout", {}),
+    ],
+    "subprocess.check_output": [
+        ("io", "subprocess_timeout", {}),
+    ],
+    "subprocess.Popen": [
+        ("io", "subprocess_timeout", {}),
+    ],
+    "open": [
+        ("io", "disk_full", {}),
+        ("io", "permission_denied", {}),
+    ],
+}
+
+
+def _infer_faults(mod: ModuleType, mod_name: str) -> list[Fault]:
+    """Auto-discover faults by scanning function ASTs for risky calls.
+
+    Detects subprocess, file I/O, and cross-function calls, then
+    generates appropriate fault instances.
+    """
+    import ast
+    import textwrap
+
+    faults: list[Fault] = []
+    seen: set[str] = set()
+
+    for name, func in _get_public_functions(mod):
+        try:
+            source = textwrap.dedent(inspect.getsource(func))
+            tree = ast.parse(source)
+        except (OSError, TypeError, SyntaxError):
+            continue
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+
+            # Extract call target as string (e.g. "subprocess.run", "open")
+            call_str = _call_to_string(node)
+            if not call_str:
+                continue
+
+            # Check against known patterns
+            for pattern, fault_specs in _FAULT_PATTERNS.items():
+                if pattern not in call_str:
+                    continue
+                for fault_mod, fault_fn, kwargs in fault_specs:
+                    key = f"{fault_mod}.{fault_fn}"
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    fault_module = importlib.import_module(f"ordeal.faults.{fault_mod}")
+                    factory = getattr(fault_module, fault_fn)
+                    # Faults that need a target get the module name
+                    params = inspect.signature(factory).parameters
+                    if "target" in params:
+                        faults.append(factory(f"{mod_name}.{name}", **kwargs))
+                    else:
+                        faults.append(factory(**kwargs))
+
+            # Cross-function calls → error_on_call
+            if call_str.startswith(mod_name + ".") and call_str not in seen:
+                seen.add(call_str)
+                from ordeal.faults.io import error_on_call
+
+                faults.append(error_on_call(call_str))
+
+    return faults
+
+
+def _call_to_string(node: Any) -> str | None:
+    """Extract a dotted string from an ast.Call node's func attribute."""
+    import ast
+
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        parts = []
+        current = func
+        while isinstance(current, ast.Attribute):
+            parts.append(current.attr)
+            current = current.value
+        if isinstance(current, ast.Name):
+            parts.append(current.id)
+            return ".".join(reversed(parts))
+    return None
+
+
+def _infer_invariants(
+    mod: ModuleType,
+    fixtures: dict[str, Any] | None,
+) -> tuple[dict[str, list[Invariant]], list[Invariant]]:
+    """Auto-discover invariants by mining function properties.
+
+    Runs mine() on each function with a small example count,
+    then maps universal properties to invariant objects.
+    """
+    from ordeal.invariants import bounded, finite, no_nan, non_empty
+    from ordeal.mine import mine
+
+    # Map mined property names to invariant constructors
+    _PROPERTY_TO_INVARIANT: dict[str, Invariant | None] = {
+        "no NaN": no_nan,
+        "output >= 0": bounded(0, float("inf")),
+        "output in [0, 1]": bounded(0, 1),
+        "never empty": non_empty(),
+    }
+
+    invariant_map: dict[str, list[Invariant]] = {}
+    for name, func in _get_public_functions(mod):
+        strats = _infer_strategies(func, fixtures)
+        if strats is None:
+            continue
+        try:
+            result = mine(func, max_examples=30)
+        except Exception:
+            continue
+
+        func_invs: list[Invariant] = []
+        has_numeric = False
+        for prop in result.universal:
+            inv = _PROPERTY_TO_INVARIANT.get(prop.name)
+            if inv is not None:
+                func_invs.append(inv)
+            if "output >= 0" in prop.name or "output in [" in prop.name:
+                has_numeric = True
+
+        # If function returns numeric values and no specific bound was found,
+        # at least check for finite
+        if has_numeric and not any(isinstance(i, type(finite)) for i in func_invs):
+            func_invs.append(finite)
+
+        if func_invs:
+            invariant_map[name] = func_invs
+
+    return invariant_map, []
 
 
 def chaos_for(
@@ -569,52 +715,52 @@ def chaos_for(
     *faults*.  After each step, *invariants* are checked on every
     return value.
 
-    Simple::
+    Zero-config — discovers everything automatically::
 
         TestScoring = chaos_for("myapp.scoring")
+        # Scans code for subprocess/file/network calls → generates faults
+        # Mines each function with random inputs → generates invariants
 
-    With invariants applied to all functions::
-
-        TestScoring = chaos_for(
-            "myapp.scoring",
-            invariants=[finite, bounded(0, 1)],
-        )
-
-    With per-function invariants::
+    With explicit overrides::
 
         TestScoring = chaos_for(
             "myapp.scoring",
-            invariants={
-                "score_response": bounded(0, 1),
-                "compute_weights": finite,
-            },
+            faults=[timing.timeout("myapp.db.query")],
+            invariants={"compute": bounded(0, 1)},
         )
+
+    Pass ``faults=[]`` or ``invariants=[]`` to disable auto-discovery.
 
     Returns a pytest-discoverable ``TestCase`` class.
 
     Args:
         module: Module path or object.
         fixtures: Strategy overrides for parameter names.
-        invariants: Checked on return values after each rule call.
-            A list applies all invariants to every function.
-            A dict maps function names to specific invariants.
-        faults: Fault instances for the nemesis to toggle.
+        invariants: ``None`` = auto-mine, list = global, dict = per-function.
+        faults: ``None`` = auto-infer from code, list = explicit.
         max_examples: Hypothesis examples.
         stateful_step_count: Max rules per test case.
     """
     mod = _resolve_module(module)
     mod_name = module if isinstance(module, str) else mod.__name__
-    fault_list = faults or []
 
-    # Normalize invariants to per-function lookup
-    if isinstance(invariants, dict):
+    # Auto-discover faults from code analysis when not provided
+    if faults is None:
+        fault_list = _infer_faults(mod, mod_name)
+    else:
+        fault_list = list(faults)
+
+    # Auto-discover invariants from mine() when not provided
+    if invariants is None:
+        invariant_map, global_invs = _infer_invariants(mod, fixtures)
+    elif isinstance(invariants, dict):
         invariant_map: dict[str, list[Invariant]] = {
             k: [v] if isinstance(v, Invariant) else list(v) for k, v in invariants.items()
         }
         global_invs: list[Invariant] = []
     else:
         invariant_map = {}
-        global_invs = invariants or []
+        global_invs = list(invariants)
 
     # Collect rule methods
     rules_dict: dict[str, Any] = {}

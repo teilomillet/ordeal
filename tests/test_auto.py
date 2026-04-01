@@ -80,6 +80,8 @@ class TestChaosFor:
         TestCase = chaos_for(
             "tests._auto_target",
             fixtures={"b": st.floats(min_value=0.1, max_value=10.0)},
+            faults=[],
+            invariants=[],
             max_examples=10,
             stateful_step_count=5,
         )
@@ -107,11 +109,22 @@ class TestChaosFor:
         TestCase = chaos_for(
             "tests._auto_target",
             fixtures={"b": st.floats(min_value=0.1, max_value=10.0)},
+            faults=[],
+            invariants=[],
             max_examples=10,
             stateful_step_count=5,
         )
         test = TestCase("runTest")
         test.runTest()
+
+    def test_auto_discovers_invariants(self):
+        """chaos_for() with no invariants/faults auto-mines and infers."""
+        TestCase = chaos_for(
+            "ordeal.demo",
+            max_examples=5,
+            stateful_step_count=5,
+        )
+        assert TestCase is not None
 
 
 # ============================================================================

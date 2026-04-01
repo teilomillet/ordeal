@@ -129,6 +129,7 @@ _EXPECTED_CATALOG_SECTIONS = [
     "supervisor",
     "mutagen",
     "cmplog",
+    "equivalence",
 ]
 
 

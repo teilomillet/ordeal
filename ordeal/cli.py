@@ -128,6 +128,7 @@ def _cmd_explore(args: argparse.Namespace) -> int:
             fault_toggle_prob=cfg.explorer.fault_toggle_prob,
             record_traces=cfg.report.traces or bool(args.generate_tests),
             workers=cfg.explorer.workers,
+            ngram=cfg.explorer.ngram,
         )
 
         result = explorer.run(
@@ -374,6 +375,7 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
             checkpoint_strategy=cfg.explorer.checkpoint_strategy,
             fault_toggle_prob=cfg.explorer.fault_toggle_prob,
             workers=n,
+            ngram=cfg.explorer.ngram,
         )
 
         import time as _t

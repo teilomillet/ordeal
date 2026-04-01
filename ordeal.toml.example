@@ -35,6 +35,14 @@ steps_per_run = 50
 # Probability of a nemesis action (fault toggle) per step.
 fault_toggle_prob = 0.3
 
+# N-gram depth for edge coverage hashing (AFL++ NGRAM model).
+#   1 = classic AFL single-edge (prev XOR cur).
+#   2 = path-context: hashes the last 2 locations with the current one.
+#       Captures which branch led to each edge.  Sweet spot for Python.
+#   3+ = deeper context, diminishing returns (Python lines are coarser
+#       than C basic blocks — ngram=2 already captures the important signal).
+ngram = 2
+
 
 # Each [[tests]] entry is a ChaosTest class to explore.
 # Format: "module.path:ClassName"

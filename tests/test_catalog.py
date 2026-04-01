@@ -31,6 +31,8 @@ class TestTopLevelCatalog:
             "mutagen",
             "cmplog",
             "concolic",
+            "grammar",
+            "equivalence",
         }
         always(set(c.keys()) == expected, "catalog has all categories")
 

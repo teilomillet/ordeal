@@ -1733,3 +1733,150 @@ Discovers per-function properties (via `mine()`) and cross-function relationship
 | `holds` | `int` | Number of inputs where it held |
 | `total` | `int` | Number of inputs tested |
 | `counterexample` | `dict | None` | One failing input if relation doesn't hold universally |
+
+---
+
+## Grammar Strategies
+
+!!! quote "Syntax-valid inputs reach deeper code"
+    Random bytes and strings get rejected at the parser level — they never reach the business logic that actually has bugs. Grammar-aware strategies generate syntactically valid inputs (JSON, SQL, URLs, etc.) that pass parsing and exercise the code paths that matter. This is the Python equivalent of libFuzzer's structure-aware custom mutators.
+
+```python
+from ordeal.grammar import json_strategy, sql_strategy, url_strategy
+from ordeal.grammar import email_strategy, csv_strategy, xml_strategy
+from ordeal.grammar import path_strategy, regex_strategy, structured_strategy
+```
+
+Each returns a `hypothesis.strategies.SearchStrategy`. Use with `@given`, `@quickcheck`, `mine()`, or any Hypothesis-based tool.
+
+| Strategy | What it generates | Key parameters |
+|---|---|---|
+| `json_strategy(schema=, max_depth=3)` | Valid JSON values (objects, arrays, primitives) | `schema` dict constrains structure |
+| `sql_strategy(dialect=, tables=)` | Valid SELECT/INSERT/UPDATE/DELETE | `tables` dict of `{name: [columns]}` |
+| `url_strategy(schemes=)` | Valid URLs with paths, query params, fragments | `schemes` list (default: http, https, ftp) |
+| `email_strategy()` | Valid email addresses | — |
+| `path_strategy()` | Valid Unix and Windows file paths | — |
+| `csv_strategy(columns=, rows=)` | Valid CSV with headers | `columns` list of names |
+| `xml_strategy(tag=, max_depth=2)` | Well-formed XML with elements and attributes | `tag` root element name |
+| `regex_strategy(pattern)` | Strings matching a regex | `pattern` regex string |
+| `structured_strategy(example)` | Values structurally similar to the example | Any Python value |
+
+```python
+# Generate valid JSON for API testing
+from ordeal.grammar import json_strategy
+@given(payload=json_strategy({"type": "object"}))
+def test_api(payload):
+    response = my_api.post(payload)
+    assert response.status_code < 500
+
+# Generate valid SQL for query testing
+from ordeal.grammar import sql_strategy
+@given(query=sql_strategy(tables={"users": ["id", "name", "email"]}))
+def test_query_parser(query):
+    parsed = parse_sql(query)
+    assert parsed is not None
+
+# Infer strategy from an example
+from ordeal.grammar import structured_strategy
+example = {"name": "Alice", "scores": [95, 87, 92], "active": True}
+@given(data=structured_strategy(example))
+def test_process(data):
+    result = process_record(data)
+    assert result is not None
+```
+
+---
+
+## Equivalence Detection
+
+!!! quote "Not all surviving mutants are test gaps"
+    Equivalent mutants are code changes that don't change behavior — they always survive mutation testing, inflating the "test gap" count and wasting developer time. Detecting them is one of the hardest problems in mutation testing. ordeal provides three complementary approaches: structural (fast), statistical (medium), and formal (slow, definitive).
+
+```python
+from ordeal.equivalence import (
+    structural_equivalence,
+    statistical_equivalence,
+    prove_equivalent,
+    classify_mutant,
+    filter_equivalent_mutants,
+    EquivalenceResult,
+)
+```
+
+### Three approaches, layered fast → slow
+
+**Structural** — AST comparison after normalization. Catches trivially equivalent mutants (e.g., reordering commutative operations). Fast but conservative.
+
+**Statistical** — Run both versions on random inputs, compare outputs. Uses Wilson score confidence interval to bound equivalence probability. Medium speed, probabilistic.
+
+**Formal** — Z3 SMT solver encodes both functions and checks semantic identity. Definitive proof but slow. Optional: `pip install z3-solver`.
+
+### classify_mutant
+
+```python
+classify_mutant(
+    original_fn: Callable,
+    mutant_fn: Callable,
+    original_source: str,
+    mutant_source: str,
+    *,
+    max_seconds: float = 5,
+) -> EquivalenceResult
+```
+
+Runs all three methods in order (structural → statistical → formal). Returns the first definitive result.
+
+### EquivalenceResult
+
+| Attribute | Type | Description |
+|---|---|---|
+| `equivalent` | `bool | None` | `True` = equivalent, `False` = different, `None` = inconclusive |
+| `confidence` | `float` | 1.0 for proven, 0.0-1.0 for statistical |
+| `method` | `str` | `"structural"`, `"statistical"`, `"formal"`, or `"inconclusive"` |
+| `counterexample` | `dict | None` | Input where outputs differ (if not equivalent) |
+| `time_seconds` | `float` | Time taken for the analysis |
+
+### filter_equivalent_mutants
+
+```python
+filter_equivalent_mutants(
+    target: str,
+    mutant_pairs: list[MutantPair],
+    *,
+    methods: tuple[str, ...] = ("structural", "statistical"),
+) -> list[MutantPair]
+```
+
+Drop-in replacement for the existing equivalence filter in mutation testing. Uses the layered approach: structural first (fast), then statistical, optionally formal.
+
+---
+
+## N-gram Coverage
+
+!!! quote "Path context finds deeper bugs"
+    Single-edge coverage (the default AFL model) tracks individual transitions: A→B. But the same edge reached via different paths can expose different bugs. N-gram coverage tracks sequences of N edges as a single hash: at ngram=2, the path X→A→B is different from Y→A→B. This captures deeper patterns in control flow without the full overhead of path-sensitive analysis.
+
+The Explorer's `CoverageCollector` supports configurable N-gram depth:
+
+```python
+from ordeal.explore import CoverageCollector
+
+# Default: single-edge (backward compatible)
+collector = CoverageCollector(["myapp"], ngram=1)
+
+# 2-gram: captures one level of path context
+collector = CoverageCollector(["myapp"], ngram=2)
+```
+
+Configure via `ordeal.toml`:
+
+```toml
+[explorer]
+ngram = 2  # path-context depth (default: 1)
+```
+
+| N-gram | What it captures | Overhead | Best for |
+|---|---|---|---|
+| 1 | Single edge transitions | Lowest | Quick exploration |
+| 2 | Edge + one predecessor | Low | Most codebases (recommended) |
+| 3+ | Deeper path context | Medium | Complex state machines |

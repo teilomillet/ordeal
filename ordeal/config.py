@@ -47,6 +47,7 @@ class ExplorerConfig:
     steps_per_run: int = 50
     fault_toggle_prob: float = 0.3
     workers: int = 0  # 0 = auto (os.cpu_count())
+    ngram: int = 2  # N-gram depth for edge coverage (1=classic AFL, 2+=path-context)
 
 
 @dataclass
@@ -235,6 +236,10 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
     explorer_raw = raw.get("explorer", {})
     _warn_unknown_keys("explorer", explorer_raw, _KNOWN_EXPLORER_KEYS)
 
+    ngram_val = int(explorer_raw.get("ngram", 2))
+    if ngram_val < 1:
+        raise ConfigError(f"explorer.ngram must be >= 1, got {ngram_val}")
+
     explorer = ExplorerConfig(
         target_modules=explorer_raw.get("target_modules", []),
         max_time=float(explorer_raw.get("max_time", 60.0)),
@@ -246,6 +251,7 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
         steps_per_run=int(explorer_raw.get("steps_per_run", 50)),
         fault_toggle_prob=float(explorer_raw.get("fault_toggle_prob", 0.3)),
         workers=int(explorer_raw.get("workers", 1)),
+        ngram=ngram_val,
     )
 
     if explorer.checkpoint_strategy not in _VALID_CHECKPOINT_STRATEGIES:

@@ -288,7 +288,7 @@ for p in r["failed"]:
 - **Persistent seed corpus** — failing traces auto-save to `.ordeal/seeds/`, replay on every `pytest` run for instant regression detection (Go fuzzing / Hypothesis test database model)
 - **Fault ablation** — `ablate_faults(trace)` replays without each fault to find the minimal necessary set; answers "which faults caused this bug?"; wired into Explorer post-shrink and `ordeal replay --ablate`
 - **Coverage gap reporting** — `CoverageCollector` tracks line-level coverage; `ExplorationResult.coverage_gaps` reports uncovered branches; `reachability_suggestions()` generates `reachable()` calls for AI assistants
-- **Rule swarm** — `rule_swarm=True` on Explorer or `rule_swarm = true` in `ordeal.toml`. Each run uses a random subset of rules (bitmask, at least one kept). Disabling some rules forces others to accumulate state — e.g. only inserts, no deletes → cache grows large → GC triggers. The swarm testing pattern applied to rule selection, not just faults.
+- **Unified swarm** — `rule_swarm=True` on Explorer or `rule_swarm = true` in `ordeal.toml`. Joint rule+fault configuration per run: one coin flip covers both which rules are callable AND which faults the nemesis can toggle (Groce et al. ISSTA 2012). Three phases: (1) warmup with pure coin-flip, (2) adaptive energy-weighted selection (MOpt pattern — productive configs get higher probability), (3) coverage-directed bias toward rules that exercise files with uncovered branches.
 - **Failing step in traces** — rule steps that raise are now recorded in the trace, so `ordeal replay` reproduces failures where the exception occurs during rule execution
 
 ## Extending ordeal

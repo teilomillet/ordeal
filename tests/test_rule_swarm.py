@@ -106,11 +106,66 @@ class TestRuleSwarm:
         assert result.failures
 
     def test_swarm_in_summary(self):
-        """ExplorationResult.summary() should mention rule swarm."""
+        """ExplorationResult.summary() should mention swarm."""
         result = ExplorationResult(
             total_runs=100,
             rule_swarm_runs=60,
         )
         s = result.summary()
-        assert "Rule swarm" in s
+        assert "Swarm" in s
         assert "60/100" in s
+
+    def test_unified_swarm_includes_faults(self):
+        """Unified swarm should select both rules and faults jointly."""
+        from ordeal.faults import LambdaFault
+
+        class _WithFaults(ChaosTest):
+            faults = [
+                LambdaFault("f1", lambda: None, lambda: None),
+                LambdaFault("f2", lambda: None, lambda: None),
+            ]
+
+            def __init__(self):
+                super().__init__()
+                self.counter = 0
+
+            @rule()
+            def tick_a(self):
+                self.counter += 1
+
+            @rule()
+            def tick_b(self):
+                self.counter += 1
+                if self.counter >= 10:
+                    raise ValueError("boom")
+
+        explorer = Explorer(_WithFaults, rule_swarm=True, seed=42)
+        result = explorer.run(max_time=5, max_runs=100, shrink=False)
+        assert result.rule_swarm_runs > 0
+
+        # Check that trace records both active_rules AND active_faults
+        found_fault_info = False
+        for f in result.failures:
+            if f.trace:
+                for s in f.trace.steps:
+                    if s.kind == "rule_swarm" and "active_faults" in s.params:
+                        found_fault_info = True
+                        break
+        assert found_fault_info, "Swarm traces should record active_faults"
+
+    def test_adaptive_energy_tracks_configs(self):
+        """Swarm should track configurations with energy after warmup."""
+        explorer = Explorer(
+            _CacheWithGC,
+            rule_swarm=True,
+            target_modules=["tests.test_rule_swarm"],
+            seed=42,
+        )
+        # Run enough for warmup (>20 runs) so energy-weighted selection kicks in
+        explorer.run(max_time=5, max_runs=50, shrink=False)
+
+        # Configs should have been created and tracked
+        assert len(explorer._swarm_configs) > 0, "Swarm should track configurations"
+        # At least some should have been used multiple times
+        used = [c for c in explorer._swarm_configs.values() if c.times_used > 0]
+        assert used, "Some configs should have been reused via energy selection"

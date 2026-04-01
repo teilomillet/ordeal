@@ -479,6 +479,38 @@ _ENERGY_MIN = 0.01
 _SEED_MUTATION_PROB = 0.25  # 25% of rule executions use mutation (mine.py uses same ratio)
 _MAX_SEEDS_PER_CHECKPOINT = 16  # bounded to prevent memory growth
 
+# Swarm configuration constants (Groce et al., ISSTA 2012)
+_SWARM_ENERGY_REWARD = 2.0  # energy boost when a config leads to new edges
+_SWARM_ENERGY_DECAY = 0.9  # decay per run for configs that don't find new edges
+_SWARM_ENERGY_MIN = 0.1  # floor — no config is fully excluded
+_SWARM_WARMUP_RUNS = 20  # pure coin-flip before switching to energy-weighted
+
+
+@dataclass
+class SwarmConfig:
+    """A joint rule+fault configuration for one exploration run.
+
+    Each configuration determines which rules are callable AND which
+    faults the nemesis can toggle.  This is the paper's model (Groce
+    et al., ISSTA 2012): a "configuration" is the full feature set.
+
+    The ``energy`` field enables adaptive scheduling (MOpt pattern):
+    configurations that led to new coverage get higher selection
+    probability in future runs.
+    """
+
+    active_rules: list[str]  # rule names included in this config
+    active_faults: list[str]  # fault names the nemesis can toggle
+    energy: float = 1.0
+    times_used: int = 0
+    edges_found: int = 0
+
+    @property
+    def key(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Hashable identity for dedup and lookup."""
+        return (tuple(sorted(self.active_rules)), tuple(sorted(self.active_faults)))
+
+
 # Shared-memory edge bitmap: one byte per 16-bit edge hash.
 # Single-byte writes are atomic — no locks needed.
 _EDGE_BITMAP_SIZE = 65536
@@ -763,7 +795,8 @@ class ExplorationResult:
             )
         if self.rule_swarm_runs > 0:
             lines.append(
-                f"Rule swarm: {self.rule_swarm_runs}/{self.total_runs} runs used rule subsets"
+                f"Swarm: {self.rule_swarm_runs}/{self.total_runs} runs"
+                f" used joint rule+fault configs"
             )
         if self.seed_mutations_used > 0:
             lines.append(
@@ -1048,6 +1081,13 @@ class Explorer:
         self._last_step_used_mutation: bool = False
         self._last_generated_params: dict[str, Any] = {}
         self._active_rules: list[_RuleInfo] = []  # set per run (swarm or full)
+        self._active_fault_names: list[str] | None = None  # set per run (swarm or all)
+        self._current_swarm_config: SwarmConfig | None = None  # current run's config
+        self._swarm_configs: dict[
+            tuple[tuple[str, ...], tuple[str, ...]], SwarmConfig
+        ] = {}  # energy-tracked configs
+        self._rule_file_coverage: dict[str, set[str]] = {}  # rule_name -> {filenames}
+        self._gap_files: set[str] = set()  # files with uncovered branches
         self._strategy_failures: dict[str, int] = {}
 
     # -- Snapshot / restore -------------------------------------------------
@@ -1329,8 +1369,18 @@ class Explorer:
         return params
 
     def _toggle_fault(self, machine: ChaosTest) -> str:
-        """Toggle a random fault. Returns signed name like ``+name`` or ``-name``."""
-        fault = self.rng.choice(machine._faults)
+        """Toggle a random fault. Returns signed name like ``+name`` or ``-name``.
+
+        When unified swarm is active, only faults in ``_active_fault_names``
+        are eligible for toggling.
+        """
+        if self._active_fault_names is not None:
+            eligible = [f for f in machine._faults if f.name in self._active_fault_names]
+            if not eligible:
+                eligible = machine._faults  # fallback
+            fault = self.rng.choice(eligible)
+        else:
+            fault = self.rng.choice(machine._faults)
         if fault.active:
             fault.deactivate()
             return f"-{fault.name}"
@@ -1514,6 +1564,144 @@ class Explorer:
         except Exception:
             pass
 
+    # -- Swarm configuration selection ----------------------------------------
+
+    def _select_swarm_config(self, machine: ChaosTest, total_runs: int) -> SwarmConfig | None:
+        """Select a joint rule+fault configuration for this run.
+
+        **Phase 1 (warmup)**: pure coin-flip per feature (Groce et al.).
+        **Phase 2 (adaptive)**: energy-weighted selection from previously
+        seen configs, with coin-flip fallback for exploration.
+
+        Returns ``None`` if swarm shouldn't apply (e.g. single rule, no faults).
+        """
+        n_rules = len(self._rules)
+        all_fault_names = [f.name for f in machine._faults]
+        n_faults = len(all_fault_names)
+        n_features = n_rules + n_faults
+
+        if n_features <= 1:
+            return None
+
+        # Phase 1: pure coin-flip (warmup or no history)
+        if total_runs < _SWARM_WARMUP_RUNS or not self._swarm_configs:
+            return self._coin_flip_config(n_rules, all_fault_names)
+
+        # Phase 2: energy-weighted selection with exploration mix.
+        # 20% pure coin-flip (explore), 10% coverage-directed (steer),
+        # 70% energy-weighted from history (exploit).
+        roll = self.rng.random()
+        if roll < 0.2:
+            return self._coin_flip_config(n_rules, all_fault_names)
+        if roll < 0.3:
+            # Coverage-directed: bias toward rules that exercise files
+            # with uncovered branches (if we have gap data)
+            directed = self._coverage_directed_config(n_rules, all_fault_names)
+            if directed is not None:
+                return directed
+            return self._coin_flip_config(n_rules, all_fault_names)
+
+        # Select from existing configs weighted by energy
+        configs = list(self._swarm_configs.values())
+        energies = [c.energy for c in configs]
+        total_energy = sum(energies)
+        if total_energy <= 0:
+            return self._coin_flip_config(n_rules, all_fault_names)
+
+        r = self.rng.random() * total_energy
+        cumulative = 0.0
+        for cfg in configs:
+            cumulative += cfg.energy
+            if cumulative >= r:
+                cfg.times_used += 1
+                return cfg
+
+        return configs[-1]  # fallback
+
+    def _coin_flip_config(self, n_rules: int, all_fault_names: list[str]) -> SwarmConfig:
+        """Generate a random config via independent Bernoulli(0.5) per feature.
+
+        Joint bitmask over rules + faults.  At least one rule is always kept.
+        """
+        # Rules: coin flip, at least one
+        if n_rules > 1:
+            rule_mask = self.rng.randint(1, (1 << n_rules) - 1)
+            active_rules = [self._rules[i].name for i in range(n_rules) if rule_mask & (1 << i)]
+        else:
+            active_rules = [self._rules[0].name]
+
+        # Faults: coin flip, can be empty (no faults toggled this run is fine)
+        active_faults: list[str] = []
+        for fname in all_fault_names:
+            if self.rng.random() < 0.5:
+                active_faults.append(fname)
+
+        cfg = SwarmConfig(active_rules=active_rules, active_faults=active_faults)
+
+        # Register in history for energy tracking (dedup by key)
+        key = cfg.key
+        if key not in self._swarm_configs:
+            self._swarm_configs[key] = cfg
+        return self._swarm_configs[key]
+
+    def _coverage_directed_config(
+        self, n_rules: int, all_fault_names: list[str]
+    ) -> SwarmConfig | None:
+        """Generate a config biased toward rules that exercise uncovered files.
+
+        Uses ``_rule_file_coverage`` (which rules led to edges in which
+        files) and ``_gap_files`` (files with uncovered branches) to
+        boost inclusion probability for rules that exercise gap files.
+
+        Returns ``None`` if no gap data is available.
+        """
+        if not self._gap_files or not self._rule_file_coverage:
+            return None
+
+        # Identify rules that exercise files with coverage gaps
+        gap_rules: set[str] = set()
+        for rule_name, files in self._rule_file_coverage.items():
+            if files & self._gap_files:
+                gap_rules.add(rule_name)
+
+        if not gap_rules:
+            return None
+
+        # Include gap-relevant rules with probability 0.8 (boosted),
+        # other rules with probability 0.3 (suppressed).
+        active_rules: list[str] = []
+        for r in self._rules:
+            prob = 0.8 if r.name in gap_rules else 0.3
+            if self.rng.random() < prob:
+                active_rules.append(r.name)
+        if not active_rules:
+            # Ensure at least one gap-relevant rule
+            active_rules = [self.rng.choice(list(gap_rules))]
+
+        # Faults: standard coin flip
+        active_faults = [f for f in all_fault_names if self.rng.random() < 0.5]
+
+        cfg = SwarmConfig(active_rules=active_rules, active_faults=active_faults)
+        key = cfg.key
+        if key not in self._swarm_configs:
+            self._swarm_configs[key] = cfg
+        return self._swarm_configs[key]
+
+    def _update_swarm_energy(self, new_edges: int) -> None:
+        """Update energy for the current run's swarm config.
+
+        Rewards the config that was used this run if it found new edges.
+        Decays all other configs slightly to favor fresh discoveries.
+        """
+        cfg = self._current_swarm_config
+        if cfg is None:
+            return
+        if new_edges > 0:
+            cfg.energy = min(cfg.energy * _SWARM_ENERGY_REWARD, 10.0)
+            cfg.edges_found += new_edges
+        else:
+            cfg.energy = max(cfg.energy * _SWARM_ENERGY_DECAY, _SWARM_ENERGY_MIN)
+
     # -- Step execution helpers (extracted from run() for readability) -----
 
     def _execute_step(
@@ -1644,6 +1832,15 @@ class Explorer:
                 # These become mutation targets when branching from this
                 # checkpoint again — the AFL closed-loop for stateful testing.
                 self._record_productive_seed(source_cp, result)
+
+                # Track which files this rule exercises (for coverage-directed swarm)
+                if self._last_step_rule is not None:
+                    rule_name = self._last_step_rule[0]
+                    hit_files = self._rule_file_coverage.get(rule_name)
+                    if hit_files is None:
+                        hit_files = set()
+                        self._rule_file_coverage[rule_name] = hit_files
+                    hit_files.update(collector.lines_hit.keys())
 
         # State-aware coverage (with global dedup via shared state bitmap)
         if hasattr(machine, "state_hash"):
@@ -1972,32 +2169,43 @@ class Explorer:
             else:
                 machine = self.test_class()
 
-            # Rule swarm: random rule subset per run.
+            # Unified swarm: joint rule+fault configuration per run.
             #
-            # Each rule is included with independent probability 0.5 (fair
-            # coin flip).  This is the algorithm from the swarm testing
-            # paper (Groce et al., ISSTA 2012, §2): "we toss a fair coin
-            # to determine feature presence or absence."  The mask range
-            # [1, 2^n - 1] excludes the empty set (at least one rule kept).
+            # Each feature (rule or fault) is included with independent
+            # probability 0.5 (fair coin flip, Groce et al. ISSTA 2012).
+            # A single bitmask covers both rules and faults — the
+            # "configuration" is the full feature set, not two independent
+            # selections.
             #
-            # With enough runs, even rare subsets appear: P(a given k-rule
-            # combo appears in n configs) = 1 - (1 - 0.5^k)^n.  At n=100
-            # runs, any given 5-rule combo has >95% chance of appearing.
-            if self.rule_swarm and len(self._rules) > 1:
-                n = len(self._rules)
-                mask = self.rng.randint(1, (1 << n) - 1)
-                self._active_rules = [r for i, r in enumerate(self._rules) if mask & (1 << i)]
-                k = len(self._active_rules)
-                result.rule_swarm_runs += 1
-                # Record which rules are active so replay can reproduce
-                active_names = [r.name for r in self._active_rules]
-                trace_steps.append(
-                    TraceStep(
-                        kind="rule_swarm",
-                        name=f"[swarm {k}/{n}: {', '.join(active_names)}]",
-                        params={"active_rules": active_names},
+            # After a warmup period, configurations are selected with
+            # energy-weighted probability (MOpt pattern): configs that led
+            # to new coverage get higher selection probability.
+            self._active_fault_names = None  # reset — means "all faults"
+            self._current_swarm_config = None
+            if self.rule_swarm:
+                swarm_cfg = self._select_swarm_config(machine, result.total_runs)
+                if swarm_cfg is not None:
+                    self._current_swarm_config = swarm_cfg
+                    self._active_rules = [
+                        r for r in self._rules if r.name in swarm_cfg.active_rules
+                    ]
+                    self._active_fault_names = swarm_cfg.active_faults
+                    result.rule_swarm_runs += 1
+                    trace_steps.append(
+                        TraceStep(
+                            kind="rule_swarm",
+                            name=(
+                                f"[swarm rules={len(swarm_cfg.active_rules)}"
+                                f" faults={len(swarm_cfg.active_faults)}]"
+                            ),
+                            params={
+                                "active_rules": swarm_cfg.active_rules,
+                                "active_faults": swarm_cfg.active_faults,
+                            },
+                        )
                     )
-                )
+                else:
+                    self._active_rules = self._rules
             else:
                 self._active_rules = self._rules
 
@@ -2097,6 +2305,21 @@ class Explorer:
             else:
                 _runs_since_new += 1
             result.runs_since_new_edge = _runs_since_new
+
+            # Update swarm config energy + coverage-directed gap files
+            if self.rule_swarm:
+                self._update_swarm_energy(new_edges_this_run)
+                # Refresh gap files every 50 runs for coverage-directed swarm
+                if (
+                    use_coverage
+                    and self.target_modules
+                    and result.total_runs % 50 == 0
+                    and _lines_hit_all
+                ):
+                    gaps, _, _ = _compute_coverage_gaps(
+                        _lines_hit_all, self.target_modules, result.total_runs
+                    )
+                    self._gap_files = {g["file"] for g in gaps}
 
             # Progress callback
             if progress:

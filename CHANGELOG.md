@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.54
+
+**Features:**
+
+- three SOTA frontier improvements
+- seed mutation in the exploration loop — AFL closed-loop for stateful testing
+
+**Fixes:**
+
+- make Explorer, Checkpoint, and seed mutation discoverable via catalog()
+
+**Other:**
+
+- test: discoverability gate — new features can't ship invisible
+
+
 ## 0.2.52
 
 **Fixes:**

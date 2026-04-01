@@ -44,6 +44,8 @@ class FunctionState:
     mined: bool = False
     properties: list[dict[str, Any]] = field(default_factory=list)
     property_violations: list[str] = field(default_factory=list)
+    edges_discovered: int = 0
+    saturated: bool = False
 
     # mutate() results
     mutated: bool = False
@@ -87,6 +89,8 @@ class FunctionState:
         gaps: list[str] = []
         if not self.mined:
             gaps.append("not mined")
+        elif self.saturated:
+            gaps.append(f"mining saturated ({self.edges_discovered} edges)")
         if not self.mutated:
             gaps.append("not mutation-tested")
         elif self.mutation_score is not None and self.mutation_score < 0.8:
@@ -207,6 +211,8 @@ def explore_mine(state: ExplorationState, *, max_examples: int = 50) -> Explorat
             for p in result.properties
             if p.total > 0
         ]
+        fs.edges_discovered = result.edges_discovered
+        fs.saturated = result.saturated
         # Flag suspicious properties
         fs.property_violations = [
             f"{p.name} ({p.confidence:.0%})"

@@ -111,6 +111,8 @@ class MineResult:
     not_checked: list[str] = field(default_factory=lambda: list(STRUCTURAL_LIMITATIONS))
     collected_inputs: list[dict[str, object]] = field(default_factory=list, repr=False)
     collected_outputs: list[object] = field(default_factory=list, repr=False)
+    edges_discovered: int = 0
+    saturated: bool = False
 
     @property
     def universal(self) -> list[MinedProperty]:
@@ -124,7 +126,12 @@ class MineResult:
 
     def summary(self) -> str:
         """Human-readable report."""
-        lines = [f"mine({self.function}): {self.examples} examples"]
+        header = f"mine({self.function}): {self.examples} examples"
+        if self.edges_discovered:
+            header += f", {self.edges_discovered} edges"
+        if self.saturated:
+            header += " (saturated)"
+        lines = [header]
         for p in sorted(self.properties, key=lambda p: -p.confidence):
             if p.confidence >= 0.5:
                 lines.append(str(p))
@@ -529,16 +536,48 @@ def mine(
             f"Cannot infer strategies for {fname}. Provide fixtures for untyped parameters."
         )
 
-    # Collect outputs and inputs
+    # Collect outputs and inputs with coverage tracking.
+    # The CoverageCollector detects when new code paths are reached,
+    # so we can report saturation (more examples won't help).
     outputs: list[Any] = []
     inputs: list[dict[str, Any]] = []
+    edges_seen: set[int] = set()
+    new_edge_count: int = 0
+    stale_count: int = 0
+
+    # Resolve target module for coverage tracking
+    fn_module = getattr(fn, "__module__", "")
+    target_path = fn_module.split(".")[0] if fn_module else ""
+
+    collector = None
+    if target_path:
+        try:
+            from ordeal.explore import CoverageCollector
+
+            collector = CoverageCollector([target_path])
+        except Exception:
+            pass
 
     try:
 
         @given(**strategies)
         @settings(max_examples=max_examples, database=None)
         def collect(**kwargs: Any) -> None:
-            result = fn(**kwargs)
+            nonlocal new_edge_count, stale_count
+            if collector:
+                collector.start()
+            try:
+                result = fn(**kwargs)
+            finally:
+                if collector:
+                    edges = collector.stop()
+                    new = edges - edges_seen
+                    if new:
+                        edges_seen.update(new)
+                        new_edge_count += 1
+                        stale_count = 0
+                    else:
+                        stale_count += 1
             outputs.append(result)
             inputs.append(dict(kwargs))
 
@@ -568,6 +607,10 @@ def mine(
     props = [p for p in all_props if p.total > 0]
     not_applicable = [p.name for p in all_props if p.total == 0]
 
+    # Coverage saturation: if the last 50%+ of examples found no new edges,
+    # more compute won't help — the input space is saturated for this function.
+    is_saturated = len(edges_seen) > 0 and stale_count > max(len(outputs) // 2, 10)
+
     name = getattr(fn, "__name__", str(fn))
     return MineResult(
         function=name,
@@ -576,6 +619,8 @@ def mine(
         not_applicable=not_applicable,
         collected_inputs=inputs,
         collected_outputs=outputs,
+        edges_discovered=len(edges_seen),
+        saturated=is_saturated,
     )
 
 

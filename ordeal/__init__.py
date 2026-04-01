@@ -1,99 +1,89 @@
 """ordeal — Automated chaos testing for Python.
 
+Start here — discover everything ordeal can do::
+
+    from ordeal import catalog
+    c = catalog()  # 16 subsystems, every function and class
+    for key in sorted(c):
+        for item in c[key]:
+            print(f"{item['qualname']}  -- {item['doc']}")
+
+Explore a module's state space (mine + scan + mutate + chaos, zero config)::
+
+    from ordeal.state import explore
+    state = explore("myapp.scoring")
+    print(state.confidence)   # 0.72
+    print(state.frontier)     # what's unexplored
+    print(state.findings)     # bugs and anomalies
+
+Quick start — match what you want to the right tool:
+
+- **"I have no tests"** → ``ordeal init``
+- **"Explore a module deeply"** → ``explore("myapp")``
+- **"Test under failure conditions"** → ``chaos_for("myapp")`` (auto-discovers faults + invariants)
+- **"What properties hold?"** → ``mine(my_fn)`` or ``mine_module("myapp")``
+- **"Are my tests good enough?"** → ``mutate("myapp.fn")`` (zero tests OK)
+- **"Reproducible exploration"** → ``DeterministicSupervisor(seed=42)``
+- **"Navigate the state space"** → ``StateTree`` (checkpoint, rollback, branch)
+- **"What can ordeal do?"** → ``catalog()``
+
 Capabilities (each is independent — use one or all):
 
-1. **Bootstrap a project** — one command, zero to validated tests::
+1. **Unified exploration** — mine + scan + mutate + chaos in one pass::
 
-    ordeal init                     # auto-detect package, generate everything
-    # also: init_project("myapp")   # Python API
+    from ordeal.state import explore
+    state = explore("myapp.scoring", workers=4, max_examples=200)
 
 2. **Stateful chaos testing** — Hypothesis-powered rule exploration::
 
     from ordeal import ChaosTest, chaos_test, rule, always
     from ordeal.faults import timing, io
 
-    @chaos_test  # directly pytest-discoverable
+    @chaos_test
     class MyServiceChaos(ChaosTest):
-        faults = [timing.timeout("myapp.db.query"), io.error_on_call("myapp.cache.get")]
+        faults = [timing.timeout("myapp.db.query")]
 
         @rule()
         def call_service(self):
             result = my_service.process("input")
             always(result is not None, "never returns None")
 
-3. **Property assertions** (Antithesis-style)::
+3. **Auto chaos testing** — zero config, discovers faults + invariants::
 
-    always(condition, "name")                 # must hold every time — raises immediately
-    sometimes(condition, "name")              # must hold at least once — checked at end
-    sometimes(condition, "name", warn=True)   # visible in normal pytest (no --chaos)
-    reachable("label")                        # code path must execute at least once
-    report()                                  # structured pass/fail summary of all properties
+    from ordeal.auto import chaos_for
+    TestCase = chaos_for("myapp.scoring")  # AST scan → faults, mine → invariants
 
-3. **Inline fault injection** (FoundationDB BUGGIFY) — no-op in production::
+4. **Property mining** — discover what functions actually do::
 
-    from ordeal import buggify
-    if buggify():                   # True only when chaos mode is active
-        data = corrupt(data)
-
-4. **API chaos testing** — built-in OpenAPI engine, no extra deps::
-
-    from ordeal.integrations.openapi import chaos_api_test
-    result = chaos_api_test(app=my_fastapi_app, faults=[...])
-    result = chaos_api_test(app=my_app, auto_discover=True)  # auto-generate faults
-    print(result.summary())  # pass/fail + contextual hints
+    from ordeal import mine, mine_module
+    result = mine(my_function)          # single function
+    result = mine_module("myapp")       # whole module + cross-function relations
 
 5. **Mutation testing** — verify your tests catch real bugs::
 
     from ordeal import mutate
+    result = mutate("myapp.fn", preset="standard")  # works with or without tests
 
-    result = mutate("mymodule.func", preset="standard")  # auto-detects function vs module
-    print(result.summary())   # test gaps + how to fix them
+6. **Property assertions** (Antithesis-style)::
 
-    # CLI: ordeal mutate mymodule.func --preset standard
+    always(condition, "name")                 # must hold every time
+    sometimes(condition, "name", warn=True)   # visible without --chaos
 
-6. **Coverage-guided exploration** — deeper than random testing::
+7. **Deterministic exploration** — reproducible, navigable state space::
 
-    ordeal explore  # CLI, reads ordeal.toml — checkpoints, energy scheduling
+    from ordeal.supervisor import DeterministicSupervisor, StateTree
+    with DeterministicSupervisor(seed=42) as sup:
+        ...  # all RNGs seeded, time patched, trajectory logged
 
-7. **Property mining** — discover what functions actually do::
+8. **Coverage-guided mining** — closes the AFL feedback loop::
 
-    from ordeal import mine
-    result = mine(my_function)  # discovers likely properties
-
-8. **Module audit** — measure test quality across an entire module::
-
-    from ordeal import audit
-    result = audit("myapp.scoring")  # mutation score, property coverage, gaps
-
-9. **Metamorphic testing** — relation-based property checking::
-
-    from ordeal import metamorphic, Relation
-    @metamorphic(Relation("negate", transform=lambda x: -x, expect=lambda a, b: a == -b))
-    def compute(x: int) -> int: ...
-
-10. **Differential testing** — compare two implementations::
-
-    from ordeal import diff
-    result = diff(fn_a, fn_b)  # find inputs where they disagree
-
-11. **Atheris integration** — coverage-guided fuzzing for buggify() decisions::
-
-    from ordeal.integrations.atheris_engine import fuzz
-    fuzz(my_function, max_time=60)  # requires: pip install ordeal[atheris]
-
-12. **Discoverability** — introspect all capabilities programmatically::
-
-    from ordeal import catalog
-    c = catalog()  # 12 subsystems: faults, mining, audit, auto, mutations, ...
-    for key in sorted(c):
-        for item in c[key]:
-            print(f"{item['qualname']}  -- {item['doc']}")
+    mine(fn)  # CMPLOG extracts branch points, coverage steers generation,
+              # value mutation explores near productive inputs, saturation detected
 
 Running chaos tests::
 
     pytest --chaos                  # enable chaos mode globally
     pytest --chaos --chaos-seed 42  # reproducible chaos
-    auto_configure()                # or enable programmatically in conftest.py
 """
 
 from __future__ import annotations

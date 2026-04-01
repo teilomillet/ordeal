@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.86
+
+**Fixes:**
+
+- input validation + test gaps found by ordeal's own tools
+
+
 ## 0.2.85
 
 **Features:**

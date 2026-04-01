@@ -261,7 +261,7 @@ def _cmd_mine(args: argparse.Namespace) -> int:
             continue
 
         print(result.summary())
-        if result.not_applicable:
+        if getattr(args, "verbose", False) and result.not_applicable:
             print(f"    n/a: {', '.join(result.not_applicable)}")
         print()
 
@@ -300,7 +300,7 @@ def _cmd_mine_pair(args: argparse.Namespace) -> int:
         return 1
 
     print(result.summary())
-    if result.not_applicable:
+    if getattr(args, "verbose", False) and result.not_applicable:
         print(f"    n/a: {', '.join(result.not_applicable)}")
     return 0
 
@@ -970,6 +970,9 @@ def main(argv: list[str] | None = None) -> int:
     mine_p.add_argument("target", help="Dotted path: mymod.func or mymod")
     mine_p.add_argument(
         "--max-examples", "-n", type=int, default=500, help="Examples to sample (default: 500)"
+    )
+    mine_p.add_argument(
+        "--verbose", "-v", action="store_true", help="Show n/a properties and extra detail"
     )
 
     # -- ordeal mine-pair --

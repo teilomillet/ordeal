@@ -292,6 +292,27 @@ def strategy_for_type(tp: type, *, _depth: int = 0) -> st.SearchStrategy:
     if _is_pydantic_model(tp):
         return _strategy_for_pydantic(tp, _depth=next_depth)
 
+    # numpy ndarray — generate small random arrays with common shapes/dtypes.
+    # Unlocks mine() on ML/vision code that takes ndarray inputs.
+    try:
+        import numpy as np
+
+        if tp is np.ndarray:
+            shapes = st.sampled_from([(10,), (3, 3), (100, 100, 3), (64, 64), (224, 224, 3)])
+            dtypes = st.sampled_from([np.uint8, np.float32, np.float64])
+
+            @st.composite
+            def _ndarray(draw: st.DrawFn) -> np.ndarray:  # type: ignore[type-arg]
+                shape = draw(shapes)
+                dtype = draw(dtypes)
+                if dtype == np.uint8:
+                    return np.random.randint(0, 256, shape, dtype=dtype)
+                return np.random.randn(*shape).astype(dtype)
+
+            return _ndarray()
+    except ImportError:
+        pass
+
     # Fallback: Hypothesis from_type
     try:
         return st.from_type(tp)

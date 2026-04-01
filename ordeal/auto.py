@@ -309,11 +309,15 @@ def _infer_strategies(
         # 1. Explicit fixture (always wins)
         if fixtures and name in fixtures:
             strategies[name] = fixtures[name]
-        # 2. Default is None → keep it None (don't generate random junk
-        #    for optional params — the function chose None as default
-        #    for a reason)
+        # 2. Default is None → sample both None and the typed value.
+        #    Previously this skipped the param entirely, which blocked
+        #    mine() on any function with Optional params.
         elif has_default and param.default is None:
-            continue
+            if name in hints:
+                # Optional[T] → sample T | None
+                strategies[name] = st.one_of(strategy_for_type(hints[name]), st.none())
+            else:
+                continue
         # 3. Common name pattern
         elif (name_strat := _strategy_for_name(name)) is not None:
             strategies[name] = name_strat

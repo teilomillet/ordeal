@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.62
+
+**Features:**
+
+- exploration output shows available capabilities
+
+
 ## 0.2.60
 
 **Features:**

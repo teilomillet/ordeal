@@ -1587,13 +1587,25 @@ class Explorer:
         if total_runs < _SWARM_WARMUP_RUNS or not self._swarm_configs:
             return self._coin_flip_config(n_rules, all_fault_names)
 
-        # Phase 2: energy-weighted selection with exploration mix.
-        # 20% pure coin-flip (explore), 10% coverage-directed (steer),
-        # 70% energy-weighted from history (exploit).
+        # Phase 2: mixed strategy (paper §2.2: "include C_D in every swarm set").
+        #   10% full config C_D (all rules + all faults — catches sequence bugs)
+        #   15% pure coin-flip (explore — catches accumulation bugs)
+        #   10% coverage-directed (steer — reaches uncovered branches)
+        #   65% energy-weighted from history (exploit — repeats what works)
         roll = self.rng.random()
-        if roll < 0.2:
+        if roll < 0.1:
+            # C_D: the default all-inclusive config. Guarantees sequence
+            # bugs are always findable (paper §2.2 mitigation strategy).
+            all_rules = [r.name for r in self._rules]
+            cfg = SwarmConfig(active_rules=all_rules, active_faults=list(all_fault_names))
+            key = cfg.key
+            if key not in self._swarm_configs:
+                self._swarm_configs[key] = cfg
+            self._swarm_configs[key].times_used += 1
+            return self._swarm_configs[key]
+        if roll < 0.25:
             return self._coin_flip_config(n_rules, all_fault_names)
-        if roll < 0.3:
+        if roll < 0.35:
             # Coverage-directed: bias toward rules that exercise files
             # with uncovered branches (if we have gap data)
             directed = self._coverage_directed_config(n_rules, all_fault_names)

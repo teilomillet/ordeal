@@ -105,7 +105,7 @@ When a project uses ordeal and passes, it means something:
 - Property assertions held across all runs
 - Mutations were caught
 
-That's not "the tests pass." That's a certification that the code handles adversity. Ordeal-tested code is code you can trust.
+That's not "the tests pass." That's evidence — much stronger than green unit tests alone — that the code handles adversity.
 
 ## Install
 

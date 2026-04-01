@@ -268,7 +268,7 @@ Three steps. That's the minimal reproduction. Now you know exactly what to fix.
     - **What it does**: ordeal automatically explores thousands of scenarios — including realistic failures — to find bugs your regular tests miss.
     - **How it works**: you describe what can go wrong (faults), what your system does (rules), and what must always be true (invariants). An adversary (the nemesis) controls when faults activate, in what combination and order.
     - **What you get**: when something breaks, ordeal gives you the shortest sequence of events that reproduces the failure — a clear path to the fix, not a wall of noise.
-    - **Why it's valuable**: it tests combinations and orderings you'd never think of. Passing a chaos test is a stronger guarantee than passing a suite of hand-written scenarios.
+    - **Why it's valuable**: it tests combinations and orderings you'd never think of. Passing a chaos test provides stronger evidence of correctness than passing a fixed suite of hand-written scenarios, because it explores the space of failures rather than checking a few you imagined.
 
 !!! quote "Where you go from here depends on what you need"
     Need results fast? `ordeal mine mymodule` finds bugs in 30 seconds with zero test code.

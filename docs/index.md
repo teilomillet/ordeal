@@ -113,7 +113,7 @@ Every goal maps to a starting point — a command to run, a module to import, an
 | Discover all available faults, assertions, strategies | `from ordeal import catalog; catalog()` | [API Reference](reference/api.md) |
 
 !!! quote "Pick your starting point"
-    Every path leads somewhere useful. You can't pick wrong.
+    Every path leads somewhere useful — pick whichever matches what you need right now.
 
     - **"I just want to see what ordeal does"** → Run `uvx ordeal mine ordeal.demo` in your terminal, then read [Getting Started](getting-started.md)
     - **"I have code and want to find bugs"** → Run `ordeal mine mymodule` — see [Auto Testing](guides/auto.md)

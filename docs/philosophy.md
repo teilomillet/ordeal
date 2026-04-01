@@ -41,7 +41,7 @@ You don't write test cases. You describe the world and the rules. The machine fi
 ## Why ordeal exists
 
 !!! quote "Why this matters"
-    The companies below spent years and millions of dollars building internal tools for this kind of testing. Ordeal takes their best ideas and puts them in a single Python library you can `pip install`. You get the same testing philosophy that protects billion-dollar databases and distributed systems — for free, in your project, today.
+    The companies below spent years and millions of dollars building internal tools for this kind of testing. Ordeal takes their best ideas and puts them in a single Python library you can `pip install`. You get the same testing *philosophy* — not the same scale or infrastructure, but the same approach to finding bugs that matter.
 
 The ideas behind ordeal aren't new. They come from some of the most rigorous engineering cultures in the world:
 
@@ -62,18 +62,36 @@ The ideas behind ordeal aren't new. They come from some of the most rigorous eng
 
 Ordeal brings all of this to Python. Not as six different tools you have to stitch together — as one library with one API and one mental model.
 
+## Why not stitch tools together?
+
+You could assemble this yourself: Hypothesis for property testing, mutmut for mutation testing, a custom conftest for fault injection, coverage.py for guidance, and shell scripts to glue it all together. Many teams do. It works — up to a point.
+
+The problem is that the tools can't talk to each other. Here's what you lose when they're separate:
+
+**Coverage can't guide fault scheduling.** Ordeal's explorer tracks which code edges each fault combination discovers. Faults that open new paths get toggled more often. A standalone fuzzer and a standalone fault injector can't coordinate like this — you'd need to write the feedback loop yourself.
+
+**Mutation testing can't use your chaos tests.** mutmut runs your existing pytest suite against each mutant. It doesn't know about stateful `ChaosTest` classes, fault injection, or `always`/`sometimes` assertions. Ordeal's `mutate()` runs with `--chaos`, so the nemesis and property assertions count toward the kill score. That's a richer oracle than unit tests alone.
+
+**Shrinking doesn't cross tool boundaries.** When Hypothesis finds a failing property, it shrinks the input. But if the failure involves a specific fault being active at a specific step in a stateful sequence, a standalone property-testing library can't shrink the fault schedule — it didn't generate it. Ordeal's nemesis is a Hypothesis rule, so fault schedules shrink alongside operation sequences automatically.
+
+**Property mining can't feed into mutation testing.** Ordeal's `mine()` discovers invariants (bounds, monotonicity, idempotence) from execution. Those invariants become the oracle for `mutate()` when no hand-written tests exist. With separate tools, you'd discover properties in one tool and manually transcribe them as test assertions for another.
+
+**There's no unified state.** After running mine, scan, mutate, and explore separately, you have four different output formats with no shared understanding of what's been tested. Ordeal's `ExplorationState` tracks confidence, frontier, and coverage across all tools in one structure.
+
+None of this means you *can't* build it yourself — the individual ideas are well-known. The value is in the integration: the tools share coverage data, fault schedules, discovered properties, and exploration state. That feedback loop is where the bugs come from, and it's the part that's hard to replicate with glue code.
+
 ## The ordeal standard
 
 !!! quote "What this unlocks"
-    Imagine being able to say "my code was tested against thousands of failure scenarios I never had to think up." That is what the ordeal standard gives you. It is not a badge you slap on — it is a level of confidence backed by automated exploration, fault injection, and mutation testing all working together.
+    Imagine being able to say "my code was tested against thousands of failure scenarios I never had to think up." That is what the ordeal standard gives you — not a guarantee of zero bugs, but a level of confidence backed by automated exploration, fault injection, and mutation testing all working together.
 
 Here's what we believe:
 
-**If your code passes ordeal, it means something.**
+**If your code passes ordeal, you have concrete evidence it handles adversity.**
 
 It means an automated explorer ran thousands of operation sequences against your system. It means faults were injected at every level — I/O, timing, numerical — in combinations you never would have written by hand. It means property assertions held across all those runs. It means the code was mutated and your tests caught the mutations.
 
-That's not "the tests pass." That's a *certification* that the code handles adversity.
+That's not "the tests pass." That's a higher bar — not a guarantee of correctness, but significantly stronger evidence than unit tests alone.
 
 !!! quote "What this means in practice"
     For a solo developer, this means shipping with evidence your code handles failure — not just a green check, but a trace showing thousands of scenarios explored.
@@ -82,9 +100,9 @@ That's not "the tests pass." That's a *certification* that the code handles adve
 
     For an organization, this means catching the interaction failures that page your oncall at 3am — the timeout during a retry during a batch write — before they reach production.
 
-We want ordeal to be the bar. When someone looks at a project and sees ordeal traces, they should know: this code was tested the way FoundationDB tests its storage engine. The way Antithesis tests distributed databases. Not at that scale, but with that philosophy.
+We want ordeal to raise the bar. When someone looks at a project and sees ordeal traces, they should know: this code was tested with the same philosophy that FoundationDB and Antithesis use — not at that scale, but with that rigor.
 
-**Ordeal-tested means the code works.** Not just on the happy path. Not just with the inputs someone thought to try. It works when things go wrong, in combinations nobody anticipated, under conditions that only a machine would think to create.
+**Ordeal-tested means the code was stressed.** Not just on the happy path. Not just with the inputs someone thought to try. It was tested when things go wrong, in combinations nobody anticipated, under conditions that only a machine would think to create. That doesn't mean zero bugs remain — it means the obvious gaps have been explored.
 
 ## Built for what's coming
 
@@ -108,7 +126,7 @@ This isn't theoretical. It's the design constraint that shaped every API decisio
 ## The testing pyramid is incomplete
 
 !!! quote "Think of it this way"
-    Unit tests ask "does this function work?" Integration tests ask "do these pieces connect?" End-to-end tests ask "does the whole flow run?" But nobody asks "what happens when two things fail at the same time during step three?" That is the missing layer, and ordeal fills it. It sits underneath everything else because the guarantees it provides support all the tests above.
+    Unit tests ask "does this function work?" Integration tests ask "do these pieces connect?" End-to-end tests ask "does the whole flow run?" But nobody asks "what happens when two things fail at the same time during step three?" That is the missing layer, and ordeal fills it. It sits underneath everything else because the confidence it provides supports all the tests above.
 
 You know the testing pyramid: unit tests at the base, integration tests in the middle, end-to-end tests at the top. It's a good model. But it's missing a layer.
 

@@ -50,7 +50,7 @@ Each takes a name string that identifies the property. The name is how the track
 ### `always(condition, name)` -- this must be true every time
 
 !!! quote "Why this matters"
-    `always` is your strongest guarantee. It says: "No matter what faults are active, no matter what sequence of operations runs, this condition must hold every single time." If it ever fails, even once out of ten thousand checks, ordeal catches it immediately and shows you the shortest path to reproduce the problem.
+    `always` is ordeal's strictest assertion. It says: "No matter what faults are active, no matter what sequence of operations runs, this condition must hold every single time." If it ever fails, even once out of ten thousand checks, ordeal catches it immediately and shows you the shortest path to reproduce the problem.
 
 ```python
 always(not math.isnan(result), "score is never NaN")

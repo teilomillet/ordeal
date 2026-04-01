@@ -68,7 +68,7 @@ stubs = result.generate_test_stubs()  # test file for surviving mutants
 - Invariant violations show actual value, expected bound, index, and deviation
 
 **Reading output:**
-- `ALWAYS property (N/N)` — held every time. Strong guarantee.
+- `ALWAYS property (N/N)` — held every time across all explored scenarios.
 - `X% property (M/N)` — failed in some cases. Fix the failing ones.
 - `SURVIVED L42:8 + -> -` — mutation your tests didn't catch. Gap at that line.
 - `Score: X/Y (Z%)` — final score line, always printed for CI parsing.

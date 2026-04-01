@@ -27,6 +27,7 @@ uv run ordeal audit <module>     # audit test coverage for a module
 uv run ordeal mine <target>      # discover properties of a function
 uv run ordeal replay <trace>     # replay a failure trace
 uv run ordeal benchmark          # USL scaling analysis (reads ordeal.toml)
+uv run ordeal skill              # install AI agent skill (.claude/skills/ordeal/SKILL.md)
 ```
 
 ## Discovery
@@ -54,7 +55,8 @@ ordeal/
 ├── scaling.py          USL scaling analysis — fit_usl, analyze, benchmark
 ├── trace.py            Trace recording, JSON serialization, replay, shrink, fault ablation
 ├── config.py           ordeal.toml loader with strict validation
-├── cli.py              CLI: ordeal explore / mutate / audit / mine / replay / benchmark
+├── cli.py              CLI: ordeal explore / mutate / audit / mine / replay / benchmark / skill
+├── SKILL.md            AI agent skill — teaches coding agents how to use ordeal
 ├── plugin.py           Pytest plugin: --chaos, --chaos-seed, --buggify-prob, --mutate
 ├── state.py            Unified ExplorationState — what ordeal knows about your code
 ├── supervisor.py       DeterministicSupervisor + StateTree — reproducible exploration with rollback

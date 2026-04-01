@@ -29,6 +29,25 @@ def _stderr(msg: str) -> None:
     sys.stderr.flush()
 
 
+def _install_skill(dry_run: bool = False) -> str | None:
+    """Copy the bundled SKILL.md into .claude/skills/ordeal/SKILL.md.
+
+    Returns the path written, or *None* if dry_run / already up-to-date.
+    """
+    src = Path(__file__).parent / "SKILL.md"
+    if not src.exists():
+        return None
+    dest = Path(".claude/skills/ordeal/SKILL.md")
+    new_content = src.read_text()
+    if dest.exists() and dest.read_text() == new_content:
+        return None  # already up-to-date
+    if dry_run:
+        return str(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(new_content)
+    return str(dest)
+
+
 # ============================================================================
 # Progress reporter
 # ============================================================================
@@ -717,6 +736,22 @@ jobs:
 """
 
 
+def _cmd_skill(args: argparse.Namespace) -> int:
+    """Install the ordeal skill for AI coding agents."""
+    path = _install_skill(dry_run=args.dry_run)
+    if path is None and args.dry_run:
+        _stderr("ordeal skill — already up-to-date\n")
+        return 0
+    if path is None:
+        _stderr("ordeal skill — already up-to-date\n")
+        return 0
+    if args.dry_run:
+        _stderr(f"ordeal skill — would write: {path}\n")
+    else:
+        _stderr(f"ordeal skill — installed: {path}\n")
+    return 0
+
+
 def _cmd_init(args: argparse.Namespace) -> int:
     """Bootstrap test files for untested modules."""
     import re
@@ -753,6 +788,9 @@ def _cmd_init(args: argparse.Namespace) -> int:
         ci_path = f".github/workflows/{ci_name}.yml"
         ci_content = _generate_ci_workflow(pkg)
 
+    # --- Install AI skill ---
+    skill_path = _install_skill(dry_run=dry_run)
+
     if dry_run:
         _stderr(f"\nordeal init — DRY RUN for {pkg}\n\n")
         for r in generated:
@@ -761,7 +799,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         if ci_content:
             print(f"\n# --- {ci_path} ---\n")
             print(ci_content)
-        n_files = len(generated) + (1 if ci_content else 0)
+        n_files = len(generated) + (1 if ci_content else 0) + (1 if skill_path else 0)
         _stderr(f"  Would generate {n_files} file(s)\n\n")
         return 0
 
@@ -964,6 +1002,8 @@ def _cmd_init(args: argparse.Namespace) -> int:
         _stderr("    ordeal.toml\n")
     if ci_path:
         _stderr(f"    {ci_path}\n")
+    if skill_path:
+        _stderr(f"    {skill_path}\n")
     _stderr("\n")
 
     # --- Pinned values for review ---
@@ -985,9 +1025,11 @@ def _cmd_init(args: argparse.Namespace) -> int:
         "tests_pass": tests_pass,
         "mutation_score": mutation_score.removeprefix("Score: ") if mutation_score else None,
         "ci_workflow": ci_path,
+        "skill": skill_path,
         "files": [r["path"] for r in generated]
         + (["ordeal.toml"] if Path("ordeal.toml").exists() else [])
-        + ([ci_path] if ci_path else []),
+        + ([ci_path] if ci_path else [])
+        + ([skill_path] if skill_path else []),
         "pinned_values": pinned_values,
         "functions": [
             {"module": r["module"], "status": r["status"], "test_file": r["path"]} for r in results
@@ -1423,6 +1465,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Throughput metric to fit (default: runs)",
     )
 
+    # -- ordeal skill --
+    skill_p = sub.add_parser("skill", help="Install ordeal skill for AI coding agents")
+    skill_p.add_argument(
+        "--dry-run", action="store_true", help="Show what would be written without writing"
+    )
+
     # -- ordeal init --
     init_p = sub.add_parser("init", help="Bootstrap test files for untested modules")
     init_p.add_argument(
@@ -1537,6 +1585,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_mine_pair(args)
     elif args.command == "benchmark":
         return _cmd_benchmark(args)
+    elif args.command == "skill":
+        return _cmd_skill(args)
     elif args.command == "init":
         return _cmd_init(args)
     elif args.command == "mutate":

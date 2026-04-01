@@ -448,6 +448,7 @@ class ExplorationResult:
 
     total_runs: int = 0
     total_steps: int = 0
+    skipped_steps: int = 0
     unique_edges: int = 0
     checkpoints_saved: int = 0
     failures: list[Failure] = field(default_factory=list)
@@ -466,9 +467,11 @@ class ExplorationResult:
 
     def summary(self) -> str:
         """Human-readable exploration summary."""
+        steps_info = f"{self.total_steps} steps"
+        if self.skipped_steps > 0:
+            steps_info += f" ({self.skipped_steps} skipped — strategy generation failed)"
         lines = [
-            f"Exploration: {self.total_runs} runs, "
-            f"{self.total_steps} steps, {self.duration_seconds:.1f}s",
+            f"Exploration: {self.total_runs} runs, {steps_info}, {self.duration_seconds:.1f}s",
             f"Coverage: {self.unique_edges} edges, {self.checkpoints_saved} checkpoints",
         ]
         if self.unique_states > 0:
@@ -810,25 +813,43 @@ class Explorer:
     # -- Execution ----------------------------------------------------------
 
     def _execute_rule(self, machine: ChaosTest, rule: _RuleInfo) -> dict[str, Any]:
-        """Execute a rule, drawing parameters from strategies. Returns drawn params."""
+        """Execute a rule, drawing parameters from strategies.
+
+        Returns drawn params.  If a required strategy fails to generate,
+        skips the rule entirely (returns empty dict) rather than calling
+        the rule with missing arguments — prevents "spinning" where the
+        explorer counts thousands of no-op runs.
+        """
         params: dict[str, Any] = {}
+        required_count = 0
 
         for param_name, strategy in rule.strategies.items():
             if param_name == "data" or rule.has_data and param_name == "data":
                 params["data"] = _DataProxy()
             else:
+                required_count += 1
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
                     try:
                         params[param_name] = strategy.example()
                     except Exception:
-                        pass  # skip unresolvable params
+                        pass  # strategy failed — tracked below
+
+        # If any required strategy failed, skip the rule entirely.
+        # This prevents spinning: calling rules with missing arguments
+        # that return immediately and inflate run counts.
+        generated = len(params) - (1 if "data" in params else 0)
+        if required_count > 0 and generated < required_count:
+            return params  # caller sees incomplete params
 
         try:
             getattr(machine, rule.name)(**params)
         except TypeError:
             # Fallback: call with no args (rule may have defaults)
-            getattr(machine, rule.name)()
+            try:
+                getattr(machine, rule.name)()
+            except TypeError:
+                pass  # rule genuinely can't execute — skip
 
         return params
 
@@ -992,10 +1013,11 @@ class Explorer:
         trace_steps: list[TraceStep],
         ts_offset: float,
         new_edges_this_run: int,
-    ) -> dict[str, Any]:
+    ) -> bool:
         """Execute one exploration step: either a fault toggle or a rule.
 
-        Returns a dict with ``rule_log_entry`` and ``trace_step`` keys.
+        Returns ``True`` if the step executed, ``False`` if it was
+        skipped (strategy generation failed for required parameters).
         """
         if machine._faults and self.rng.random() < self.fault_toggle_prob:
             toggle_name = self._toggle_fault(machine)
@@ -1009,9 +1031,19 @@ class Explorer:
                     timestamp_offset=ts_offset,
                 )
             )
+            return True
         else:
             rule_info = self.rng.choice(self._rules)
             params = self._execute_rule(machine, rule_info)
+            # Detect skipped rules: required params missing means strategy
+            # generation failed. Don't log as a real step — prevents the
+            # "spinning" problem where run counts inflate with no-op calls.
+            required = sum(1 for p in rule_info.strategies if p != "data")
+            generated = sum(
+                1 for k, v in params.items() if k != "data" and not isinstance(v, _DataProxy)
+            )
+            if required > 0 and generated < required:
+                return False  # skip — strategy generation failed
             rule_log.append(rule_info.name)
 
             serializable_params = {
@@ -1028,6 +1060,7 @@ class Explorer:
                     timestamp_offset=ts_offset,
                 )
             )
+        return True
 
     def _process_coverage(
         self,
@@ -1316,9 +1349,12 @@ class Explorer:
                     result.total_steps += 1
                     ts_offset = _time.monotonic() - run_start
 
-                    self._execute_step(
+                    executed = self._execute_step(
                         machine, rule_log, trace_steps, ts_offset, new_edges_this_run
                     )
+                    if not executed:
+                        result.skipped_steps += 1
+                        continue
                     self._check_invariants(machine)
                     new_edges_this_run = self._process_coverage(
                         machine,

@@ -1972,12 +1972,28 @@ class Explorer:
             else:
                 machine = self.test_class()
 
-            # Rule swarm: random rule subset per run
+            # Rule swarm: random rule subset per run.
+            #
+            # Distribution: draw subset size k ~ Uniform(1, n), then sample
+            # k rules.  This gives equal probability to "only 1 rule" and
+            # "all n rules" — unlike a uniform bitmask which clusters around
+            # n/2.  Extreme subsets (1 rule, 2 rules) are the most valuable
+            # for swarm because they force the remaining rules to accumulate
+            # state (Groce et al., ISSTA 2012).
             if self.rule_swarm and len(self._rules) > 1:
                 n = len(self._rules)
-                mask = self.rng.randint(1, (1 << n) - 1)
-                self._active_rules = [r for i, r in enumerate(self._rules) if mask & (1 << i)]
+                k = self.rng.randint(1, n)
+                self._active_rules = self.rng.sample(self._rules, k)
                 result.rule_swarm_runs += 1
+                # Record which rules are active so replay can reproduce
+                active_names = [r.name for r in self._active_rules]
+                trace_steps.append(
+                    TraceStep(
+                        kind="rule_swarm",
+                        name=f"[swarm {k}/{n}: {', '.join(active_names)}]",
+                        params={"active_rules": active_names},
+                    )
+                )
             else:
                 self._active_rules = self._rules
 

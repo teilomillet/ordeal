@@ -265,6 +265,8 @@ def _replay_steps(
                 _replay_fault_toggle(fault_index, step.name)
             elif step.kind == "rule":
                 _replay_rule(machine, step.name, step.params)
+            elif step.kind == "rule_swarm":
+                continue  # metadata — replay uses the rule steps that follow
             # Check invariants after every step
             for method in invariant_methods:
                 method(machine)

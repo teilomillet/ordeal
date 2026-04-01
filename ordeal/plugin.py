@@ -205,13 +205,14 @@ def pytest_configure(config: pytest.Config) -> None:
 
     _register_array_strategies()
 
-    # Replay seed corpus for regression detection
-    if config.getoption("chaos", default=False):
-        _seed_replay_results.clear()
-        try:
-            _seed_replay_results.extend(_replay_seed_corpus())
-        except Exception:
-            pass  # seed replay is best-effort
+    # Replay seed corpus for regression detection — runs on EVERY pytest
+    # invocation, not just --chaos.  This is the Go fuzzing model: saved
+    # crashers are permanent regression tests that run automatically.
+    _seed_replay_results.clear()
+    try:
+        _seed_replay_results.extend(_replay_seed_corpus())
+    except Exception:
+        pass  # seed replay is best-effort
 
     if config.getoption("chaos", default=False):
         assertions.tracker.active = True

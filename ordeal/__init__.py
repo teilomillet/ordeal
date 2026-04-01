@@ -90,6 +90,7 @@ _LAZY_SUBMODULES = (
     "ordeal.scaling",
     "ordeal.state",
     "ordeal.explore",
+    "ordeal.trace",
     "ordeal.supervisor",
     "ordeal.mutagen",
     "ordeal.cmplog",
@@ -148,8 +149,8 @@ def catalog() -> dict[str, list]:
     dicts describing the available items.  Keys: ``faults``, ``invariants``,
     ``assertions``, ``strategies``, ``mutations``, ``integrations``,
     ``mining``, ``audit``, ``auto``, ``metamorphic``, ``diff``, ``scaling``,
-    ``exploration``, ``supervisor``, ``mutagen``, ``cmplog``, ``concolic``,
-    ``grammar``, ``equivalence``.
+    ``exploration``, ``trace``, ``supervisor``, ``mutagen``, ``cmplog``,
+    ``concolic``, ``grammar``, ``equivalence``.
 
     Everything is derived from the source code via ``inspect``; adding a new
     fault, invariant, or capability makes it appear here automatically.
@@ -225,6 +226,16 @@ def catalog() -> dict[str, list]:
         ),
         "equivalence": _introspect_module(
             __import__("ordeal.equivalence", fromlist=["equivalence"]),
+        ),
+        "trace": _introspect_module(
+            __import__("ordeal.trace", fromlist=["trace"]),
+            include={
+                "Trace",
+                "replay",
+                "shrink",
+                "ablate_faults",
+                "generate_tests",
+            },
         ),
     }
     try:

@@ -33,6 +33,7 @@ class TestTopLevelCatalog:
             "concolic",
             "grammar",
             "equivalence",
+            "trace",
         }
         always(set(c.keys()) == expected, "catalog has all categories")
 

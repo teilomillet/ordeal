@@ -52,7 +52,7 @@ ordeal/
 ├── metamorphic.py      Metamorphic testing — relation-based property checking
 ├── diff.py             Differential testing — compare two implementations
 ├── scaling.py          USL scaling analysis — fit_usl, analyze, benchmark
-├── trace.py            Trace recording, JSON serialization, replay, delta-debugging shrink
+├── trace.py            Trace recording, JSON serialization, replay, shrink, fault ablation
 ├── config.py           ordeal.toml loader with strict validation
 ├── cli.py              CLI: ordeal explore / mutate / audit / mine / replay / benchmark
 ├── plugin.py           Pytest plugin: --chaos, --chaos-seed, --buggify-prob, --mutate
@@ -128,6 +128,10 @@ Quick reference — match what the developer wants to the right tool:
 - **"Crack guarded branches"** → `from ordeal.cmplog import extract_comparison_values` (finds magic values in AST)
 - **"Mutate known-good inputs"** → `from ordeal.mutagen import mutate_inputs` (AFL-style value mutation)
 - **"How does my system scale?"** → `ordeal benchmark` or `fit_usl(measurements)` or `@scales_linearly`
+- **"Which faults caused this bug?"** → `from ordeal import ablate_faults; ablate_faults(trace)` (tries without each fault, reports necessary ones)
+- **"Replay a failure"** → `ordeal replay trace.json` or `ordeal replay --shrink --ablate trace.json`
+- **"Protect against regressions"** → seeds auto-save to `.ordeal/seeds/`, auto-replay on every `pytest` run
+- **"What branches aren't tested?"** → `result.coverage_gaps` + `result.reachability_suggestions()` after `ordeal explore`
 - **"Get a preflight report"** → `from ordeal import report; report()` (structured pass/fail summary)
 - **"What can ordeal do?"** → `from ordeal import catalog; catalog()`
 
@@ -279,6 +283,10 @@ for p in r["failed"]:
 - **Coverage-aware mining** — mine() tracks edge coverage per input, reports saturation, feeds coverage back to Hypothesis via target()
 - **`DeterministicSupervisor`** — seeds all RNGs, patches time, logs state trajectory as Markov chain; same seed = same execution
 - **`StateTree`** — navigable exploration tree with checkpoint, rollback, and branching; the AI navigates the state space
+- **Persistent seed corpus** — failing traces auto-save to `.ordeal/seeds/`, replay on every `pytest` run for instant regression detection (Go fuzzing / Hypothesis test database model)
+- **Fault ablation** — `ablate_faults(trace)` replays without each fault to find the minimal necessary set; answers "which faults caused this bug?"; wired into Explorer post-shrink and `ordeal replay --ablate`
+- **Coverage gap reporting** — `CoverageCollector` tracks line-level coverage; `ExplorationResult.coverage_gaps` reports uncovered branches; `reachability_suggestions()` generates `reachable()` calls for AI assistants
+- **Failing step in traces** — rule steps that raise are now recorded in the trace, so `ordeal replay` reproduces failures where the exception occurs during rule execution
 
 ## Extending ordeal
 

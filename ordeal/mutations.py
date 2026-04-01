@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import functools
 import importlib
 import inspect
 import pkgutil
@@ -91,17 +92,86 @@ def _unwrap_func(func: object) -> object:
 
     Handles ``inspect.unwrap`` (follows ``__wrapped__`` chains),
     Ray's ``@ray.remote`` (stores the real function in ``._function``),
-    and Celery-style ``task.run`` patterns.
+    Celery-style ``task.run`` patterns, staticmethod/classmethod
+    (``__func__``), property (``fget``), and ``functools.partial``.
     """
     # Ray @ray.remote stores the original in ._function
     if hasattr(func, "_function"):
         func = func._function
+    # staticmethod / classmethod → __func__
+    if hasattr(func, "__func__"):
+        func = func.__func__
+    # property → fget
+    if isinstance(func, property) and func.fget is not None:
+        func = func.fget
+    # functools.partial → .func
+    if hasattr(func, "func") and isinstance(func, functools.partial):
+        func = func.func
+    # Celery-style task.run
+    if hasattr(func, "run") and callable(getattr(func, "run", None)):
+        candidate = func.run
+        if hasattr(candidate, "__code__"):
+            func = candidate
     # Standard unwrap (__wrapped__ chains from functools.wraps)
     try:
         func = inspect.unwrap(func)
     except (ValueError, TypeError):
         pass
     return func
+
+
+def _get_source(func: object) -> str:
+    """Extract source code for *func*, with file-based fallback.
+
+    Tries ``inspect.getsource`` first.  When that fails (common for
+    decorated callables whose wrapper is defined in C or lacks source
+    metadata), falls back to reading the source file directly using
+    ``__code__`` attributes.
+    """
+    try:
+        return textwrap.dedent(inspect.getsource(func))
+    except (OSError, TypeError):
+        pass
+
+    # Fallback: read from __code__.co_filename / co_firstlineno
+    code = getattr(func, "__code__", None)
+    if code is None:
+        raise OSError(
+            f"Cannot retrieve source for {func!r}: "
+            "inspect.getsource failed and object has no __code__ attribute"
+        )
+
+    filename = code.co_filename
+    first_line = code.co_firstlineno  # 1-based
+
+    try:
+        with open(filename) as fh:
+            lines = fh.readlines()
+    except (OSError, TypeError) as exc:
+        raise OSError(
+            f"Cannot retrieve source for {func!r}: "
+            f"inspect.getsource failed and could not read {filename!r}"
+        ) from exc
+
+    # Walk from the def/async def line until dedent signals end of function
+    start = first_line - 1  # 0-based
+    if start >= len(lines):
+        raise OSError(f"Source line {first_line} is past end of {filename}")
+
+    func_lines = [lines[start]]
+    # Determine the indentation of the def line
+    base_indent = len(lines[start]) - len(lines[start].lstrip())
+    for line in lines[start + 1 :]:
+        stripped = line.strip()
+        if stripped == "" or stripped.startswith("#"):
+            func_lines.append(line)
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent <= base_indent:
+            break
+        func_lines.append(line)
+
+    return textwrap.dedent("".join(func_lines))
 
 
 class NoTestsFoundError(RuntimeError):
@@ -3145,6 +3215,15 @@ def validate_mined_properties(
     return mutate_function_and_test(target, mined_test, operators)
 
 
+_BOUNDARY_VALUES: dict[type, list] = {
+    int: [0, 1, -1, 2, -2],
+    float: [0.0, 1.0, -1.0, 0.5, -0.5],
+    bool: [True, False],
+    str: ["", "a", "ab"],
+    bytes: [b"", b"\x00", b"ab"],
+}
+
+
 def _is_runtime_equivalent(
     original: Callable,
     mutant_fn: Callable,
@@ -3152,9 +3231,9 @@ def _is_runtime_equivalent(
 ) -> bool:
     """Heuristic: run both functions on random inputs, skip if outputs match.
 
-    Generates *n_samples* sets of arguments from the function's type hints
-    (via ``strategy_for_type``) and compares outputs.  If every output is
-    identical, the mutant is likely equivalent — testing it is wasted work.
+    Tests boundary values first (0, 1, -1, etc.) to catch mutations that
+    only differ at edges (e.g. ``<`` → ``<=``), then *n_samples* random
+    draws from type-driven strategies.
 
     Returns ``True`` (skip) when all samples agree.  Falls back to ``False``
     (test it) when inputs can't be generated or any sample disagrees.
@@ -3186,15 +3265,46 @@ def _is_runtime_equivalent(
     except Exception:
         return False
 
+    param_hints = []
     strategies = []
     for p in params:
         if p.name not in hints:
             return False
+        hint = hints[p.name]
+        param_hints.append(hint)
         try:
-            strategies.append(strategy_for_type(hints[p.name]))
+            strategies.append(strategy_for_type(hint))
         except Exception:
             return False
 
+    # --- Phase 1: boundary values (catches < vs <=, off-by-one, etc.) ---
+    boundary_lists = []
+    for hint in param_hints:
+        origin = getattr(hint, "__origin__", hint)
+        values = _BOUNDARY_VALUES.get(origin, [])
+        boundary_lists.append(values)
+
+    # Build boundary arg combos: for each param pick each boundary value
+    # while using the first boundary (or a random draw) for other params.
+    def _check(args: list) -> bool:
+        try:
+            return original(*args) == mutant_fn(*args)
+        except Exception:
+            return False
+
+    # Defaults: first boundary value per param, or a random draw
+    defaults = []
+    for i, bl in enumerate(boundary_lists):
+        defaults.append(bl[0] if bl else strategies[i].example())
+
+    for i, bl in enumerate(boundary_lists):
+        for val in bl:
+            args = list(defaults)
+            args[i] = val
+            if not _check(args):
+                return False
+
+    # --- Phase 2: random samples ---
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         for _ in range(n_samples):
@@ -3340,7 +3450,7 @@ def mutate_function_and_test(
     module_path, func_name = target.rsplit(".", 1)
     module = importlib.import_module(module_path)
     func = _unwrap_func(getattr(module, func_name))
-    source = textwrap.dedent(inspect.getsource(func))
+    source = _get_source(func)
 
     mutant_pairs = generate_mutants(
         source, operators, extra_mutants=extra_mutants, llm=llm, concern=concern
@@ -3691,7 +3801,7 @@ def mutation_faults(
     module_path, func_name = target.rsplit(".", 1)
     module = importlib.import_module(module_path)
     func = _unwrap_func(getattr(module, func_name))
-    source = textwrap.dedent(inspect.getsource(func))
+    source = _get_source(func)
 
     results: list[tuple[Mutant, PatchFault]] = []
     for mutant, mutated_tree in generate_mutants(source, operators):

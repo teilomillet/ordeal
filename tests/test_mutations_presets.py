@@ -11,7 +11,10 @@ from ordeal.config import ConfigError, load_config
 from ordeal.mutations import (
     OPERATORS,
     PRESETS,
+    _get_source,
+    _is_runtime_equivalent,
     _resolve_operators,
+    _unwrap_func,
     generate_mutants,
     mutate_function_and_test,
 )
@@ -409,3 +412,184 @@ def test_mutate_marker_registered():
     cfg = FakeConfig()
     pytest_configure(cfg)  # type: ignore[arg-type]
     assert any("mutate" in line for line in cfg._ini_lines)
+
+
+# ============================================================================
+# _unwrap_func — decorator unwrapping
+# ============================================================================
+
+
+def test_unwrap_func_with_wrapped_chain():
+    """inspect.unwrap follows __wrapped__ chains (functools.wraps)."""
+    import functools
+
+    def real(x: int) -> int:
+        return x + 1
+
+    @functools.wraps(real)
+    def wrapper(x: int) -> int:
+        return real(x)
+
+    assert _unwrap_func(wrapper) is real
+
+
+def test_unwrap_func_ray_remote_attribute():
+    """_unwrap_func follows ._function for Ray-like decorators."""
+
+    def real(x: int) -> int:
+        return x * 2
+
+    class FakeRemote:
+        _function = real
+
+        def __call__(self, *args, **kwargs):
+            return self._function(*args, **kwargs)
+
+    assert _unwrap_func(FakeRemote()) is real
+
+
+def test_unwrap_func_staticmethod():
+    """_unwrap_func follows __func__ for staticmethod."""
+
+    def real(x: int) -> int:
+        return x
+
+    sm = staticmethod(real)
+    assert _unwrap_func(sm) is real
+
+
+def test_unwrap_func_property():
+    """_unwrap_func follows .fget for property objects."""
+
+    def getter(self) -> int:
+        return 42
+
+    prop = property(getter)
+    assert _unwrap_func(prop) is getter
+
+
+def test_unwrap_func_partial():
+    """_unwrap_func follows .func for functools.partial."""
+    import functools
+
+    def real(a: int, b: int) -> int:
+        return a + b
+
+    p = functools.partial(real, 1)
+    assert _unwrap_func(p) is real
+
+
+# ============================================================================
+# _get_source — source extraction with fallback
+# ============================================================================
+
+
+def test_get_source_normal_function():
+    """_get_source works for a regular function."""
+    source = _get_source(_add)
+    assert "def _add" in source
+    assert "return a + b" in source
+
+
+def test_get_source_fallback_when_getsource_fails(monkeypatch):
+    """When inspect.getsource raises, _get_source falls back to file reading."""
+    import inspect as _inspect
+
+    original_getsource = _inspect.getsource
+
+    def broken_getsource(obj):
+        if obj is _add:
+            raise OSError("no source")
+        return original_getsource(obj)
+
+    monkeypatch.setattr(_inspect, "getsource", broken_getsource)
+
+    source = _get_source(_add)
+    assert "def _add" in source
+    assert "return a + b" in source
+
+
+# ============================================================================
+# _is_runtime_equivalent — boundary-aware equivalence filter
+# ============================================================================
+
+
+def _clamp(x: int, lo: int, hi: int) -> int:
+    """Clamp x into [lo, hi]."""
+    if x < lo:
+        return lo
+    if x > hi:
+        return hi
+    return x
+
+
+def _clamp_boundary_bug(x: int, lo: int, hi: int) -> int:
+    """Same as _clamp but with <= instead of < — only differs at boundary."""
+    if x <= lo:
+        return lo
+    if x > hi:
+        return hi
+    return x
+
+
+def test_runtime_equivalent_catches_boundary_mutation():
+    """Boundary values distinguish < from <= even in multi-param functions."""
+    result = _is_runtime_equivalent(_clamp, _clamp_boundary_bug)
+    # Boundary values like (x=0, lo=0, hi=-1) expose the difference:
+    # original: 0 < 0 → False, 0 > -1 → True, returns -1
+    # mutant:   0 <= 0 → True, returns 0
+    assert result is False
+
+
+def _threshold(x: int) -> str:
+    """Classify x as low/high — boundary at exactly 0."""
+    if x < 0:
+        return "low"
+    return "high"
+
+
+def _threshold_lte(x: int) -> str:
+    """< mutated to <=, changes result at x=0."""
+    if x <= 0:
+        return "low"
+    return "high"
+
+
+def test_runtime_equivalent_distinguishes_lt_vs_lte():
+    """Boundary value x=0 must distinguish < from <= in threshold function."""
+    result = _is_runtime_equivalent(_threshold, _threshold_lte)
+    assert result is False, "boundary value 0 should distinguish < from <="
+
+
+def _classify(x: float) -> float:
+    """Classify: positive → 1.0, non-positive → -1.0."""
+    if x > 0.0:
+        return 1.0
+    return -1.0
+
+
+def _classify_gte(x: float) -> float:
+    """> mutated to >=, changes result at x=0.0."""
+    if x >= 0.0:
+        return 1.0
+    return -1.0
+
+
+def test_runtime_equivalent_floats_boundary():
+    """Boundary value 0.0 must distinguish > from >= in float function."""
+    # _classify(0.0) → -1.0, _classify_gte(0.0) → 1.0
+    result = _is_runtime_equivalent(_classify, _classify_gte)
+    assert result is False, "boundary value 0.0 should distinguish > from >="
+
+
+def test_runtime_equivalent_truly_equivalent():
+    """Truly equivalent functions should still be detected."""
+
+    def original(x: int) -> int:
+        return x + 0
+
+    def mutant(x: int) -> int:
+        return x - 0
+
+    result = _is_runtime_equivalent(original, mutant)
+    assert result is True

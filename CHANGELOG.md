@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.69
+
+**Features:**
+
+- auto-derived refresh suggestions — no hardcoded display
+
+
 ## 0.2.68
 
 **Features:**

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.73
+
+**Features:**
+
+- fuzz_endpoint with fault injection — chaos_api_test for raw HTTP
+- add --ci flag to ordeal init for GitHub Actions workflow generation
+
+
 ## 0.2.72
 
 **Features:**

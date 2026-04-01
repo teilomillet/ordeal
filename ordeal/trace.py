@@ -440,43 +440,71 @@ def ablate_faults(
     trace: Trace,
     test_class: type | None = None,
 ) -> dict[str, bool]:
-    """Determine which faults are necessary for a failure to reproduce.
+    """Determine which faults are individually necessary for a failure.
 
-    For each fault that appears in the trace, replays the trace without
-    that fault's toggles.  If the failure still reproduces, the fault is
-    **not necessary**.  If the failure disappears, the fault is **necessary**.
+    **Phase 1 — individual ablation**: for each fault in the trace,
+    replays without that fault's toggles (all other faults remain).
+    If the failure disappears, the fault is *individually necessary*.
 
-    This answers the Antithesis root-cause question: *"Is it possible to
-    find the bug without fiddling with the clock?"*
+    **Phase 2 — pairwise ablation**: if multiple faults appear
+    individually unnecessary (removing either one still fails because
+    the other compensates), tests removing them in pairs.  A pair
+    where the failure disappears means those faults are *jointly
+    necessary* — neither alone is sufficient, but together they are.
+
+    This answers the Antithesis root-cause question: *"Is it possible
+    to find the bug without fiddling with the clock?"*
+
+    **Epistemic note**: this finds faults that are necessary *for this
+    specific trace*.  A different execution path might reproduce the
+    same bug with a different fault set.
 
     Args:
         trace: A failing trace (typically already shrunk).
         test_class: Override the class (default: import from trace metadata).
 
     Returns:
-        ``{fault_name: True}`` for necessary faults,
-        ``{fault_name: False}`` for unnecessary ones.
-        Empty dict if the trace has no fault toggles.
+        ``{fault_name: True}`` if the fault is necessary (removing it
+        prevents reproduction), ``{fault_name: False}`` if it is not
+        (failure still reproduces without it).  Empty dict if the trace
+        has no fault toggles.
     """
     if test_class is None:
         test_class = _import_class(trace.test_class)
 
-    # Extract unique fault names from the trace
     fault_names = {s.name.lstrip("+-") for s in trace.steps if s.kind == "fault_toggle"}
     if not fault_names:
         return {}
 
+    # Phase 1: individual ablation
     result: dict[str, bool] = {}
     for fname in sorted(fault_names):
-        # Replay without this fault's toggles
         without = [
             s
             for s in trace.steps
             if not (s.kind == "fault_toggle" and s.name.lstrip("+-") == fname)
         ]
         error = _replay_steps(without, test_class)
-        # If failure disappears without this fault, it's necessary
         result[fname] = error is None
+
+    # Phase 2: pairwise ablation for faults that appear individually unnecessary.
+    # If removing A alone still fails (B compensates) and removing B alone still
+    # fails (A compensates), but removing both A+B fixes it — both are jointly
+    # necessary.  Promote them to necessary=True.
+    unnecessary = [f for f, necessary in result.items() if not necessary]
+    if len(unnecessary) >= 2:
+        for i, fa in enumerate(unnecessary):
+            for fb in unnecessary[i + 1 :]:
+                without_pair = [
+                    s
+                    for s in trace.steps
+                    if not (s.kind == "fault_toggle" and s.name.lstrip("+-") in (fa, fb))
+                ]
+                error = _replay_steps(without_pair, test_class)
+                if error is None:
+                    # Removing both fixes it — both are jointly necessary
+                    result[fa] = True
+                    result[fb] = True
 
     return result
 

@@ -77,6 +77,28 @@ class _NeedsBothFaults(ChaosTest):
             raise ValueError("both faults caused this")
 
 
+class _NeedsEitherFault(ChaosTest):
+    """Fails when fault_a OR fault_b is active (either suffices).
+
+    Individual ablation: removing A alone still fails (B compensates),
+    removing B alone still fails (A compensates).  Both appear unnecessary.
+    Pairwise ablation: removing both A and B fixes it — both are jointly
+    necessary.
+    """
+
+    faults = [_make_fault_a(), _make_fault_b()]
+
+    def __init__(self):
+        super().__init__()
+        self.counter = 0
+
+    @rule()
+    def tick(self):
+        self.counter += 1
+        if self.counter >= 2 and (_fault_a_flag or _fault_b_flag):
+            raise ValueError("either fault caused this")
+
+
 class _NeedsNoFaults(ChaosTest):
     """Always fails regardless of faults."""
 
@@ -180,6 +202,18 @@ class TestAblation:
         )
         result = ablate_faults(trace, _NeedsNoFaults)
         assert result == {}
+
+    def test_pairwise_joint_necessity(self):
+        """Either fault alone suffices, but pairwise ablation catches it."""
+        trace = _make_trace_with_faults(_NeedsEitherFault, ["fault_a", "fault_b"])
+        err = replay(trace, _NeedsEitherFault)
+        assert err is not None
+
+        result = ablate_faults(trace, _NeedsEitherFault)
+        # Pairwise ablation should promote both to necessary
+        # because removing both fixes the bug
+        assert result["fault_a"] is True
+        assert result["fault_b"] is True
 
     def test_ablation_in_failure_str(self):
         """Failure.__str__ includes necessary faults when ablation is set."""

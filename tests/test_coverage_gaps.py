@@ -51,6 +51,24 @@ def foo():
         assert 3 in lines  # try
         assert 5 in lines  # except
 
+    def test_finds_assert(self):
+        source = """
+def foo(x):
+    assert x > 0
+"""
+        branches = _find_branch_lines(source)
+        lines = [ln for ln, _ in branches]
+        assert 3 in lines
+
+    def test_finds_raise(self):
+        source = """
+def foo():
+    raise ValueError("boom")
+"""
+        branches = _find_branch_lines(source)
+        lines = [ln for ln, _ in branches]
+        assert 3 in lines
+
     def test_empty_source(self):
         assert _find_branch_lines("") == []
 
@@ -89,13 +107,15 @@ class TestExplorationResultCoverageGaps:
         )
         s = result.summary()
         assert "Line coverage: 80/100 (80%)" in s
-        assert "Coverage gaps: 2" in s
+        assert "Not reached" in s
+        assert "2 branch" in s
         assert "if x > 0:" in s
 
     def test_summary_includes_reachable_suggestions(self):
         from ordeal.explore import ExplorationResult
 
         result = ExplorationResult(
+            total_runs=50,
             coverage_gaps=[
                 {"file": "myapp/foo.py", "line": 10, "code": "if x > 0:"},
             ],
@@ -103,6 +123,8 @@ class TestExplorationResultCoverageGaps:
         s = result.summary()
         assert "reachable(" in s
         assert "myapp/foo.py:10" in s
+        assert "Not reached" in s
+        assert "50 runs" in s
 
 
 class TestReachabilitySuggestions:
@@ -110,6 +132,7 @@ class TestReachabilitySuggestions:
         from ordeal.explore import ExplorationResult
 
         result = ExplorationResult(
+            total_runs=100,
             coverage_gaps=[
                 {"file": "myapp/foo.py", "line": 10, "code": "if x > 0:"},
                 {"file": "myapp/bar.py", "line": 5, "code": "for item in items:"},
@@ -121,6 +144,9 @@ class TestReachabilitySuggestions:
         assert suggestions[0]["line"] == 10
         assert "reachable(" in suggestions[0]["suggestion"]
         assert "if x > 0:" in suggestions[0]["suggestion"]
+        # Epistemic fields
+        assert suggestions[0]["confidence"] == "not_reached"
+        assert suggestions[0]["runs"] == 100
 
     def test_empty_gaps_empty_suggestions(self):
         from ordeal.explore import ExplorationResult

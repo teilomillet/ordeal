@@ -312,10 +312,10 @@ class CoverageCollector:
 
 
 def _find_branch_lines(source: str) -> list[tuple[int, str]]:
-    """Find branch statement lines in Python source via AST.
+    """Find branch and control-flow statement lines in Python source via AST.
 
-    Returns ``[(lineno, code_snippet), ...]`` for ``if``, ``elif``,
-    ``for``, ``while``, ``try``, and ``except`` statements.
+    Returns ``[(lineno, code_snippet), ...]`` for ``if``, ``for``,
+    ``while``, ``try``, ``except``, ``match``, ``assert``, and ``raise``.
     """
     import ast
     import textwrap
@@ -325,13 +325,27 @@ def _find_branch_lines(source: str) -> list[tuple[int, str]]:
     except SyntaxError:
         return []
 
+    # Branch/control-flow node types
+    branch_types: tuple[type, ...] = (
+        ast.If,
+        ast.For,
+        ast.While,
+        ast.Try,
+        ast.ExceptHandler,
+        ast.Assert,
+        ast.Raise,
+    )
+    # Python 3.10+ match/case
+    if hasattr(ast, "Match"):
+        branch_types = (*branch_types, ast.Match, ast.match_case)
+
     src_lines = source.splitlines()
     branches: list[tuple[int, str]] = []
     for node in ast.walk(tree):
         lineno = getattr(node, "lineno", None)
         if lineno is None:
             continue
-        if isinstance(node, (ast.If, ast.For, ast.While, ast.Try, ast.ExceptHandler)):
+        if isinstance(node, branch_types):
             code = src_lines[lineno - 1].strip() if lineno <= len(src_lines) else ""
             branches.append((lineno, textwrap.shorten(code, 80)))
     return branches
@@ -340,16 +354,24 @@ def _find_branch_lines(source: str) -> list[tuple[int, str]]:
 def _compute_coverage_gaps(
     lines_hit: dict[str, set[int]],
     target_modules: list[str],
+    total_runs: int = 0,
 ) -> tuple[list[dict[str, Any]], int, int]:
     """Compare lines_hit against branch lines in target modules.
 
     Returns ``(gaps, lines_covered, lines_total)`` where gaps is a list
-    of ``{file, line, code}`` dicts for uncovered branch statements.
+    of ``{file, line, code}`` dicts for branch/control-flow statements
+    not reached during exploration.
+
+    **Epistemic note**: "not reached" means the explorer did not
+    execute this line in ``total_runs`` runs.  It does NOT mean the
+    code is unreachable — a longer run or different fault schedule
+    might reach it.
     """
+    import ast
     import importlib
     import inspect
 
-    all_branch_lines: list[tuple[str, int, str]] = []  # (file, line, code)
+    all_branch_lines: list[tuple[str, int, str]] = []
     all_executable: set[tuple[str, int]] = set()
 
     for mod_name in target_modules:
@@ -364,22 +386,27 @@ def _compute_coverage_gaps(
             continue
 
         branches = _find_branch_lines(src)
-        # Offset: getsource may not start at line 1 for submodules
-        try:
-            src_lines_all = Path(src_file).read_text().splitlines()
-        except Exception:
-            src_lines_all = src.splitlines()
-
         for lineno, code in branches:
             all_branch_lines.append((src_file, lineno, code))
 
-        # Count all executable lines (non-empty, non-comment, non-decorator)
-        for i, line in enumerate(src_lines_all, 1):
-            stripped = line.strip()
-            if stripped and not stripped.startswith("#") and not stripped.startswith("@"):
-                all_executable.add((src_file, i))
+        # Count executable lines via AST — only lines that contain
+        # actual statements (skips docstrings, comments, blank lines).
+        try:
+            tree = ast.parse(Path(src_file).read_text())
+        except Exception:
+            try:
+                tree = ast.parse(src)
+            except Exception:
+                continue
+        for node in ast.walk(tree):
+            lineno = getattr(node, "lineno", None)
+            if lineno is not None and isinstance(node, ast.stmt):
+                # Skip pure docstring expressions (string-only Expr nodes)
+                if isinstance(node, ast.Expr) and isinstance(node.value, (ast.Constant,)):
+                    if isinstance(node.value.value, str):
+                        continue
+                all_executable.add((src_file, lineno))
 
-    # Find covered lines across all files
     covered = set()
     for fn, lines in lines_hit.items():
         for ln in lines:
@@ -391,7 +418,6 @@ def _compute_coverage_gaps(
     gaps = []
     for src_file, lineno, code in all_branch_lines:
         if (src_file, lineno) not in covered:
-            # Use short relative path
             try:
                 rel = str(Path(src_file).relative_to(Path.cwd()))
             except ValueError:
@@ -772,7 +798,8 @@ class ExplorationResult:
             lines.append(f"Line coverage: {self.lines_covered}/{self.lines_total} ({pct:.0f}%)")
         if self.coverage_gaps:
             n = len(self.coverage_gaps)
-            lines.append(f"Coverage gaps: {n} uncovered branch(es) in target modules")
+            run_ctx = f" in {self.total_runs} runs" if self.total_runs else ""
+            lines.append(f"Not reached{run_ctx}: {n} branch(es) in target modules")
             suggestions = self.reachability_suggestions()
             for s in suggestions[:5]:
                 lines.append(f"  {s['file']}:{s['line']} {s['code']}")
@@ -817,14 +844,21 @@ class ExplorationResult:
         }
 
     def reachability_suggestions(self) -> list[dict[str, Any]]:
-        """Generate ``reachable()`` assertion suggestions from coverage gaps.
+        """Generate ``reachable()`` suggestions for branches not reached.
 
         Each suggestion is a structured dict an AI assistant can act on:
 
         - ``file``: source file path
-        - ``line``: line number of the uncovered branch
+        - ``line``: line number of the branch not reached
         - ``code``: the branch statement (``if``, ``for``, etc.)
         - ``suggestion``: a ``reachable()`` call to insert near that line
+        - ``confidence``: ``"not_reached"`` — the explorer did not hit
+          this line; it may be reachable with more runs or different faults
+        - ``runs``: number of exploration runs in this session
+
+        **Epistemic note**: these are branches the explorer did not reach.
+        Adding ``reachable()`` lets future runs prove whether the branch
+        is reachable or genuinely dead code.
 
         Returns an empty list if there are no coverage gaps.
         """
@@ -838,6 +872,8 @@ class ExplorationResult:
                     "line": gap["line"],
                     "code": gap["code"],
                     "suggestion": suggestion,
+                    "confidence": "not_reached",
+                    "runs": self.total_runs,
                 }
             )
         return suggestions
@@ -996,6 +1032,7 @@ class Explorer:
         self._invariant_names: list[str] = []
         self._last_step_rule: tuple[str, dict[str, Any]] | None = None
         self._last_step_used_mutation: bool = False
+        self._last_generated_params: dict[str, Any] = {}
         self._strategy_failures: dict[str, int] = {}
 
     # -- Snapshot / restore -------------------------------------------------
@@ -1258,6 +1295,12 @@ class Explorer:
                 return params  # caller sees incomplete params
 
         self._last_step_used_mutation = used_mutation
+        # Store params before calling the method so they're available
+        # if the method raises — the except block in _execute_step
+        # uses these to record the failing step with actual params.
+        self._last_generated_params = {
+            k: v for k, v in params.items() if not isinstance(v, _DataProxy)
+        }
 
         try:
             getattr(machine, rule.name)(**params)
@@ -1499,13 +1542,15 @@ class Explorer:
             try:
                 params = self._execute_rule(machine, rule_info, source_cp=source_cp)
             except Exception:
-                # Record the failing rule so replay can reproduce it.
+                # Record the failing rule with actual generated params
+                # so replay reproduces the exact same call.
                 rule_log.append(rule_info.name)
+                failing_params = getattr(self, "_last_generated_params", {})
                 trace_steps.append(
                     TraceStep(
                         kind="rule",
                         name=rule_info.name,
-                        params={},
+                        params=failing_params,
                         edge_count=len(self._total_edges) + new_edges_this_run,
                         timestamp_offset=ts_offset,
                     )
@@ -2073,7 +2118,9 @@ class Explorer:
 
         # -- Post-exploration: coverage gap analysis --
         if use_coverage and _lines_hit_all and self.target_modules:
-            gaps, covered, total = _compute_coverage_gaps(_lines_hit_all, self.target_modules)
+            gaps, covered, total = _compute_coverage_gaps(
+                _lines_hit_all, self.target_modules, result.total_runs
+            )
             result.coverage_gaps = gaps
             result.lines_covered = covered
             result.lines_total = total

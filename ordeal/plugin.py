@@ -146,6 +146,54 @@ def _register_array_strategies() -> None:
         pass
 
 
+_seed_replay_results: list[dict[str, Any]] = []
+
+
+def _replay_seed_corpus() -> list[dict[str, Any]]:
+    """Scan .ordeal/seeds/ and replay all seeds.  Returns replay results."""
+    from pathlib import Path
+
+    from ordeal.trace import Trace
+    from ordeal.trace import replay as _replay
+
+    corpus = Path(".ordeal/seeds")
+    if not corpus.exists():
+        return []
+
+    # Try loading config for custom corpus_dir
+    try:
+        from ordeal.config import load_config
+
+        cfg = load_config()
+        corpus = Path(cfg.report.corpus_dir)
+    except Exception:
+        pass
+
+    if not corpus.exists():
+        return []
+
+    results: list[dict[str, Any]] = []
+    for class_dir in sorted(corpus.iterdir()):
+        if not class_dir.is_dir():
+            continue
+        for seed_file in sorted(class_dir.glob("seed-*.json")):
+            try:
+                trace = Trace.load(seed_file)
+            except Exception:
+                continue
+            error = _replay(trace)
+            results.append(
+                {
+                    "path": str(seed_file),
+                    "seed_name": seed_file.stem,
+                    "reproduced": error is not None,
+                    "error": f"{type(error).__name__}: {error}" if error else None,
+                    "test_class": trace.test_class,
+                }
+            )
+    return results
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Activate assertions + buggify when ``--chaos`` is passed."""
     config.addinivalue_line("markers", "chaos: mark test for chaos mode")
@@ -156,6 +204,14 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
     _register_array_strategies()
+
+    # Replay seed corpus for regression detection
+    if config.getoption("chaos", default=False):
+        _seed_replay_results.clear()
+        try:
+            _seed_replay_results.extend(_replay_seed_corpus())
+        except Exception:
+            pass  # seed replay is best-effort
 
     if config.getoption("chaos", default=False):
         assertions.tracker.active = True
@@ -446,6 +502,25 @@ def pytest_terminal_summary(
             "  Without --chaos, buggify() is inactive and chaos-marked tests don't run.",
         )
         terminalreporter.line("")
+
+    # -- Seed corpus replay results --
+    if _seed_replay_results:
+        terminalreporter.section("Ordeal Seed Corpus")
+        for sr in _seed_replay_results:
+            if sr["reproduced"]:
+                terminalreporter.line(
+                    f"  REGRESSION  {sr['seed_name']}: {sr['test_class']} — {sr['error']}",
+                    red=True,
+                )
+            else:
+                terminalreporter.line(
+                    f"  fixed       {sr['seed_name']}: {sr['test_class']} — no longer reproduces",
+                    green=True,
+                )
+        reproduced = sum(1 for s in _seed_replay_results if s["reproduced"])
+        if reproduced:
+            terminalreporter.line(f"\n  {reproduced} regression(s) still reproduce", red=True)
+        _seed_replay_results.clear()
 
     # -- Mutation results (from @pytest.mark.mutate tests) --
     if _mutation_results:

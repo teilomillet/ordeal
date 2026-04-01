@@ -67,6 +67,10 @@ output = "ordeal-report.json"
 traces = true
 traces_dir = ".ordeal/traces"
 
+# Seed corpus — failing traces are saved here and replayed automatically
+# on subsequent runs for instant regression detection.
+corpus_dir = ".ordeal/seeds"
+
 # Print live progress to stderr during exploration.
 verbose = true
 

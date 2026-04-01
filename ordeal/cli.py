@@ -21,7 +21,7 @@ from typing import Any
 
 from ordeal.config import ConfigError, OrdealConfig, load_config
 from ordeal.explore import ExplorationResult, Explorer, ProgressSnapshot
-from ordeal.trace import Trace, replay, shrink
+from ordeal.trace import Trace, ablate_faults, replay, shrink
 
 
 def _stderr(msg: str) -> None:
@@ -263,6 +263,7 @@ def _cmd_explore(args: argparse.Namespace) -> int:
 
         _stderr(f"Exploring {test_cfg.class_path}...\n")
 
+        corpus_dir = None if args.no_seeds else cfg.report.corpus_dir
         explorer = Explorer(
             test_class,
             target_modules=cfg.explorer.target_modules,
@@ -274,6 +275,7 @@ def _cmd_explore(args: argparse.Namespace) -> int:
             record_traces=cfg.report.traces or bool(args.generate_tests),
             workers=cfg.explorer.workers,
             ngram=cfg.explorer.ngram,
+            corpus_dir=corpus_dir,
         )
 
         result = explorer.run(
@@ -288,6 +290,14 @@ def _cmd_explore(args: argparse.Namespace) -> int:
 
         if verbose:
             _stderr("\n")  # newline after progress
+
+        # Report seed replay results
+        if result.seed_replays:
+            for sr in result.seed_replays:
+                if sr["reproduced"]:
+                    _stderr(f"  REGRESSION  {sr['seed_name']}: {sr['error']}\n")
+                else:
+                    _stderr(f"  fixed       {sr['seed_name']}: no longer reproduces\n")
 
         all_results.append((test_cfg.class_path, result))
 
@@ -342,6 +352,21 @@ def _cmd_replay(args: argparse.Namespace) -> int:
             if args.output:
                 shrunk.save(args.output)
                 _stderr(f"Saved: {args.output}\n")
+            trace = shrunk  # use shrunk trace for ablation
+        if args.ablate:
+            _stderr("Ablating faults...\n")
+            faults = ablate_faults(trace)
+            if faults:
+                needed = [f for f, necessary in faults.items() if necessary]
+                unneeded = [f for f, necessary in faults.items() if not necessary]
+                if needed:
+                    _stderr(f"Necessary faults: {', '.join(needed)}\n")
+                if unneeded:
+                    _stderr(f"Unnecessary faults: {', '.join(unneeded)}\n")
+                if not needed:
+                    _stderr("Bug reproduces without any faults.\n")
+            else:
+                _stderr("No fault toggles in trace.\n")
         return 1
     else:
         _stderr("Failure did not reproduce.\n")
@@ -1236,6 +1261,7 @@ def main(argv: list[str] | None = None) -> int:
     explore_p.add_argument("--max-time", type=float, help="Override max_time (seconds)")
     explore_p.add_argument("--verbose", "-v", action="store_true", help="Live progress")
     explore_p.add_argument("--no-shrink", action="store_true", help="Skip shrinking")
+    explore_p.add_argument("--no-seeds", action="store_true", help="Skip seed corpus replay")
     explore_p.add_argument(
         "--workers", "-w", type=int, help="Parallel worker processes (default: 1)"
     )
@@ -1265,6 +1291,9 @@ def main(argv: list[str] | None = None) -> int:
     replay_p = sub.add_parser("replay", help="Replay a saved trace")
     replay_p.add_argument("trace_file", help="Path to trace JSON file")
     replay_p.add_argument("--shrink", action="store_true", help="Shrink the trace")
+    replay_p.add_argument(
+        "--ablate", action="store_true", help="Ablate faults to find necessary ones"
+    )
     replay_p.add_argument("--output", "-o", help="Save shrunk trace to this path")
 
     # -- ordeal audit --

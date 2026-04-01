@@ -1,4 +1,4 @@
-"""Trace recording, serialization, replay, shrinking, and test generation.
+"""Trace recording, serialization, replay, shrinking, ablation, and test generation.
 
 A **Trace** captures every decision the Explorer made during one run:
 which rules fired, what parameters were drawn, which faults toggled,
@@ -6,15 +6,16 @@ and what coverage was observed.  Traces enable:
 
 - **Replay**: reproduce a failure exactly
 - **Shrinking**: minimize a failing trace to the smallest reproducing case
+- **Ablation**: determine which faults are necessary for a failure
 - **Test generation**: turn traces into standalone pytest test functions
 - **Post-hoc analysis**: inspect the full sequence offline
 
-    from ordeal.trace import Trace, replay, shrink, generate_tests
+    from ordeal.trace import Trace, replay, shrink, ablate_faults
 
     trace = Trace.load("run-42.json")
     failure = replay(trace)          # does it reproduce?
     minimal = shrink(trace, MyTest)  # find the smallest version
-    code = generate_tests([trace])   # generate pytest tests
+    faults = ablate_faults(minimal)  # which faults are necessary?
 """
 
 from __future__ import annotations
@@ -80,6 +81,13 @@ class Trace:
     duration: float = 0.0
 
     # -- Serialization ------------------------------------------------------
+
+    def content_hash(self) -> str:
+        """Stable SHA256 hash of trace content for dedup-safe filenames."""
+        import hashlib
+
+        canonical = json.dumps(self.to_dict(), sort_keys=True, default=str)
+        return hashlib.sha256(canonical.encode()).hexdigest()[:12]
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to a JSON-serializable dict."""
@@ -421,6 +429,56 @@ def _shrink_faults(steps: list[TraceStep], test_class: type) -> list[TraceStep]:
         if _replay_steps(candidate, test_class) is not None:
             steps = candidate
     return steps
+
+
+# ============================================================================
+# Fault ablation
+# ============================================================================
+
+
+def ablate_faults(
+    trace: Trace,
+    test_class: type | None = None,
+) -> dict[str, bool]:
+    """Determine which faults are necessary for a failure to reproduce.
+
+    For each fault that appears in the trace, replays the trace without
+    that fault's toggles.  If the failure still reproduces, the fault is
+    **not necessary**.  If the failure disappears, the fault is **necessary**.
+
+    This answers the Antithesis root-cause question: *"Is it possible to
+    find the bug without fiddling with the clock?"*
+
+    Args:
+        trace: A failing trace (typically already shrunk).
+        test_class: Override the class (default: import from trace metadata).
+
+    Returns:
+        ``{fault_name: True}`` for necessary faults,
+        ``{fault_name: False}`` for unnecessary ones.
+        Empty dict if the trace has no fault toggles.
+    """
+    if test_class is None:
+        test_class = _import_class(trace.test_class)
+
+    # Extract unique fault names from the trace
+    fault_names = {s.name.lstrip("+-") for s in trace.steps if s.kind == "fault_toggle"}
+    if not fault_names:
+        return {}
+
+    result: dict[str, bool] = {}
+    for fname in sorted(fault_names):
+        # Replay without this fault's toggles
+        without = [
+            s
+            for s in trace.steps
+            if not (s.kind == "fault_toggle" and s.name.lstrip("+-") == fname)
+        ]
+        error = _replay_steps(without, test_class)
+        # If failure disappears without this fault, it's necessary
+        result[fname] = error is None
+
+    return result
 
 
 # ============================================================================

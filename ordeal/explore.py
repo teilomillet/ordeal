@@ -166,6 +166,7 @@ class CoverageCollector:
         self._dirty = False
         self._prev_trace: Any = None
         self._coverage_cov: Any = None
+        self._lines_hit: dict[str, set[int]] = {}  # filename -> set of line numbers
 
     def _is_target(self, filename: str) -> bool:
         """Check if *filename* belongs to one of the target modules.
@@ -199,7 +200,15 @@ class CoverageCollector:
         if not is_target:
             return self._trace
 
-        loc = hash((fn, frame.f_lineno)) & 0xFFFF
+        # Track line-level coverage for gap reporting
+        lineno = frame.f_lineno
+        lines = self._lines_hit.get(fn)
+        if lines is None:
+            lines = set()
+            self._lines_hit[fn] = lines
+        lines.add(lineno)
+
+        loc = hash((fn, lineno)) & 0xFFFF
 
         if self._ngram == 1:
             # Classic AFL single-edge: prev_loc XOR cur_loc.
@@ -295,6 +304,101 @@ class CoverageCollector:
             self._snapshot_cache = frozenset(self._edges)
             self._dirty = False
             return self._snapshot_cache
+
+    @property
+    def lines_hit(self) -> dict[str, set[int]]:
+        """Mapping of filename -> set of line numbers visited."""
+        return dict(self._lines_hit)
+
+
+def _find_branch_lines(source: str) -> list[tuple[int, str]]:
+    """Find branch statement lines in Python source via AST.
+
+    Returns ``[(lineno, code_snippet), ...]`` for ``if``, ``elif``,
+    ``for``, ``while``, ``try``, and ``except`` statements.
+    """
+    import ast
+    import textwrap
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    src_lines = source.splitlines()
+    branches: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        lineno = getattr(node, "lineno", None)
+        if lineno is None:
+            continue
+        if isinstance(node, (ast.If, ast.For, ast.While, ast.Try, ast.ExceptHandler)):
+            code = src_lines[lineno - 1].strip() if lineno <= len(src_lines) else ""
+            branches.append((lineno, textwrap.shorten(code, 80)))
+    return branches
+
+
+def _compute_coverage_gaps(
+    lines_hit: dict[str, set[int]],
+    target_modules: list[str],
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Compare lines_hit against branch lines in target modules.
+
+    Returns ``(gaps, lines_covered, lines_total)`` where gaps is a list
+    of ``{file, line, code}`` dicts for uncovered branch statements.
+    """
+    import importlib
+    import inspect
+
+    all_branch_lines: list[tuple[str, int, str]] = []  # (file, line, code)
+    all_executable: set[tuple[str, int]] = set()
+
+    for mod_name in target_modules:
+        try:
+            mod = importlib.import_module(mod_name)
+        except ImportError:
+            continue
+        try:
+            src = inspect.getsource(mod)
+            src_file = inspect.getfile(mod)
+        except (OSError, TypeError):
+            continue
+
+        branches = _find_branch_lines(src)
+        # Offset: getsource may not start at line 1 for submodules
+        try:
+            src_lines_all = Path(src_file).read_text().splitlines()
+        except Exception:
+            src_lines_all = src.splitlines()
+
+        for lineno, code in branches:
+            all_branch_lines.append((src_file, lineno, code))
+
+        # Count all executable lines (non-empty, non-comment, non-decorator)
+        for i, line in enumerate(src_lines_all, 1):
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and not stripped.startswith("@"):
+                all_executable.add((src_file, i))
+
+    # Find covered lines across all files
+    covered = set()
+    for fn, lines in lines_hit.items():
+        for ln in lines:
+            covered.add((fn, ln))
+
+    lines_total = len(all_executable)
+    lines_covered = len(all_executable & covered)
+
+    gaps = []
+    for src_file, lineno, code in all_branch_lines:
+        if (src_file, lineno) not in covered:
+            # Use short relative path
+            try:
+                rel = str(Path(src_file).relative_to(Path.cwd()))
+            except ValueError:
+                rel = src_file
+            gaps.append({"file": rel, "line": lineno, "code": code})
+
+    return gaps, lines_covered, lines_total
 
 
 # ============================================================================
@@ -553,6 +657,7 @@ class Failure:
     active_faults: list[str]
     rule_log: list[str]
     trace: Trace | None = None
+    necessary_faults: dict[str, bool] | None = None
 
     def __str__(self) -> str:
         faults = ", ".join(self.active_faults) or "none"
@@ -560,10 +665,17 @@ class Failure:
         shrunk = ""
         if self.trace:
             shrunk = f" (shrunk to {len(self.trace.steps)} steps)"
+        ablation = ""
+        if self.necessary_faults:
+            needed = [f for f, necessary in self.necessary_faults.items() if necessary]
+            if needed:
+                ablation = f"\n  Necessary faults: {', '.join(needed)}"
+            else:
+                ablation = "\n  Necessary faults: none (fails without any faults)"
         return (
             f"Run {self.run_id}, step {self.step}: "
             f"{type(self.error).__name__}: {self.error}{shrunk}\n"
-            f"  Active faults: {faults}\n"
+            f"  Active faults: {faults}{ablation}\n"
             f"  Sequence: {last_rules}"
         )
 
@@ -594,6 +706,10 @@ class ExplorationResult:
     seed_mutations_productive: int = 0
     strategy_failures: dict[str, int] = field(default_factory=dict)
     ngram: int = 1
+    seed_replays: list[dict[str, Any]] = field(default_factory=list)
+    coverage_gaps: list[dict[str, Any]] = field(default_factory=list)
+    lines_covered: int = 0
+    lines_total: int = 0
 
     def summary(self) -> str:
         """Human-readable exploration summary."""
@@ -651,6 +767,29 @@ class ExplorationResult:
             lines.append("No failures found \u2014 all reachable paths explored.")
         else:
             lines.append("No failures found.")
+        if self.lines_total > 0:
+            pct = self.lines_covered / self.lines_total * 100
+            lines.append(f"Line coverage: {self.lines_covered}/{self.lines_total} ({pct:.0f}%)")
+        if self.coverage_gaps:
+            n = len(self.coverage_gaps)
+            lines.append(f"Coverage gaps: {n} uncovered branch(es) in target modules")
+            suggestions = self.reachability_suggestions()
+            for s in suggestions[:5]:
+                lines.append(f"  {s['file']}:{s['line']} {s['code']}")
+                lines.append(f"    add: {s['suggestion']}")
+            if n > 5:
+                lines.append(f"  ... and {n - 5} more")
+        if self.seed_replays:
+            reproduced = sum(1 for s in self.seed_replays if s["reproduced"])
+            fixed = len(self.seed_replays) - reproduced
+            parts = []
+            if reproduced:
+                parts.append(f"{reproduced} reproduced")
+            if fixed:
+                parts.append(f"{fixed} fixed")
+            lines.append(
+                f"Seed corpus: {len(self.seed_replays)} seeds replayed ({', '.join(parts)})"
+            )
         if self.stopped_reason:
             lines.append(f"Stopped: {self.stopped_reason}")
 
@@ -676,6 +815,32 @@ class ExplorationResult:
             "checkpoints": self.checkpoints_saved > 0,
             "sometimes_properties": self.properties_satisfied > 0,
         }
+
+    def reachability_suggestions(self) -> list[dict[str, Any]]:
+        """Generate ``reachable()`` assertion suggestions from coverage gaps.
+
+        Each suggestion is a structured dict an AI assistant can act on:
+
+        - ``file``: source file path
+        - ``line``: line number of the uncovered branch
+        - ``code``: the branch statement (``if``, ``for``, etc.)
+        - ``suggestion``: a ``reachable()`` call to insert near that line
+
+        Returns an empty list if there are no coverage gaps.
+        """
+        suggestions = []
+        for gap in self.coverage_gaps:
+            label = f"{gap['file']}:{gap['line']}"
+            suggestion = f'reachable("{label}: {gap["code"]}")'
+            suggestions.append(
+                {
+                    "file": gap["file"],
+                    "line": gap["line"],
+                    "code": gap["code"],
+                    "suggestion": suggestion,
+                }
+            )
+        return suggestions
 
 
 # ============================================================================
@@ -733,6 +898,7 @@ class Explorer:
         mutation_targets: list[str] | None = None,
         seed_mutation_prob: float | None = None,
         ngram: int = 2,
+        corpus_dir: str | Path | None = None,
     ) -> None:
         """Initialize the exploration engine.
 
@@ -777,6 +943,10 @@ class Explorer:
                 Higher values capture deeper path context but have
                 diminishing returns for Python's coarse line-level tracing.
                 See :class:`CoverageCollector` for the full rationale.
+            corpus_dir: Directory for the persistent seed corpus.  Failing
+                traces are saved here and replayed automatically on the
+                next run for instant regression detection.  Default
+                ``".ordeal/seeds"``.  Set to ``None`` to disable.
         """
         self.test_class = test_class
         self.target_paths = [m.replace(".", "/") for m in (target_modules or [])]
@@ -796,6 +966,7 @@ class Explorer:
         self.seed_mutation_prob = (
             seed_mutation_prob if seed_mutation_prob is not None else _SEED_MUTATION_PROB
         )
+        self.corpus_dir: Path | None = Path(corpus_dir) if corpus_dir is not None else None
 
         # Shared-memory edge bitmap (set by _run_parallel / _worker_fn)
         # 65536 bytes — one byte per possible 16-bit edge hash.
@@ -1325,7 +1496,21 @@ class Explorer:
             return True
         else:
             rule_info = self.rng.choice(self._rules)
-            params = self._execute_rule(machine, rule_info, source_cp=source_cp)
+            try:
+                params = self._execute_rule(machine, rule_info, source_cp=source_cp)
+            except Exception:
+                # Record the failing rule so replay can reproduce it.
+                rule_log.append(rule_info.name)
+                trace_steps.append(
+                    TraceStep(
+                        kind="rule",
+                        name=rule_info.name,
+                        params={},
+                        edge_count=len(self._total_edges) + new_edges_this_run,
+                        timestamp_offset=ts_offset,
+                    )
+                )
+                raise
             # Detect skipped rules: required params missing means strategy
             # generation failed. Don't log as a real step — prevents the
             # "spinning" problem where run counts inflate with no-op calls.
@@ -1528,6 +1713,55 @@ class Explorer:
             )
         )
 
+    # -- Seed corpus -------------------------------------------------------
+
+    def _corpus_class_dir(self) -> Path | None:
+        """Return the seed directory for this test class, or None if disabled."""
+        if self.corpus_dir is None:
+            return None
+        safe_name = _qualified_name(self.test_class).replace(":", "_").replace(".", "_")
+        return self.corpus_dir / safe_name
+
+    def _save_seed(self, trace: Trace) -> Path | None:
+        """Save a failing trace to the seed corpus.  Returns path or None if dedup."""
+        d = self._corpus_class_dir()
+        if d is None:
+            return None
+        d.mkdir(parents=True, exist_ok=True)
+        name = f"seed-{trace.content_hash()}.json"
+        p = d / name
+        if p.exists():
+            return None  # already saved (dedup)
+        trace.save(p)
+        return p
+
+    def _replay_seeds(self) -> list[dict[str, Any]]:
+        """Load and replay all seeds for this test class.  Returns replay results."""
+        from ordeal.trace import replay as _replay
+
+        d = self._corpus_class_dir()
+        if d is None or not d.exists():
+            return []
+        results: list[dict[str, Any]] = []
+        for p in sorted(d.glob("seed-*.json")):
+            try:
+                trace = Trace.load(p)
+            except Exception:
+                continue  # skip corrupt / incompatible seeds
+            error = _replay(trace, self.test_class)
+            results.append(
+                {
+                    "path": str(p),
+                    "seed_name": p.stem,
+                    "reproduced": error is not None,
+                    "error": f"{type(error).__name__}: {error}" if error else None,
+                    "test_class": trace.test_class,
+                    "run_id": trace.run_id,
+                    "steps": len(trace.steps),
+                }
+            )
+        return results
+
     # -- Main loop ----------------------------------------------------------
 
     def run(
@@ -1597,6 +1831,9 @@ class Explorer:
         result = ExplorationResult()
         result.ngram = self.ngram
 
+        # Replay seed corpus before exploration
+        result.seed_replays = self._replay_seeds()
+
         # Resume from saved state if provided
         if resume_from is not None:
             restored = self.load_state(resume_from)
@@ -1604,6 +1841,7 @@ class Explorer:
             result.checkpoints_saved = restored["checkpoints"]
 
         use_coverage = bool(self.target_paths)
+        _lines_hit_all: dict[str, set[int]] = {}
         start = _time.monotonic()
         class_name = _qualified_name(self.test_class)
 
@@ -1748,6 +1986,13 @@ class Explorer:
             finally:
                 if collector:
                     collector.stop()
+                    # Accumulate line-level coverage across runs
+                    for fn, lines in collector.lines_hit.items():
+                        existing = _lines_hit_all.get(fn)
+                        if existing is None:
+                            _lines_hit_all[fn] = set(lines)
+                        else:
+                            existing.update(lines)
                 machine.teardown()
 
             # Update checkpoint energy
@@ -1810,8 +2055,28 @@ class Explorer:
                         max_time=max_shrink_time,
                     )
 
+        # -- Post-exploration: fault ablation --
+        if shrink:
+            from ordeal.trace import ablate_faults as _ablate
+
+            for failure in result.failures:
+                if failure.trace and failure.trace.steps:
+                    failure.necessary_faults = _ablate(failure.trace, self.test_class)
+
+        # -- Post-exploration: save failing traces to seed corpus --
+        for failure in result.failures:
+            if failure.trace:
+                self._save_seed(failure.trace)
+
         result.unique_edges = len(self._total_edges)
         result.duration_seconds = _time.monotonic() - start
+
+        # -- Post-exploration: coverage gap analysis --
+        if use_coverage and _lines_hit_all and self.target_modules:
+            gaps, covered, total = _compute_coverage_gaps(_lines_hit_all, self.target_modules)
+            result.coverage_gaps = gaps
+            result.lines_covered = covered
+            result.lines_total = total
 
         # Save state for future resumption
         if save_state_to is not None:

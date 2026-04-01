@@ -74,6 +74,7 @@ class ReportConfig:
     traces: bool = False
     traces_dir: str = ".ordeal/traces"
     verbose: bool = False
+    corpus_dir: str = ".ordeal/seeds"
 
 
 @dataclass
@@ -300,6 +301,7 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
         traces=report_raw.get("traces", False),
         traces_dir=report_raw.get("traces_dir", ".ordeal/traces"),
         verbose=report_raw.get("verbose", False),
+        corpus_dir=report_raw.get("corpus_dir", ".ordeal/seeds"),
     )
 
     if report.format not in _VALID_REPORT_FORMATS:

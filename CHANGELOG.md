@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.56
+
+**Features:**
+
+- wire DeterministicSupervisor into explore()
+- mutation pipeline diagnostics — no more silent 0/0 results
+
+
 ## 0.2.55
 
 **Features:**

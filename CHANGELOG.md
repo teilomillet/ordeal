@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.45
+
+**Features:**
+
+- minimal docstring — AI discovers by experiment, not docs
+
+**Docs:**
+
+- describe what ordeal IS, not what to DO
+
+
 ## 0.2.44
 
 **Features:**

@@ -192,9 +192,17 @@ def subprocess_timeout(target: str, *, timeout_sec: float = 0.001) -> PatchFault
 
     Patches ``subprocess.run`` — when the command string contains *target*,
     raises ``subprocess.TimeoutExpired`` instead of running the process.
-    Useful for testing Python↔Rust/C/Go bridges under chaos::
+    Useful for testing Python↔Rust/C/Go bridges under chaos.
 
-        faults = [subprocess_timeout("cargo run")]
+    Best used with regular pytest + ``always()`` (not ChaosTest, since
+    subprocess lifecycle doesn't compose with stateful rules)::
+
+        from ordeal.faults.io import subprocess_timeout
+
+        def test_kernel_timeout(chaos_enabled):
+            with subprocess_timeout("cargo run"):
+                result = run_kernel()
+            always(result is not None, "handles timeout gracefully")
 
     Args:
         target: Substring to match in the command (e.g. ``"cargo run"``).
@@ -219,9 +227,17 @@ def corrupt_stdout(target: str) -> PatchFault:
     """Replace the stdout of subprocess calls matching *target* with random bytes.
 
     Replaces ``stdout`` in the ``CompletedProcess`` with random bytes,
-    simulating garbled FFI output::
+    simulating garbled FFI output.
 
-        faults = [corrupt_stdout("my_binary")]
+    Best used with regular pytest + ``always()`` (not ChaosTest, since
+    subprocess lifecycle doesn't compose with stateful rules)::
+
+        from ordeal.faults.io import corrupt_stdout
+
+        def test_garbled_output(chaos_enabled):
+            with corrupt_stdout("my_binary"):
+                result = parse_binary_output()
+            always(result is not None, "handles corrupt output")
 
     Args:
         target: Substring to match in the command.
@@ -247,9 +263,17 @@ def subprocess_delay(target: str, *, delay: float = 1.0) -> PatchFault:
     """Add *delay* seconds to subprocess calls matching *target*.
 
     Simulates slow FFI responses — tests timeout handling and
-    progress reporting in Python↔Rust/C/Go bridges::
+    progress reporting in Python↔Rust/C/Go bridges.
 
-        faults = [subprocess_delay("cargo run", delay=5.0)]
+    Best used with regular pytest + ``always()`` (not ChaosTest, since
+    subprocess lifecycle doesn't compose with stateful rules)::
+
+        from ordeal.faults.io import subprocess_delay
+
+        def test_kernel_slow(chaos_enabled):
+            with subprocess_delay("cargo run", delay=5.0):
+                result = run_kernel()
+            always(result.completed, "completes despite delay")
 
     Args:
         target: Substring to match in the command.

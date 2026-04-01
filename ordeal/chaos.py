@@ -81,6 +81,15 @@ class ChaosTest(RuleBasedStateMachine):
         - ``ordeal explore`` runs coverage-guided exploration with
           checkpointing and energy scheduling (reads ordeal.toml)
         - ``swarm = True`` tests random fault subsets per run
+
+    Not suited for external processes:
+        Rules fire in unpredictable order — Hypothesis controls the
+        schedule. Systems that need strict lifecycle management
+        (subprocesses, database transactions, gRPC channels) should
+        use regular pytest tests with ``always()``/``sometimes()`` and
+        subprocess faults (``subprocess_timeout``, ``subprocess_delay``)
+        instead. See the "External processes" section in the writing
+        tests guide.
     """
 
     faults: ClassVar[list[Fault]] = []

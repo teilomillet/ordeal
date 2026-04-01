@@ -625,6 +625,12 @@ def mine(
         max_examples: Number of random inputs to try.
         **fixtures: Strategy overrides or plain values.
     """
+    # Unwrap decorated functions (@ray.remote, @functools.wraps, etc.)
+    # so inspect.getsource, signature, and type hints all work.
+    from ordeal.auto import _unwrap
+
+    fn = _unwrap(fn)
+
     # Normalize fixtures
     normalized: dict[str, st.SearchStrategy[Any]] | None = None
     if fixtures:
@@ -814,6 +820,11 @@ def mine_pair(
         # discovers: roundtrip g(f(x)) == x, roundtrip f(g(x)) == x
     """
     import inspect
+
+    from ordeal.auto import _unwrap
+
+    f = _unwrap(f)
+    g = _unwrap(g)
 
     # Normalize fixtures
     normalized: dict[str, st.SearchStrategy[Any]] | None = None

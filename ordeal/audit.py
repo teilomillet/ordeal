@@ -627,10 +627,15 @@ def _measure_coverage(
             error=f"coverage report not generated. stderr: {stderr_hint}",
         )
     except json.JSONDecodeError as exc:
+        # Common cause: importing the module triggers side-effects
+        # (ONNX, TensorFlow, etc.) that write to stdout/stderr,
+        # polluting the coverage JSON output.
+        stderr_hint = (result.stderr or "")[:200] if result else ""
         json_path.unlink(missing_ok=True)
         return CoverageMeasurement(
             Status.FAILED,
-            error=f"invalid JSON: {exc}",
+            error=f"invalid JSON: {exc}"
+            + (f" (subprocess stderr: {stderr_hint})" if stderr_hint else ""),
         )
     finally:
         json_path.unlink(missing_ok=True)

@@ -525,6 +525,8 @@ def fuzz(
         check_return_type: Verify return type annotation.
         **fixtures: Strategy overrides or plain values (auto-wrapped in st.just).
     """
+    fn = _unwrap(fn)
+
     # Auto-wrap plain values in st.just()
     normalized: dict[str, st.SearchStrategy[Any]] | None = None
     if fixtures:

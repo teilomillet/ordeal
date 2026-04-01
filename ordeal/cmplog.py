@@ -62,6 +62,13 @@ def extract_comparison_values(fn: Callable[..., Any]) -> dict[str, list[Any]]:
     found in the source.  These values are the ones most likely to crack
     guarded branches that random testing cannot reach.
     """
+    # Unwrap decorated functions (@ray.remote, functools.wraps)
+    fn = getattr(fn, "_function", fn)
+    try:
+        fn = inspect.unwrap(fn)
+    except (ValueError, TypeError):
+        pass
+
     try:
         source = textwrap.dedent(inspect.getsource(fn))
         tree = ast.parse(source)

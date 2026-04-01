@@ -179,12 +179,21 @@ def pytest_collection_modifyitems(
     config: pytest.Config,
     items: list[pytest.Item],
 ) -> None:
-    """Skip @pytest.mark.chaos and @pytest.mark.mutate tests unless flags are passed."""
+    """Skip @pytest.mark.chaos and @pytest.mark.mutate tests unless flags are passed.
+
+    When chaos tests are skipped, a warning is emitted in the terminal
+    summary so CI pipelines don't silently pass with zero chaos coverage.
+    """
     if not config.getoption("chaos", default=False):
         skip_chaos = pytest.mark.skip(reason="chaos tests require --chaos flag")
+        chaos_count = 0
         for item in items:
             if "chaos" in item.keywords:
                 item.add_marker(skip_chaos)
+                chaos_count += 1
+        if chaos_count:
+            # Store the count so pytest_terminal_summary can warn
+            config._ordeal_skipped_chaos = chaos_count
 
     if not config.getoption("mutate", default=False):
         skip_mutate = pytest.mark.skip(reason="mutation tests require --mutate flag")
@@ -426,6 +435,18 @@ def pytest_terminal_summary(
     config: pytest.Config,
 ) -> None:
     """Print Ordeal Property Results and Mutation Results at the end."""
+    # -- Warn if chaos tests were skipped (easy to miss in CI) --
+    skipped = config.__dict__.get("_ordeal_skipped_chaos", 0) if hasattr(config, "__dict__") else 0
+    if skipped:
+        terminalreporter.section("Ordeal Warning")
+        terminalreporter.line(
+            f"WARNING: {skipped} chaos test(s) SKIPPED — run with --chaos to include them",
+        )
+        terminalreporter.line(
+            "  Without --chaos, buggify() is inactive and chaos-marked tests don't run.",
+        )
+        terminalreporter.line("")
+
     # -- Mutation results (from @pytest.mark.mutate tests) --
     if _mutation_results:
         terminalreporter.section("Ordeal Mutation Results")

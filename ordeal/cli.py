@@ -119,6 +119,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     """
     from ordeal.state import explore
 
+    inc_private = getattr(args, "include_private", False)
     _stderr(f"Scanning {args.target} (seed={args.seed})...\n")
     state = explore(
         args.target,
@@ -126,6 +127,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         max_examples=args.max_examples,
         workers=args.workers,
         time_limit=args.time_limit,
+        include_private=inc_private,
     )
 
     if args.json:

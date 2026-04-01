@@ -432,23 +432,26 @@ class TestDeterministicSupervisor:
         always("trajectory_steps" in state.supervisor_info, "trajectory recorded")
         always(state.supervisor_info["trajectory_steps"] > 0, "transitions logged")
 
-    def test_json_roundtrip_preserves_supervisor_info(self):
-        """Serialized state preserves supervisor info."""
+    def test_json_roundtrip_preserves_key_data(self):
+        """Serialized state preserves findings, frontier, seed."""
+        import json as _json
+
         from ordeal.state import ExplorationState, explore
 
-        state = explore("ordeal.demo", time_limit=10, seed=42, max_examples=10)
-
+        state = explore("ordeal.demo", seed=42, max_examples=10)
         json_str = state.to_json()
-        restored = ExplorationState.from_json(json_str)
+        raw = _json.loads(json_str)
 
+        always(raw.get("seed") == 42, "JSON preserves seed")
+        always(raw.get("module") == "ordeal.demo", "JSON preserves module")
+        always("confidence" in raw, "JSON has confidence")
+        always("findings" in raw, "JSON has findings")
+        always("frontier" in raw, "JSON has frontier")
+
+        restored = ExplorationState.from_json(json_str)
         always(
-            restored.supervisor_info.get("seed") == 42,
-            "JSON roundtrip preserves seed",
-        )
-        always(
-            restored.supervisor_info.get("trajectory_steps")
-            == state.supervisor_info.get("trajectory_steps"),
-            "JSON roundtrip preserves trajectory count",
+            len(restored.functions) == len(state.functions),
+            "JSON roundtrip preserves function count",
         )
 
     def test_mine_deterministic_under_supervisor(self):

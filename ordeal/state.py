@@ -127,6 +127,7 @@ class ExplorationState:
 
     module: str
     functions: dict[str, FunctionState] = field(default_factory=dict)
+    skipped: list[tuple[str, str]] = field(default_factory=list)
     edge_coverage: float | None = None
     exploration_time: float = 0.0
     supervisor_info: dict[str, Any] = field(default_factory=dict)
@@ -168,6 +169,10 @@ class ExplorationState:
         lines = [f"Exploration: {self.module}"]
         lines.append(f"  confidence: {self.confidence:.0%}")
         lines.append(f"  functions:  {len(self.functions)}")
+        if self.skipped:
+            lines.append(f"  skipped:    {len(self.skipped)} functions")
+            for name, reason in self.skipped:
+                lines.append(f"    {name}: {reason}")
         if self.supervisor_info:
             seed = self.supervisor_info.get("seed", "?")
             traj = self.supervisor_info.get("trajectory_steps", 0)
@@ -199,15 +204,16 @@ class ExplorationState:
         The state tree's snapshots are excluded (not JSON-serializable).
         The tree structure is preserved via ``tree.to_json()``.
         """
-        data = {
+        data: dict[str, Any] = {
             "module": self.module,
+            "confidence": round(self.confidence, 4),
             "functions": {name: asdict(fs) for name, fs in self.functions.items()},
-            "edge_coverage": self.edge_coverage,
-            "exploration_time": self.exploration_time,
-            "supervisor_info": self.supervisor_info,
+            "findings": self.findings,
+            "frontier": self.frontier,
+            "skipped": self.skipped,
+            "exploration_time": round(self.exploration_time, 2),
+            "seed": self.supervisor_info.get("seed"),
         }
-        if self.tree and self.tree.size > 0:
-            data["tree"] = json.loads(self.tree.to_json())
         return json.dumps(data, indent=2)
 
     @classmethod
@@ -229,14 +235,27 @@ class ExplorationState:
 # ============================================================================
 
 
-def explore_mine(state: ExplorationState, *, max_examples: int = 50) -> ExplorationState:
+def explore_mine(
+    state: ExplorationState,
+    *,
+    max_examples: int = 50,
+    include_private: bool = False,
+) -> ExplorationState:
     """Mine all functions in the module and update state."""
 
-    from ordeal.auto import _get_public_functions, _resolve_module
+    from ordeal.auto import _get_public_functions, _infer_strategies, _resolve_module
     from ordeal.mine import mine
 
     mod = _resolve_module(state.module)
-    for name, func in _get_public_functions(mod):
+    funcs = _get_public_functions(mod, include_private=include_private)
+
+    # Track skipped functions with reasons
+    for name, func in funcs:
+        strats = _infer_strategies(func, None)
+        if strats is None:
+            state.skipped.append((name, "can't infer strategies (Optional/complex params)"))
+
+    for name, func in funcs:
         try:
             result = mine(func, max_examples=max_examples)
         except Exception:
@@ -395,6 +414,7 @@ def explore(
     workers: int = 1,
     max_examples: int = 50,
     seed: int = 42,
+    include_private: bool = False,
 ) -> ExplorationState:
     """Run all exploration strategies on a module.
 
@@ -453,7 +473,7 @@ def explore(
         sup.log_transition("explore_start", state_hash=state_hash)
 
         # Step 1: Mine properties
-        state = explore_mine(state, max_examples=max_examples)
+        state = explore_mine(state, max_examples=max_examples, include_private=include_private)
         mine_hash = hash(("mined", len(state.functions), state.confidence))
         state.tree.checkpoint(
             mine_hash,

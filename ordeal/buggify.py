@@ -83,6 +83,11 @@ _T = TypeVar("_T")
 def buggify_value(normal: _T, faulty: _T, probability: float | None = None) -> _T:
     """Return *faulty* during chaos testing (with some probability),
     otherwise return *normal*.
+
+    Args:
+        normal: Value to return in production (chaos inactive).
+        faulty: Value to return during chaos testing.
+        probability: Override the default fault probability (0.0–1.0).
     """
     if buggify(probability):
         return faulty

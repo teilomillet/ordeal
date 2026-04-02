@@ -456,6 +456,12 @@ def chaos_test(cls: type | None = None, *, faults: list | None = None):
 
     The returned object is the ``TestCase`` class, directly discoverable
     by pytest without any extra wiring.
+
+    Args:
+        cls: The ChaosTest subclass (passed automatically when used as
+            ``@chaos_test`` without parentheses).
+        faults: Optional list of fault instances to inject.  Overrides
+            the class-level ``faults`` attribute.
     """
 
     def _wrap(klass: type) -> type:

@@ -216,6 +216,12 @@ def always(condition: bool, name: str, *, mute: bool = False, **details: Any) ->
 
     When the tracker IS active (``--chaos``), the result is also recorded
     for the property report regardless of ``mute``.
+
+    Args:
+        condition: The boolean condition that must hold.
+        name: Human-readable label for this assertion.
+        mute: If ``True``, record violation without raising.
+        **details: Extra context included in the error message.
     """
     tracker.record(name, "always", condition, details or None)
     if not condition and not mute:
@@ -276,7 +282,12 @@ def sometimes(
 
 
 def reachable(name: str, **details: Any) -> None:
-    """Assert this code path executes at least once — deferred, checked at session end."""
+    """Assert this code path executes at least once — deferred, checked at session end.
+
+    Args:
+        name: Human-readable label for this reachability assertion.
+        **details: Extra context for the property report.
+    """
     was_active = tracker.record_hit(name, "reachable")
     if not was_active:
         warnings.warn(
@@ -294,6 +305,11 @@ def unreachable(name: str, *, mute: bool = False, **details: Any) -> None:
 
     Pass ``mute=True`` to record the hit without raising.  The hit
     still appears in the property report — it is tracked, not hidden.
+
+    Args:
+        name: Human-readable label for this assertion.
+        mute: If ``True``, record the hit without raising.
+        **details: Extra context included in the error message.
     """
     tracker.record_hit(name, "unreachable")
     if not mute:

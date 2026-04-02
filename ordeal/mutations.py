@@ -1077,6 +1077,11 @@ def generate_starter_tests(target: str, *, dry_run: bool = False) -> str:
     all side effects when previewing what ``ordeal init --dry-run`` would
     create.
 
+    Args:
+        target: Dotted path to a function (``"myapp.scoring.compute"``)
+            or module (``"myapp.scoring"``).
+        dry_run: If ``True``, no imports or execution — AST-only stubs.
+
     Returns an empty string if the target cannot be resolved.
     """
     if dry_run:

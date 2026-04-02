@@ -323,6 +323,11 @@ def auto_configure(
 
         from ordeal import auto_configure
         auto_configure()
+
+    Args:
+        buggify_probability: Default probability for ``buggify()`` calls
+            (0.0–1.0, default 0.1).
+        seed: Random seed for reproducible fault scheduling.
     """
     from ordeal import assertions as _assertions
     from ordeal import buggify as _buggify

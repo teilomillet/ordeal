@@ -188,7 +188,18 @@ class PatchFault(Fault):
 
     def _do_activate(self) -> None:
         if self._original is None:
-            self._resolve()
+            try:
+                self._resolve()
+            except (ImportError, AttributeError) as exc:
+                import warnings
+
+                warnings.warn(
+                    f"Skipping fault {self.name!r}: cannot resolve target "
+                    f"{self.target!r} ({exc}). The target may have been renamed "
+                    "or removed in the installed version.",
+                    stacklevel=2,
+                )
+                return
         wrapped = self.wrapper_fn(self._original)
         setattr(self._parent, self._attr_name, wrapped)
 

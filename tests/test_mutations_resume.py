@@ -165,11 +165,26 @@ class TestResumeInvariant:
 
     def test_resume_matches_fresh_on_unchanged_source(self, clean_cache):
         """When source hasn't changed, resume returns identical results."""
-        fresh = mutate("ordeal.demo.score", preset="essential")
-        resumed = mutate("ordeal.demo.score", preset="essential", resume=True)
+        import tests._mutation_target as mod
+        from ordeal.mutations import mutate_function_and_test
+
+        def test_add():
+            assert mod.add(1, 2) == 3
+            assert mod.add(-1, 5) == 4
+
+        fresh = mutate_function_and_test(
+            "tests._mutation_target.add", test_fn=test_add, operators=["arithmetic"]
+        )
+        # Now test via mutate() with resume (which wraps mutate_function_and_test)
+        resumed = mutate(
+            "tests._mutation_target.add",
+            test_fn=test_add,
+            operators=["arithmetic"],
+            resume=True,
+        )
+        # First call saves to cache; both should have same results
         assert resumed.total == fresh.total
         assert resumed.killed == fresh.killed
-        assert resumed.score == fresh.score
 
     def test_cache_invalidated_on_source_change(self, sample_module, clean_cache):
         """When source changes, cache is discarded and tests re-run."""
@@ -192,14 +207,46 @@ class TestResumeInvariant:
 
     def test_resume_reports_cached_count(self, clean_cache):
         """Resume diagnostics show how many results came from cache."""
-        # First run: fresh
-        mutate("ordeal.demo.score", preset="essential", resume=True)
+        import tests._mutation_target as mod
+
+        def test_add():
+            assert mod.add(1, 2) == 3
+
+        target = "tests._mutation_target.add"
+        # First run: populates cache (explicit test_fn, not mine oracle)
+        mutate(target, test_fn=test_add, operators=["arithmetic"], resume=True)
         # Second run: from cache
-        r2 = mutate("ordeal.demo.score", preset="essential", resume=True)
+        r2 = mutate(target, test_fn=test_add, operators=["arithmetic"], resume=True)
         assert r2.diagnostics.get("cached", 0) > 0
         assert r2.diagnostics.get("retested", 0) == 0
 
     def test_fresh_run_no_cached_diagnostic(self, clean_cache):
         """Fresh run (resume=False) should not have cached diagnostic."""
-        result = mutate("ordeal.demo.score", preset="essential", resume=False)
+        import tests._mutation_target as mod
+
+        def test_add():
+            assert mod.add(1, 2) == 3
+
+        result = mutate(
+            "tests._mutation_target.add",
+            test_fn=test_add,
+            operators=["arithmetic"],
+            resume=False,
+        )
         assert result.diagnostics.get("cached") is None
+
+    def test_mine_oracle_results_not_cached(self, clean_cache):
+        """Mine oracle results are stochastic — must not be cached.
+
+        mine() uses random inputs, so re-running can discover different
+        properties. Results where killed_by='mine()' must not be saved
+        to cache.
+        """
+        # ordeal.demo.score has no matching tests → mine oracle
+        r1 = mutate("ordeal.demo.score", preset="essential", resume=True)
+        assert any(m.killed_by == "mine()" for m in r1.mutants)
+
+        # Second run should NOT be cached — mine should run fresh again
+        r2 = mutate("ordeal.demo.score", preset="essential", resume=True)
+        assert r2.diagnostics.get("cached") is None
+        assert any(m.killed_by == "mine()" for m in r2.mutants)

@@ -4800,8 +4800,11 @@ def mutate(
         disk_mutation=disk_mutation,
     )
 
-    # Save cache after fresh run
-    if resume:
+    # Save cache after fresh run — but NOT if the result came from the
+    # mine oracle (primary or fallback), which is stochastic. mine() uses
+    # random inputs, so re-running can discover more properties.
+    mine_used = any(m.killed_by == "mine()" for m in result.mutants)
+    if resume and not mine_used:
         try:
             module_hash = _module_source_hash(target)
             _save_cache(target, result, module_hash)

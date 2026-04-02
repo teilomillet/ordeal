@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.94
+
+**Features:**
+
+- lower minimum Python to 3.10
+
+**Fixes:**
+
+- --dry-run no longer executes target functions (#3)
+
+
 ## 0.2.93
 
 **Fixes:**

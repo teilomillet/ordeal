@@ -1203,7 +1203,24 @@ def audit_report(
     """Audit multiple modules and produce a summary report.
 
     Returns a formatted string suitable for terminal output.
-    Every number is labeled ``[verified]`` or ``FAILED``.
+    Every number is labeled ``[verified]`` or ``FAILED``::
+
+        from ordeal.audit import audit_report
+
+        print(audit_report(["myapp.scoring", "myapp.utils"]))
+        # ordeal audit
+        #   myapp.scoring
+        #     current:  33 tests | 343 lines | 98% coverage [verified]
+        #     migrated: 12 tests | 130 lines | 96% coverage [verified]
+        #     saving:   64% fewer tests | 62% less code | same coverage
+        #   total:
+        #     current:  55 tests | 500 lines
+        #     migrated: 20 tests | 200 lines
+
+    Args:
+        modules: Dotted module paths to audit (e.g. ``["myapp.scoring"]``).
+        test_dir: Directory containing test files (default ``"tests"``).
+        max_examples: Hypothesis examples for property mining per function.
     """
     results = []
     for mod in modules:

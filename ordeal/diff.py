@@ -31,13 +31,20 @@ from ordeal.auto import _infer_strategies
 
 @dataclass
 class Mismatch:
-    """A single input where the two functions disagree."""
+    """A single input where the two functions disagree.
+
+    Attributes:
+        args: The input arguments that produced different outputs.
+        output_a: Output from function A.
+        output_b: Output from function B.
+    """
 
     args: dict[str, Any]
     output_a: Any
     output_b: Any
 
     def __str__(self) -> str:
+        """Format as multi-line comparison (args, output_a, output_b)."""
         return (
             f"  args:     {_truncate(self.args)}\n"
             f"  output_a: {_truncate(self.output_a)}\n"
@@ -47,7 +54,21 @@ class Mismatch:
 
 @dataclass
 class DiffResult:
-    """Result of comparing two functions."""
+    """Result of comparing two functions.
+
+    Key attributes::
+
+        result.equivalent        # True if no mismatches found
+        result.mismatches        # list of Mismatch objects
+        result.summary()         # formatted report
+
+    Example::
+
+        result = diff(score_v1, score_v2)
+        if not result.equivalent:
+            for m in result.mismatches:
+                print(m)  # shows args, output_a, output_b
+    """
 
     function_a: str
     function_b: str
@@ -60,7 +81,7 @@ class DiffResult:
         return len(self.mismatches) == 0
 
     def summary(self) -> str:
-        """Human-readable report."""
+        """Human-readable report showing status and up to 3 mismatches."""
         status = "EQUIVALENT" if self.equivalent else "DIVERGENT"
         lines = [f"diff({self.function_a}, {self.function_b}): {self.total} examples, {status}"]
         if self.mismatches:

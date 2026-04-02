@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.90
+
+**Fixes:**
+
+- keep xdist loaded but inactive in mutation pipeline
+
+
 ## 0.2.89
 
 **Fixes:**

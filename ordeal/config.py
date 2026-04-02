@@ -24,7 +24,15 @@ Load it::
 from __future__ import annotations
 
 import importlib
-import tomllib
+import sys
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib  # type: ignore[no-redefine]
 from dataclasses import dataclass, field
 from pathlib import Path
 

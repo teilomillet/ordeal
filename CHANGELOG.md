@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.91
+
+**Features:**
+
+- disk_mutation parameter for cross-process mutation testing (Ray, multiprocessing)
+
+
 ## 0.2.90
 
 **Fixes:**

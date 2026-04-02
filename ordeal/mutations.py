@@ -3688,6 +3688,90 @@ def _parallel_module_test(
     return results
 
 
+def _module_mine_oracle_fallback(
+    target: str,
+    module: types.ModuleType,
+    original_result: MutationResult,
+    operators: list[str],
+    stats: dict[str, int],
+    *,
+    filter_equivalent: bool,
+    equivalence_samples: int,
+    preset_used: str | None,
+    mutant_timeout: float | None,
+) -> MutationResult | None:
+    """Run mine oracle per-function when module-level tests killed 0 mutants.
+
+    Iterates public functions in the module, re-generates mutants for each,
+    and tests them via :func:`_mine_based_mutation_test`.  If the mine oracle
+    catches mutations that tests missed, warns about process isolation and
+    returns the combined result.
+    """
+    combined = MutationResult(target=target, operators_used=operators, preset_used=preset_used)
+    any_killed = False
+
+    for name in sorted(dir(module)):
+        if name.startswith("_"):
+            continue
+        func = getattr(module, name, None)
+        if not callable(func) or inspect.isclass(func):
+            continue
+        obj_mod = getattr(func, "__module__", None)
+        if obj_mod and not obj_mod.startswith(target):
+            continue
+
+        func = _unwrap_func(func)
+        try:
+            source = _get_source(func)
+        except Exception:
+            continue
+
+        func_target = f"{target}.{name}"
+        try:
+            func_mutants = generate_mutants(source, operators, timeout=mutant_timeout)
+        except Exception:
+            continue
+
+        if not func_mutants:
+            continue
+
+        try:
+            mine_result = _mine_based_mutation_test(
+                func_target,
+                func,
+                name,
+                module,
+                func_mutants,
+                filter_equivalent=filter_equivalent,
+                equivalence_samples=equivalence_samples,
+                operators_used=operators,
+                preset_used=preset_used,
+                _stats={},
+            )
+            combined.mutants.extend(mine_result.mutants)
+            if mine_result.killed > 0:
+                any_killed = True
+        except (NoTestsFoundError, Exception):
+            continue
+
+    if any_killed:
+        import warnings
+
+        warnings.warn(
+            f"{target!r}: tests killed 0/{original_result.total} mutants but "
+            f"mine oracle killed {combined.killed}/{combined.total} across "
+            f"module functions — your tests likely exercise this module through "
+            "a process boundary (Ray, multiprocessing) where in-memory mutations "
+            "are invisible. Falling back to mine oracle for accurate results.",
+            stacklevel=3,
+        )
+        combined.diagnostics["fallback_reason"] = "process_isolation"
+        combined.diagnostics.update(stats)
+        combined.diagnostics["tested"] = combined.total
+        return combined
+    return None
+
+
 def mutate_and_test(
     target: str,
     test_fn: Callable[[], None] | None = None,
@@ -3793,6 +3877,24 @@ def mutate_and_test(
             mutant.error = error
             mutant.killed_by = killer
             result.mutants.append(mutant)
+        # 0% score fallback for module-level: if auto-discovered tests killed
+        # nothing, try calling each public function directly (mine oracle).
+        # Same logic as mutate_function_and_test's fallback.
+        if result.total > 0 and result.killed == 0:
+            mine_kills = _module_mine_oracle_fallback(
+                target,
+                module,
+                result,
+                operators,
+                stats,
+                filter_equivalent=filter_equivalent,
+                equivalence_samples=equivalence_samples,
+                preset_used=used_preset,
+                mutant_timeout=mutant_timeout,
+            )
+            if mine_kills is not None:
+                return mine_kills
+
         result.diagnostics.update(stats)
         result.diagnostics["tested"] = result.total
         return result

@@ -70,8 +70,10 @@ import ast
 import contextlib
 import copy
 import functools
+import hashlib
 import importlib
 import inspect
+import json
 import pkgutil
 import sys
 import textwrap
@@ -800,6 +802,126 @@ class MutationResult:
                 result.ineffective.append(test_source)
 
         return result
+
+
+# ============================================================================
+# Mutation cache — resume support
+# ============================================================================
+
+
+def _module_source_hash(target: str) -> str:
+    """SHA-256 hash of the entire module source file.
+
+    Any change to the file — functions, constants, imports — produces a
+    different hash.  This is deliberately coarse: if a helper function
+    changes, all cached results for the module are invalidated.
+    """
+    parts = target.rsplit(".", 1)
+    module_name = parts[0] if len(parts) >= 2 and _is_function_target(target) else target
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError:
+        # Fall back to spec-based file resolution
+        spec = importlib.util.find_spec(module_name)
+        if spec and spec.origin:
+            with open(spec.origin, "rb") as f:
+                return hashlib.sha256(f.read()).hexdigest()[:16]
+        raise
+    source_file = getattr(module, "__file__", None)
+    if source_file is None:
+        raise ValueError(f"Cannot locate source for {target!r}")
+    with open(source_file, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()[:16]
+
+
+def _cache_path(target: str) -> Path:
+    safe = target.replace(".", "_")
+    return Path(".ordeal") / "mutate" / f"{safe}.json"
+
+
+def _mutant_to_dict(m: Mutant) -> dict:
+    return {
+        "operator": m.operator,
+        "description": m.description,
+        "line": m.line,
+        "col": m.col,
+        "killed": m.killed,
+        "error": m.error,
+        "source_line": m.source_line,
+        "killed_by": m.killed_by,
+    }
+
+
+def _mutant_from_dict(d: dict) -> Mutant:
+    return Mutant(
+        operator=d["operator"],
+        description=d["description"],
+        line=d.get("line", 0),
+        col=d.get("col", 0),
+        killed=d.get("killed", False),
+        error=d.get("error"),
+        source_line=d.get("source_line", ""),
+        killed_by=d.get("killed_by"),
+    )
+
+
+def _save_cache(target: str, result: MutationResult, module_hash: str) -> None:
+    """Persist a mutation result to .ordeal/mutate/<target>.json."""
+    data = {
+        "target": target,
+        "module_source_hash": module_hash,
+        "preset_used": result.preset_used,
+        "operators_used": result.operators_used,
+        "mutants": [_mutant_to_dict(m) for m in result.mutants],
+        "diagnostics": result.diagnostics,
+        "timestamp": time.time(),
+    }
+    p = _cache_path(target)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    tmp.rename(p)  # atomic on POSIX
+
+
+def _load_cache(
+    target: str,
+    module_hash: str,
+    preset: str | None,
+    operators: list[str] | None,
+) -> MutationResult | None:
+    """Load cached mutation result if valid.
+
+    Returns ``None`` (cache miss) when:
+    - No cache file exists
+    - Module source hash changed (any code modification)
+    - Preset or operators changed (different mutation config)
+    """
+    p = _cache_path(target)
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text())
+    except Exception:
+        return None
+
+    # Validate: same source + same config
+    if data.get("module_source_hash") != module_hash:
+        return None
+    if data.get("preset_used") != preset:
+        return None
+    if data.get("operators_used") != operators:
+        return None
+
+    result = MutationResult(
+        target=target,
+        operators_used=data.get("operators_used"),
+        preset_used=data.get("preset_used"),
+    )
+    result.mutants = [_mutant_from_dict(m) for m in data.get("mutants", [])]
+    result.diagnostics = data.get("diagnostics", {})
+    result.diagnostics["cached"] = result.total
+    result.diagnostics["retested"] = 0
+    return result
 
 
 @dataclass
@@ -3822,11 +3944,11 @@ def mutate_and_test(
             far.  Prevents hanging on complex AST expressions (numpy, cv2).
     """
     disk_mutation = _resolve_disk_mutation(disk_mutation, target)
+    used_preset = preset
+    operators = _resolve_operators(operators, preset)
     use_batch = test_fn is None  # batch when auto-discovering tests
     if test_fn is None:
         test_fn = _auto_test_fn(target, test_filter=test_filter)
-    used_preset = preset
-    operators = _resolve_operators(operators, preset)
     module = importlib.import_module(target)
     source_file = getattr(module, "__file__", None)
     if source_file is None:
@@ -4230,6 +4352,9 @@ def mutate_function_and_test(
     """
     # Try auto-discovering tests; fall back to mine()-based oracle
     disk_mutation = _resolve_disk_mutation(disk_mutation, target)
+    # Resume: check cache before doing any work
+    used_preset = preset
+    operators = _resolve_operators(operators, preset)
     auto_discovered_tests = test_fn is None
     use_mine_oracle = False
     if test_fn is None:
@@ -4242,9 +4367,6 @@ def mutate_function_and_test(
             test_fn = None
         except Exception:
             pass  # tests exist but failed — that's fine for mutation testing
-
-    used_preset = preset
-    operators = _resolve_operators(operators, preset)
     module_path, func_name = target.rsplit(".", 1)
     module = importlib.import_module(module_path)
     func = _unwrap_func(getattr(module, func_name))
@@ -4593,6 +4715,7 @@ def mutate(
     test_filter: str | None = None,
     mutant_timeout: float | None = None,
     disk_mutation: bool | None = None,
+    resume: bool = False,
 ) -> MutationResult:
     """Unified mutation testing entry point — auto-detects function vs module.
 
@@ -4643,9 +4766,24 @@ def mutate(
         disk_mutation: Write the mutated source to disk so subprocesses
             (Ray workers, ``multiprocessing`` spawn) see the mutation.
             Default ``False`` (in-memory only, safe for parallel tests).
+        resume: Reuse cached results when the module source hasn't changed.
+            Cache is invalidated when **any** line in the module changes
+            (not just the target function) or when the preset/operators
+            change.  Default ``False`` (always run fresh).
     """
+    # Resume: check cache before dispatching
+    resolved_operators = _resolve_operators(operators, preset)
+    if resume:
+        try:
+            module_hash = _module_source_hash(target)
+            cached = _load_cache(target, module_hash, preset, resolved_operators)
+            if cached is not None:
+                return cached
+        except Exception:
+            pass
+
     dispatch = mutate_function_and_test if _is_function_target(target) else mutate_and_test
-    return dispatch(
+    result = dispatch(
         target,
         test_fn=test_fn,
         operators=operators,
@@ -4661,6 +4799,16 @@ def mutate(
         mutant_timeout=mutant_timeout,
         disk_mutation=disk_mutation,
     )
+
+    # Save cache after fresh run
+    if resume:
+        try:
+            module_hash = _module_source_hash(target)
+            _save_cache(target, result, module_hash)
+        except Exception:
+            pass
+
+    return result
 
 
 def mutation_faults(

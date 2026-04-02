@@ -1046,8 +1046,7 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
         MutationResult,
         NoTestsFoundError,
         generate_starter_tests,
-        mutate_and_test,
-        mutate_function_and_test,
+        mutate,
     )
 
     targets: list[str] = args.targets or []
@@ -1060,6 +1059,7 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
     test_filter: str | None = args.test_filter
     mutant_timeout: float | None = args.mutant_timeout
     disk_mutation: bool | None = args.disk_mutation
+    resume: bool = args.resume
 
     # Fall back to config file if no targets given
     if not targets:
@@ -1114,33 +1114,19 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
     for target in targets:
         _stderr(f"Mutating {target}...\n")
 
-        is_func = _is_function_target(target)
-
         try:
-            if is_func:
-                result = mutate_function_and_test(
-                    target,
-                    operators=operators,
-                    preset=preset,
-                    workers=workers,
-                    filter_equivalent=filter_equivalent,
-                    equivalence_samples=equivalence_samples,
-                    test_filter=test_filter,
-                    mutant_timeout=mutant_timeout,
-                    disk_mutation=disk_mutation,
-                )
-            else:
-                result = mutate_and_test(
-                    target,
-                    operators=operators,
-                    preset=preset,
-                    workers=workers,
-                    filter_equivalent=filter_equivalent,
-                    equivalence_samples=equivalence_samples,
-                    test_filter=test_filter,
-                    mutant_timeout=mutant_timeout,
-                    disk_mutation=disk_mutation,
-                )
+            result = mutate(
+                target,
+                operators=operators,
+                preset=preset,
+                workers=workers,
+                filter_equivalent=filter_equivalent,
+                equivalence_samples=equivalence_samples,
+                test_filter=test_filter,
+                mutant_timeout=mutant_timeout,
+                disk_mutation=disk_mutation,
+                resume=resume,
+            )
         except NoTestsFoundError as e:
             _stderr(f"  WARNING: No tests found for {target!r}\n")
             starter = generate_starter_tests(target)
@@ -1570,6 +1556,15 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Write mutations to disk so subprocesses (Ray, multiprocessing) see them. "
             "Auto-detected when omitted."
+        ),
+    )
+    mutate_p.add_argument(
+        "--resume",
+        action="store_true",
+        default=False,
+        help=(
+            "Reuse cached results for unchanged targets (cache: .ordeal/mutate/). "
+            "Invalidated when any line in the module source changes."
         ),
     )
     mutate_p.add_argument(

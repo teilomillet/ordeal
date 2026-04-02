@@ -63,7 +63,10 @@ class Fault(ABC):
             if self._active:
                 return
             self._do_activate()
-            self._active = True
+            # PatchFault sets _skipped when the target can't be resolved.
+            # Don't mark as active — the fault was never injected.
+            if not getattr(self, "_skipped", False):
+                self._active = True
 
     def deactivate(self) -> None:
         """Deactivate the fault injection if currently active."""
@@ -199,6 +202,7 @@ class PatchFault(Fault):
                     "or removed in the installed version.",
                     stacklevel=2,
                 )
+                self._skipped = True
                 return
         wrapped = self.wrapper_fn(self._original)
         setattr(self._parent, self._attr_name, wrapped)

@@ -44,7 +44,10 @@ better aggregate coverage than uniform selection (Groce et al., 2012).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar
+import functools
+import signal
+import threading
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import hypothesis.strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, rule
@@ -53,6 +56,53 @@ from ordeal.faults import Fault
 
 if TYPE_CHECKING:
     from ordeal.explore import CoverageCollector
+
+
+class RuleTimeoutError(Exception):
+    """A ChaosTest rule exceeded its ``rule_timeout``.
+
+    This usually means a fault (buggify / PatchFault) caused the code
+    under test to block indefinitely — a real resilience finding.
+    """
+
+
+def _can_use_sigalrm() -> bool:
+    """Return True if SIGALRM-based timeouts are available."""
+    if not hasattr(signal, "SIGALRM") or not hasattr(signal, "setitimer"):
+        return False
+    try:
+        return threading.current_thread() is threading.main_thread()
+    except RuntimeError:
+        return False
+
+
+def _wrap_rule_with_timeout(fn: Any, timeout: float) -> Any:
+    """Wrap *fn* so it raises ``RuleTimeoutError`` after *timeout* seconds."""
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        if not _can_use_sigalrm():
+            return fn(*args, **kwargs)
+
+        def _handler(signum: int, frame: Any) -> None:
+            raise RuleTimeoutError(
+                f"ChaosTest rule {fn.__name__!r} timed out after {timeout}s. "
+                f"A fault likely caused the code under test to block "
+                f"(buggify-induced hang, slow I/O, unresponsive inference, etc.). "
+                f"This is a real resilience finding — the code has no timeout. "
+                f"Set rule_timeout = 0 to disable."
+            )
+
+        old_handler = signal.signal(signal.SIGALRM, _handler)
+        signal.setitimer(signal.ITIMER_REAL, timeout)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, old_handler)
+
+    return wrapper
+
 
 # ---------------------------------------------------------------------------
 # Adaptive fault scheduling constants
@@ -153,6 +203,29 @@ class ChaosTest(RuleBasedStateMachine):
 
     faults: ClassVar[list[Fault]] = []
     swarm: ClassVar[bool] = False
+    rule_timeout: ClassVar[float] = 30.0
+
+    # Internal rule names that should never be wrapped with a timeout.
+    _INTERNAL_RULES: ClassVar[frozenset[str]] = frozenset({"_nemesis", "_swarm_init"})
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        timeout = cls.rule_timeout
+        if timeout <= 0:
+            return
+        for attr_name in list(vars(cls)):
+            if attr_name in ChaosTest._INTERNAL_RULES:
+                continue
+            obj = vars(cls)[attr_name]
+            if not callable(obj):
+                continue
+            rule_marker = getattr(obj, "hypothesis_stateful_rule", None)
+            if rule_marker is None:
+                continue
+            wrapped = _wrap_rule_with_timeout(obj, timeout)
+            # Patch the Rule dataclass so Hypothesis calls the wrapped version.
+            rule_marker.function = wrapped
+            setattr(cls, attr_name, wrapped)
 
     def __init__(self) -> None:
         super().__init__()

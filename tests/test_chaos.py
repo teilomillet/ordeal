@@ -1,9 +1,12 @@
 """Tests for ordeal.chaos — ChaosTest stateful testing."""
 
+import time
+
+import pytest
 from hypothesis import settings
 from hypothesis.stateful import invariant, rule
 
-from ordeal.chaos import ChaosTest, chaos_test
+from ordeal.chaos import ChaosTest, RuleTimeoutError, chaos_test
 from ordeal.faults import LambdaFault
 
 # -- A simple system under test ---------------------------------------------
@@ -141,3 +144,60 @@ class DecoratedChaos(ChaosTest):
 
 
 DecoratedChaos.settings = settings(max_examples=10, stateful_step_count=5)
+
+
+# -- rule_timeout tests -------------------------------------------------------
+
+
+class HangingChaos(ChaosTest):
+    """A ChaosTest where a rule hangs — simulates buggify-induced deadlock."""
+
+    rule_timeout = 1.0  # 1 second
+
+    @rule()
+    def hangs_forever(self):
+        time.sleep(60)  # simulate buggify-induced infinite block
+
+
+def test_rule_timeout_interrupts_hanging_rule():
+    """rule_timeout should raise RuleTimeoutError instead of hanging."""
+    TestCase = HangingChaos.TestCase
+    TestCase.settings = settings(max_examples=1, stateful_step_count=3)
+    with pytest.raises(RuleTimeoutError, match="timed out after"):
+        TestCase().runTest()
+
+
+class FastChaos(ChaosTest):
+    """A ChaosTest where rules complete quickly — timeout should not fire."""
+
+    rule_timeout = 5.0
+
+    def __init__(self):
+        super().__init__()
+        self.counter = 0
+
+    @rule()
+    def fast_rule(self):
+        self.counter += 1
+
+
+TestFastChaos = FastChaos.TestCase
+TestFastChaos.settings = settings(max_examples=10, stateful_step_count=5)
+
+
+class NoTimeoutChaos(ChaosTest):
+    """rule_timeout = 0 disables the timeout entirely."""
+
+    rule_timeout = 0
+
+    def __init__(self):
+        super().__init__()
+        self.value = 0
+
+    @rule()
+    def do_work(self):
+        self.value += 1
+
+
+TestNoTimeoutChaos = NoTimeoutChaos.TestCase
+TestNoTimeoutChaos.settings = settings(max_examples=5, stateful_step_count=3)

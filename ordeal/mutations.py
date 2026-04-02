@@ -3108,7 +3108,8 @@ def _batch_module_test(
 
     plugin = _BatchPlugin()
     pytest.main(
-        ["-x", "-q", "--tb=no", "--no-header", "--chaos", "-k", short_name],
+        ["-x", "-q", "--tb=no", "--no-header", "--chaos",
+         "-p", "no:xdist", "-o", "addopts=", "-k", short_name],
         plugins=[plugin],
     )
     return results
@@ -3464,7 +3465,10 @@ def _auto_test_fn(target: str, test_filter: str | None = None) -> Callable[[], N
             parts = target.rsplit(".", 1)
             module_name = parts[0] if len(parts) >= 2 else target
             k_filter = module_name.split(".")[-1]
-        rc = pytest.main(["-x", "-q", "--tb=short", "--no-header", "--chaos", "-k", k_filter])
+        rc = pytest.main([
+            "-x", "-q", "--tb=short", "--no-header", "--chaos",
+            "-p", "no:xdist", "-o", "addopts=", "-k", k_filter,
+        ])
         if rc == 5:
             short = target.rsplit(".", 1)[-1]
             suggested = f"tests/test_{short}.py"

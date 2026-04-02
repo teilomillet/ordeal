@@ -245,6 +245,7 @@ def catalog() -> dict[str, list]:
         installed = Path(".claude/skills/ordeal/SKILL.md").exists()
         result["skill"] = [
             {
+                "name": "SKILL.md",
                 "qualname": "ordeal.SKILL.md",
                 "doc": "AI agent skill — teaches coding agents how to use ordeal",
                 "installed": installed,

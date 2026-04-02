@@ -46,7 +46,16 @@ def _approx_equal(a: Any, b: Any) -> bool:
         if math.isnan(a) or math.isnan(b):
             return False
         return math.isclose(a, b, rel_tol=_REL_TOL, abs_tol=_ABS_TOL)
-    return a == b
+    try:
+        result = a == b
+        # numpy arrays return an array from ==; reduce to scalar
+        if hasattr(result, "__iter__") and not isinstance(result, str):
+            import numpy as np
+
+            return bool(np.all(np.asarray(result)))
+        return bool(result)
+    except Exception:
+        return False
 
 
 @dataclass

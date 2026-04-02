@@ -1059,7 +1059,7 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
     equivalence_samples: int = args.equivalence_samples
     test_filter: str | None = args.test_filter
     mutant_timeout: float | None = args.mutant_timeout
-    disk_mutation: bool = args.disk_mutation
+    disk_mutation: bool | None = args.disk_mutation
 
     # Fall back to config file if no targets given
     if not targets:
@@ -1561,8 +1561,11 @@ def main(argv: list[str] | None = None) -> int:
     mutate_p.add_argument(
         "--disk-mutation",
         action="store_true",
-        default=False,
-        help="Write mutations to disk so subprocesses (Ray, multiprocessing) see them",
+        default=None,
+        help=(
+            "Write mutations to disk so subprocesses (Ray, multiprocessing) see them. "
+            "Auto-detected when omitted."
+        ),
     )
     mutate_p.add_argument(
         "--generate-stubs",

@@ -3024,6 +3024,116 @@ def _mutated_module(module_name: str, mutated_tree: ast.Module):
                 setattr(original, name, value)
 
 
+_CROSS_PROCESS_IMPORTS = frozenset(
+    {
+        "ray",
+        "multiprocessing",
+        "subprocess",
+        "concurrent",
+        "celery",
+        "dask",
+        "joblib",
+    }
+)
+
+_CROSS_PROCESS_CALLS = frozenset(
+    {
+        "ray.remote",
+        "ray.get",
+        "ray.put",
+        "multiprocessing.Pool",
+        "multiprocessing.Process",
+        "concurrent.futures.ProcessPoolExecutor",
+        "subprocess.run",
+        "subprocess.Popen",
+        "subprocess.check_output",
+        "subprocess.check_call",
+    }
+)
+
+
+def _needs_disk_mutation(target: str) -> bool:
+    """Auto-detect whether *target* uses cross-process patterns.
+
+    Scans the target module's AST for imports and calls that indicate
+    subprocesses (Ray, multiprocessing, subprocess, etc.) will reimport
+    from disk.  When detected, disk-level mutation is needed for correct
+    mutation scores.
+    """
+    try:
+        parts = target.rsplit(".", 1)
+        module_name = parts[0] if len(parts) >= 2 else target
+
+        # Try to get source file — module may not be importable
+        # (e.g. if it does `import ray` and ray isn't installed)
+        source_file = None
+        try:
+            module = importlib.import_module(module_name)
+            source_file = getattr(module, "__file__", None)
+        except Exception:
+            # Fall back to finding the file on disk via spec
+            spec = importlib.util.find_spec(module_name)
+            if spec and spec.origin:
+                source_file = spec.origin
+
+        if source_file is None:
+            return False
+        with open(source_file) as f:
+            source = f.read()
+        tree = ast.parse(source)
+    except Exception:
+        return False
+
+    for node in ast.walk(tree):
+        # Check imports: import ray, from multiprocessing import Pool
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                if root in _CROSS_PROCESS_IMPORTS:
+                    return True
+        if isinstance(node, ast.ImportFrom) and node.module:
+            root = node.module.split(".")[0]
+            if root in _CROSS_PROCESS_IMPORTS:
+                return True
+        # Check decorators: @ray.remote
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            for dec in node.decorator_list:
+                dec_name = _decorator_name(dec)
+                if dec_name and any(dec_name.startswith(p) for p in _CROSS_PROCESS_IMPORTS):
+                    return True
+    return False
+
+
+def _decorator_name(node: ast.expr) -> str | None:
+    """Extract dotted name from a decorator AST node."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        prefix = _decorator_name(node.value)
+        return f"{prefix}.{node.attr}" if prefix else node.attr
+    if isinstance(node, ast.Call):
+        return _decorator_name(node.func)
+    return None
+
+
+def _resolve_disk_mutation(disk_mutation: bool | None, target: str) -> bool:
+    """Resolve disk_mutation: None means auto-detect."""
+    if disk_mutation is not None:
+        return disk_mutation
+    needed = _needs_disk_mutation(target)
+    if needed:
+        import warnings
+
+        warnings.warn(
+            f"Auto-enabling disk_mutation for {target!r} — "
+            "cross-process imports detected (Ray/multiprocessing/subprocess). "
+            "Mutations will be written to disk so subprocesses see them. "
+            "Suppress with disk_mutation=False.",
+            stacklevel=3,
+        )
+    return needed
+
+
 def _clear_pyc(source_path: str) -> None:
     """Remove ``__pycache__`` bytecode for *source_path*.
 
@@ -3344,7 +3454,7 @@ def mutate_and_test(
     concern: str | None = None,
     test_filter: str | None = None,
     mutant_timeout: float | None = None,
-    disk_mutation: bool = False,
+    disk_mutation: bool | None = None,
 ) -> MutationResult:
     """Apply mutations to an entire module and run *test_fn* against each.
 
@@ -3379,6 +3489,7 @@ def mutate_and_test(
             When exceeded, returns whatever mutants have been generated so
             far.  Prevents hanging on complex AST expressions (numpy, cv2).
     """
+    disk_mutation = _resolve_disk_mutation(disk_mutation, target)
     use_batch = test_fn is None  # batch when auto-discovering tests
     if test_fn is None:
         test_fn = _auto_test_fn(target, test_filter=test_filter)
@@ -3683,7 +3794,7 @@ def mutate_function_and_test(
     concern: str | None = None,
     test_filter: str | None = None,
     mutant_timeout: float | None = None,
-    disk_mutation: bool = False,
+    disk_mutation: bool | None = None,
 ) -> MutationResult:
     """Mutate a single function and run tests against each mutant.
 
@@ -3768,6 +3879,7 @@ def mutate_function_and_test(
             far.  Prevents hanging on complex AST expressions (numpy, cv2).
     """
     # Try auto-discovering tests; fall back to mine()-based oracle
+    disk_mutation = _resolve_disk_mutation(disk_mutation, target)
     use_mine_oracle = False
     if test_fn is None:
         try:
@@ -4088,7 +4200,7 @@ def mutate(
     concern: str | None = None,
     test_filter: str | None = None,
     mutant_timeout: float | None = None,
-    disk_mutation: bool = False,
+    disk_mutation: bool | None = None,
 ) -> MutationResult:
     """Unified mutation testing entry point — auto-detects function vs module.
 

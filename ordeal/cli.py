@@ -1564,7 +1564,12 @@ def main(argv: list[str] | None = None) -> int:
         default=False,
         help=(
             "Reuse cached results for unchanged targets (cache: .ordeal/mutate/). "
-            "Invalidated when any line in the module source changes."
+            "Invalidated when module source, test files (test_<module>*.py), "
+            "conftest.py, lockfile, or preset/operators change. "
+            "Mine oracle results are never cached. "
+            "Note: test files not matching test_<module>*.py are not tracked; "
+            "use --no-resume or delete .ordeal/mutate/ if using test_filter "
+            "with non-standard test names."
         ),
     )
     mutate_p.add_argument(

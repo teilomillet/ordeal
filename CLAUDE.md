@@ -132,6 +132,7 @@ Quick reference — match what the developer wants to the right tool:
 - **"How does my system scale?"** → `ordeal benchmark` or `fit_usl(measurements)` or `@scales_linearly`
 - **"Which faults caused this bug?"** → `from ordeal import ablate_faults; ablate_faults(trace)` (tries without each fault, reports necessary ones)
 - **"Replay a failure"** → `ordeal replay trace.json` or `ordeal replay --shrink --ablate trace.json`
+- **"Skip unchanged modules"** → `mutate("myapp.scoring", resume=True)` or `ordeal mutate --resume` (caches results in `.ordeal/mutate/`, invalidated by source, test, conftest, lockfile, or config changes; mine oracle results never cached; test files must follow `test_<module>*.py` naming to be tracked)
 - **"Protect against regressions"** → seeds auto-save to `.ordeal/seeds/`, auto-replay on every `pytest` run
 - **"What branches aren't tested?"** → `result.coverage_gaps` + `result.reachability_suggestions()` after `ordeal explore`
 - **"Get a preflight report"** → `from ordeal import report; report()` (structured pass/fail summary)

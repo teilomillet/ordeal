@@ -4814,10 +4814,25 @@ def mutate(
         disk_mutation: Write the mutated source to disk so subprocesses
             (Ray workers, ``multiprocessing`` spawn) see the mutation.
             Default ``False`` (in-memory only, safe for parallel tests).
-        resume: Reuse cached results when the module source hasn't changed.
-            Cache is invalidated when **any** line in the module changes
-            (not just the target function) or when the preset/operators
-            change.  Default ``False`` (always run fresh).
+        resume: Reuse cached results when nothing has changed.  Cache is
+            invalidated when **any** of these change:
+
+            - Module source (any line)
+            - Test files (``tests/test_<module>.py``, ``test_<module>_*.py``)
+            - ``tests/conftest.py`` or ``conftest.py``
+            - Lockfile (``uv.lock``, ``poetry.lock``, ``requirements.txt``)
+            - Preset or operators
+
+            Mine oracle results (``killed_by='mine()'``) are **never**
+            cached because mine uses random inputs — re-running can
+            discover more properties.
+
+            **Caveat**: test files that don't follow ``test_<module>*.py``
+            naming (e.g. ``test_battle.py``) are not tracked.  If you use
+            ``test_filter`` to run non-standard test files, pass
+            ``resume=False``.
+
+            Default ``False`` (always run fresh).
     """
     # Resume: check cache before dispatching
     resolved_operators = _resolve_operators(operators, preset)

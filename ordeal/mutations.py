@@ -3052,40 +3052,14 @@ _CROSS_PROCESS_CALLS = frozenset(
 )
 
 
-def _needs_disk_mutation(target: str) -> bool:
-    """Auto-detect whether *target* uses cross-process patterns.
-
-    Scans the target module's AST for imports and calls that indicate
-    subprocesses (Ray, multiprocessing, subprocess, etc.) will reimport
-    from disk.  When detected, disk-level mutation is needed for correct
-    mutation scores.
-    """
+def _has_cross_process_imports(source: str) -> bool:
+    """Check whether source code contains cross-process imports or decorators."""
     try:
-        parts = target.rsplit(".", 1)
-        module_name = parts[0] if len(parts) >= 2 else target
-
-        # Try to get source file — module may not be importable
-        # (e.g. if it does `import ray` and ray isn't installed)
-        source_file = None
-        try:
-            module = importlib.import_module(module_name)
-            source_file = getattr(module, "__file__", None)
-        except Exception:
-            # Fall back to finding the file on disk via spec
-            spec = importlib.util.find_spec(module_name)
-            if spec and spec.origin:
-                source_file = spec.origin
-
-        if source_file is None:
-            return False
-        with open(source_file) as f:
-            source = f.read()
         tree = ast.parse(source)
     except Exception:
         return False
 
     for node in ast.walk(tree):
-        # Check imports: import ray, from multiprocessing import Pool
         if isinstance(node, ast.Import):
             for alias in node.names:
                 root = alias.name.split(".")[0]
@@ -3095,12 +3069,70 @@ def _needs_disk_mutation(target: str) -> bool:
             root = node.module.split(".")[0]
             if root in _CROSS_PROCESS_IMPORTS:
                 return True
-        # Check decorators: @ray.remote
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             for dec in node.decorator_list:
                 dec_name = _decorator_name(dec)
                 if dec_name and any(dec_name.startswith(p) for p in _CROSS_PROCESS_IMPORTS):
                     return True
+    return False
+
+
+def _read_module_source(module_name: str) -> str | None:
+    """Read source for a module — works even when the module can't be imported."""
+    source_file = None
+    try:
+        module = importlib.import_module(module_name)
+        source_file = getattr(module, "__file__", None)
+    except Exception:
+        try:
+            spec = importlib.util.find_spec(module_name)
+            if spec and spec.origin:
+                source_file = spec.origin
+        except Exception:
+            pass
+    if source_file is None:
+        return None
+    try:
+        with open(source_file) as f:
+            return f.read()
+    except Exception:
+        return None
+
+
+def _needs_disk_mutation(target: str) -> bool:
+    """Auto-detect whether *target* or its tests use cross-process patterns.
+
+    Scans both the target module's AST and the corresponding test files
+    for imports of Ray, multiprocessing, subprocess, etc.  The target
+    module itself may be pure Python while the *tests* call it through
+    Ray ``.remote()`` — scanning only the target would miss this.
+    """
+    parts = target.rsplit(".", 1)
+    module_name = parts[0] if len(parts) >= 2 else target
+
+    # Scan the target module
+    source = _read_module_source(module_name)
+    if source and _has_cross_process_imports(source):
+        return True
+
+    # Scan likely test files (tests/test_<module>.py, tests/conftest.py)
+    short_name = module_name.split(".")[-1]
+    test_candidates = [
+        f"tests/test_{short_name}.py",
+        "tests/conftest.py",
+        f"test_{short_name}.py",
+    ]
+    for test_path in test_candidates:
+        try:
+            with open(test_path) as f:
+                test_source = f.read()
+            if _has_cross_process_imports(test_source):
+                return True
+        except FileNotFoundError:
+            continue
+        except Exception:
+            continue
+
     return False
 
 
@@ -3880,6 +3912,7 @@ def mutate_function_and_test(
     """
     # Try auto-discovering tests; fall back to mine()-based oracle
     disk_mutation = _resolve_disk_mutation(disk_mutation, target)
+    auto_discovered_tests = test_fn is None
     use_mine_oracle = False
     if test_fn is None:
         try:
@@ -3984,6 +4017,47 @@ def mutate_function_and_test(
                 fault.deactivate()
 
         result.mutants.append(mutant)
+
+    # 0% score fallback: if auto-discovered tests killed nothing, try mine
+    # oracle directly.  This catches process-isolation (Ray workers, long-lived
+    # pools) where PatchFault / disk mutation are invisible to test workers.
+    # Only for auto-discovered tests — if the user provided test_fn, the 0%
+    # score is the correct result (their test may intentionally be weak).
+    if result.total > 0 and result.killed == 0 and auto_discovered_tests:
+        mine_result = _mine_based_mutation_test(
+            target,
+            func,
+            func_name,
+            module,
+            # Re-generate mutant pairs (originals were consumed)
+            generate_mutants(
+                source,
+                operators,
+                extra_mutants=extra_mutants,
+                concern=concern,
+                timeout=mutant_timeout,
+            ),
+            filter_equivalent=filter_equivalent,
+            equivalence_samples=equivalence_samples,
+            operators_used=operators,
+            preset_used=used_preset,
+            _stats={},
+        )
+        if mine_result.killed > 0:
+            import warnings
+
+            warnings.warn(
+                f"{target!r}: tests killed 0/{result.total} mutants but mine oracle "
+                f"killed {mine_result.killed}/{mine_result.total} — your tests likely "
+                "exercise this function through a process boundary (Ray, multiprocessing) "
+                "where in-memory mutations are invisible. "
+                "Falling back to mine oracle for accurate results.",
+                stacklevel=2,
+            )
+            mine_result.diagnostics["fallback_reason"] = "process_isolation"
+            mine_result.diagnostics.update(stats)
+            mine_result.diagnostics["tested"] = mine_result.total
+            return mine_result
 
     # LLM equivalence filter on surviving mutants
     if llm_equivalence and llm is not None:

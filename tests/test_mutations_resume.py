@@ -30,10 +30,10 @@ def clean_cache():
     """Remove .ordeal/mutate/ before and after each test."""
     cache_dir = Path(".ordeal") / "mutate"
     if cache_dir.exists():
-        shutil.rmtree(cache_dir)
+        shutil.rmtree(cache_dir, ignore_errors=True)
     yield
     if cache_dir.exists():
-        shutil.rmtree(cache_dir)
+        shutil.rmtree(cache_dir, ignore_errors=True)
 
 
 @pytest.fixture()
@@ -250,3 +250,103 @@ class TestResumeInvariant:
         r2 = mutate("ordeal.demo.score", preset="essential", resume=True)
         assert r2.diagnostics.get("cached") is None
         assert any(m.killed_by == "mine()" for m in r2.mutants)
+
+
+# ============================================================================
+# Cache invalidation: test changes and dependency changes
+# ============================================================================
+
+
+class TestCacheInvalidation:
+    """Cache must invalidate when tests or dependencies change."""
+
+    def test_test_file_change_invalidates_cache(self, sample_module, clean_cache):
+        """Editing test_<module>.py must invalidate the cache."""
+        mod_name, mod_dir = sample_module
+        test_dir = mod_dir.parent / "tests"
+        test_dir.mkdir(exist_ok=True)
+        test_file = test_dir / f"test_{mod_name}.py"
+
+        # Write a test file and get the hash
+        test_file.write_text(
+            f"import {mod_name}\n\ndef test_add():\n    assert {mod_name}.add(1, 2) == 3\n"
+        )
+
+        h1 = _module_source_hash(mod_name)
+
+        # Edit the test file
+        test_file.write_text(
+            f"import {mod_name}\n\n"
+            f"def test_add():\n"
+            f"    assert {mod_name}.add(1, 2) == 3\n"
+            f"    assert {mod_name}.add(-1, 5) == 4  # new assertion\n"
+        )
+
+        h2 = _module_source_hash(mod_name)
+        assert h1 != h2, "Test file change must produce different hash"
+
+    def test_conftest_change_invalidates_cache(self, sample_module, clean_cache):
+        """Editing conftest.py must invalidate the cache."""
+        mod_name, mod_dir = sample_module
+        test_dir = mod_dir.parent / "tests"
+        test_dir.mkdir(exist_ok=True)
+        conftest = test_dir / "conftest.py"
+
+        # Create conftest and get hash
+        conftest.write_text("# empty conftest\n")
+        h1 = _module_source_hash(mod_name)
+
+        # Edit conftest
+        conftest.write_text(
+            "import pytest\n\n@pytest.fixture(scope='session')\ndef ray_init():\n    pass\n"
+        )
+        h2 = _module_source_hash(mod_name)
+        assert h1 != h2, "conftest.py change must produce different hash"
+
+    def test_lockfile_change_invalidates_cache(self, sample_module, clean_cache, tmp_path):
+        """Lockfile change (dependency upgrade) must invalidate the cache."""
+        mod_name, mod_dir = sample_module
+
+        # We can't easily modify the real uv.lock, so test the hash function
+        # by creating a fake lockfile in cwd. The hash function looks in cwd.
+        import os
+
+        orig_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            # Create the module structure in tmp_path for the hash function
+            h1 = _module_source_hash(mod_name)
+
+            # Create a lockfile
+            (tmp_path / "uv.lock").write_text("numpy==1.26.0\n")
+            h2 = _module_source_hash(mod_name)
+            assert h1 != h2, "Adding lockfile must change hash"
+
+            # Modify lockfile (dependency upgrade)
+            (tmp_path / "uv.lock").write_text("numpy==2.0.0\n")
+            h3 = _module_source_hash(mod_name)
+            assert h2 != h3, "Lockfile change must change hash"
+        finally:
+            os.chdir(orig_cwd)
+
+    def test_module_change_still_invalidates(self, sample_module, clean_cache):
+        """Module source change must still invalidate (regression check)."""
+        mod_name, mod_dir = sample_module
+        h1 = _module_source_hash(mod_name)
+
+        # Edit module source
+        init = mod_dir / "__init__.py"
+        init.write_text(init.read_text() + "\nNEW_CONSTANT = 42\n")
+        for key in list(sys.modules):
+            if key.startswith(mod_name):
+                del sys.modules[key]
+
+        h2 = _module_source_hash(mod_name)
+        assert h1 != h2, "Module source change must produce different hash"
+
+    def test_no_change_same_hash(self, sample_module, clean_cache):
+        """No changes → same hash (deterministic)."""
+        mod_name, _ = sample_module
+        h1 = _module_source_hash(mod_name)
+        h2 = _module_source_hash(mod_name)
+        assert h1 == h2

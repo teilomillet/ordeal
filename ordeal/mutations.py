@@ -810,28 +810,69 @@ class MutationResult:
 
 
 def _module_source_hash(target: str) -> str:
-    """SHA-256 hash of the entire module source file.
+    """Hash that captures everything that could affect mutation results.
 
-    Any change to the file — functions, constants, imports — produces a
-    different hash.  This is deliberately coarse: if a helper function
-    changes, all cached results for the module are invalidated.
+    Combines:
+    1. **Module source** — any change to the target file
+    2. **Test files** — ``tests/test_<module>.py`` and ``tests/conftest.py``
+    3. **Lockfile** — ``uv.lock``, ``poetry.lock``, or ``requirements.txt``
+
+    If any of these change, the hash changes and the cache is invalidated.
+    This prevents stale results when tests are improved (#1) or
+    dependencies are upgraded (#2).
     """
+    h = hashlib.sha256()
+
+    # 1. Module source
     parts = target.rsplit(".", 1)
     module_name = parts[0] if len(parts) >= 2 and _is_function_target(target) else target
+    source_file = None
     try:
         module = importlib.import_module(module_name)
+        source_file = getattr(module, "__file__", None)
     except ImportError:
-        # Fall back to spec-based file resolution
         spec = importlib.util.find_spec(module_name)
         if spec and spec.origin:
-            with open(spec.origin, "rb") as f:
-                return hashlib.sha256(f.read()).hexdigest()[:16]
-        raise
-    source_file = getattr(module, "__file__", None)
+            source_file = spec.origin
     if source_file is None:
         raise ValueError(f"Cannot locate source for {target!r}")
     with open(source_file, "rb") as f:
-        return hashlib.sha256(f.read()).hexdigest()[:16]
+        h.update(f.read())
+
+    # 2. Test files — tests/test_<module>.py, tests/conftest.py, conftest.py
+    #    Search from cwd AND from the module's parent directories (covers
+    #    both standard and src/ layouts).
+    short_name = module_name.split(".")[-1]
+    search_roots = [Path.cwd()]
+    source_parent = Path(source_file).resolve().parent
+    for ancestor in [source_parent, *source_parent.parents]:
+        if (ancestor / "tests").is_dir() or (ancestor / "pyproject.toml").exists():
+            if ancestor.resolve() not in {r.resolve() for r in search_roots}:
+                search_roots.append(ancestor)
+            break
+
+    seen_test_files: set[str] = set()
+    for root in search_roots:
+        candidates = [
+            root / "tests" / f"test_{short_name}.py",
+            root / "tests" / "conftest.py",
+            root / f"test_{short_name}.py",
+            root / "conftest.py",
+        ]
+        for p in sorted(candidates):
+            rp = str(p.resolve())
+            if p.exists() and rp not in seen_test_files:
+                seen_test_files.add(rp)
+                h.update(p.read_bytes())
+
+    # 3. Lockfile — dependency version changes
+    for lockfile in ["uv.lock", "poetry.lock", "requirements.txt"]:
+        p = Path(lockfile)
+        if p.exists():
+            h.update(p.read_bytes())
+            break  # only use the first one found
+
+    return h.hexdigest()[:16]
 
 
 def _cache_path(target: str) -> Path:

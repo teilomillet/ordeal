@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.89
+
+**Fixes:**
+
+- mutation pipeline silent 0/0 when xdist is configured, numpy crash in mine, catalog KeyError
+
+
 ## 0.2.86
 
 **Fixes:**

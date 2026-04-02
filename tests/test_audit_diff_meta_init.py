@@ -142,11 +142,12 @@ class TestDiffFunction:
     def test_float_tolerance(self):
         from ordeal.diff import diff
 
+        # Use bounded floats to avoid overflow at float_max
         def f(x: float) -> float:
-            return x * 1.0
+            return max(-1e100, min(1e100, x)) * 1.0
 
         def g(x: float) -> float:
-            return x * 1.0000001
+            return max(-1e100, min(1e100, x)) * 1.0000001
 
         result = diff(f, g, rtol=1e-5, max_examples=20)
         assert result.equivalent

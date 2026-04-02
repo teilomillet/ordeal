@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.97
+
+**Fixes:**
+
+- clear _skipped on successful retry + tests for fault skip/recovery
+
+
 ## 0.2.96
 
 **Fixes:**

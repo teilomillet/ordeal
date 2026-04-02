@@ -67,6 +67,7 @@ Discover all operators and presets programmatically::
 from __future__ import annotations
 
 import ast
+import contextlib
 import copy
 import functools
 import importlib
@@ -2980,6 +2981,13 @@ def _mutated_module(module_name: str, mutated_tree: ast.Module):
     Patches the original module object in-place so that both
     ``import mod; mod.func(...)`` and ``from mod import func``
     (captured before the swap) see the mutated definitions.
+
+    .. note::
+
+       This is **process-local** — subprocesses (Ray workers,
+       ``multiprocessing`` spawn) reimport from disk and will not see
+       the mutation.  Use :func:`_mutated_module_on_disk` when the
+       test suite may spawn child processes.
     """
     original = sys.modules.get(module_name)
     if original is None:
@@ -3014,6 +3022,155 @@ def _mutated_module(module_name: str, mutated_tree: ast.Module):
         for name, value in saved.items():
             if not name.startswith("__"):
                 setattr(original, name, value)
+
+
+def _clear_pyc(source_path: str) -> None:
+    """Remove ``__pycache__`` bytecode for *source_path*.
+
+    Python caches compiled bytecode in ``__pycache__/<stem>.cpython-*.pyc``.
+    After rewriting a ``.py`` file the stale ``.pyc`` must be removed,
+    otherwise the interpreter may load the old bytecode instead of
+    re-compiling from the modified source.
+    """
+    from pathlib import Path
+
+    source = Path(source_path)
+    cache_dir = source.parent / "__pycache__"
+    if cache_dir.exists():
+        stem = source.stem
+        for pyc in cache_dir.glob(f"{stem}.*.pyc"):
+            pyc.unlink(missing_ok=True)
+
+
+@contextmanager
+def _mutated_source_file(source_path: str, mutated_source: str):
+    """Write mutated source to disk, clear bytecode, restore on exit.
+
+    Subprocesses (Ray workers, ``multiprocessing`` spawn, ``subprocess``)
+    reimport from disk, so in-memory patching alone is invisible to them.
+    This writes the mutation to the actual ``.py`` file so **any** process
+    that imports the module picks up the mutated code.
+    """
+    with open(source_path) as f:
+        original_source = f.read()
+
+    _clear_pyc(source_path)
+    with open(source_path, "w") as f:
+        f.write(mutated_source)
+
+    try:
+        yield
+    finally:
+        with open(source_path, "w") as f:
+            f.write(original_source)
+        _clear_pyc(source_path)
+
+
+@contextmanager
+def _mutated_module_on_disk(module_name: str, mutated_tree: ast.Module):
+    """Mutate a module both in-memory and on disk.
+
+    Combines :func:`_mutated_module` (for in-process visibility) with
+    :func:`_mutated_source_file` (for subprocess visibility).  This is
+    the correct strategy when the test suite may spawn child processes
+    — e.g. Ray workers, ``multiprocessing`` pools, or subprocess calls.
+    """
+    original = sys.modules.get(module_name)
+    if original is None:
+        raise ImportError(f"Module {module_name!r} not in sys.modules")
+
+    source_path = getattr(original, "__file__", None)
+    if source_path is None:
+        raise ValueError(f"Cannot locate source file for {module_name!r}")
+
+    try:
+        mutated_source = ast.unparse(mutated_tree)
+    except Exception:
+        # Fallback: in-memory only if unparse fails (rare)
+        with _mutated_module(module_name, mutated_tree) as mod:
+            yield mod
+        return
+
+    with (
+        _mutated_source_file(source_path, mutated_source),
+        _mutated_module(module_name, mutated_tree) as mod,
+    ):
+        importlib.invalidate_caches()
+        yield mod
+
+
+@contextmanager
+def _function_mutated_on_disk(
+    module_path: str,
+    func_name: str,
+    mutated_func_tree: ast.Module,
+):
+    """Rewrite a single function on disk inside its module.
+
+    Reads the full module source, replaces the target function's AST
+    node with the mutated version, writes to disk, and restores on exit.
+    Used alongside :class:`PatchFault` for full cross-process coverage.
+    """
+    module = importlib.import_module(module_path)
+    source_path = getattr(module, "__file__", None)
+    if source_path is None:
+        yield  # nothing to do — no source file
+        return
+
+    with open(source_path) as f:
+        module_source = f.read()
+
+    # Extract the mutated FunctionDef from the single-function AST
+    mutated_func_node = None
+    for node in ast.walk(mutated_func_tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            mutated_func_node = node
+            break
+
+    if mutated_func_node is None:
+        yield  # no function found — skip disk mutation
+        return
+
+    # Parse full module, replace the target function
+    module_tree = ast.parse(module_source)
+    replaced = False
+    for i, node in enumerate(module_tree.body):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name:
+            # Preserve the original line number for ast.fix_missing_locations
+            mutated_func_node.lineno = node.lineno
+            mutated_func_node.col_offset = node.col_offset
+            module_tree.body[i] = mutated_func_node
+            replaced = True
+            break
+        # Also check inside class definitions
+        if isinstance(node, ast.ClassDef):
+            for j, method in enumerate(node.body):
+                if (
+                    isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and method.name == func_name
+                ):
+                    mutated_func_node.lineno = method.lineno
+                    mutated_func_node.col_offset = method.col_offset
+                    node.body[j] = mutated_func_node
+                    replaced = True
+                    break
+            if replaced:
+                break
+
+    if not replaced:
+        yield  # function not found in module — skip disk mutation
+        return
+
+    ast.fix_missing_locations(module_tree)
+    try:
+        mutated_module_source = ast.unparse(module_tree)
+    except Exception:
+        yield  # unparse failed — skip disk mutation
+        return
+
+    with _mutated_source_file(source_path, mutated_module_source):
+        importlib.invalidate_caches()
+        yield
 
 
 def _module_is_equivalent(
@@ -3051,6 +3208,8 @@ def _module_is_equivalent(
 def _batch_module_test(
     target: str,
     mutant_pairs: list[tuple[Mutant, ast.Module]],
+    *,
+    disk_mutation: bool = False,
 ) -> list[tuple[Mutant, bool, str | None]]:
     """Run all mutants in a single pytest session via a custom plugin.
 
@@ -3089,8 +3248,14 @@ def _batch_module_test(
                     error = None
                     killer = None
                     try:
-                        with _mutated_module(target, mutated_tree):
-                            importlib.invalidate_caches()
+                        cm = (
+                            _mutated_module_on_disk(target, mutated_tree)
+                            if disk_mutation
+                            else _mutated_module(target, mutated_tree)
+                        )
+                        with cm:
+                            if not disk_mutation:
+                                importlib.invalidate_caches()
                             for i, item in enumerate(session.items):
                                 nxt = session.items[i + 1] if i + 1 < len(session.items) else None
                                 item.config.hook.pytest_runtest_protocol(item=item, nextitem=nxt)
@@ -3179,6 +3344,7 @@ def mutate_and_test(
     concern: str | None = None,
     test_filter: str | None = None,
     mutant_timeout: float | None = None,
+    disk_mutation: bool = False,
 ) -> MutationResult:
     """Apply mutations to an entire module and run *test_fn* against each.
 
@@ -3259,7 +3425,7 @@ def mutate_and_test(
         if workers > 1 and len(mutant_pairs) > 1:
             batch_results = _parallel_module_test(target, mutant_pairs, workers)
         else:
-            batch_results = _batch_module_test(target, mutant_pairs)
+            batch_results = _batch_module_test(target, mutant_pairs, disk_mutation=disk_mutation)
         for item in batch_results:
             mutant, killed, error = item[0], item[1], item[2]
             killer = item[3] if len(item) > 3 else None
@@ -3275,8 +3441,14 @@ def mutate_and_test(
     test_name = getattr(test_fn, "__qualname__", getattr(test_fn, "__name__", "test_fn"))
     for mutant, mutated_tree in mutant_pairs:
         try:
-            with _mutated_module(target, mutated_tree):
-                importlib.invalidate_caches()
+            cm = (
+                _mutated_module_on_disk(target, mutated_tree)
+                if disk_mutation
+                else _mutated_module(target, mutated_tree)
+            )
+            with cm:
+                if not disk_mutation:
+                    importlib.invalidate_caches()
                 test_fn()
             mutant.killed = False
         except Exception as e:
@@ -3511,6 +3683,7 @@ def mutate_function_and_test(
     concern: str | None = None,
     test_filter: str | None = None,
     mutant_timeout: float | None = None,
+    disk_mutation: bool = False,
 ) -> MutationResult:
     """Mutate a single function and run tests against each mutant.
 
@@ -3678,19 +3851,25 @@ def mutate_function_and_test(
             stats["filtered_runtime_equivalent"] = stats.get("filtered_runtime_equivalent", 0) + 1
             continue
 
-        # Swap via PatchFault
+        # Swap via PatchFault (in-process) + optional disk mutation (subprocesses)
         fn_name = getattr(test_fn, "__qualname__", getattr(test_fn, "__name__", "test_fn"))
         fault = PatchFault(target, lambda orig, mf=mutated_func: mf)
-        fault.activate()
-        try:
-            test_fn()
-            mutant.killed = False
-        except Exception as e:
-            mutant.killed = True
-            mutant.error = str(e)[:200]
-            mutant.killed_by = fn_name
-        finally:
-            fault.deactivate()
+        disk_cm = (
+            _function_mutated_on_disk(module_path, func_name, mutated_tree)
+            if disk_mutation
+            else contextlib.nullcontext()
+        )
+        with disk_cm:
+            fault.activate()
+            try:
+                test_fn()
+                mutant.killed = False
+            except Exception as e:
+                mutant.killed = True
+                mutant.error = str(e)[:200]
+                mutant.killed_by = fn_name
+            finally:
+                fault.deactivate()
 
         result.mutants.append(mutant)
 
@@ -3909,6 +4088,7 @@ def mutate(
     concern: str | None = None,
     test_filter: str | None = None,
     mutant_timeout: float | None = None,
+    disk_mutation: bool = False,
 ) -> MutationResult:
     """Unified mutation testing entry point — auto-detects function vs module.
 
@@ -3956,6 +4136,9 @@ def mutate(
             from the target module name.
         mutant_timeout: Maximum seconds for the mutant generation step.
             Prevents hanging on complex AST expressions (numpy, cv2).
+        disk_mutation: Write the mutated source to disk so subprocesses
+            (Ray workers, ``multiprocessing`` spawn) see the mutation.
+            Default ``False`` (in-memory only, safe for parallel tests).
     """
     dispatch = mutate_function_and_test if _is_function_target(target) else mutate_and_test
     return dispatch(
@@ -3972,6 +4155,7 @@ def mutate(
         concern=concern,
         test_filter=test_filter,
         mutant_timeout=mutant_timeout,
+        disk_mutation=disk_mutation,
     )
 
 

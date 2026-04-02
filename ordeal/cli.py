@@ -1059,6 +1059,7 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
     equivalence_samples: int = args.equivalence_samples
     test_filter: str | None = args.test_filter
     mutant_timeout: float | None = args.mutant_timeout
+    disk_mutation: bool = args.disk_mutation
 
     # Fall back to config file if no targets given
     if not targets:
@@ -1126,6 +1127,7 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
                     equivalence_samples=equivalence_samples,
                     test_filter=test_filter,
                     mutant_timeout=mutant_timeout,
+                    disk_mutation=disk_mutation,
                 )
             else:
                 result = mutate_and_test(
@@ -1137,6 +1139,7 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
                     equivalence_samples=equivalence_samples,
                     test_filter=test_filter,
                     mutant_timeout=mutant_timeout,
+                    disk_mutation=disk_mutation,
                 )
         except NoTestsFoundError as e:
             _stderr(f"  WARNING: No tests found for {target!r}\n")
@@ -1554,6 +1557,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         metavar="SECS",
         help="Timeout for mutant generation step in seconds (skip functions that hang)",
+    )
+    mutate_p.add_argument(
+        "--disk-mutation",
+        action="store_true",
+        default=False,
+        help="Write mutations to disk so subprocesses (Ray, multiprocessing) see them",
     )
     mutate_p.add_argument(
         "--generate-stubs",

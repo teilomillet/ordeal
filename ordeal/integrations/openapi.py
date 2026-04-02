@@ -342,8 +342,17 @@ def auto_faults(
 
     for target in targets:
         module_path, func_name = target.rsplit(".", 1)
-        module = importlib.import_module(module_path)
-        func = getattr(module, func_name)
+        try:
+            module = importlib.import_module(module_path)
+            func = getattr(module, func_name)
+        except (ImportError, AttributeError) as exc:
+            _log.warning(
+                "Skipping %s: cannot resolve (%s). "
+                "The target may have been renamed in the installed version.",
+                target,
+                exc,
+            )
+            continue
         # Unwrap decorators (@ray.remote, @functools.wraps, etc.)
         func = getattr(func, "_function", func)  # ray.remote
         try:

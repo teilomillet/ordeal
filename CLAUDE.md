@@ -211,6 +211,71 @@ Module audit — mutation score, property coverage, test gaps.
 uv run ordeal audit myapp.scoring
 ```
 
+Multi-module audit with summary:
+
+```python
+from ordeal.audit import audit_report
+
+report = audit_report(["myapp.scoring", "myapp.utils"])
+print(report)
+# ordeal audit
+#   myapp.scoring
+#     current:  33 tests | 343 lines | 98% coverage [verified]
+#     migrated: 12 tests | 130 lines | 96% coverage [verified]
+#   myapp.utils
+#     ...
+#   total:
+#     current:  55 tests | 500 lines
+#     migrated: 20 tests | 200 lines
+#     saving:   64% fewer tests | 60% less code
+```
+
+### "Compare two implementations" / `diff()`
+
+Differential testing — run two functions on the same random inputs, catch divergence:
+
+```python
+from ordeal.diff import diff
+
+result = diff(score_v1, score_v2, max_examples=100)
+assert result.equivalent      # True if no mismatches
+print(result.summary())       # "diff(score_v1, score_v2): 100 examples, EQUIVALENT"
+
+# Floating-point tolerance:
+result = diff(compute_old, compute_new, rtol=1e-6)
+
+# Custom comparator:
+result = diff(fn_a, fn_b, compare=lambda a, b: a.keys() == b.keys())
+
+# Inspect mismatches:
+for m in result.mismatches:
+    print(m)  # args, output_a, output_b
+```
+
+### "Discover and test algebraic relations" / `metamorphic`
+
+Auto-discover metamorphic relations (commutativity, determinism, etc.):
+
+```python
+from ordeal.metamorphic import discover_relations, metamorphic
+
+# Standalone discovery:
+relations = discover_relations(my_add)  # finds: commutative, deterministic
+
+# Auto-discovery decorator (no arguments):
+@metamorphic()
+def test_add(x: int, y: int):
+    return my_add(x, y)  # auto-discovers and tests relations
+
+# Explicit relation:
+from ordeal.metamorphic import Relation
+negate = Relation("negate", transform=lambda args: (-args[0],), check=lambda a, b: a == -b)
+
+@metamorphic(negate)
+def test_abs(x: float):
+    return abs(x)
+```
+
 ### "Discover properties" / "What invariants hold?"
 
 Property mining — automatically discovers what's true about a function.
@@ -226,7 +291,7 @@ One command: zero tests to validated test suite.
 ```bash
 ordeal init                    # auto-detect package, generate everything
 ordeal init myapp              # explicit target
-ordeal init --dry-run          # preview without writing
+ordeal init --dry-run          # preview without side effects (no imports, no execution)
 ordeal init --ci               # also generate GitHub Actions workflow
 ordeal init --ci --ci-name qa  # custom workflow name → .github/workflows/qa.yml
 ```
@@ -241,6 +306,8 @@ What it does (discovery-driven, no hand-crafted values):
 - Runs 10s coverage-guided explore
 - Generates `ordeal.toml` for explore/mutate/audit
 - JSON to stdout for AI assistants, quality report to stderr for humans
+
+**`--dry-run` safety guarantee**: no modules imported, no functions executed. Uses AST parsing and filesystem scanning only. Safe even on packages with import-time side effects (DB connections, git operations, API calls).
 
 ### "Get a preflight report" / `report()`
 
@@ -291,6 +358,15 @@ for p in r["failed"]:
 - **Coverage gap reporting** — `CoverageCollector` tracks line-level coverage; `ExplorationResult.coverage_gaps` reports uncovered branches; `reachability_suggestions()` generates `reachable()` calls for AI assistants
 - **Unified swarm** — `rule_swarm=True` on Explorer or `rule_swarm = true` in `ordeal.toml`. Joint rule+fault configuration per run: one coin flip covers both which rules are callable AND which faults the nemesis can toggle (Groce et al. ISSTA 2012). Three phases: (1) warmup with pure coin-flip, (2) adaptive energy-weighted selection (MOpt pattern — productive configs get higher probability), (3) coverage-directed bias toward rules that exercise files with uncovered branches.
 - **Failing step in traces** — rule steps that raise are now recorded in the trace, so `ordeal replay` reproduces failures where the exception occurs during rule execution
+- **xdist isolation in mutation pipeline** — internal `pytest.main()` calls use `-o addopts=` + `@pytest.hookimpl(tryfirst=True)` to prevent xdist from hijacking the mutation loop; xdist fixtures (`worker_id`) remain available
+- **`disk_mutation` for cross-process testing** — `mutate("target", disk_mutation=True)` writes mutated `.py` to disk so Ray workers / multiprocessing subprocesses see the mutation; auto-detected when target or test files import Ray/multiprocessing/subprocess
+- **Mine oracle fallback on 0% score** — when auto-discovered tests kill 0 mutants (process isolation), ordeal automatically falls back to mine oracle for accurate results; works for both function-level and module-level mutation; warns about the process boundary
+- **`PatchFault` graceful skip** — unresolvable targets (renamed APIs, missing modules) emit a warning and stay inactive instead of crashing; retry on next activation recovers if the target appears
+- **`--resume` for mutation testing** — `mutate("target", resume=True)` caches results in `.ordeal/mutate/`; invalidated by module source, test files (`test_<module>*.py`), `conftest.py`, lockfile, or preset/operator changes; mine oracle results never cached
+- **`--dry-run` zero side effects** — `ordeal init --dry-run` uses AST parsing and filesystem scanning only; no modules imported, no functions executed; safe on packages with import-time side effects
+- **Python 3.10+ support** — `tomllib` import with `tomli` fallback; `requires-python` lowered from `>=3.12` to `>=3.10`
+- **`audit_report(modules)`** — multi-module audit with aggregated totals and savings percentage
+- **`discover_relations(fn)`** tested and documented — standalone relation discovery for metamorphic testing with auto-discovery of commutativity, determinism, etc.
 
 ## Extending ordeal
 

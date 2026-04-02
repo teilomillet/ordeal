@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.99
+
+**Features:**
+
+- module-level mine oracle fallback on 0% score
+
+**Fixes:**
+
+- module mine fallback includes private functions (_normalize_text etc.)
+
+
 ## 0.2.97
 
 **Fixes:**

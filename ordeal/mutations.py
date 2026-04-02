@@ -3716,11 +3716,10 @@ def _module_mine_oracle_fallback(
         func = getattr(module, name, None)
         if not callable(func) or inspect.isclass(func):
             continue
+        func = _unwrap_func(func)
         obj_mod = getattr(func, "__module__", None)
         if obj_mod and not obj_mod.startswith(target):
             continue
-
-        func = _unwrap_func(func)
         try:
             source = _get_source(func)
         except Exception:

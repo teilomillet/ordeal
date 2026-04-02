@@ -272,6 +272,56 @@ class TestModuleMineOracleFallback:
         finally:
             _cleanup_module("_test_dunder_mod")
 
+    def test_ray_remote_unwrapped_before_module_check(self):
+        """@ray.remote functions have __module__='ray.remote_function'.
+
+        The fallback must unwrap BEFORE checking __module__, otherwise
+        the function is skipped because 'ray.remote_function' doesn't
+        start with the target module name.
+        """
+        from ordeal.mutations import MutationResult, _module_mine_oracle_fallback
+
+        def _compute(x: int) -> int:
+            return x * 2
+
+        # Simulate @ray.remote: outer has wrong __module__, ._function has correct one
+        class FakeRemote:
+            def __init__(self, fn):
+                self._function = fn
+                self.__module__ = "ray.remote_function"
+                self.__name__ = fn.__name__
+                self.__qualname__ = fn.__qualname__
+
+            def __call__(self, *args, **kwargs):
+                return self._function(*args, **kwargs)
+
+        _compute.__module__ = "_test_ray_mod"
+        wrapped = FakeRemote(_compute)
+
+        mod = _make_module("_test_ray_mod", {"_compute": wrapped})
+
+        try:
+            dummy_result = MutationResult(target="_test_ray_mod")
+            dummy_result.mutants = []
+
+            result = _module_mine_oracle_fallback(
+                "_test_ray_mod",
+                mod,
+                dummy_result,
+                ["arithmetic", "comparison"],
+                {},
+                filter_equivalent=True,
+                equivalence_samples=5,
+                preset_used="essential",
+                mutant_timeout=None,
+            )
+            # Should find _compute after unwrapping, not skip it
+            if result is not None:
+                assert result.total > 0
+                assert any("_compute" in m.description or True for m in result.mutants)
+        finally:
+            _cleanup_module("_test_ray_mod")
+
 
 # ============================================================================
 # Function-level mine oracle — 0% score

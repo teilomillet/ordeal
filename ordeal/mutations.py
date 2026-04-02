@@ -3711,7 +3711,7 @@ def _module_mine_oracle_fallback(
     any_killed = False
 
     for name in sorted(dir(module)):
-        if name.startswith("_"):
+        if name.startswith("__"):
             continue
         func = getattr(module, name, None)
         if not callable(func) or inspect.isclass(func):

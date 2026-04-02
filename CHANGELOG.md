@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.103
+
+**Features:**
+
+- resume parameter for mutation testing with module-level cache
+
+
 ## 0.2.101
 
 **Fixes:**

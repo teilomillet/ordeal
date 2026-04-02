@@ -48,6 +48,12 @@ ngram = 2
 # (e.g. only inserts, no deletes → cache grows → GC triggers).
 # rule_swarm = true
 
+# Per-rule timeout in seconds.  If a ChaosTest rule takes longer than
+# this (e.g. buggify-induced hang, slow ONNX inference, blocking I/O),
+# it is interrupted with RuleTimeoutError — a real resilience finding.
+# Default 30s.  Set to 0 to disable.  Also settable via --rule-timeout.
+# rule_timeout = 30.0
+
 
 # Each [[tests]] entry is a ChaosTest class to explore.
 # Format: "module.path:ClassName"
@@ -56,6 +62,7 @@ ngram = 2
 class = "tests.test_chaos:MyServiceChaos"
 # steps_per_run = 30   # override per test (optional)
 # swarm = true          # enable swarm fault selection (optional)
+# rule_timeout = 60.0   # override per-rule timeout for this test (optional)
 
 # [[tests]]
 # class = "tests.test_chaos:AnotherChaos"

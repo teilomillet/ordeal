@@ -148,11 +148,11 @@ def catalog() -> dict[str, list]:
     """Discover all ordeal capabilities via runtime introspection.
 
     Returns a dict with one key per subsystem — each value is a list of
-    dicts describing the available items.  Keys: ``faults``, ``invariants``,
-    ``assertions``, ``strategies``, ``mutations``, ``integrations``,
-    ``mining``, ``audit``, ``auto``, ``metamorphic``, ``diff``, ``scaling``,
-    ``exploration``, ``trace``, ``supervisor``, ``mutagen``, ``cmplog``,
-    ``concolic``, ``grammar``, ``equivalence``.
+    dicts describing the available items.  Keys: ``chaos``, ``faults``,
+    ``invariants``, ``assertions``, ``strategies``, ``mutations``,
+    ``integrations``, ``mining``, ``audit``, ``auto``, ``metamorphic``,
+    ``diff``, ``scaling``, ``exploration``, ``trace``, ``supervisor``,
+    ``mutagen``, ``cmplog``, ``concolic``, ``grammar``, ``equivalence``.
 
     Everything is derived from the source code via ``inspect``; adding a new
     fault, invariant, or capability makes it appear here automatically.
@@ -199,6 +199,31 @@ def catalog() -> dict[str, list]:
         "scaling": _introspect_module(
             __import__("ordeal.scaling", fromlist=["scaling"]),
         ),
+        "chaos": [
+            {
+                "name": "ChaosTest",
+                "qualname": "ordeal.chaos.ChaosTest",
+                "doc": (
+                    "Stateful chaos testing base class. "
+                    "Class attrs: faults (list[Fault]), swarm (bool), "
+                    "rule_timeout (float, default 30s — per-rule SIGALRM guard "
+                    "against buggify/fault-induced hangs; 0 to disable)"
+                ),
+            },
+            {
+                "name": "RuleTimeoutError",
+                "qualname": "ordeal.chaos.RuleTimeoutError",
+                "doc": (
+                    "Raised when a ChaosTest rule exceeds rule_timeout seconds. "
+                    "Indicates fault-induced hang — a real resilience finding."
+                ),
+            },
+            {
+                "name": "chaos_test",
+                "qualname": "ordeal.chaos.chaos_test",
+                "doc": "Decorator: turns ChaosTest subclass into pytest-discoverable TestCase",
+            },
+        ],
         "exploration": _introspect_module(
             __import__("ordeal.state", fromlist=["state"]),
         )

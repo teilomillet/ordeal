@@ -57,6 +57,7 @@ class ExplorerConfig:
     workers: int = 0  # 0 = auto (os.cpu_count())
     ngram: int = 2  # N-gram depth for edge coverage (1=classic AFL, 2+=path-context)
     rule_swarm: bool = False  # random rule subsets per run (swarm testing for rules)
+    rule_timeout: float = 30.0  # per-rule timeout in seconds (0 to disable)
 
 
 @dataclass
@@ -66,6 +67,7 @@ class TestConfig:
     class_path: str  # "module.path:ClassName"
     steps_per_run: int | None = None
     swarm: bool | None = None
+    rule_timeout: float | None = None  # override explorer.rule_timeout per test
 
     def resolve(self) -> type:
         """Import and return the ChaosTest class."""
@@ -265,6 +267,7 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
         workers=int(explorer_raw.get("workers", 1)),
         ngram=ngram_val,
         rule_swarm=explorer_raw.get("rule_swarm", False),
+        rule_timeout=float(explorer_raw.get("rule_timeout", 30.0)),
     )
 
     if explorer.checkpoint_strategy not in _VALID_CHECKPOINT_STRATEGIES:
@@ -284,6 +287,7 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
                 class_path=t["class"],
                 steps_per_run=t.get("steps_per_run"),
                 swarm=t.get("swarm"),
+                rule_timeout=(float(t["rule_timeout"]) if "rule_timeout" in t else None),
             )
         )
 

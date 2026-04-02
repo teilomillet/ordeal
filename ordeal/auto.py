@@ -766,6 +766,7 @@ def chaos_for(
     faults: list[Fault] | None = None,
     max_examples: int = 50,
     stateful_step_count: int = 30,
+    rule_timeout: float = 30.0,
 ) -> type:
     """Auto-generate a ChaosTest from a module's public API.
 
@@ -798,6 +799,7 @@ def chaos_for(
         faults: ``None`` = auto-infer from code, list = explicit.
         max_examples: Hypothesis examples.
         stateful_step_count: Max rules per test case.
+        rule_timeout: Per-rule timeout in seconds (default 30, 0 to disable).
     """
     mod = _resolve_module(module)
     mod_name = module if isinstance(module, str) else mod.__name__
@@ -840,6 +842,7 @@ def chaos_for(
     # Build class
     namespace: dict[str, Any] = {
         "faults": fault_list,
+        "rule_timeout": rule_timeout,
         **rules_dict,
     }
 

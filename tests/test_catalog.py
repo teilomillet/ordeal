@@ -14,6 +14,7 @@ class TestTopLevelCatalog:
     def test_all_categories_present(self):
         c = catalog()
         expected = {
+            "chaos",
             "faults",
             "invariants",
             "assertions",

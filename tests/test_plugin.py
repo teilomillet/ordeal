@@ -76,8 +76,8 @@ class TestPytestAddoption:
     def test_registers_all_options(self):
         parser, group = _make_parser()
         pytest_addoption(parser)
-        # chaos, chaos-seed, buggify-prob, mutate, mutate-preset
-        assert group.addoption.call_count == 5
+        # chaos, chaos-seed, buggify-prob, rule-timeout, mutate, mutate-preset
+        assert group.addoption.call_count == 6
 
 
 # ============================================================================

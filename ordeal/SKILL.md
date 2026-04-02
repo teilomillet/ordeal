@@ -42,6 +42,7 @@ ordeal's output is self-describing. When it finds something actionable, it tells
 - **Seed corpus** — failing inputs in `.ordeal/seeds/`, replayed automatically on every `pytest` run.
 - **Fault ablation** — after a bug, replay without each fault to find which ones were necessary.
 - **Chaos mode** (`--chaos`) — activates fault injection, buggify(), and property tracking.
+- **Rule timeout** (`rule_timeout`, default 30s) — per-rule SIGALRM guard in ChaosTest. Raises `RuleTimeoutError` if a rule hangs (e.g. buggify-induced deadlock). Override per class, via `--rule-timeout`, or in `ordeal.toml` `[explorer]`. Set 0 to disable.
 
 ## Guardrails
 

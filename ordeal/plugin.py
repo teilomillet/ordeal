@@ -25,6 +25,7 @@ CLI flags::
     --chaos                 Enable chaos testing mode
     --chaos-seed SEED       Seed for reproducible chaos
     --buggify-prob FLOAT    Probability for buggify() calls (default 0.1)
+    --rule-timeout FLOAT    Per-rule timeout for ChaosTest (seconds, default 30; 0 to disable)
 
 Markers::
 
@@ -68,6 +69,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         type=float,
         default=0.1,
         help="Probability for buggify() calls (default: 0.1).",
+    )
+    group.addoption(
+        "--rule-timeout",
+        type=float,
+        default=None,
+        help="Per-rule timeout for ChaosTest in seconds (default: 30, 0 to disable).",
     )
     group.addoption(
         "--mutate",
@@ -213,6 +220,21 @@ def pytest_configure(config: pytest.Config) -> None:
         _seed_replay_results.extend(_replay_seed_corpus())
     except Exception:
         pass  # seed replay is best-effort
+
+    # -- rule_timeout: CLI flag → ordeal.toml → class default (30s) --
+    rule_timeout = config.getoption("rule_timeout", default=None)
+    if rule_timeout is None:
+        try:
+            from ordeal.config import load_config
+
+            cfg = load_config()
+            rule_timeout = cfg.explorer.rule_timeout
+        except Exception:
+            pass
+    if rule_timeout is not None:
+        from ordeal.chaos import ChaosTest
+
+        ChaosTest.rule_timeout = float(rule_timeout)
 
     if config.getoption("chaos", default=False):
         assertions.tracker.active = True

@@ -3068,6 +3068,7 @@ def _batch_module_test(
     class _BatchPlugin:
         """Pytest plugin that tests multiple mutants in one session."""
 
+        @pytest.hookimpl(tryfirst=True)
         def pytest_runtestloop(self, session: pytest.Session) -> bool:
             """Override the default test loop to iterate mutants."""
             if not session.config.option.collectonly:
@@ -3108,19 +3109,7 @@ def _batch_module_test(
 
     plugin = _BatchPlugin()
     pytest.main(
-        [
-            "-x",
-            "-q",
-            "--tb=no",
-            "--no-header",
-            "--chaos",
-            "-p",
-            "no:xdist",
-            "-o",
-            "addopts=",
-            "-k",
-            short_name,
-        ],
+        ["-x", "-q", "--tb=no", "--no-header", "--chaos", "-o", "addopts=", "-k", short_name],
         plugins=[plugin],
     )
     return results
@@ -3483,8 +3472,6 @@ def _auto_test_fn(target: str, test_filter: str | None = None) -> Callable[[], N
                 "--tb=short",
                 "--no-header",
                 "--chaos",
-                "-p",
-                "no:xdist",
                 "-o",
                 "addopts=",
                 "-k",

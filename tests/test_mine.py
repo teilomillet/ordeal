@@ -7,6 +7,7 @@ from ordeal import ChaosTest, always, invariant, rule
 from ordeal.assertions import tracker
 from ordeal.mine import (
     _check_associative,
+    _check_bijective,
     _check_commutative,
     _check_involution,
     _check_length_relationship,
@@ -497,3 +498,16 @@ class RelationalBattle(ChaosTest):
 
 TestRelationalBattle = RelationalBattle.TestCase
 TestRelationalBattle.settings = hsettings(max_examples=50, stateful_step_count=20)
+
+
+def test_check_bijective_unhashable_inputs():
+    """_check_bijective should skip inputs containing unhashable values (e.g. lists)."""
+    inputs = [
+        {"a": [1, 2, 3], "b": [4, 5, 6]},
+        {"a": [7, 8, 9], "b": [10, 11, 12]},
+    ]
+    outputs = [[0.1, 0.2], [0.3, 0.4]]
+    # Should not raise TypeError: unhashable type: 'list'
+    result = _check_bijective(inputs, outputs)
+    assert result.holds == 0
+    assert result.total == 0

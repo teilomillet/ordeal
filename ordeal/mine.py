@@ -783,8 +783,8 @@ def _check_bijective(
     for inp, out in zip(inputs, outputs):
         try:
             key = tuple(sorted(inp.items()))
-            h_out = out  # test hashability
-            hash(h_out)
+            hash(key)
+            hash(out)
         except TypeError:
             continue
         total += 1

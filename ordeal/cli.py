@@ -1489,7 +1489,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Directory to write test files (default: tests)",
     )
     init_p.add_argument(
-        "--dry-run", action="store_true", help="Show what would be generated without writing files"
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Preview without side effects — no files written, no functions executed. "
+            "Generates stub tests from signatures only."
+        ),
     )
     init_p.add_argument(
         "--ci",

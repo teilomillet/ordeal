@@ -344,6 +344,26 @@ class TestCacheInvalidation:
         h2 = _module_source_hash(mod_name)
         assert h1 != h2, "Module source change must produce different hash"
 
+    def test_prefixed_test_file_change_invalidates(self, sample_module, clean_cache):
+        """test_<module>_presets.py style files must also invalidate."""
+        mod_name, mod_dir = sample_module
+        test_dir = mod_dir.parent / "tests"
+        test_dir.mkdir(exist_ok=True)
+
+        h1 = _module_source_hash(mod_name)
+
+        # Create a prefixed test file (like test_mutations_presets.py)
+        prefixed = test_dir / f"test_{mod_name}_edge_cases.py"
+        prefixed.write_text("def test_edge():\n    pass\n")
+
+        h2 = _module_source_hash(mod_name)
+        assert h1 != h2, "Prefixed test file must change the hash"
+
+        # Edit it
+        prefixed.write_text("def test_edge():\n    assert True\n")
+        h3 = _module_source_hash(mod_name)
+        assert h2 != h3, "Editing prefixed test file must change the hash"
+
     def test_no_change_same_hash(self, sample_module, clean_cache):
         """No changes → same hash (deterministic)."""
         mod_name, _ = sample_module

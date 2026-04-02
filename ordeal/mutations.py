@@ -853,12 +853,19 @@ def _module_source_hash(target: str) -> str:
 
     seen_test_files: set[str] = set()
     for root in search_roots:
-        candidates = [
-            root / "tests" / f"test_{short_name}.py",
+        # Exact match + prefix glob (test_mutations.py + test_mutations_*.py)
+        candidates: list[Path] = [
             root / "tests" / "conftest.py",
-            root / f"test_{short_name}.py",
             root / "conftest.py",
         ]
+        for test_dir in [root / "tests", root]:
+            exact = test_dir / f"test_{short_name}.py"
+            if exact.exists():
+                candidates.append(exact)
+            # Glob: test_<module>_*.py (e.g. test_mutations_presets.py)
+            if test_dir.is_dir():
+                candidates.extend(sorted(test_dir.glob(f"test_{short_name}_*.py")))
+
         for p in sorted(candidates):
             rp = str(p.resolve())
             if p.exists() and rp not in seen_test_files:

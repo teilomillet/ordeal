@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.96
+
+**Fixes:**
+
+- skipped PatchFault not marked active — correct state tracking
+- PatchFault.activate() skips unresolvable targets instead of crashing (#4)
+- --dry-run no longer imports or executes target functions (#3)
+
+
 ## 0.2.94
 
 **Features:**

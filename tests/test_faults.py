@@ -142,6 +142,69 @@ class TestPatchFault:
         assert sample_function(1) == 999
         fault.deactivate()
 
+    def test_unresolvable_target_skipped_with_warning(self):
+        """PatchFault on a nonexistent target warns and stays inactive."""
+        fault = PatchFault(
+            "tests.test_faults.DOES_NOT_EXIST",
+            lambda orig: lambda *a, **k: -1,
+        )
+        with pytest.warns(UserWarning, match="cannot resolve target"):
+            fault.activate()
+
+        assert not fault.active
+        # Deactivate is a no-op — no crash
+        fault.deactivate()
+
+    def test_unresolvable_module_skipped_with_warning(self):
+        """PatchFault on a nonexistent module warns and stays inactive."""
+        fault = PatchFault(
+            "no_such_package_xyz.no_such_module.func",
+            lambda orig: lambda *a, **k: -1,
+        )
+        with pytest.warns(UserWarning, match="cannot resolve target"):
+            fault.activate()
+
+        assert not fault.active
+
+    def test_skipped_fault_recovers_when_target_appears(self):
+        """A fault that was skipped can resolve on retry if the target appears."""
+        import tests.test_faults as mod
+
+        # Start with no target
+        fault = PatchFault(
+            "tests.test_faults._late_binding_fn",
+            lambda orig: lambda *a, **k: -1,
+        )
+        with pytest.warns(UserWarning, match="cannot resolve target"):
+            fault.activate()
+        assert not fault.active
+
+        # Now create the target
+        mod._late_binding_fn = lambda x: x * 2
+
+        # Reset and retry — should resolve now
+        fault.reset()
+        fault.activate()
+        assert fault.active
+        assert mod._late_binding_fn(5) == -1
+        fault.deactivate()
+        assert mod._late_binding_fn(5) == 10
+
+        # Clean up
+        del mod._late_binding_fn
+
+    def test_context_manager_with_unresolvable_target(self):
+        """Using a skipped fault as context manager doesn't crash."""
+        fault = PatchFault(
+            "tests.test_faults.DOES_NOT_EXIST",
+            lambda orig: lambda *a, **k: -1,
+        )
+        with pytest.warns(UserWarning, match="cannot resolve target"):
+            with fault:
+                # Fault didn't activate — original behavior preserved
+                assert sample_function(5) == 10
+        assert not fault.active
+
 
 class TestIOFaults:
     def test_error_on_call(self):

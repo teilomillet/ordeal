@@ -204,6 +204,8 @@ class PatchFault(Fault):
                 )
                 self._skipped = True
                 return
+        # Resolution succeeded (possibly on retry) — clear skip flag
+        self._skipped = False
         wrapped = self.wrapper_fn(self._original)
         setattr(self._parent, self._attr_name, wrapped)
 

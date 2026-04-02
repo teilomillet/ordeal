@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.92
+
+**Features:**
+
+- auto-detect cross-process patterns and enable disk mutation
+
+
 ## 0.2.91
 
 **Features:**

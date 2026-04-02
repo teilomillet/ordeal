@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.101
+
+**Fixes:**
+
+- unwrap @ray.remote before __module__ check in mine oracle fallback
+
+**Other:**
+
+- test: 15 tests for unresolvable targets and mine oracle fallback
+
+
 ## 0.2.100
 
 **Fixes:**

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.100
+
+**Fixes:**
+
+- auto_faults skips unresolvable endpoints (FastAPI redoc_html rename)
+
+
 ## 0.2.99
 
 **Features:**

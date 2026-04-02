@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.93
+
+**Fixes:**
+
+- mine oracle fallback on 0% score + scan test files for cross-process
+
+
 ## 0.2.92
 
 **Features:**

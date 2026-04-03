@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.2.104
+
+**Features:**
+
+- declare(), coverage tracer fallback, function mutation batching, stateful OpenAPI links
+- per-rule timeout in ChaosTest prevents buggify-induced hangs
+
+**Fixes:**
+
+- Windows CI — explicit UTF-8 encoding and SIGALRM guard
+- float tolerance test bounded to avoid overflow at float_max
+- _check_bijective handles unhashable input values (e.g. lists)
+- cache hash captures prefixed test files (test_module_*.py)
+- cache hash includes test files, conftest, and lockfile
+- don't cache stochastic mine oracle results + test fixes
+
+**Docs:**
+
+- wire rule_timeout into catalog, plugin, config, chaos_for, SKILL
+- add Args: sections to all public API functions
+- improve user-facing docstrings for audit_report, DiffResult, Mismatch
+- add usage sections for audit_report, diff, metamorphic, dry-run
+- document resume cache invalidation rules and caveats
+
+**Other:**
+
+- test: 31 tests closing coverage gaps in audit, diff, metamorphic, init
+- fix: cache hash captures prefixed test files (test_module_*.py)
+
+
 ## 0.2.103
 
 **Features:**

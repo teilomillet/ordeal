@@ -68,7 +68,7 @@ from ordeal.auto import (
     _infer_strategies,
     _resolve_module,
 )
-from ordeal.mine import MineResult, MinedProperty, mine
+from ordeal.mine import MineResult, mine
 
 # ============================================================================
 # Constants — every number has a documented rationale
@@ -192,7 +192,7 @@ DISPLAY_CAP: int = 5
 SOURCE_TRUNCATION: int = 60
 """Maximum characters of source code to show in suggestions."""
 
-type AuditValidationMode = Literal["fast", "deep"]
+AuditValidationMode = Literal["fast", "deep"]
 """How audit validates mined properties against mutants."""
 
 
@@ -203,8 +203,7 @@ def _normalize_validation_mode(validation_mode: str) -> AuditValidationMode:
             return validation_mode
         case _:
             raise ValueError(
-                "validation_mode must be 'fast' or 'deep', "
-                f"got {validation_mode!r}",
+                f"validation_mode must be 'fast' or 'deep', got {validation_mode!r}",
             )
 
 

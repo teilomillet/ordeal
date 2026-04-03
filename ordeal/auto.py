@@ -387,9 +387,7 @@ def _boundary_values_for_hint(hint: Any) -> list[Any]:
     if origin is Literal:
         return list(get_args(hint))
 
-    if origin is Union or (
-        hasattr(pytypes, "UnionType") and origin is pytypes.UnionType
-    ):
+    if origin is Union or (hasattr(pytypes, "UnionType") and origin is pytypes.UnionType):
         values: list[Any] = []
         for arg in get_args(hint):
             if arg is type(None):
@@ -427,11 +425,7 @@ def _boundary_smoke_inputs(
     except Exception:
         return []
 
-    params = [
-        param
-        for name, param in sig.parameters.items()
-        if name not in {"self", "cls"}
-    ]
+    params = [param for name, param in sig.parameters.items() if name not in {"self", "cls"}]
     if not params:
         return [{}]
 

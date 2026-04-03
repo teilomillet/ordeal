@@ -321,8 +321,10 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         print(state.to_json())
     else:
         print(_format_scan_summary(state))
-        if state.findings and not getattr(args, "report_file", None) and not getattr(
-            args, "write_regression", None
+        if (
+            state.findings
+            and not getattr(args, "report_file", None)
+            and not getattr(args, "write_regression", None)
         ):
             print(
                 "  tip: add --report-file report.md or --write-regression"
@@ -1531,7 +1533,9 @@ def _slugify_report_name(text: str) -> str:
 
 def _python_literal(value: Any, *, trim: bool = True) -> str:
     """Render a stable Python literal for regression stubs."""
-    rendered = _trim_report_value(value, max_depth=4, max_items=6, max_string=80) if trim else value
+    rendered = (
+        _trim_report_value(value, max_depth=4, max_items=6, max_string=80) if trim else value
+    )
     return pformat(rendered, width=88, sort_dicts=False)
 
 
@@ -1620,7 +1624,8 @@ def _render_regression_stub(
         return "\n".join(lines)
 
     if name == "commutative" and isinstance(counterexample.get("swapped_input"), dict):
-        lines.append(f"    swapped = {_python_literal(counterexample['swapped_input'], trim=trim)}")
+        swapped_lit = _python_literal(counterexample["swapped_input"], trim=trim)
+        lines.append(f"    swapped = {swapped_lit}")
         lines.append(f"    left = {function}(**args)")
         lines.append(f"    right = {function}(**swapped)")
         lines.append("    assert right == left")
@@ -1822,7 +1827,8 @@ def _regression_stubs_from_details(
 
 def _scan_regression_stubs(state: Any) -> tuple[list[str], list[str]]:
     """Build runnable regression stubs from replayable scan findings."""
-    return _regression_stubs_from_details(module=state.module, details=_build_scan_report(state)["details"])
+    details = _build_scan_report(state)["details"]
+    return _regression_stubs_from_details(module=state.module, details=details)
 
 
 def _render_scan_regression_file(state: Any) -> str | None:
@@ -2105,11 +2111,11 @@ def main(argv: list[str] | None = None) -> int:
             "  ordeal scan mymod --report-file report.md\n"
             "                              Run everything and save a shareable bug report\n"
             "  ordeal scan mymod --write-regression tests/test_ordeal_regressions.py\n"
-            "                              Save runnable pytest regressions for replayable findings\n"
+            "                              Save pytest regressions for findings\n"
             "  ordeal mine mymod.func --report-file finding.md\n"
-            "                              Mine one target and save a shareable finding report\n"
+            "                              Mine one target and save a finding report\n"
             "  ordeal mine mymod.func --write-regression tests/test_ordeal_regressions.py\n"
-            "                              Save runnable pytest regressions for suspicious findings\n"
+            "                              Save pytest regressions for suspicious findings\n"
             "  ordeal catalog              See every capability\n"
             "  catalog() in Python         Full API reference"
         ),

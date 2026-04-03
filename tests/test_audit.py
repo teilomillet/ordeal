@@ -526,7 +526,7 @@ class TestAuditIntegration:
         assert "no test files" in (result.current_coverage.error or "")
 
 
-class TestModuleAuditSummary:
+class TestModuleAuditSummaryValidation:
     def test_includes_fast_validation_mode_with_mutation_score(self):
         result = ModuleAudit(
             module="demo.module",

@@ -93,7 +93,7 @@ from ordeal.faults import PatchFault
 # Helpers
 # ============================================================================
 
-type ValidationMode = Literal["fast", "deep"]
+ValidationMode = Literal["fast", "deep"]
 
 
 def _normalize_validation_mode(validation_mode: str) -> ValidationMode:
@@ -103,8 +103,7 @@ def _normalize_validation_mode(validation_mode: str) -> ValidationMode:
             return validation_mode
         case _:
             raise ValueError(
-                "validation_mode must be 'fast' or 'deep', "
-                f"got {validation_mode!r}",
+                f"validation_mode must be 'fast' or 'deep', got {validation_mode!r}",
             )
 
 
@@ -4794,7 +4793,9 @@ def validate_mined_properties(
         original: MineResult,
     ) -> list[dict[str, object]]:
         budget = max(20, max_examples)
-        samples: list[dict[str, object]] = [dict(kwargs) for kwargs in original.collected_inputs[:budget]]
+        samples: list[dict[str, object]] = [
+            dict(kwargs) for kwargs in original.collected_inputs[:budget]
+        ]
         if len(samples) >= budget:
             return samples
 
@@ -4810,8 +4811,7 @@ def validate_mined_properties(
         params = [
             p.name
             for p in sig.parameters.values()
-            if p.name != "self"
-            and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+            if p.name != "self" and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
         ]
         if not params:
             return samples
@@ -4825,7 +4825,7 @@ def validate_mined_properties(
     def _evaluate_properties_on_samples(
         current_func: Callable,
         sample_inputs: list[dict[str, object]],
-    ) -> list["MinedProperty"]:
+    ) -> list:
         from ordeal.mine import (
             _check_associative,
             _check_bijective,

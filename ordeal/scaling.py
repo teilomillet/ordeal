@@ -382,9 +382,7 @@ class PerfContractCase:
             primary_score = self.details.get("primary_score")
             reference_score = self.details.get("reference_score")
             if primary_score is not None and reference_score is not None:
-                extras.append(
-                    f"{self.spec.validation_mode}={float(primary_score):.0%}"
-                )
+                extras.append(f"{self.spec.validation_mode}={float(primary_score):.0%}")
                 extras.append(
                     f"{self.spec.compare_validation_mode or 'deep'}={float(reference_score):.0%}"
                 )
@@ -818,11 +816,13 @@ def _parse_perf_contract(path: str) -> list[PerfContractSpec]:
         if spec.max_score_gap is not None and not (0 <= spec.max_score_gap <= 1):
             raise ValueError(f"Case {name!r} must have max_score_gap between 0 and 1")
         if spec.validation_mode not in {"fast", "deep"}:
-            raise ValueError(f"Case {name!r} has unsupported validation_mode {spec.validation_mode!r}")
-        if (
-            spec.compare_validation_mode is not None
-            and spec.compare_validation_mode not in {"fast", "deep"}
-        ):
+            raise ValueError(
+                f"Case {name!r} has unsupported validation_mode {spec.validation_mode!r}"
+            )
+        if spec.compare_validation_mode is not None and spec.compare_validation_mode not in {
+            "fast",
+            "deep",
+        }:
             raise ValueError(
                 f"Case {name!r} has unsupported compare_validation_mode "
                 f"{spec.compare_validation_mode!r}"

@@ -1,0 +1,47 @@
+[[cases]]
+name = "import_cli"
+kind = "import"
+module = "ordeal.cli"
+repeats = 5
+max_seconds = 0.08
+
+[[cases]]
+name = "audit_demo_cold"
+kind = "audit"
+module = "ordeal.demo"
+mode = "cold"
+repeats = 3
+max_examples = 20
+workers = 1
+max_seconds = 2.25
+
+[[cases]]
+name = "audit_demo_warm"
+kind = "audit"
+module = "ordeal.demo"
+mode = "warm"
+repeats = 3
+max_examples = 20
+workers = 1
+max_seconds = 0.30
+
+[[cases]]
+name = "audit_demo_fast_vs_deep"
+kind = "audit_compare"
+module = "ordeal.demo"
+repeats = 2
+max_examples = 20
+workers = 1
+validation_mode = "fast"
+compare_validation_mode = "deep"
+max_score_gap = 0.10
+
+[[cases]]
+name = "mutate_tiny_add"
+kind = "mutate"
+target = "tests._mutation_bench_target.tiny_add"
+repeats = 5
+workers = 1
+preset = "standard"
+filter_equivalent = true
+max_seconds = 0.25

@@ -34,10 +34,25 @@ class TestScanModule:
         # divide(a, 0.0) crashes — scan should catch it
         assert not divide_result.passed
 
+    def test_captures_failing_args_for_crash(self):
+        result = scan_module("tests._auto_target", max_examples=10)
+        divide_result = next(f for f in result.functions if f.name == "divide")
+        assert divide_result.failing_args is not None
+        assert divide_result.failing_args["b"] == 0.0
+
     def test_safe_functions_pass(self):
         result = scan_module("tests._auto_target", max_examples=20)
         add_result = next(f for f in result.functions if f.name == "add")
         assert add_result.passed
+
+    def test_fixture_override_can_avoid_boundary_crash(self):
+        result = scan_module(
+            "tests._auto_target",
+            max_examples=20,
+            fixtures={"b": st.floats(min_value=0.1, max_value=100.0)},
+        )
+        divide_result = next(f for f in result.functions if f.name == "divide")
+        assert divide_result.passed
 
     def test_summary(self):
         result = scan_module("tests._auto_target", max_examples=10)

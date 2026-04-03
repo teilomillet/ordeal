@@ -557,6 +557,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                 test_dir=args.test_dir,
                 max_examples=args.max_examples,
                 workers=args.workers,
+                validation_mode=args.validation_mode,
             )
             print(result.summary())
             if args.show_generated and result.generated_test:
@@ -573,6 +574,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             test_dir=args.test_dir,
             max_examples=args.max_examples,
             workers=args.workers,
+            validation_mode=args.validation_mode,
         )
         print(report)
     return 0
@@ -720,15 +722,26 @@ def _cmd_mine_pair(args: argparse.Namespace) -> int:
 
 
 def _cmd_benchmark(args: argparse.Namespace) -> int:
-    """Measure parallel scaling and fit USL parameters."""
+    """Measure scaling, mutation latency, or a checked-in perf/quality contract."""
     import os
 
     from ordeal.scaling import analyze as _analyze_scaling
     from ordeal.scaling import benchmark as _benchmark
+    from ordeal.scaling import benchmark_perf_contract as _benchmark_perf_contract
 
     explorer_cls = Explorer
     if explorer_cls is None:
         from ordeal.explore import Explorer as explorer_cls
+
+    if args.perf_contract:
+        suite = _benchmark_perf_contract(
+            args.perf_contract,
+            cwd=os.getcwd(),
+        )
+        print(suite.summary())
+        if args.check and not suite.passed:
+            return 1
+        return 0
 
     if args.mutate_targets:
         suite = _benchmark(
@@ -2238,7 +2251,17 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # -- ordeal audit --
-    audit_p = sub.add_parser("audit", help="Audit test coverage vs ordeal migration")
+    audit_p = sub.add_parser(
+        "audit",
+        help="Audit test coverage vs ordeal migration",
+        description=(
+            "Compare your current tests with ordeal-generated tests.\n\n"
+            "Validation modes:\n"
+            "  fast  replay mined inputs against mutants (default, faster)\n"
+            "  deep  re-mine each mutant for maximum search depth"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     audit_p.add_argument("modules", nargs="+", help="Module paths to audit")
     audit_p.add_argument(
         "--test-dir", "-t", default="tests", help="Test directory (default: tests)"
@@ -2251,6 +2274,12 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=1,
         help="Parallel workers for mutation validation (default: 1)",
+    )
+    audit_p.add_argument(
+        "--validation-mode",
+        choices=("fast", "deep"),
+        default="fast",
+        help="Mutation validation mode: fast replay (default) or deep re-mine",
     )
     audit_p.add_argument(
         "--show-generated",
@@ -2312,7 +2341,10 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # -- ordeal benchmark --
-    bench_p = sub.add_parser("benchmark", help="Measure parallel scaling (USL analysis)")
+    bench_p = sub.add_parser(
+        "benchmark",
+        help="Measure scaling, mutation latency, or a checked-in perf/quality contract",
+    )
     bench_p.add_argument(
         "--config", "-c", default="ordeal.toml", help="Config file (default: ordeal.toml)"
     )
@@ -2327,6 +2359,16 @@ def main(argv: list[str] | None = None) -> int:
         choices=["runs", "steps", "edges"],
         default="runs",
         help="Throughput metric to fit (default: runs)",
+    )
+    bench_p.add_argument(
+        "--perf-contract",
+        default=None,
+        help="Run a checked-in perf/quality contract TOML file instead of scaling analysis",
+    )
+    bench_p.add_argument(
+        "--check",
+        action="store_true",
+        help="Return exit code 1 when a perf-contract case exceeds a time or score-gap budget",
     )
     bench_p.add_argument(
         "--mutate",
@@ -2523,3 +2565,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         parser.print_help()
         return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised via subprocess
+    raise SystemExit(main())

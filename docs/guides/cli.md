@@ -87,6 +87,7 @@ Measure your existing tests vs what ordeal auto-scan achieves — verified numbe
 ```bash
 ordeal audit myapp.scoring --test-dir tests/
 ordeal audit myapp.scoring myapp.pipeline -t tests/ --max-examples 50
+ordeal audit myapp.scoring --validation-mode deep
 ```
 
 Output:
@@ -107,6 +108,8 @@ ordeal audit
 
 Every number is `[verified]` (measured and cross-checked for consistency) or `FAILED: reason`. When `pytest-cov` is installed, ordeal uses its JSON report; otherwise it falls back to an internal tracer. Mined properties are grouped by kind. The mutation score shows how many code mutations the mined properties catch — if it's below 100%, the surviving mutants reveal property gaps.
 
+`--validation-mode fast` replays mined inputs against each mutant and is the default because it is much faster. `--validation-mode deep` re-runs `mine()` on each mutant, which is slower but keeps the broader exploratory search.
+
 The "migrated" column shows what a real ordeal test file looks like: `fuzz()` for crash safety plus explicitly mined properties (bounds, determinism, type checks). It generates the test file a developer would write after adopting ordeal.
 
 Use `--show-generated` to inspect the generated test, or `--save-generated` to save it and use it directly:
@@ -121,6 +124,7 @@ ordeal audit myapp.scoring --save-generated test_migrated.py  # save to file
 | `modules` | required | Module paths to audit (positional, one or more) |
 | `--test-dir`, `-t` | `tests` | Directory containing existing tests |
 | `--max-examples` | `20` | Hypothesis examples per function |
+| `--validation-mode` | `fast` | `fast` replay or `deep` re-mine for mutation validation |
 | `--show-generated` | off | Print the generated test file |
 | `--save-generated` | — | Save generated test to this path |
 
@@ -195,6 +199,7 @@ ordeal benchmark -c ci.toml               # custom config
 ordeal benchmark --max-workers 16         # test up to 16 workers
 ordeal benchmark --time 30                # 30s per trial (default: 10s)
 ordeal benchmark --metric edges           # fit on edges/sec instead of runs/sec
+ordeal benchmark --perf-contract ordeal.perf.toml --check
 ```
 
 ```
@@ -210,12 +215,28 @@ Scaling Analysis (Universal Scaling Law)
     Coherence (kappa):  0.005578 cross-worker sync cost.
 ```
 
+For checked-in benchmark contracts, `--perf-contract` enforces both latency and audit-quality drift in CI:
+
+```toml
+[[cases]]
+name = "audit_demo_fast_vs_deep"
+kind = "audit_compare"
+module = "ordeal.demo"
+validation_mode = "fast"
+compare_validation_mode = "deep"
+max_score_gap = 0.10
+```
+
+That case fails if fast audit validation falls more than 10 percentage points behind deep validation on mutation score.
+
 | Flag | Default | Description |
 |---|---|---|
 | `--config`, `-c` | `ordeal.toml` | Config file |
 | `--max-workers` | CPU count | Maximum workers to test |
 | `--time` | `10` | Seconds per trial |
 | `--metric` | `runs` | `"runs"` (runs/sec) or `"edges"` (edges/sec) |
+| `--perf-contract` | — | Run a checked-in perf/quality contract instead of scaling analysis |
+| `--check` | off | Exit with code 1 if any contract case exceeds its budget |
 
 ### `ordeal explore`
 

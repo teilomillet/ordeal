@@ -357,6 +357,7 @@ chaos_api_test("http://localhost:8080/openapi.json", faults=[...], stateful=True
 
 ```bash
 ordeal audit myapp.scoring --test-dir tests/
+ordeal audit myapp.scoring --validation-mode deep
 ```
 
 ```
@@ -371,7 +372,7 @@ myapp.scoring
     - L67 in normalize(): test that ValueError is raised
 ```
 
-Every number is either `[verified]` (measured and cross-checked) or `FAILED: reason` — the audit never silently returns 0%. When `pytest-cov` is available, ordeal uses its JSON report; otherwise it falls back to an internal tracer. Mined properties include Wilson confidence intervals. When there are coverage gaps, it reads the source and tells you exactly what to test. Use `--show-generated` to inspect the test file, `--save-generated` to keep it.
+Every number is either `[verified]` (measured and cross-checked) or `FAILED: reason` — the audit never silently returns 0%. When `pytest-cov` is available, ordeal uses its JSON report; otherwise it falls back to an internal tracer. Mined properties include Wilson confidence intervals. `--validation-mode fast` replays mined inputs against mutants for speed; `--validation-mode deep` re-mines each mutant for maximum search depth. When there are coverage gaps, it reads the source and tells you exactly what to test. Use `--show-generated` to inspect the test file, `--save-generated` to keep it.
 
 ## CLI
 

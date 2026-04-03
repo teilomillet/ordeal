@@ -826,10 +826,14 @@ validate_mined_properties(
     target: str,                                # dotted path: "myapp.scoring.compute"
     max_examples: int = 100,                    # examples for mine()
     operators: list[str] | None = None,         # None = all operators
+    *,
+    preset: Literal["essential", "standard", "thorough"] | None = None,
+    mine_result: MineResult | None = None,
+    validation_mode: Literal["fast", "deep"] = "fast",
 ) -> MutationResult
 ```
 
-Mine properties of `target`, then mutate it and check the properties catch the mutations. Bridges mine() and mutation testing. Surviving mutants reveal properties too weak to detect real bugs. Used automatically by `ordeal audit`.
+Mine properties of `target`, then mutate it and check the properties catch the mutations. Bridges mine() and mutation testing. Surviving mutants reveal properties too weak to detect real bugs. `validation_mode="fast"` replays mined inputs against each mutant; `validation_mode="deep"` re-runs `mine()` on each mutant. Used automatically by `ordeal audit`.
 
 ### mutate_function_and_test
 
@@ -1054,10 +1058,12 @@ audit(
     *,
     test_dir: str = "tests",       # directory containing existing tests
     max_examples: int = 20,        # Hypothesis examples per function
+    workers: int = 1,              # parallel mutation-validation workers
+    validation_mode: Literal["fast", "deep"] = "fast",
 ) -> ModuleAudit
 ```
 
-Audit a single module: measure existing test coverage vs ordeal-migrated tests. Every number in the result is either `[verified]` or `FAILED: reason` — the audit never silently returns 0%.
+Audit a single module: measure existing test coverage vs ordeal-migrated tests. Every number in the result is either `[verified]` or `FAILED: reason` — the audit never silently returns 0%. `validation_mode="fast"` replays mined inputs against mutants. `validation_mode="deep"` re-mines each mutant for maximum search depth.
 
 Coverage is measured via coverage.py JSON reports (stable schema), not terminal parsing. Results are cross-checked for consistency. Generated test files are saved to `.ordeal/test_<module>_migrated.py`.
 
@@ -1069,6 +1075,8 @@ audit_report(
     *,
     test_dir: str = "tests",
     max_examples: int = 20,
+    workers: int = 1,
+    validation_mode: Literal["fast", "deep"] = "fast",
 ) -> str
 ```
 
@@ -1089,6 +1097,7 @@ Audit multiple modules and produce a formatted summary report. Every number labe
 | `gap_functions` | `list[str]` | Functions needing fixtures |
 | `suggestions` | `list[str]` | Actionable suggestions for uncovered lines |
 | `mutation_score` | `str` | e.g. `"8/10 (80%)"` — how many mutations mined properties catch |
+| `validation_mode` | `Literal["fast", "deep"]` | Whether audit used replay or deep re-mining for mutation validation |
 | `not_checked` | `list[str]` | Known unknowns — what ordeal structurally cannot verify |
 | `warnings` | `list[str]` | Every problem visible here |
 | `generated_test` | `str` | Full generated test file content |
@@ -1275,6 +1284,17 @@ suite = benchmark(
 print(suite.summary())
 ```
 
+### benchmark_perf_contract
+
+```python
+from ordeal.scaling import benchmark_perf_contract
+
+suite = benchmark_perf_contract("ordeal.perf.toml")
+print(suite.summary())
+```
+
+Run a checked-in perf/quality contract. Supports import latency, audit latency, mutation latency, and `audit_compare` cases that fail when one audit validation mode falls too far behind another on mutation score.
+
 ### scales_linearly
 
 ```python
@@ -1412,10 +1432,14 @@ validate_mined_properties(
     target: str,                    # dotted path: "myapp.scoring.compute"
     max_examples: int = 100,
     operators: list[str] | None = None,
+    *,
+    preset: Literal["essential", "standard", "thorough"] | None = None,
+    mine_result: MineResult | None = None,
+    validation_mode: Literal["fast", "deep"] = "fast",
 ) -> MutationResult
 ```
 
-Mine properties of `target`, then mutate the code and check whether the mined properties catch the mutations. Surviving mutants reveal properties that are too weak. Used by `ordeal audit` to report mutation scores.
+Mine properties of `target`, then mutate the code and check whether the mined properties catch the mutations. Surviving mutants reveal properties that are too weak. `validation_mode="fast"` replays mined inputs against mutants. `validation_mode="deep"` re-runs `mine()` for each mutant. Used by `ordeal audit` to report mutation scores.
 
 ---
 

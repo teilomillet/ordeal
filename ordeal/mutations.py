@@ -93,6 +93,20 @@ from ordeal.faults import PatchFault
 # Helpers
 # ============================================================================
 
+type ValidationMode = Literal["fast", "deep"]
+
+
+def _normalize_validation_mode(validation_mode: str) -> ValidationMode:
+    """Validate how mined properties should be checked against mutants."""
+    match validation_mode:
+        case "fast" | "deep":
+            return validation_mode
+        case _:
+            raise ValueError(
+                "validation_mode must be 'fast' or 'deep', "
+                f"got {validation_mode!r}",
+            )
+
 
 @contextmanager
 def _timed_phase(timings: dict[str, float], name: str) -> Callable[[], None]:
@@ -4741,6 +4755,7 @@ def validate_mined_properties(
     *,
     preset: PresetName | None = None,
     mine_result: "MineResult | None" = None,
+    validation_mode: ValidationMode = "fast",
 ) -> MutationResult:
     """Mine properties of *target*, then mutate it and check the properties catch the mutations.
 
@@ -4757,8 +4772,11 @@ def validate_mined_properties(
         mine_result: Optional precomputed ``mine()`` result for the original
             function. Reusing it avoids re-mining when a caller already has
             those properties (for example, inside ``ordeal.audit``).
+        validation_mode: ``"fast"`` replays mined inputs against mutants.
+            ``"deep"`` re-runs ``mine()`` on each mutant for maximum search depth.
     """
     operators = _resolve_operators(operators, preset)
+    validation_mode = _normalize_validation_mode(validation_mode)
     from ordeal.mine import mine
 
     module_path, func_name = target.rsplit(".", 1)
@@ -4771,12 +4789,118 @@ def validate_mined_properties(
     if not universal:
         return MutationResult(target=target)  # nothing to validate
 
+    def _sample_inputs_for_validation(
+        current_func: Callable,
+        original: MineResult,
+    ) -> list[dict[str, object]]:
+        budget = max(20, max_examples)
+        samples: list[dict[str, object]] = [dict(kwargs) for kwargs in original.collected_inputs[:budget]]
+        if len(samples) >= budget:
+            return samples
+
+        plan = _equivalence_sample_plan(current_func, budget - len(samples))
+        if plan is None:
+            return samples
+
+        try:
+            sig = inspect.signature(current_func)
+        except (TypeError, ValueError):
+            return samples
+
+        params = [
+            p.name
+            for p in sig.parameters.values()
+            if p.name != "self"
+            and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+        ]
+        if not params:
+            return samples
+
+        for args in plan.samples:
+            if len(args) != len(params):
+                continue
+            samples.append(dict(zip(params, args, strict=False)))
+        return samples
+
+    def _evaluate_properties_on_samples(
+        current_func: Callable,
+        sample_inputs: list[dict[str, object]],
+    ) -> list["MinedProperty"]:
+        from ordeal.mine import (
+            _check_associative,
+            _check_bijective,
+            _check_bounded_01,
+            _check_commutative,
+            _check_constant_output,
+            _check_deterministic,
+            _check_idempotent,
+            _check_involution,
+            _check_length_relationship,
+            _check_linear_relationship,
+            _check_monotonic,
+            _check_never_empty,
+            _check_never_none,
+            _check_no_nan,
+            _check_non_negative,
+            _check_null_on_null,
+            _check_observed_bounds,
+            _check_output_length_constant,
+            _check_output_subset_of_input,
+            _check_preserves_type,
+            _check_sorted,
+            _check_type_consistent,
+        )
+
+        replayed_inputs: list[dict[str, object]] = []
+        outputs: list[object] = []
+        for kwargs in sample_inputs:
+            replay_kwargs = copy.deepcopy(kwargs)
+            try:
+                output = current_func(**replay_kwargs)
+            except Exception as exc:
+                raise AssertionError(f"Mutant raised on replayed mined input {kwargs!r}") from exc
+            replayed_inputs.append(dict(replay_kwargs))
+            outputs.append(output)
+
+        all_props = [
+            _check_type_consistent(outputs),
+            _check_never_none(outputs),
+            _check_no_nan(outputs),
+            _check_non_negative(outputs),
+            _check_bounded_01(outputs),
+            _check_never_empty(outputs),
+            _check_deterministic(current_func, replayed_inputs),
+            _check_idempotent(current_func, outputs, replayed_inputs),
+            _check_involution(current_func, outputs, replayed_inputs),
+            _check_observed_bounds(outputs),
+            _check_sorted(outputs),
+            _check_constant_output(outputs),
+            _check_output_length_constant(outputs),
+            _check_bijective(replayed_inputs, outputs),
+            _check_preserves_type(replayed_inputs, outputs),
+            _check_null_on_null(current_func, replayed_inputs),
+            _check_commutative(current_func, replayed_inputs, outputs),
+            _check_associative(current_func, replayed_inputs),
+        ]
+        all_props.extend(_check_monotonic(replayed_inputs, outputs))
+        all_props.extend(_check_length_relationship(replayed_inputs, outputs))
+        all_props.extend(_check_output_subset_of_input(replayed_inputs, outputs))
+        all_props.extend(_check_linear_relationship(replayed_inputs, outputs))
+        return [prop for prop in all_props if prop.total > 0]
+
     # Build a test function from the mined properties
     def mined_test() -> None:
         current_func = getattr(importlib.import_module(module_path), func_name)
-        re_mined = mine(current_func, max_examples=max(20, max_examples // 5))
+        if validation_mode == "deep":
+            props = mine(current_func, max_examples=max(20, max_examples // 5)).properties
+        else:
+            sample_inputs = _sample_inputs_for_validation(current_func, original_mine)
+            if sample_inputs:
+                props = _evaluate_properties_on_samples(current_func, sample_inputs)
+            else:
+                props = mine(current_func, max_examples=max(20, max_examples // 5)).properties
         for original_prop in universal:
-            match = next((p for p in re_mined.properties if p.name == original_prop.name), None)
+            match = next((p for p in props if p.name == original_prop.name), None)
             if match is None or not match.universal:
                 raise AssertionError(f"Property {original_prop.name!r} no longer holds on mutant")
 

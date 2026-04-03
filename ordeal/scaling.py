@@ -37,9 +37,16 @@ import statistics
 import subprocess
 import sys
 import textwrap
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised on 3.10
+    import tomli as tomllib  # type: ignore[no-redefine]
 
 # ============================================================================
 # Core formulas
@@ -304,6 +311,124 @@ class MutationBenchmarkSuite:
         return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class PerfContractSpec:
+    """One benchmark case from a checked-in perf/quality contract."""
+
+    name: str
+    kind: str
+    repeats: int = 3
+    max_seconds: float | None = None
+    module: str | None = None
+    target: str | None = None
+    mode: str = "cold"
+    validation_mode: str = "fast"
+    compare_validation_mode: str | None = None
+    workers: int = 1
+    preset: str | None = "standard"
+    test_filter: str | None = None
+    filter_equivalent: bool = True
+    test_dir: str = "tests"
+    max_examples: int = 20
+    max_score_gap: float | None = None
+
+
+@dataclass
+class PerfContractCase:
+    """Observed timings and quality metrics for one contract case."""
+
+    spec: PerfContractSpec
+    seconds: list[float]
+    details: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def median_seconds(self) -> float:
+        """Median wall time for the case."""
+        return statistics.median(self.seconds)
+
+    @property
+    def max_seconds(self) -> float | None:
+        """Configured upper bound for this case."""
+        return self.spec.max_seconds
+
+    @property
+    def score_gap(self) -> float | None:
+        """Observed score gap for differential audit cases."""
+        gap = self.details.get("score_gap")
+        return float(gap) if gap is not None else None
+
+    @property
+    def passed(self) -> bool:
+        """Whether the observed median stayed within the configured budget."""
+        if self.max_seconds is not None and self.median_seconds > self.max_seconds:
+            return False
+        if self.spec.max_score_gap is not None:
+            gap = self.score_gap
+            if gap is None or gap > self.spec.max_score_gap:
+                return False
+        return True
+
+    def summary(self) -> str:
+        """Human-readable one-line summary."""
+        budget = "no budget"
+        if self.max_seconds is not None:
+            budget = f"budget={self.max_seconds:.3f}s"
+        status = "PASS" if self.passed else "FAIL"
+        extras: list[str] = []
+        if self.spec.kind == "audit":
+            extras.append(f"mode={self.spec.mode}")
+            extras.append(f"validation={self.spec.validation_mode}")
+        if self.spec.kind == "audit_compare":
+            primary_score = self.details.get("primary_score")
+            reference_score = self.details.get("reference_score")
+            if primary_score is not None and reference_score is not None:
+                extras.append(
+                    f"{self.spec.validation_mode}={float(primary_score):.0%}"
+                )
+                extras.append(
+                    f"{self.spec.compare_validation_mode or 'deep'}={float(reference_score):.0%}"
+                )
+            if self.score_gap is not None:
+                extras.append(f"gap={self.score_gap:.0%}")
+            if self.spec.max_score_gap is not None:
+                extras.append(f"gap_budget={self.spec.max_score_gap:.0%}")
+        if self.spec.kind == "mutate":
+            score = self.details.get("score")
+            if score is not None:
+                extras.append(f"score={float(score):.0%}")
+        extra_text = f" ({', '.join(extras)})" if extras else ""
+        return (
+            f"{status} {self.spec.name}: median={self.median_seconds:.3f}s "
+            f"over {len(self.seconds)} run(s), {budget}{extra_text}"
+        )
+
+
+@dataclass
+class PerfContractSuite:
+    """Results for a checked-in perf/quality contract."""
+
+    cases: list[PerfContractCase]
+    contract_path: str
+
+    @property
+    def passed(self) -> bool:
+        """True when every benchmark case stayed within budget."""
+        return all(case.passed for case in self.cases)
+
+    @property
+    def failures(self) -> list[PerfContractCase]:
+        """Cases that exceeded their configured budget."""
+        return [case for case in self.cases if not case.passed]
+
+    def summary(self) -> str:
+        """Human-readable summary for the entire contract."""
+        status = "PASS" if self.passed else "FAIL"
+        lines = [f"Performance Contract [{status}]", f"  file={self.contract_path}"]
+        for case in self.cases:
+            lines.append(f"  {case.summary()}")
+        return "\n".join(lines)
+
+
 def analyze(measurements: list[tuple[int | float, float]]) -> ScalingAnalysis:
     """Fit USL from (N, throughput) measurements and return full analysis.
 
@@ -442,6 +567,405 @@ def _benchmark_mutations(
         workers=workers,
         preset=preset,
     )
+
+
+_IMPORT_BENCHMARK_MARKER = "__ORDEAL_IMPORT_BENCH__ "
+_AUDIT_DIFF_MARKER = "__ORDEAL_AUDIT_DIFF__ "
+
+
+def _parse_benchmark_payload(stdout: str, marker: str) -> dict[str, Any]:
+    """Extract the trailing JSON payload emitted by a benchmark subprocess."""
+    for line in reversed(stdout.splitlines()):
+        if line.startswith(marker):
+            return json.loads(line[len(marker) :])
+    raise RuntimeError(f"Benchmark subprocess produced no parseable payload for marker {marker!r}")
+
+
+def _run_import_benchmark_trial(
+    module: str,
+    *,
+    python_executable: str,
+    cwd: str,
+) -> float:
+    """Measure pure import latency inside a fresh Python subprocess."""
+    script = textwrap.dedent(
+        f"""
+        import json
+        import time
+
+        started = time.perf_counter()
+        import {module}  # noqa: F401
+        elapsed = time.perf_counter() - started
+        print({_IMPORT_BENCHMARK_MARKER!r} + json.dumps({{"seconds": elapsed}}, sort_keys=True))
+        """
+    )
+    proc = subprocess.run(
+        [python_executable, "-c", script],
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    payload = _parse_benchmark_payload(proc.stdout, _IMPORT_BENCHMARK_MARKER)
+    return float(payload["seconds"])
+
+
+def _audit_cache_file(module: str, cwd: str) -> Path:
+    """Return the audit cache file path for *module* inside *cwd*."""
+    return Path(cwd) / ".ordeal" / "audit" / f"{module.replace('.', '_')}.json"
+
+
+def _generated_audit_test_file(module: str, cwd: str) -> Path:
+    """Return the generated migrated-test path for *module* inside *cwd*."""
+    short = module.rsplit(".", 1)[-1]
+    return Path(cwd) / ".ordeal" / f"test_{short}_migrated.py"
+
+
+def _clear_audit_artifacts(module: str, cwd: str) -> None:
+    """Remove cached/generated audit artifacts for a clean benchmark trial."""
+    _audit_cache_file(module, cwd).unlink(missing_ok=True)
+    _generated_audit_test_file(module, cwd).unlink(missing_ok=True)
+
+
+def _run_cli_audit_once(
+    module: str,
+    *,
+    test_dir: str,
+    max_examples: int,
+    workers: int,
+    validation_mode: str,
+    python_executable: str,
+    cwd: str,
+) -> float:
+    """Run one `ordeal audit` CLI invocation and return wall time."""
+    args = [
+        python_executable,
+        "-m",
+        "ordeal.cli",
+        "audit",
+        module,
+        "--test-dir",
+        test_dir,
+        "--max-examples",
+        str(max_examples),
+        "--workers",
+        str(workers),
+        "--validation-mode",
+        validation_mode,
+    ]
+    started = time.perf_counter()
+    subprocess.run(
+        args,
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return time.perf_counter() - started
+
+
+def _run_audit_benchmark_trial(
+    module: str,
+    *,
+    mode: str,
+    test_dir: str,
+    max_examples: int,
+    workers: int,
+    validation_mode: str,
+    python_executable: str,
+    cwd: str,
+) -> float:
+    """Benchmark cold or warm `ordeal audit` CLI latency."""
+    normalized_mode = mode.strip().lower()
+    if normalized_mode not in {"cold", "warm"}:
+        raise ValueError(f"Unknown audit benchmark mode: {mode!r}")
+
+    _clear_audit_artifacts(module, cwd)
+    if normalized_mode == "warm":
+        _run_cli_audit_once(
+            module,
+            test_dir=test_dir,
+            max_examples=max_examples,
+            workers=workers,
+            validation_mode=validation_mode,
+            python_executable=python_executable,
+            cwd=cwd,
+        )
+    return _run_cli_audit_once(
+        module,
+        test_dir=test_dir,
+        max_examples=max_examples,
+        workers=workers,
+        validation_mode=validation_mode,
+        python_executable=python_executable,
+        cwd=cwd,
+    )
+
+
+def _run_audit_differential_trial(
+    module: str,
+    *,
+    test_dir: str,
+    max_examples: int,
+    workers: int,
+    validation_mode: str,
+    compare_validation_mode: str,
+    python_executable: str,
+    cwd: str,
+) -> dict[str, Any]:
+    """Run one fresh-process fast-vs-deep audit comparison."""
+    _clear_audit_artifacts(module, cwd)
+    script = textwrap.dedent(
+        f"""
+        import json
+        import time
+
+        from ordeal.audit import audit
+
+        started = time.perf_counter()
+        primary = audit(
+            {module!r},
+            test_dir={test_dir!r},
+            max_examples={max_examples},
+            workers={workers},
+            validation_mode={validation_mode!r},
+        )
+        middle = time.perf_counter()
+        reference = audit(
+            {module!r},
+            test_dir={test_dir!r},
+            max_examples={max_examples},
+            workers={workers},
+            validation_mode={compare_validation_mode!r},
+        )
+        ended = time.perf_counter()
+        payload = {{
+            "seconds": ended - started,
+            "primary_seconds": middle - started,
+            "reference_seconds": ended - middle,
+            "primary_score": primary.mutation_score_fraction,
+            "reference_score": reference.mutation_score_fraction,
+            "primary_mutation_score": primary.mutation_score,
+            "reference_mutation_score": reference.mutation_score,
+        }}
+        print({_AUDIT_DIFF_MARKER!r} + json.dumps(payload, sort_keys=True))
+        """
+    )
+    proc = subprocess.run(
+        [python_executable, "-c", script],
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return _parse_benchmark_payload(proc.stdout, _AUDIT_DIFF_MARKER)
+
+
+def _parse_perf_contract(path: str) -> list[PerfContractSpec]:
+    """Parse a TOML perf/quality contract file."""
+    contract_path = Path(path)
+    with contract_path.open("rb") as fh:
+        data = tomllib.load(fh)
+
+    raw_cases = data.get("cases")
+    if not isinstance(raw_cases, list) or not raw_cases:
+        raise ValueError("Performance contract must define at least one [[cases]] entry")
+
+    specs: list[PerfContractSpec] = []
+    for idx, raw_case in enumerate(raw_cases, start=1):
+        if not isinstance(raw_case, dict):
+            raise ValueError(f"Case #{idx} must be a table")
+        name = str(raw_case.get("name", "")).strip()
+        kind = str(raw_case.get("kind", "")).strip()
+        if not name:
+            raise ValueError(f"Case #{idx} is missing 'name'")
+        if kind not in {"import", "audit", "audit_compare", "mutate"}:
+            raise ValueError(f"Case {name!r} has unsupported kind {kind!r}")
+
+        spec = PerfContractSpec(
+            name=name,
+            kind=kind,
+            repeats=int(raw_case.get("repeats", 3)),
+            max_seconds=(
+                float(raw_case["max_seconds"]) if raw_case.get("max_seconds") is not None else None
+            ),
+            module=(str(raw_case["module"]) if "module" in raw_case else None),
+            target=(str(raw_case["target"]) if "target" in raw_case else None),
+            mode=str(raw_case.get("mode", "cold")),
+            validation_mode=str(raw_case.get("validation_mode", "fast")),
+            compare_validation_mode=(
+                str(raw_case["compare_validation_mode"])
+                if "compare_validation_mode" in raw_case
+                else ("deep" if kind == "audit_compare" else None)
+            ),
+            workers=int(raw_case.get("workers", 1)),
+            preset=(str(raw_case["preset"]) if "preset" in raw_case else "standard"),
+            test_filter=(str(raw_case["test_filter"]) if "test_filter" in raw_case else None),
+            filter_equivalent=bool(raw_case.get("filter_equivalent", True)),
+            test_dir=str(raw_case.get("test_dir", "tests")),
+            max_examples=int(raw_case.get("max_examples", 20)),
+            max_score_gap=(
+                float(raw_case["max_score_gap"])
+                if raw_case.get("max_score_gap") is not None
+                else None
+            ),
+        )
+
+        if spec.repeats <= 0:
+            raise ValueError(f"Case {name!r} must have repeats >= 1")
+        if spec.max_seconds is not None and spec.max_seconds <= 0:
+            raise ValueError(f"Case {name!r} must have max_seconds > 0")
+        if spec.max_score_gap is not None and not (0 <= spec.max_score_gap <= 1):
+            raise ValueError(f"Case {name!r} must have max_score_gap between 0 and 1")
+        if spec.validation_mode not in {"fast", "deep"}:
+            raise ValueError(f"Case {name!r} has unsupported validation_mode {spec.validation_mode!r}")
+        if (
+            spec.compare_validation_mode is not None
+            and spec.compare_validation_mode not in {"fast", "deep"}
+        ):
+            raise ValueError(
+                f"Case {name!r} has unsupported compare_validation_mode "
+                f"{spec.compare_validation_mode!r}"
+            )
+        if spec.kind in {"import", "audit", "audit_compare"} and not spec.module:
+            raise ValueError(f"Case {name!r} requires 'module'")
+        if spec.kind == "mutate" and not spec.target:
+            raise ValueError(f"Case {name!r} requires 'target'")
+        if spec.kind == "audit_compare":
+            if spec.compare_validation_mode is None:
+                raise ValueError(f"Case {name!r} requires compare_validation_mode")
+            if spec.compare_validation_mode == spec.validation_mode:
+                raise ValueError(f"Case {name!r} must compare two different validation modes")
+            if spec.max_score_gap is None:
+                raise ValueError(f"Case {name!r} requires max_score_gap")
+        specs.append(spec)
+
+    return specs
+
+
+def benchmark_perf_contract(
+    contract_path: str,
+    *,
+    python_executable: str | None = None,
+    cwd: str | None = None,
+) -> PerfContractSuite:
+    """Run a checked-in perf/quality contract and return the observed medians."""
+    executable = python_executable or sys.executable
+    workdir = cwd or os.getcwd()
+    cases: list[PerfContractCase] = []
+
+    for spec in _parse_perf_contract(contract_path):
+        seconds: list[float] = []
+        details: dict[str, Any] = {}
+        if spec.kind == "import":
+            assert spec.module is not None
+            for _ in range(spec.repeats):
+                seconds.append(
+                    _run_import_benchmark_trial(
+                        spec.module,
+                        python_executable=executable,
+                        cwd=workdir,
+                    )
+                )
+        elif spec.kind == "audit":
+            assert spec.module is not None
+            for _ in range(spec.repeats):
+                seconds.append(
+                    _run_audit_benchmark_trial(
+                        spec.module,
+                        mode=spec.mode,
+                        test_dir=spec.test_dir,
+                        max_examples=spec.max_examples,
+                        workers=spec.workers,
+                        validation_mode=spec.validation_mode,
+                        python_executable=executable,
+                        cwd=workdir,
+                    )
+                )
+        elif spec.kind == "audit_compare":
+            assert spec.module is not None
+            assert spec.compare_validation_mode is not None
+            primary_scores: list[float] = []
+            reference_scores: list[float] = []
+            primary_times: list[float] = []
+            reference_times: list[float] = []
+            primary_score_strings: list[str] = []
+            reference_score_strings: list[str] = []
+            for _ in range(spec.repeats):
+                payload = _run_audit_differential_trial(
+                    spec.module,
+                    test_dir=spec.test_dir,
+                    max_examples=spec.max_examples,
+                    workers=spec.workers,
+                    validation_mode=spec.validation_mode,
+                    compare_validation_mode=spec.compare_validation_mode,
+                    python_executable=executable,
+                    cwd=workdir,
+                )
+                seconds.append(float(payload["seconds"]))
+                primary_times.append(float(payload["primary_seconds"]))
+                reference_times.append(float(payload["reference_seconds"]))
+                primary_score = payload.get("primary_score")
+                reference_score = payload.get("reference_score")
+                if primary_score is not None:
+                    primary_scores.append(float(primary_score))
+                if reference_score is not None:
+                    reference_scores.append(float(reference_score))
+                primary_score_text = str(payload.get("primary_mutation_score", ""))
+                reference_score_text = str(payload.get("reference_mutation_score", ""))
+                if primary_score_text:
+                    primary_score_strings.append(primary_score_text)
+                if reference_score_text:
+                    reference_score_strings.append(reference_score_text)
+            primary_median = statistics.median(primary_scores) if primary_scores else None
+            reference_median = statistics.median(reference_scores) if reference_scores else None
+            details.update(
+                {
+                    "primary_score": primary_median,
+                    "reference_score": reference_median,
+                    "score_gap": (
+                        max(0.0, reference_median - primary_median)
+                        if primary_median is not None and reference_median is not None
+                        else None
+                    ),
+                    "primary_seconds": (
+                        statistics.median(primary_times) if primary_times else None
+                    ),
+                    "reference_seconds": (
+                        statistics.median(reference_times) if reference_times else None
+                    ),
+                    f"{spec.validation_mode}_score": primary_median,
+                    f"{spec.compare_validation_mode}_score": reference_median,
+                    f"{spec.validation_mode}_mutation_score": (
+                        primary_score_strings[-1] if primary_score_strings else ""
+                    ),
+                    f"{spec.compare_validation_mode}_mutation_score": (
+                        reference_score_strings[-1] if reference_score_strings else ""
+                    ),
+                }
+            )
+        else:
+            assert spec.target is not None
+            trials = [
+                _run_mutation_benchmark_trial(
+                    spec.target,
+                    preset=spec.preset,
+                    workers=spec.workers,
+                    filter_equivalent=spec.filter_equivalent,
+                    test_filter=spec.test_filter,
+                    python_executable=executable,
+                    cwd=workdir,
+                )
+                for _ in range(spec.repeats)
+            ]
+            seconds = [trial.seconds for trial in trials]
+            details["score"] = trials[0].score
+            details["total"] = trials[0].total
+            details["killed"] = trials[0].killed
+
+        cases.append(PerfContractCase(spec=spec, seconds=seconds, details=details))
+
+    return PerfContractSuite(cases=cases, contract_path=contract_path)
 
 
 def benchmark(

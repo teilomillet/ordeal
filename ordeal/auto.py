@@ -23,7 +23,7 @@ import importlib
 import inspect
 from dataclasses import dataclass, field
 from types import ModuleType
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
 import hypothesis.strategies as st
 from hypothesis import given, settings
@@ -206,6 +206,13 @@ _SUFFIX_STRATEGIES: dict[str, st.SearchStrategy[Any]] = {
 
 # User-registered strategies (project-specific, added at runtime)
 _REGISTERED_STRATEGIES: dict[str, st.SearchStrategy[Any]] = {}
+_BOUNDARY_SMOKE_VALUES: dict[object, tuple[object, ...]] = {
+    bool: (False, True),
+    int: (0, 1, -1),
+    float: (0.0, 1.0, -1.0),
+    str: ("", "a"),
+    bytes: (b"", b"x"),
+}
 
 
 def register_fixture(name: str, strategy: st.SearchStrategy[Any]) -> None:
@@ -362,6 +369,95 @@ def _infer_strategies(
     return strategies if strategies else None
 
 
+def _append_boundary_case(
+    cases: list[dict[str, Any]],
+    candidate: dict[str, Any],
+) -> None:
+    """Append *candidate* when it is not already present."""
+    if any(existing == candidate for existing in cases):
+        return
+    cases.append(candidate)
+
+
+def _boundary_values_for_hint(hint: Any) -> list[Any]:
+    """Return deterministic boundary values for common type hints."""
+    import types as pytypes
+
+    origin = get_origin(hint)
+    if origin is Literal:
+        return list(get_args(hint))
+
+    if origin is Union or (
+        hasattr(pytypes, "UnionType") and origin is pytypes.UnionType
+    ):
+        values: list[Any] = []
+        for arg in get_args(hint):
+            if arg is type(None):
+                values.append(None)
+            else:
+                values.extend(_boundary_values_for_hint(arg))
+        return values
+
+    if origin is list:
+        return [[]]
+    if origin is tuple:
+        return [()]
+    if origin is dict:
+        return [{}]
+    if origin is set:
+        return [set()]
+    if origin is frozenset:
+        return [frozenset()]
+
+    return list(_BOUNDARY_SMOKE_VALUES.get(hint, ()))
+
+
+def _boundary_smoke_inputs(
+    func: Any,
+    *,
+    fixtures: dict[str, st.SearchStrategy[Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Build deterministic boundary inputs when no explicit fixtures are set."""
+    if fixtures:
+        return []
+
+    try:
+        hints = get_type_hints(func)
+        sig = inspect.signature(func)
+    except Exception:
+        return []
+
+    params = [
+        param
+        for name, param in sig.parameters.items()
+        if name not in {"self", "cls"}
+    ]
+    if not params:
+        return [{}]
+
+    base_kwargs: dict[str, Any] = {}
+    per_param_values: list[tuple[str, list[Any]]] = []
+    for param in params:
+        values: list[Any] = []
+        if param.default is not inspect.Parameter.empty:
+            values.append(param.default)
+        if param.name in hints:
+            values.extend(_boundary_values_for_hint(hints[param.name]))
+        if not values:
+            return []
+        base_kwargs[param.name] = values[0]
+        per_param_values.append((param.name, values))
+
+    cases: list[dict[str, Any]] = []
+    _append_boundary_case(cases, dict(base_kwargs))
+    for name, values in per_param_values:
+        for value in values:
+            candidate = dict(base_kwargs)
+            candidate[name] = value
+            _append_boundary_case(cases, candidate)
+    return cases
+
+
 def _type_matches(value: Any, expected: type) -> bool:
     """Check if value matches expected type, handling generics and unions."""
     import types as pytypes
@@ -472,6 +568,7 @@ def scan_module(
             return_type,
             max_examples=func_examples,
             check_return_type=check_return_type,
+            fixtures=fixtures,
         )
         result.functions.append(func_result)
 
@@ -486,13 +583,26 @@ def _test_one_function(
     *,
     max_examples: int,
     check_return_type: bool,
+    fixtures: dict[str, st.SearchStrategy[Any]] | None = None,
 ) -> FunctionResult:
     """Run no-crash + return-type + mined-property checks on a single function."""
+    last_kwargs: dict[str, Any] = {}
     try:
+        for kwargs in _boundary_smoke_inputs(func, fixtures=fixtures):
+            last_kwargs = dict(kwargs)
+            result = func(**dict(kwargs))
+            if check_return_type and return_type is not None:
+                if not _type_matches(result, return_type):
+                    raise AssertionError(
+                        f"Expected return type {return_type}, "
+                        f"got {type(result).__name__}: {result!r}"
+                    )
 
         @given(**strategies)
         @settings(max_examples=max_examples, database=None)
         def test(**kwargs: Any) -> None:
+            nonlocal last_kwargs
+            last_kwargs = dict(kwargs)
             result = func(**kwargs)
             if check_return_type and return_type is not None:
                 if not _type_matches(result, return_type):
@@ -503,7 +613,12 @@ def _test_one_function(
 
         test()
     except Exception as e:
-        return FunctionResult(name=name, passed=False, error=str(e)[:300])
+        return FunctionResult(
+            name=name,
+            passed=False,
+            error=str(e)[:300],
+            failing_args=last_kwargs or None,
+        )
 
     # Mine properties to detect semantic anomalies (not just crashes)
     violations: list[str] = []
@@ -576,6 +691,12 @@ def fuzz(
     failures: list[Exception] = []
     last_kwargs: dict[str, Any] = {}
     try:
+        for kwargs in _boundary_smoke_inputs(fn, fixtures=normalized):
+            last_kwargs = dict(kwargs)
+            result = fn(**dict(kwargs))
+            if check_return_type and return_type is not None:
+                if not _type_matches(result, return_type):
+                    raise AssertionError(f"Expected {return_type}, got {type(result).__name__}")
 
         @given(**strategies)
         @settings(max_examples=max_examples, database=None)

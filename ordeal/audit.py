@@ -49,9 +49,11 @@ so the developer can inspect, run, and debug it.
 from __future__ import annotations
 
 import enum
+import hashlib
 import importlib.util
 import json
 import math
+import re
 import subprocess
 import sys
 import tempfile
@@ -59,13 +61,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
+from typing import Literal
 
 from ordeal.auto import (
     _get_public_functions,
     _infer_strategies,
     _resolve_module,
 )
-from ordeal.mine import MineResult, mine
+from ordeal.mine import MineResult, MinedProperty, mine
 
 # ============================================================================
 # Constants — every number has a documented rationale
@@ -188,6 +191,34 @@ DISPLAY_CAP: int = 5
 
 SOURCE_TRUNCATION: int = 60
 """Maximum characters of source code to show in suggestions."""
+
+type AuditValidationMode = Literal["fast", "deep"]
+"""How audit validates mined properties against mutants."""
+
+
+def _normalize_validation_mode(validation_mode: str) -> AuditValidationMode:
+    """Validate the requested audit mutation-validation mode."""
+    match validation_mode:
+        case "fast" | "deep":
+            return validation_mode
+        case _:
+            raise ValueError(
+                "validation_mode must be 'fast' or 'deep', "
+                f"got {validation_mode!r}",
+            )
+
+
+_MUTATION_SCORE_RE = re.compile(r"^\s*(\d+)\s*/\s*(\d+)\s*\((\d+)%\)\s*$")
+
+
+def _parse_mutation_score(score: str) -> tuple[int, int] | None:
+    """Parse ``\"killed/total (pct%)\"`` into exact counts."""
+    match = _MUTATION_SCORE_RE.fullmatch(score)
+    if match is None:
+        return None
+    killed = int(match.group(1))
+    total = int(match.group(2))
+    return killed, total
 
 
 # ============================================================================
@@ -406,6 +437,7 @@ class ModuleAudit:
     # What ordeal discovered (with confidence bounds)
     mined_properties: list[str] = field(default_factory=list)
     mutation_score: str = ""  # e.g. "8/10 (80%)" or "" if not run
+    validation_mode: AuditValidationMode = "fast"
     gap_functions: list[str] = field(default_factory=list)
     suggestions: list[str] = field(default_factory=list)
     suggested_relations: list[dict[str, str]] = field(default_factory=list)
@@ -479,6 +511,8 @@ class ModuleAudit:
 
         if self.mutation_score:
             lines.append(f"    mutation: {self.mutation_score}")
+        if self.mutation_score or self.validation_mode == "deep":
+            lines.append(f"    validation: {self._format_validation_mode()}")
 
         if self.gap_functions:
             lines.append(
@@ -512,6 +546,116 @@ class ModuleAudit:
         if m.status == Status.FAILED:
             return f"FAILED: {m.error}"
         return f"{m.percent:.0f}% coverage [{m.status.value}]"
+
+    def _format_validation_mode(self) -> str:
+        """Describe how mutation validation was performed."""
+        if self.validation_mode == "deep":
+            return "deep re-mine"
+        return "fast replay"
+
+    @property
+    def mutation_score_counts(self) -> tuple[int, int] | None:
+        """Exact ``(killed, total)`` counts parsed from ``mutation_score``."""
+        return _parse_mutation_score(self.mutation_score)
+
+    @property
+    def mutation_score_fraction(self) -> float | None:
+        """Exact mutation score as a fraction, or ``None`` when unavailable."""
+        counts = self.mutation_score_counts
+        if counts is None:
+            return None
+        killed, total = counts
+        if total <= 0:
+            return None
+        return killed / total
+
+
+def _coverage_result_to_dict(result: CoverageResult | None) -> dict[str, object] | None:
+    """Serialize a coverage result for the audit cache."""
+    if result is None:
+        return None
+    return {
+        "percent": result.percent,
+        "total_statements": result.total_statements,
+        "missing_count": result.missing_count,
+        "missing_lines": sorted(result.missing_lines),
+        "source": result.source,
+    }
+
+
+def _coverage_result_from_dict(data: dict[str, object] | None) -> CoverageResult | None:
+    """Deserialize a cached coverage result."""
+    if data is None:
+        return None
+    return CoverageResult(
+        percent=float(data["percent"]),
+        total_statements=int(data["total_statements"]),
+        missing_count=int(data["missing_count"]),
+        missing_lines=frozenset(int(line) for line in data["missing_lines"]),
+        source=str(data["source"]),
+    )
+
+
+def _coverage_measurement_to_dict(measurement: CoverageMeasurement) -> dict[str, object]:
+    """Serialize a coverage measurement for the audit cache."""
+    return {
+        "status": measurement.status.value,
+        "result": _coverage_result_to_dict(measurement.result),
+        "error": measurement.error,
+    }
+
+
+def _coverage_measurement_from_dict(data: dict[str, object]) -> CoverageMeasurement:
+    """Deserialize a cached coverage measurement."""
+    return CoverageMeasurement(
+        status=Status(str(data["status"])),
+        result=_coverage_result_from_dict(data.get("result")),
+        error=data.get("error"),
+    )
+
+
+def _module_audit_to_dict(result: ModuleAudit) -> dict[str, object]:
+    """Serialize a module audit result for the on-disk cache."""
+    return {
+        "module": result.module,
+        "current_test_count": result.current_test_count,
+        "current_test_lines": result.current_test_lines,
+        "current_coverage": _coverage_measurement_to_dict(result.current_coverage),
+        "migrated_test_count": result.migrated_test_count,
+        "migrated_lines": result.migrated_lines,
+        "migrated_coverage": _coverage_measurement_to_dict(result.migrated_coverage),
+        "mined_properties": result.mined_properties,
+        "mutation_score": result.mutation_score,
+        "validation_mode": result.validation_mode,
+        "gap_functions": result.gap_functions,
+        "suggestions": result.suggestions,
+        "suggested_relations": result.suggested_relations,
+        "not_checked": result.not_checked,
+        "warnings": result.warnings,
+        "generated_test": result.generated_test,
+    }
+
+
+def _module_audit_from_dict(data: dict[str, object]) -> ModuleAudit:
+    """Deserialize a cached module audit result."""
+    return ModuleAudit(
+        module=str(data["module"]),
+        current_test_count=int(data["current_test_count"]),
+        current_test_lines=int(data["current_test_lines"]),
+        current_coverage=_coverage_measurement_from_dict(data["current_coverage"]),
+        migrated_test_count=int(data["migrated_test_count"]),
+        migrated_lines=int(data["migrated_lines"]),
+        migrated_coverage=_coverage_measurement_from_dict(data["migrated_coverage"]),
+        mined_properties=list(data.get("mined_properties", [])),
+        mutation_score=str(data.get("mutation_score", "")),
+        validation_mode=_normalize_validation_mode(str(data.get("validation_mode", "fast"))),
+        gap_functions=list(data.get("gap_functions", [])),
+        suggestions=list(data.get("suggestions", [])),
+        suggested_relations=list(data.get("suggested_relations", [])),
+        not_checked=list(data.get("not_checked", [])),
+        warnings=list(data.get("warnings", [])),
+        generated_test=str(data.get("generated_test", "")),
+    )
 
 
 # ============================================================================
@@ -581,6 +725,122 @@ def _find_test_files(module_name: str, test_dir: Path) -> list[Path]:
             results.append(test_file)
 
     return results
+
+
+def _generated_test_path(module: str) -> Path:
+    """Return the generated migrated-test path for *module*."""
+    mod_short = module.rsplit(".", 1)[-1]
+    return Path(".ordeal") / f"test_{mod_short}_migrated.py"
+
+
+def _audit_cache_path(module: str) -> Path:
+    """Return the on-disk cache path for *module*."""
+    safe = module.replace(".", "_")
+    return Path(".ordeal") / "audit" / f"{safe}.json"
+
+
+def _hash_file_if_exists(hasher: "hashlib._Hash", path: Path) -> None:
+    """Add a file's path and contents to *hasher* when it exists."""
+    if not path.exists() or not path.is_file():
+        return
+    hasher.update(str(path.resolve()).encode("utf-8"))
+    hasher.update(path.read_bytes())
+
+
+def _audit_state_hash(
+    module: str,
+    *,
+    test_dir: str,
+    max_examples: int,
+    validation_mode: AuditValidationMode,
+) -> str:
+    """Hash the inputs that determine an audit result.
+
+    The cache key includes the target module, relevant current tests,
+    active coverage backend availability, the dependency lockfile, and
+    the ordeal source files that affect generated tests or validation.
+    """
+    h = hashlib.sha256()
+    h.update(module.encode("utf-8"))
+    h.update(str(Path(test_dir).resolve()).encode("utf-8"))
+    h.update(str(max_examples).encode("utf-8"))
+    h.update(validation_mode.encode("utf-8"))
+    h.update(str(importlib.util.find_spec("coverage") is not None).encode("utf-8"))
+    h.update(str(importlib.util.find_spec("pytest_cov") is not None).encode("utf-8"))
+
+    mod = _resolve_module(module)
+    source_file = getattr(mod, "__file__", None)
+    if source_file is None:
+        raise ValueError(f"Cannot locate source for {module!r}")
+    _hash_file_if_exists(h, Path(source_file))
+
+    test_path = Path(test_dir)
+    test_files = _find_test_files(module, test_path)
+    for test_file in test_files:
+        _hash_file_if_exists(h, test_file)
+
+    conftests: set[Path] = set()
+    root = Path.cwd().resolve()
+    if (root / "conftest.py").exists():
+        conftests.add(root / "conftest.py")
+    if (test_path / "conftest.py").exists():
+        conftests.add((test_path / "conftest.py").resolve())
+    for test_file in test_files:
+        resolved = test_file.resolve()
+        for parent in [resolved.parent, *resolved.parents]:
+            candidate = parent / "conftest.py"
+            if candidate.exists():
+                conftests.add(candidate.resolve())
+            if parent == root:
+                break
+    for conftest in sorted(conftests):
+        _hash_file_if_exists(h, conftest)
+
+    for lockfile in ("uv.lock", "poetry.lock", "requirements.txt"):
+        candidate = Path(lockfile)
+        if candidate.exists():
+            _hash_file_if_exists(h, candidate)
+            break
+
+    for spec_name in ("ordeal.audit", "ordeal.auto", "ordeal.mine", "ordeal.mutations"):
+        spec = importlib.util.find_spec(spec_name)
+        if spec and spec.origin:
+            _hash_file_if_exists(h, Path(spec.origin))
+
+    return h.hexdigest()[:16]
+
+
+def _load_audit_cache(module: str, state_hash: str) -> ModuleAudit | None:
+    """Load a cached audit result when the state hash still matches."""
+    cache_path = _audit_cache_path(module)
+    if not cache_path.exists():
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if payload.get("state_hash") != state_hash:
+        return None
+    data = payload.get("result")
+    if not isinstance(data, dict):
+        return None
+    try:
+        return _module_audit_from_dict(data)
+    except Exception:
+        return None
+
+
+def _save_audit_cache(module: str, state_hash: str, result: ModuleAudit) -> None:
+    """Persist an audit result to the local `.ordeal/audit` cache."""
+    cache_path = _audit_cache_path(module)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "state_hash": state_hash,
+        "result": _module_audit_to_dict(result),
+    }
+    tmp = cache_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp.rename(cache_path)
 
 
 # ============================================================================
@@ -1710,6 +1970,7 @@ def audit(
     test_dir: str = "tests",
     max_examples: int = 20,
     workers: int = 1,
+    validation_mode: AuditValidationMode = "fast",
 ) -> ModuleAudit:
     """Audit a module: measure current tests vs ordeal-migrated tests.
 
@@ -1726,12 +1987,33 @@ def audit(
         max_examples: Hypothesis examples per function.
         workers: Parallel workers for mutation validation.
             ``1`` keeps the current sequential behavior.
+        validation_mode: ``"fast"`` replays mined inputs against mutants.
+            ``"deep"`` re-mines each mutant for maximum search depth.
 
     Returns:
         A ``ModuleAudit`` with verified or explicitly-failed measurements.
     """
-    result = ModuleAudit(module=module)
+    validation_mode = _normalize_validation_mode(validation_mode)
+    result = ModuleAudit(module=module, validation_mode=validation_mode)
     test_path = Path(test_dir)
+    state_hash: str | None = None
+
+    try:
+        state_hash = _audit_state_hash(
+            module,
+            test_dir=test_dir,
+            max_examples=max_examples,
+            validation_mode=validation_mode,
+        )
+        cached = _load_audit_cache(module, state_hash)
+        if cached is not None:
+            out_path = _generated_test_path(module)
+            out_path.parent.mkdir(exist_ok=True)
+            if cached.generated_test:
+                out_path.write_text(cached.generated_test, encoding="utf-8")
+            return cached
+    except Exception:
+        state_hash = None
 
     # -- 1. Find and measure existing tests --
     test_files = _find_test_files(module, test_path)
@@ -1817,6 +2099,7 @@ def audit(
                     max_examples=max_validation_examples,
                     preset="standard",
                     mine_result=mine_result,
+                    validation_mode=validation_mode,
                 )
                 total_killed += mr.killed
                 total_mutants += mr.total
@@ -1831,6 +2114,7 @@ def audit(
                     max_examples=max_validation_examples,
                     preset="standard",
                     mine_result=mine_result,
+                    validation_mode=validation_mode,
                 )
                 for target_path, mine_result in targets
             ]
@@ -1846,10 +2130,8 @@ def audit(
         result.mutation_score = f"{total_killed}/{total_mutants} ({pct:.0%})"
 
     # -- 3. Measure migrated test coverage --
-    out_dir = Path(".ordeal")
-    out_dir.mkdir(exist_ok=True)
-    mod_short = module.rsplit(".", 1)[-1]
-    out_path = out_dir / f"test_{mod_short}_migrated.py"
+    out_path = _generated_test_path(module)
+    out_path.parent.mkdir(exist_ok=True)
     out_path.write_text(generated, encoding="utf-8")
 
     result.migrated_coverage = _measure_coverage([out_path], module)
@@ -1875,6 +2157,12 @@ def audit(
         result.warnings,
     )
 
+    if state_hash is not None:
+        try:
+            _save_audit_cache(module, state_hash, result)
+        except Exception:
+            pass
+
     return result
 
 
@@ -1889,6 +2177,7 @@ def audit_report(
     test_dir: str = "tests",
     max_examples: int = 20,
     workers: int = 1,
+    validation_mode: AuditValidationMode = "fast",
 ) -> str:
     """Audit multiple modules and produce a summary report.
 
@@ -1912,7 +2201,9 @@ def audit_report(
         test_dir: Directory containing test files (default ``"tests"``).
         max_examples: Hypothesis examples for property mining per function.
         workers: Parallel workers for mutation validation in each module audit.
+        validation_mode: ``"fast"`` replay or ``"deep"`` re-mining.
     """
+    validation_mode = _normalize_validation_mode(validation_mode)
     results = []
     for mod in modules:
         results.append(
@@ -1921,6 +2212,7 @@ def audit_report(
                 test_dir=test_dir,
                 max_examples=max_examples,
                 workers=workers,
+                validation_mode=validation_mode,
             )
         )
 

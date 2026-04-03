@@ -365,6 +365,74 @@ class TestResumeInvariant:
         assert result.target == "tests._mutation_target.add"
         assert result.operators_used == ["arithmetic"]
 
+    def test_validate_mined_properties_replays_samples_without_remining(self, monkeypatch):
+        """Validation should use recorded mine() samples before falling back to re-mining."""
+        import ordeal.mine as mine_mod
+        import ordeal.mutations as mutations_mod
+
+        fake_mine_result = SimpleNamespace(
+            universal=[SimpleNamespace(name="deterministic")],
+            collected_inputs=[{"a": 1, "b": 2}, {"a": -1, "b": 5}],
+        )
+
+        calls: dict[str, int] = {"test_fn": 0}
+
+        def fail_mine(*args, **kwargs):
+            raise AssertionError("mine() should not run when replay inputs are available")
+
+        def fake_mutate(target, test_fn, operators):
+            calls["test_fn"] += 1
+            test_fn()
+            return MutationResult(target=target, operators_used=operators)
+
+        monkeypatch.setattr(mine_mod, "mine", fail_mine)
+        monkeypatch.setattr(mutations_mod, "mutate_function_and_test", fake_mutate)
+
+        result = validate_mined_properties(
+            "tests._mutation_target.add",
+            operators=["arithmetic"],
+            mine_result=fake_mine_result,
+        )
+
+        assert calls["test_fn"] == 1
+        assert result.target == "tests._mutation_target.add"
+
+    def test_validate_mined_properties_deep_mode_remines_mutants(self, monkeypatch):
+        """Deep validation should re-run mine() on the mutant path."""
+        import ordeal.mine as mine_mod
+        import ordeal.mutations as mutations_mod
+
+        fake_prop = SimpleNamespace(name="deterministic", universal=True)
+        fake_mine_result = SimpleNamespace(
+            universal=[fake_prop],
+            properties=[fake_prop],
+            collected_inputs=[{"a": 1, "b": 2}],
+        )
+
+        calls: dict[str, int] = {"mine": 0, "test_fn": 0}
+
+        def fake_mine(*args, **kwargs):
+            calls["mine"] += 1
+            return fake_mine_result
+
+        def fake_mutate(target, test_fn, operators):
+            calls["test_fn"] += 1
+            test_fn()
+            return MutationResult(target=target, operators_used=operators)
+
+        monkeypatch.setattr(mine_mod, "mine", fake_mine)
+        monkeypatch.setattr(mutations_mod, "mutate_function_and_test", fake_mutate)
+
+        result = validate_mined_properties(
+            "tests._mutation_target.add",
+            operators=["arithmetic"],
+            mine_result=fake_mine_result,
+            validation_mode="deep",
+        )
+
+        assert calls == {"mine": 1, "test_fn": 1}
+        assert result.target == "tests._mutation_target.add"
+
 
 # ============================================================================
 # Cache invalidation: test changes and dependency changes

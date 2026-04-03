@@ -227,7 +227,7 @@ print(result.summary())
 #   SURVIVED  L67:4 negate if-condition
 ```
 
-It mines the original function, then mutates it and re-mines each mutant. If a mined property no longer holds on the mutant, the mutant is killed. Surviving mutants mean the mined properties are too weak to detect that class of bug.
+By default it mines the original function, mutates it, then replays mined inputs against each mutant. If you want the broader but slower search, use `validation_mode="deep"` to re-mine each mutant. In either mode, if a mined property no longer holds on the mutant, the mutant is killed. Surviving mutants mean the mined properties are too weak to detect that class of bug.
 
 `ordeal audit` runs this automatically and reports the score in the summary:
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -278,3 +279,203 @@ class TestMutationBenchmark:
         assert "Mutation Benchmark" in text
         assert "pkg.mod.compute" in text
         assert "pytest_seconds" in text
+
+
+class TestPerfContract:
+    def test_parse_perf_contract(self, tmp_path: Path):
+        contract = tmp_path / "perf.toml"
+        contract.write_text(
+            """
+[[cases]]
+name = "import_cli"
+kind = "import"
+module = "ordeal.cli"
+repeats = 5
+max_seconds = 0.08
+
+[[cases]]
+name = "audit_demo"
+kind = "audit"
+module = "ordeal.demo"
+mode = "warm"
+repeats = 2
+validation_mode = "deep"
+max_seconds = 0.30
+
+[[cases]]
+name = "audit_demo_compare"
+kind = "audit_compare"
+module = "ordeal.demo"
+repeats = 1
+max_score_gap = 0.10
+
+[[cases]]
+name = "mutate_demo"
+kind = "mutate"
+target = "pkg.mod.compute"
+repeats = 3
+workers = 2
+max_seconds = 0.25
+"""
+        )
+
+        specs = scaling._parse_perf_contract(str(contract))
+
+        assert [spec.name for spec in specs] == [
+            "import_cli",
+            "audit_demo",
+            "audit_demo_compare",
+            "mutate_demo",
+        ]
+        assert specs[1].mode == "warm"
+        assert specs[1].validation_mode == "deep"
+        assert specs[2].kind == "audit_compare"
+        assert specs[2].compare_validation_mode == "deep"
+        assert specs[2].max_score_gap == pytest.approx(0.10)
+        assert specs[3].target == "pkg.mod.compute"
+        assert specs[3].workers == 2
+
+    def test_benchmark_perf_contract_aggregates_cases(self, monkeypatch, tmp_path: Path):
+        contract = tmp_path / "perf.toml"
+        contract.write_text(
+            """
+[[cases]]
+name = "import_cli"
+kind = "import"
+module = "ordeal.cli"
+repeats = 3
+max_seconds = 0.05
+
+[[cases]]
+name = "audit_demo_cold"
+kind = "audit"
+module = "ordeal.demo"
+mode = "cold"
+repeats = 2
+max_seconds = 2.0
+
+[[cases]]
+name = "mutate_demo"
+kind = "mutate"
+target = "pkg.mod.compute"
+repeats = 2
+max_seconds = 0.25
+
+[[cases]]
+name = "audit_demo_compare"
+kind = "audit_compare"
+module = "ordeal.demo"
+repeats = 2
+max_score_gap = 0.10
+"""
+        )
+
+        import_times = iter([0.02, 0.03, 0.025])
+        audit_times = iter([1.5, 1.6])
+        differential_trials = iter(
+            [
+                {
+                    "seconds": 0.80,
+                    "primary_seconds": 0.30,
+                    "reference_seconds": 0.50,
+                    "primary_score": 0.80,
+                    "reference_score": 0.85,
+                    "primary_mutation_score": "8/10 (80%)",
+                    "reference_mutation_score": "17/20 (85%)",
+                },
+                {
+                    "seconds": 0.90,
+                    "primary_seconds": 0.35,
+                    "reference_seconds": 0.55,
+                    "primary_score": 0.82,
+                    "reference_score": 0.84,
+                    "primary_mutation_score": "9/11 (82%)",
+                    "reference_mutation_score": "21/25 (84%)",
+                },
+            ]
+        )
+        mutation_trials = iter(
+            [
+                scaling.MutationBenchmarkTrial(0.10, total=2, killed=2, score=1.0),
+                scaling.MutationBenchmarkTrial(0.12, total=2, killed=2, score=1.0),
+            ]
+        )
+
+        monkeypatch.setattr(
+            scaling,
+            "_run_import_benchmark_trial",
+            lambda *args, **kwargs: next(import_times),
+        )
+        monkeypatch.setattr(
+            scaling,
+            "_run_audit_benchmark_trial",
+            lambda *args, **kwargs: next(audit_times),
+        )
+        monkeypatch.setattr(
+            scaling,
+            "_run_mutation_benchmark_trial",
+            lambda *args, **kwargs: next(mutation_trials),
+        )
+        monkeypatch.setattr(
+            scaling,
+            "_run_audit_differential_trial",
+            lambda *args, **kwargs: next(differential_trials),
+        )
+
+        suite = scaling.benchmark_perf_contract(
+            str(contract),
+            python_executable="python",
+            cwd=str(tmp_path),
+        )
+
+        assert suite.passed
+        assert [case.spec.name for case in suite.cases] == [
+            "import_cli",
+            "audit_demo_cold",
+            "mutate_demo",
+            "audit_demo_compare",
+        ]
+        assert suite.cases[0].median_seconds == pytest.approx(0.025)
+        assert suite.cases[1].median_seconds == pytest.approx(1.55)
+        assert suite.cases[2].details["score"] == pytest.approx(1.0)
+        assert suite.cases[3].details["primary_score"] == pytest.approx(0.81)
+        assert suite.cases[3].details["reference_score"] == pytest.approx(0.845)
+        assert suite.cases[3].score_gap == pytest.approx(0.035)
+
+    def test_perf_contract_summary_reports_failure(self):
+        case = scaling.PerfContractCase(
+            spec=scaling.PerfContractSpec(
+                name="import_cli",
+                kind="import",
+                module="ordeal.cli",
+                max_seconds=0.05,
+            ),
+            seconds=[0.07, 0.08, 0.09],
+        )
+        suite = scaling.PerfContractSuite(cases=[case], contract_path="ordeal.perf.toml")
+
+        assert not suite.passed
+        assert suite.failures == [case]
+        assert "Performance Contract [FAIL]" in suite.summary()
+
+    def test_perf_contract_fails_on_audit_score_gap(self):
+        case = scaling.PerfContractCase(
+            spec=scaling.PerfContractSpec(
+                name="audit_demo_compare",
+                kind="audit_compare",
+                module="ordeal.demo",
+                validation_mode="fast",
+                compare_validation_mode="deep",
+                max_score_gap=0.05,
+            ),
+            seconds=[0.80],
+            details={
+                "primary_score": 0.70,
+                "reference_score": 0.85,
+                "score_gap": 0.15,
+            },
+        )
+
+        assert not case.passed
+        assert "gap=15%" in case.summary()
+        assert "gap_budget=5%" in case.summary()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -32,6 +33,49 @@ class TestCLI:
         assert "shareable bug report" in out
         assert "--write-regression tests/test_ordeal_regressions.py" in out
         assert "ordeal mine mymod.func --write-regression tests/test_ordeal_regressions.py" in out
+
+    def test_python_module_entrypoint_runs(self):
+        proc = subprocess.run(
+            [sys.executable, "-m", "ordeal.cli", "--help"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert proc.returncode == 0
+        assert "usage:" in proc.stdout
+
+    def test_audit_help_mentions_validation_mode(self, capsys):
+        with pytest.raises(SystemExit):
+            main(["audit", "--help"])
+        out = capsys.readouterr().out
+        assert "--validation-mode {fast,deep}" in out
+        assert "fast replay" in out
+
+    def test_benchmark_help_mentions_perf_contract_quality(self, capsys):
+        with pytest.raises(SystemExit):
+            main(["benchmark", "--help"])
+        out = capsys.readouterr().out
+        assert "--perf-contract PERF_CONTRACT" in out
+        assert "score-gap budget" in out
+
+    def test_audit_forwards_validation_mode(self, monkeypatch, capsys):
+        import ordeal.audit as audit_mod
+
+        calls: dict[str, object] = {}
+
+        def fake_audit_report(modules, **kwargs):
+            calls["modules"] = modules
+            calls.update(kwargs)
+            return "ordeal audit"
+
+        monkeypatch.setattr(audit_mod, "audit_report", fake_audit_report)
+
+        rc = main(["audit", "ordeal.demo", "--validation-mode", "deep"])
+
+        assert rc == 0
+        assert calls["modules"] == ["ordeal.demo"]
+        assert calls["validation_mode"] == "deep"
+        assert "ordeal audit" in capsys.readouterr().out
 
     def test_catalog_mentions_report_file(self, capsys):
         assert main(["catalog"]) == 0
@@ -483,6 +527,44 @@ verbose = false
         assert calls["workers"] == 2
         assert calls["preset"] == "essential"
         assert calls["filter_equivalent"] is False
+
+    def test_benchmark_perf_contract_mode(self, monkeypatch, capsys):
+        calls: dict[str, object] = {}
+
+        class _FakeSuite:
+            passed = True
+
+            def summary(self) -> str:
+                return "Performance Contract [PASS]"
+
+        def fake_benchmark_perf_contract(path, **kwargs):
+            calls["path"] = path
+            calls.update(kwargs)
+            return _FakeSuite()
+
+        monkeypatch.setattr(scaling, "benchmark_perf_contract", fake_benchmark_perf_contract)
+
+        rc = main(["benchmark", "--perf-contract", "ordeal.perf.toml"])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Performance Contract [PASS]" in out
+        assert calls["path"] == "ordeal.perf.toml"
+
+    def test_benchmark_perf_contract_check_fails(self, monkeypatch, capsys):
+        class _FakeSuite:
+            passed = False
+
+            def summary(self) -> str:
+                return "Performance Contract [FAIL]"
+
+        monkeypatch.setattr(scaling, "benchmark_perf_contract", lambda *args, **kwargs: _FakeSuite())
+
+        rc = main(["benchmark", "--perf-contract", "ordeal.perf.toml", "--check"])
+
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "Performance Contract [FAIL]" in out
 
 
 # ============================================================================

@@ -362,6 +362,12 @@ class TestModuleAuditSummary:
         s = a.summary()
         assert "mutation: 8/10 (80%)" in s
 
+    def test_mutation_score_fraction_parses_exact_counts(self):
+        a = ModuleAudit(module="myapp.scoring")
+        a.mutation_score = "8/10 (80%)"
+        assert a.mutation_score_counts == (8, 10)
+        assert a.mutation_score_fraction == pytest.approx(0.8)
+
     def test_mutation_score_absent_when_empty(self):
         a = ModuleAudit(module="myapp.scoring")
         s = a.summary()
@@ -520,6 +526,29 @@ class TestAuditIntegration:
         assert "no test files" in (result.current_coverage.error or "")
 
 
+class TestModuleAuditSummary:
+    def test_includes_fast_validation_mode_with_mutation_score(self):
+        result = ModuleAudit(
+            module="demo.module",
+            mutation_score="1/1 (100%)",
+        )
+
+        summary = result.summary()
+
+        assert "mutation: 1/1 (100%)" in summary
+        assert "validation: fast replay" in summary
+
+    def test_includes_deep_validation_mode_when_selected(self):
+        result = ModuleAudit(
+            module="demo.module",
+            validation_mode="deep",
+        )
+
+        summary = result.summary()
+
+        assert "validation: deep re-mine" in summary
+
+
 class TestAuditReportWorkers:
     def test_forwards_workers_to_module_audits(self, monkeypatch):
         calls: list[tuple[str, int]] = []
@@ -530,9 +559,10 @@ class TestAuditReportWorkers:
             test_dir: str = "tests",
             max_examples: int = 20,
             workers: int = 1,
+            validation_mode: str = "fast",
         ) -> ModuleAudit:
             calls.append((module, workers))
-            return ModuleAudit(module=module)
+            return ModuleAudit(module=module, validation_mode=validation_mode)
 
         monkeypatch.setattr(audit_mod, "audit", fake_audit)
 
@@ -545,6 +575,33 @@ class TestAuditReportWorkers:
         assert calls == [
             ("tests._auto_target", 3),
             ("tests._auto_target", 3),
+        ]
+
+    def test_forwards_validation_mode_to_module_audits(self, monkeypatch):
+        calls: list[tuple[str, str]] = []
+
+        def fake_audit(
+            module: str,
+            *,
+            test_dir: str = "tests",
+            max_examples: int = 20,
+            workers: int = 1,
+            validation_mode: str = "fast",
+        ) -> ModuleAudit:
+            calls.append((module, validation_mode))
+            return ModuleAudit(module=module, validation_mode=validation_mode)
+
+        monkeypatch.setattr(audit_mod, "audit", fake_audit)
+
+        report = audit_mod.audit_report(
+            ["tests._auto_target", "tests._auto_target"],
+            validation_mode="deep",
+        )
+
+        assert "ordeal audit" in report
+        assert calls == [
+            ("tests._auto_target", "deep"),
+            ("tests._auto_target", "deep"),
         ]
 
 
@@ -569,3 +626,88 @@ class TestMutationValidationSelection:
             ],
         )
         assert audit_mod._should_validate_mined_properties(mine_result)
+
+
+class TestAuditCache:
+    def test_cache_roundtrip(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.chdir(tmp_path)
+
+        result = ModuleAudit(module="demo.module", validation_mode="deep")
+        result.current_test_count = 2
+        result.current_test_lines = 10
+        result.current_coverage = CoverageMeasurement(
+            Status.VERIFIED,
+            CoverageResult(
+                percent=100.0,
+                total_statements=5,
+                missing_count=0,
+                missing_lines=frozenset(),
+                source="coverage.py JSON",
+            ),
+        )
+        result.migrated_test_count = 1
+        result.migrated_lines = 6
+        result.migrated_coverage = CoverageMeasurement(
+            Status.VERIFIED,
+            CoverageResult(
+                percent=100.0,
+                total_statements=5,
+                missing_count=0,
+                missing_lines=frozenset(),
+                source="coverage.py JSON",
+            ),
+        )
+        result.generated_test = "def test_cached():\n    assert True\n"
+        result.mutation_score = "1/1 (100%)"
+        result.mined_properties = ["demo: deterministic (5/5, >=57% CI)"]
+
+        audit_mod._save_audit_cache("demo.module", "hash123", result)
+        loaded = audit_mod._load_audit_cache("demo.module", "hash123")
+
+        assert loaded == result
+
+    def test_state_hash_changes_with_validation_mode(self, tmp_path: Path):
+        test_file = tmp_path / "test__auto_target.py"
+        test_file.write_text("def test_placeholder():\n    assert True\n")
+
+        fast_hash = audit_mod._audit_state_hash(
+            "tests._auto_target",
+            test_dir=str(tmp_path),
+            max_examples=5,
+            validation_mode="fast",
+        )
+        deep_hash = audit_mod._audit_state_hash(
+            "tests._auto_target",
+            test_dir=str(tmp_path),
+            max_examples=5,
+            validation_mode="deep",
+        )
+
+        assert fast_hash != deep_hash
+
+    def test_audit_uses_cache_and_rewrites_generated_test(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.chdir(tmp_path)
+        cached = ModuleAudit(
+            module="tests._auto_target",
+            generated_test="def test_cached():\n    assert True\n",
+        )
+
+        monkeypatch.setattr(audit_mod, "_audit_state_hash", lambda *args, **kwargs: "hash123")
+        monkeypatch.setattr(audit_mod, "_load_audit_cache", lambda module, state_hash: cached)
+        monkeypatch.setattr(
+            audit_mod,
+            "_measure_coverage",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("cache hit should skip fresh coverage measurement")
+            ),
+        )
+
+        result = audit_mod.audit("tests._auto_target", test_dir=str(tmp_path))
+
+        assert result is cached
+        generated = tmp_path / ".ordeal" / "test__auto_target_migrated.py"
+        assert generated.read_text(encoding="utf-8") == cached.generated_test

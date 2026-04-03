@@ -927,7 +927,7 @@ def _save_cache(target: str, result: MutationResult, module_hash: str) -> None:
     p = _cache_path(target)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2))
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
     tmp.rename(p)  # atomic on POSIX
 
 
@@ -948,7 +948,7 @@ def _load_cache(
     if not p.exists():
         return None
     try:
-        data = json.loads(p.read_text())
+        data = json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return None
 
@@ -2015,7 +2015,7 @@ def init_project(
 
         if not dry_run:
             out.mkdir(parents=True, exist_ok=True)
-            dest.write_text(content)
+            dest.write_text(content, encoding="utf-8")
 
         results.append(
             {
@@ -2049,7 +2049,7 @@ def _generate_toml(
         short = mod.rsplit(".", 1)[-1]
         test_file = Path(test_dir) / f"test_{short}.py"
         if test_file.exists():
-            content = test_file.read_text()
+            content = test_file.read_text(encoding="utf-8")
             for line in content.splitlines():
                 if "= chaos_for(" in line:
                     cls_name = line.split("=")[0].strip()
@@ -2099,7 +2099,7 @@ def _generate_toml(
         ]
     )
 
-    Path("ordeal.toml").write_text("\n".join(lines))
+    Path("ordeal.toml").write_text("\n".join(lines), encoding="utf-8")
 
 
 def _detect_package() -> str | None:
@@ -2146,7 +2146,7 @@ def _candidates_from_pyproject(cwd: Path) -> list[str]:
     path = cwd / "pyproject.toml"
     if not path.exists():
         return []
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     in_project = False
     for line in text.splitlines():
         stripped = line.strip()
@@ -2168,7 +2168,7 @@ def _candidates_from_setup_cfg(cwd: Path) -> list[str]:
     path = cwd / "setup.cfg"
     if not path.exists():
         return []
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     in_metadata = False
     for line in text.splitlines():
         stripped = line.strip()
@@ -2192,7 +2192,7 @@ def _candidates_from_setup_py(cwd: Path) -> list[str]:
         return []
     import re
 
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     m = re.search(r"""name\s*=\s*["']([^"']+)["']""", text)
     return [m.group(1)] if m else []
 

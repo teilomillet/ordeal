@@ -238,8 +238,11 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
     if not p.exists():
         raise FileNotFoundError(f"Config file not found: {p}")
 
-    with open(p, "rb") as f:
-        raw = tomllib.load(f)
+    try:
+        with open(p, "rb") as f:
+            raw = tomllib.load(f)
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"Config file is not valid UTF-8: {p}: {exc}") from exc
 
     # Warn on unknown top-level sections
     for key in raw:

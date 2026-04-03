@@ -38,13 +38,13 @@ def _install_skill(dry_run: bool = False) -> str | None:
     if not src.exists():
         return None
     dest = Path(".claude/skills/ordeal/SKILL.md")
-    new_content = src.read_text()
-    if dest.exists() and dest.read_text() == new_content:
+    new_content = src.read_text(encoding="utf-8")
+    if dest.exists() and dest.read_text(encoding="utf-8") == new_content:
         return None  # already up-to-date
     if dry_run:
         return str(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(new_content)
+    dest.write_text(new_content, encoding="utf-8")
     return str(dest)
 
 
@@ -348,7 +348,7 @@ def _cmd_explore(args: argparse.Namespace) -> int:
             if test_src:
                 out = Path(args.generate_tests)
                 out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_text(test_src)
+                out.write_text(test_src, encoding="utf-8")
                 _stderr(f"Generated tests: {out}\n")
 
     # -- Report --
@@ -463,7 +463,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                 print("  --- end ---")
             if args.save_generated and result.generated_test:
                 path = Path(args.save_generated)
-                path.write_text(result.generated_test)
+                path.write_text(result.generated_test, encoding="utf-8")
                 _stderr(f"Saved: {path}\n")
     else:
         report = audit_report(
@@ -811,7 +811,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
     if ci_path and ci_content:
         ci_p = Path(ci_path)
         ci_p.parent.mkdir(parents=True, exist_ok=True)
-        ci_p.write_text(ci_content)
+        ci_p.write_text(ci_content, encoding="utf-8")
 
     if not generated:
         _stderr(f"\nordeal init — {pkg}: all modules already have tests.\n")
@@ -875,7 +875,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         if "(100%)" in mutation_score or not stubs_path.exists():
             stubs_path.unlink(missing_ok=True)
             break
-        stubs = stubs_path.read_text().strip()
+        stubs = stubs_path.read_text(encoding="utf-8").strip()
         stubs_path.unlink(missing_ok=True)
         if not stubs:
             break
@@ -883,7 +883,10 @@ def _cmd_init(args: argparse.Namespace) -> int:
         for r in generated:
             if r["path"]:
                 p = Path(r["path"])
-                p.write_text(p.read_text() + "\n\n" + stubs + "\n")
+                p.write_text(
+                    p.read_text(encoding="utf-8") + "\n\n" + stubs + "\n",
+                    encoding="utf-8",
+                )
                 break
 
     Path(".ordeal_stubs_tmp.py").unlink(missing_ok=True)
@@ -909,7 +912,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         content = r.get("content", "")
         # Re-read in case mutation loop appended stubs
         if r["path"] and Path(r["path"]).exists():
-            content = Path(r["path"]).read_text()
+            content = Path(r["path"]).read_text(encoding="utf-8")
         for line in content.splitlines():
             stripped = line.strip()
             if stripped.startswith("def test_"):
@@ -1135,9 +1138,11 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
                 if args.generate_stubs:
                     stubs_path = Path(args.generate_stubs)
                     stubs_path.parent.mkdir(parents=True, exist_ok=True)
-                    existing = stubs_path.read_text() if stubs_path.exists() else ""
+                    existing = (
+                        stubs_path.read_text(encoding="utf-8") if stubs_path.exists() else ""
+                    )
                     sep = "\n\n" if existing else ""
-                    stubs_path.write_text(existing + sep + starter)
+                    stubs_path.write_text(existing + sep + starter, encoding="utf-8")
                     _stderr(f"  Starter tests written: {stubs_path}\n")
                 else:
                     # Print the scaffold directly — don't hide it behind a flag
@@ -1168,7 +1173,7 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
                 all_stubs.append(stub)
         if all_stubs:
             stubs_path.parent.mkdir(parents=True, exist_ok=True)
-            stubs_path.write_text("\n\n".join(all_stubs))
+            stubs_path.write_text("\n\n".join(all_stubs), encoding="utf-8")
             _stderr(f"Test stubs written: {stubs_path}\n")
 
     # Final score line — always printed for CI parseability

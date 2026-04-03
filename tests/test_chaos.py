@@ -1,5 +1,6 @@
 """Tests for ordeal.chaos — ChaosTest stateful testing."""
 
+import signal
 import time
 
 import pytest
@@ -8,6 +9,8 @@ from hypothesis.stateful import invariant, rule
 
 from ordeal.chaos import ChaosTest, RuleTimeoutError, chaos_test
 from ordeal.faults import LambdaFault
+
+_has_sigalrm = hasattr(signal, "SIGALRM")
 
 # -- A simple system under test ---------------------------------------------
 
@@ -159,6 +162,7 @@ class HangingChaos(ChaosTest):
         time.sleep(60)  # simulate buggify-induced infinite block
 
 
+@pytest.mark.skipif(not _has_sigalrm, reason="SIGALRM not available on Windows")
 def test_rule_timeout_interrupts_hanging_rule():
     """rule_timeout should raise RuleTimeoutError instead of hanging."""
     TestCase = HangingChaos.TestCase

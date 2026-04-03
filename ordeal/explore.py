@@ -392,7 +392,7 @@ def _compute_coverage_gaps(
         # Count executable lines via AST — only lines that contain
         # actual statements (skips docstrings, comments, blank lines).
         try:
-            tree = ast.parse(Path(src_file).read_text())
+            tree = ast.parse(Path(src_file).read_text(encoding="utf-8"))
         except Exception:
             try:
                 tree = ast.parse(src)

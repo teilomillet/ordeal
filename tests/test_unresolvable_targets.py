@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 import types
+
 import pytest
 
 from ordeal.faults import PatchFault
@@ -220,7 +221,8 @@ class TestModuleMineOracleFallback:
             dummy_result = MutationResult(target="_test_priv_mod")
             dummy_result.mutants = []  # 0 killed by tests
 
-            with pytest.warns(UserWarning, match="tests killed 0/0 mutants but mine oracle killed"):
+            match = "tests killed 0/0 mutants but mine oracle killed"
+            with pytest.warns(UserWarning, match=match):
                 result = _module_mine_oracle_fallback(
                     "_test_priv_mod",
                     mod,
@@ -303,7 +305,8 @@ class TestModuleMineOracleFallback:
             dummy_result = MutationResult(target="_test_ray_mod")
             dummy_result.mutants = []
 
-            with pytest.warns(UserWarning, match="tests killed 0/0 mutants but mine oracle killed"):
+            match = "tests killed 0/0 mutants but mine oracle killed"
+            with pytest.warns(UserWarning, match=match):
                 result = _module_mine_oracle_fallback(
                     "_test_ray_mod",
                     mod,

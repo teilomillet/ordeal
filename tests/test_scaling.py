@@ -232,10 +232,7 @@ class TestMutationBenchmark:
         def fake_run(args, cwd, text, capture_output, check):
             payload = next(payloads)
             return SimpleNamespace(
-                stdout="noise\n"
-                + scaling._MUTATION_BENCHMARK_MARKER
-                + json.dumps(payload)
-                + "\n",
+                stdout="noise\n" + scaling._MUTATION_BENCHMARK_MARKER + json.dumps(payload) + "\n",
                 stderr="",
                 returncode=0,
             )

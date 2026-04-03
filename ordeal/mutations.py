@@ -3893,13 +3893,13 @@ def _score_mutation_test_file(
     def _iter_test_nodes(module_tree: ast.Module) -> list[ast.AST]:
         tests: list[ast.AST] = []
         for node in module_tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
+            is_func = isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            if is_func and node.name.startswith("test_"):
                 tests.append(node)
             elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
                 for item in node.body:
-                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name.startswith(
-                        "test_"
-                    ):
+                    is_fn = isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    if is_fn and item.name.startswith("test_"):
                         tests.append(item)
         return tests
 
@@ -3909,7 +3909,10 @@ def _score_mutation_test_file(
         while stack:
             current = stack.pop()
             walked.append(current)
-            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            is_scope = isinstance(
+                current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+            )
+            if is_scope:
                 continue
             stack.extend(ast.iter_child_nodes(current))
         return walked

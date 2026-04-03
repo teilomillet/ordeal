@@ -9,7 +9,6 @@ from __future__ import annotations
 import importlib
 import shutil
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -252,8 +251,7 @@ class TestResumeInvariant:
         mod_dir = tmp_path / "oraclenomod"
         mod_dir.mkdir()
         (mod_dir / "__init__.py").write_text(
-            "def mystery_transform(x: int) -> int:\n"
-            "    return (x * 2) + 1\n"
+            "def mystery_transform(x: int) -> int:\n    return (x * 2) + 1\n"
         )
         sys.path.insert(0, str(tmp_path))
         try:

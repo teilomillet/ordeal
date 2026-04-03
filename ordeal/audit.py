@@ -141,6 +141,7 @@ def _format_change_summary(
     )
     return label, " | ".join(parts)
 
+
 COVERAGE_TOLERANCE_PCT: float = 2.0
 """Tolerance for the ``coverage_preserved`` comparison, in percentage points.
 

@@ -203,15 +203,11 @@ class _DeterministicPopen:
         self.stderr = None
         if stdout_pipe:
             self.stdout = (
-                io.StringIO(self._stdout_value)
-                if text
-                else io.BytesIO(self._stdout_value)
+                io.StringIO(self._stdout_value) if text else io.BytesIO(self._stdout_value)
             )
         if stderr_pipe:
             self.stderr = (
-                io.StringIO(self._stderr_value)
-                if text
-                else io.BytesIO(self._stderr_value)
+                io.StringIO(self._stderr_value) if text else io.BytesIO(self._stderr_value)
             )
         supervisor.log_transition(f"subprocess.Popen({self._command}) pid={self.pid}")
 
@@ -466,9 +462,7 @@ class DeterministicSupervisor:
 
             if not runnable:
                 wake_at = min(
-                    task.wake_at
-                    for task in self._scheduled_tasks.values()
-                    if not task.done
+                    task.wake_at for task in self._scheduled_tasks.values() if not task.done
                 )
                 delta = max(0.0, wake_at - self.clock.time())
                 self.clock.advance(delta)
@@ -504,9 +498,7 @@ class DeterministicSupervisor:
                     self.log_transition(f"task.yield({task.name})")
                 case "sleep":
                     task.wake_at = self.clock.time() + instruction.delay
-                    self.log_transition(
-                        f"task.sleep({task.name}, {instruction.delay:.3f})"
-                    )
+                    self.log_transition(f"task.sleep({task.name}, {instruction.delay:.3f})")
                 case _:
                     raise ValueError(f"Unknown scheduler instruction: {instruction.kind!r}")
 
@@ -720,9 +712,7 @@ class DeterministicSupervisor:
             )
 
         self.clock.sleep(registration.delay)
-        self.log_transition(
-            f"subprocess.run({command_str}) -> {registration.returncode}"
-        )
+        self.log_transition(f"subprocess.run({command_str}) -> {registration.returncode}")
 
         result = _sp.CompletedProcess(
             args=command,

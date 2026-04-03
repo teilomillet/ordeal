@@ -551,11 +551,7 @@ class TestDeterministicSupervisor:
                 for name in ("a", "b", "c"):
                     sup.spawn(name, worker, name)
                 sup.run_until_idle()
-                return [
-                    t.action
-                    for t in sup.trajectory
-                    if t.action.startswith("scheduler.run(")
-                ]
+                return [t.action for t in sup.trajectory if t.action.startswith("scheduler.run(")]
 
         order_42 = schedule(42)
         order_99 = schedule(99)

@@ -19,6 +19,7 @@ import ordeal.audit as audit_mod
 from ordeal.audit import (
     CoverageMeasurement,
     CoverageResult,
+    MineResult,
     ModuleAudit,
     Status,
     _count_lines_in_file,
@@ -30,6 +31,7 @@ from ordeal.audit import (
     _verify_consistency,
     wilson_lower,
 )
+from ordeal.mine import MinedProperty
 
 # ============================================================================
 # Wilson score interval
@@ -548,22 +550,22 @@ class TestAuditReportWorkers:
 
 class TestMutationValidationSelection:
     def test_skips_validation_without_confident_universal_properties(self):
-        mine_result = audit_mod.MineResult(
+        mine_result = MineResult(
             function="demo.func",
             examples=5,
             properties=[
-                audit_mod.MinedProperty("non_universal", holds=4, total=5),
-                audit_mod.MinedProperty("tiny_sample", holds=3, total=3),
+                MinedProperty("non_universal", holds=4, total=5),
+                MinedProperty("tiny_sample", holds=3, total=3),
             ],
         )
         assert not audit_mod._should_validate_mined_properties(mine_result)
 
     def test_runs_validation_with_confident_universal_property(self):
-        mine_result = audit_mod.MineResult(
+        mine_result = MineResult(
             function="demo.func",
             examples=10,
             properties=[
-                audit_mod.MinedProperty("universal", holds=10, total=10),
+                MinedProperty("universal", holds=10, total=10),
             ],
         )
         assert audit_mod._should_validate_mined_properties(mine_result)

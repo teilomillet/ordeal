@@ -483,6 +483,96 @@ class TestDeterministicSupervisor:
             with pytest.raises(FileNotFoundError, match="register_subprocess"):
                 subprocess.run(["missing-cmd"], capture_output=True)
 
+    def test_cooperative_scheduler_reproducible(self):
+        """Same seed should produce the same cooperative interleaving."""
+
+        def run(seed: int) -> tuple[list[str], dict[str, str], list[str]]:
+            events: list[str] = []
+            with DeterministicSupervisor(seed=seed) as sup:
+
+                def worker(name: str, delay: float):
+                    events.append(f"{name}:start")
+                    yield sup.yield_now()
+                    events.append(f"{name}:resume")
+                    yield sup.sleep(delay)
+                    events.append(f"{name}:done")
+                    return name.upper()
+
+                sup.spawn("a", worker, "a", 2.0)
+                sup.spawn("b", worker, "b", 1.0)
+                results = sup.run_until_idle()
+                actions = [
+                    t.action
+                    for t in sup.trajectory
+                    if t.action.startswith(("scheduler.", "task."))
+                ]
+            return events, results, actions
+
+        events1, results1, actions1 = run(42)
+        events2, results2, actions2 = run(42)
+
+        always(events1 == events2, "same seed, same scheduler events")
+        always(results1 == results2, "same seed, same task results")
+        always(actions1 == actions2, "same seed, same scheduler trajectory")
+
+    def test_cooperative_scheduler_sleep_advances_virtual_time(self):
+        """Sleeping tasks should advance the supervisor clock, not wall time."""
+        import time
+
+        with DeterministicSupervisor(seed=42) as sup:
+
+            def sleeper():
+                yield sup.sleep(3.0)
+                return "awake"
+
+            sup.spawn("fast", lambda: "fast")
+            sup.spawn("slow", sleeper)
+            results = sup.run_until_idle()
+
+            always(results["fast"] == "fast", "plain callable task completes")
+            always(results["slow"] == "awake", "sleeping task completes")
+            always(time.time() == 3.0, "virtual clock advanced to wake-up time")
+            always(
+                any("scheduler.advance(3.000)" in t.action for t in sup.trajectory),
+                "trajectory logs scheduler clock advance",
+            )
+
+    def test_cooperative_scheduler_seed_changes_interleaving(self):
+        """Different seeds should explore different runnable-task orders."""
+
+        def schedule(seed: int) -> list[str]:
+            with DeterministicSupervisor(seed=seed) as sup:
+
+                def worker(name: str):
+                    yield sup.yield_now()
+                    yield sup.yield_now()
+                    return name
+
+                for name in ("a", "b", "c"):
+                    sup.spawn(name, worker, name)
+                sup.run_until_idle()
+                return [
+                    t.action
+                    for t in sup.trajectory
+                    if t.action.startswith("scheduler.run(")
+                ]
+
+        order_42 = schedule(42)
+        order_99 = schedule(99)
+
+        always(order_42 != order_99, "different seeds choose different schedules")
+
+    def test_cooperative_scheduler_rejects_invalid_yield(self):
+        """Tasks must yield supervisor instructions, not arbitrary values."""
+        with DeterministicSupervisor(seed=42) as sup:
+
+            def bad_worker():
+                yield "nope"
+
+            sup.spawn("bad", bad_worker)
+            with pytest.raises(TypeError, match="yielded str"):
+                sup.run_until_idle()
+
     def test_without_patch_io_real_io_works(self):
         """Default (patch_io=False) doesn't break real I/O."""
         import os

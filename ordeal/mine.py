@@ -965,7 +965,7 @@ def mine(
     try:
 
         @given(**strategies)
-        @settings(max_examples=max_examples, database=None)
+        @settings(max_examples=max_examples, database=None, derandomize=True)
         def collect(**kwargs: Any) -> None:
             nonlocal new_edge_count, stale_count
             if collector:
@@ -1149,7 +1149,7 @@ def mine_pair(
     try:
 
         @given(**strategies)
-        @settings(max_examples=max_examples, database=None)
+        @settings(max_examples=max_examples, database=None, derandomize=True)
         def collect(**kwargs: Any) -> None:
             out = f(**kwargs)
             outputs_f.append(out)
@@ -1187,7 +1187,7 @@ def mine_pair(
         try:
 
             @given(**strategies_g)
-            @settings(max_examples=max_examples, database=None)
+            @settings(max_examples=max_examples, database=None, derandomize=True)
             def collect_g(**kwargs: Any) -> None:
                 out = g(**kwargs)
                 g_outputs.append(out)
@@ -1339,7 +1339,7 @@ def _check_roundtrip(
     try:
 
         @given(**strategies)
-        @settings(max_examples=max_examples, database=None)
+        @settings(max_examples=max_examples, database=None, derandomize=True)
         def collect(**kwargs: Any) -> None:
             out = f(**kwargs)
             outputs_f.append(out)
@@ -1424,7 +1424,7 @@ def _check_composition_commutativity(
     try:
 
         @given(**strategies)
-        @settings(max_examples=max_examples, database=None)
+        @settings(max_examples=max_examples, database=None, derandomize=True)
         def collect(**kwargs: Any) -> None:
             inputs.append(dict(kwargs))
 
@@ -1502,7 +1502,7 @@ def _check_output_equivalence(
     try:
 
         @given(**strategies)
-        @settings(max_examples=max_examples, database=None)
+        @settings(max_examples=max_examples, database=None, derandomize=True)
         def collect(**kwargs: Any) -> None:
             inputs.append(dict(kwargs))
 

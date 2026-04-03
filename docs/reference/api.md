@@ -1602,7 +1602,7 @@ Individual steps (`explore_mine`, `explore_scan`, `explore_mutate`, `explore_cha
 ## Deterministic Supervisor
 
 !!! quote "Control non-determinism for reproducible exploration"
-    Execution is non-deterministic: RNG state, time, GC timing all vary between runs. The same code can produce different behavior. `DeterministicSupervisor` fixes this by seeding every entropy source and replacing time with a deterministic clock. Same seed = same execution. Different seeds = different exploration trajectories.
+    Execution is non-deterministic: RNG state, time, subprocess timing, and interleavings all vary between runs. The same code can produce different behavior. `DeterministicSupervisor` fixes this by seeding every entropy source, replacing time with a deterministic clock, and optionally running subprocesses and cooperative tasks against a seed-driven scheduler. Same seed = same execution. Different seeds = different exploration trajectories.
 
 ```python
 from ordeal.supervisor import DeterministicSupervisor, StateTree, StateNode
@@ -1623,18 +1623,34 @@ with DeterministicSupervisor(seed=42, patch_io=True) as sup:
     sup.register_subprocess(["worker", "--once"], stdout="ok\n", delay=2.0)
     out = subprocess.check_output(["worker", "--once"], text=True)
     assert out == "ok\n"
+
+with DeterministicSupervisor(seed=42) as sup:
+    def worker(name):
+        yield sup.yield_now()
+        yield sup.sleep(1.0)
+        return name
+
+    sup.spawn("a", worker, "a")
+    sup.spawn("b", worker, "b")
+    results = sup.run_until_idle()
 ```
 
 | Method | Description |
 |---|---|
 | `log_transition(action, state_hash=)` | Record a state transition |
+| `spawn(name, task, *args, **kwargs)` | Register a cooperative task with the deterministic scheduler |
+| `yield_now()` | Yield control back to the scheduler |
+| `sleep(seconds)` | Suspend the running task for simulated time |
+| `run_until_idle(max_steps=None)` | Run cooperative tasks until completion or a step limit |
 | `register_subprocess(command, stdout=, stderr=, returncode=, delay=, match=)` | Register deterministic `subprocess.run` / `check_output` / `Popen` behavior |
 | `clear_subprocesses()` | Remove registered deterministic subprocesses |
 | `fork(new_seed=)` | Create a new supervisor from current state with different seed |
 | `state` | Current state hash |
 | `trajectory` | List of `Transition` objects |
 | `visited_states` | All states visited |
-| `reproduction_info()` | Dict with seed, `patch_io`, subprocess count, hash seed, steps — everything needed to replay |
+| `task_results` | Completed cooperative task results keyed by name |
+| `pending_tasks` | Cooperative tasks that are still blocked or runnable |
+| `reproduction_info()` | Dict with seed, `patch_io`, subprocess count, scheduler steps, hash seed, steps — everything needed to replay |
 | `summary()` | Human-readable trajectory report |
 
 ### StateTree

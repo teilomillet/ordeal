@@ -17,8 +17,10 @@ import io
 import json
 import os
 import re
+import shlex
 import sys
 import time as _time
+from datetime import UTC, datetime
 from pathlib import Path
 from pprint import pformat
 from typing import TYPE_CHECKING, Any, Callable
@@ -194,7 +196,8 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
     )
     print(
         "Add '--save-artifacts' to scan for the full bug bundle:"
-        f" {_default_scan_report_path('mymod')} + {_DEFAULT_REGRESSION_PATH}."
+        f" {_default_scan_report_path('mymod')} + {_DEFAULT_REGRESSION_PATH}"
+        f" + {_default_artifact_index_path()}."
     )
     print("Run 'ordeal catalog --detail' for signatures and docs.")
     print("Python: from ordeal import catalog; catalog()")
@@ -341,15 +344,30 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     save_artifacts = getattr(args, "save_artifacts", False)
     report_path = args.report_file
     regression_path = args.write_regression
+    written_report_path: Path | None = None
+    written_regression_path: Path | None = None
     if save_artifacts and state.findings:
         report_path = report_path or _default_scan_report_path(state.module)
         regression_path = regression_path or _DEFAULT_REGRESSION_PATH
     if report_path:
-        _write_scan_report(state, report_path)
+        written_report_path = _write_scan_report(state, report_path)
     if regression_path:
-        _write_scan_regressions(state, regression_path)
+        written_regression_path = _write_scan_regressions(state, regression_path)
     if save_artifacts and not state.findings:
         _stderr("No findings yet; no artifacts written.\n")
+    if save_artifacts and state.findings and written_report_path is not None:
+        index_path = _write_scan_artifact_index(
+            state=state,
+            report_path=written_report_path,
+            regression_path=written_regression_path,
+        )
+        if not args.json:
+            _print_scan_artifact_workflow(
+                module=state.module,
+                report_path=written_report_path,
+                regression_path=written_regression_path,
+                index_path=index_path,
+            )
 
     return 1 if state.findings else 0
 
@@ -1570,6 +1588,21 @@ def _default_scan_report_path(module: str) -> str:
     return str(Path(_DEFAULT_FINDINGS_DIR).joinpath(*parts).with_suffix(".md"))
 
 
+def _default_artifact_index_path() -> str:
+    """Return the default artifact index path for saved scan findings."""
+    return str(Path(_DEFAULT_FINDINGS_DIR) / "index.json")
+
+
+def _display_path(path: Path) -> str:
+    """Render a path in a stable, shell-friendly form for CLI output."""
+    return path.as_posix()
+
+
+def _shell_command(*parts: str) -> str:
+    """Join shell arguments into a displayable command string."""
+    return shlex.join(parts)
+
+
 def _python_literal(value: Any, *, trim: bool = True) -> str:
     """Render a stable Python literal for regression stubs."""
     rendered = (
@@ -2078,22 +2111,23 @@ def _build_mine_report(
     }
 
 
-def _write_scan_report(state: Any, path_str: str) -> None:
+def _write_scan_report(state: Any, path_str: str) -> Path:
     """Write a Markdown report for `ordeal scan`."""
     path = Path(path_str)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_render_scan_report_markdown(state), encoding="utf-8")
     _stderr(f"Scan report saved: {path}\n")
+    return path
 
 
-def _write_scan_regressions(state: Any, path_str: str) -> None:
+def _write_scan_regressions(state: Any, path_str: str) -> Path | None:
     """Write runnable pytest regressions for concrete scan findings."""
     stubs, skipped = _scan_regression_stubs(state)
     if not stubs:
         _stderr("No concrete regression tests could be generated from current scan findings.\n")
         if skipped:
             _stderr(f"Skipped {len(skipped)} finding(s) without replayable concrete inputs.\n")
-        return
+        return None
     path, added, deduped = _write_regression_file(
         path_str=path_str,
         header=[
@@ -2115,6 +2149,96 @@ def _write_scan_regressions(state: Any, path_str: str) -> None:
         _stderr(f"Skipped {len(skipped)} finding(s) without replayable concrete inputs.\n")
     if deduped:
         _stderr(f"Skipped {deduped} existing regression(s) already present in {path.name}.\n")
+    return path
+
+
+def _write_scan_artifact_index(
+    *,
+    state: Any,
+    report_path: Path,
+    regression_path: Path | None,
+) -> Path:
+    """Append a `scan --save-artifacts` record to the artifact index."""
+    path = Path(_default_artifact_index_path())
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    payload: dict[str, Any] = {"version": 1, "entries": []}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            loaded = {}
+        if isinstance(loaded, dict) and isinstance(loaded.get("entries"), list):
+            payload = {
+                "version": int(loaded.get("version", 1)),
+                "entries": list(loaded["entries"]),
+            }
+
+    report = _build_scan_report(state)
+    payload["entries"].append(
+        {
+            "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "module": state.module,
+            "status": report["status"],
+            "confidence": round(state.confidence, 4),
+            "seed": report.get("seed"),
+            "finding_count": len(report["details"]),
+            "findings": [
+                {
+                    "qualname": detail.get("qualname"),
+                    "kind": detail.get("kind"),
+                    "name": detail.get("name"),
+                    "summary": detail.get("summary"),
+                }
+                for detail in report["details"]
+            ],
+            "artifacts": {
+                "report": _display_path(report_path),
+                "regression": _display_path(regression_path) if regression_path else None,
+            },
+            "commands": {
+                "pytest": (
+                    _shell_command("uv", "run", "pytest", _display_path(regression_path), "-q")
+                    if regression_path
+                    else None
+                ),
+                "rescan": _shell_command(
+                    "uv",
+                    "run",
+                    "ordeal",
+                    "scan",
+                    state.module,
+                    "--save-artifacts",
+                ),
+            },
+        }
+    )
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    _stderr(f"Artifact index updated: {path}\n")
+    return path
+
+
+def _print_scan_artifact_workflow(
+    *,
+    module: str,
+    report_path: Path,
+    regression_path: Path | None,
+    index_path: Path,
+) -> None:
+    """Print the closed-loop next steps after saving scan artifacts."""
+    print("")
+    print("artifacts:")
+    print(f"  report: {_display_path(report_path)}")
+    if regression_path is not None:
+        print(f"  regression: {_display_path(regression_path)}")
+    else:
+        print("  regression: not generated from current findings")
+    print(f"  index: {_display_path(index_path)}")
+    print("next:")
+    print(f"  review: {_display_path(report_path)}")
+    if regression_path is not None:
+        print(f"  run: {_shell_command('uv', 'run', 'pytest', _display_path(regression_path), '-q')}")
+    print(f"  after fix: {_shell_command('uv', 'run', 'ordeal', 'scan', module, '--save-artifacts')}")
 
 
 def _write_mine_regressions(
@@ -2245,7 +2369,7 @@ def main(argv: list[str] | None = None) -> int:
             "Ordeal — discovers what's true about your code.\n\n"
             "Start here:\n"
             "  ordeal scan mymod --save-artifacts\n"
-            "                              Save report + regressions\n"
+            "                              Save report + regressions + history\n"
             "  ordeal scan mymod --report-file report.md\n"
             "                              Save a shareable bug report\n"
             "  ordeal scan mymod --write-regression\n"
@@ -2299,7 +2423,7 @@ def main(argv: list[str] | None = None) -> int:
         description=(
             f"{scan_desc}\n\n"
             f"Use --save-artifacts to save both {_default_scan_report_path('mymod')} and"
-            f" {_DEFAULT_REGRESSION_PATH} when findings exist.\n"
+            f" {_DEFAULT_REGRESSION_PATH}, then update {_default_artifact_index_path()}.\n"
             "Use --report-file report.md to save a shareable Markdown bug report.\n"
             f"Use --write-regression or --write-regression PATH to save runnable pytest"
             f" regressions (default: {_DEFAULT_REGRESSION_PATH})."
@@ -2326,6 +2450,7 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "When findings exist, write both the default Markdown dossier and"
             f" regression file ({_default_scan_report_path('mymod')}, {_DEFAULT_REGRESSION_PATH})"
+            f" and update {_default_artifact_index_path()}"
         ),
     )
     scan_p.add_argument(

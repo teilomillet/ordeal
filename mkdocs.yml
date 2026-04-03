@@ -57,6 +57,7 @@ nav:
       - Fault Injection: concepts/fault-injection.md
       - Shrinking: concepts/shrinking.md
   - Guides:
+      - Bug Bundle: guides/bug-bundle.md
       - Writing Tests: guides/writing-tests.md
       - Explorer: guides/explorer.md
       - Auto Testing: guides/auto.md

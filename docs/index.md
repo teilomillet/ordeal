@@ -97,6 +97,7 @@ Every goal maps to a starting point — a command to run, a module to import, an
 
 | I want to... | Start here | Learn more |
 |---|---|---|
+| Capture a bug and lock it in | `ordeal scan mymodule --save-artifacts` | [Bug Bundle](guides/bug-bundle.md) |
 | Find bugs without writing tests | `ordeal mine mymodule` | [Auto Testing](guides/auto.md) |
 | Check if my tests are good enough | `ordeal audit mymodule` | [Mutations](guides/mutations.md) |
 | Write a chaos test | `from ordeal import ChaosTest` | [Getting Started](getting-started.md) |

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -87,6 +88,7 @@ class TestCLI:
         assert "tests/test_ordeal_regressions.py" in out
         assert "--save-artifacts" in out
         assert ".ordeal/findings/mymod.md" in out
+        assert ".ordeal/findings/index.json" in out
 
     def test_explore_missing_config(self):
         assert main(["explore", "--config", "/nonexistent.toml"]) == 1
@@ -344,14 +346,41 @@ class TestCLI:
         captured = capsys.readouterr()
 
         report_path = tmp_path / ".ordeal" / "findings" / "pkg" / "mod.md"
+        index_path = tmp_path / ".ordeal" / "findings" / "index.json"
         regression_path = tmp_path / "tests" / "test_ordeal_regressions.py"
         assert rc == 1
         assert report_path.exists()
+        assert index_path.exists()
         assert regression_path.exists()
         assert "Target: `pkg.mod`" in report_path.read_text()
         assert "def test_normalize_idempotent_regression() -> None:" in regression_path.read_text()
+        artifact_index = json.loads(index_path.read_text())
+        assert artifact_index["version"] == 1
+        assert len(artifact_index["entries"]) == 1
+        assert artifact_index["entries"][0]["module"] == "pkg.mod"
+        assert artifact_index["entries"][0]["artifacts"]["report"] == ".ordeal/findings/pkg/mod.md"
+        assert (
+            artifact_index["entries"][0]["artifacts"]["regression"]
+            == "tests/test_ordeal_regressions.py"
+        )
+        assert (
+            artifact_index["entries"][0]["commands"]["pytest"]
+            == "uv run pytest tests/test_ordeal_regressions.py -q"
+        )
+        assert (
+            artifact_index["entries"][0]["commands"]["rescan"]
+            == "uv run ordeal scan pkg.mod --save-artifacts"
+        )
+        assert "artifacts:" in captured.out
+        assert "report: .ordeal/findings/pkg/mod.md" in captured.out
+        assert "regression: tests/test_ordeal_regressions.py" in captured.out
+        assert "index: .ordeal/findings/index.json" in captured.out
+        assert "next:" in captured.out
+        assert "run: uv run pytest tests/test_ordeal_regressions.py -q" in captured.out
+        assert "after fix: uv run ordeal scan pkg.mod --save-artifacts" in captured.out
         assert "Scan report saved:" in captured.err
         assert "Regression tests written:" in captured.err
+        assert "Artifact index updated:" in captured.err
 
     def test_scan_save_artifacts_skips_writes_without_findings(
         self, monkeypatch, tmp_path, capsys
@@ -375,7 +404,89 @@ class TestCLI:
         assert rc == 0
         assert not (tmp_path / ".ordeal").exists()
         assert not (tmp_path / "tests").exists()
+        assert "artifacts:" not in captured.out
         assert "No findings yet; no artifacts written." in captured.err
+
+    def test_scan_save_artifacts_keeps_report_history_without_regression_stub(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        state = SimpleNamespace(
+            module="pkg.mod",
+            confidence=0.58,
+            functions={"score": object()},
+            supervisor_info={"seed": 42},
+            tree=SimpleNamespace(size=1),
+            findings=["score: mutation score 67%, 1 unhardened survivor(s)"],
+            frontier={"score": ["mutation score 67%, 1 unhardened survivor(s)"]},
+            finding_details=[
+                {
+                    "kind": "mutation",
+                    "function": "score",
+                    "summary": "mutation score 67%, 1 unhardened survivor(s)",
+                    "mutation_score": 0.67,
+                    "survived_mutants": 1,
+                }
+            ],
+        )
+
+        monkeypatch.setattr(ordeal_state, "explore", lambda *args, **kwargs: state)
+
+        rc = main(["scan", "pkg.mod", "--save-artifacts", "-n", "10"])
+        captured = capsys.readouterr()
+
+        report_path = tmp_path / ".ordeal" / "findings" / "pkg" / "mod.md"
+        index_path = tmp_path / ".ordeal" / "findings" / "index.json"
+        regression_path = tmp_path / "tests" / "test_ordeal_regressions.py"
+        assert rc == 1
+        assert report_path.exists()
+        assert index_path.exists()
+        assert not regression_path.exists()
+        artifact_index = json.loads(index_path.read_text())
+        assert artifact_index["entries"][0]["artifacts"]["regression"] is None
+        assert artifact_index["entries"][0]["commands"]["pytest"] is None
+        assert "No concrete regression tests could be generated" in captured.err
+        assert "Artifact index updated:" in captured.err
+        assert "regression: not generated from current findings" in captured.out
+        assert "after fix: uv run ordeal scan pkg.mod --save-artifacts" in captured.out
+
+    def test_scan_save_artifacts_appends_index_history(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.chdir(tmp_path)
+        state = SimpleNamespace(
+            module="pkg.mod",
+            confidence=0.63,
+            functions={"normalize": object()},
+            supervisor_info={"seed": 42, "trajectory_steps": 5},
+            tree=SimpleNamespace(size=3),
+            findings=["normalize: idempotent (87%)"],
+            frontier={"normalize": ["property: idempotent (87%)"]},
+            finding_details=[
+                {
+                    "kind": "property",
+                    "function": "normalize",
+                    "name": "idempotent",
+                    "summary": "idempotent (87%)",
+                    "confidence": 0.87,
+                    "holds": 26,
+                    "total": 30,
+                    "counterexample": {
+                        "input": {"xs": [9, 8, 7, 6, 5, 4, 3, 2]},
+                        "output": [1.0, 0.5, 0.0],
+                        "replayed": [0.66, 0.33, 0.0],
+                    },
+                }
+            ],
+        )
+
+        monkeypatch.setattr(ordeal_state, "explore", lambda *args, **kwargs: state)
+
+        assert main(["scan", "pkg.mod", "--save-artifacts", "-n", "10"]) == 1
+        capsys.readouterr()
+        assert main(["scan", "pkg.mod", "--save-artifacts", "-n", "10"]) == 1
+        capsys.readouterr()
+
+        artifact_index = json.loads((tmp_path / ".ordeal" / "findings" / "index.json").read_text())
+        assert len(artifact_index["entries"]) == 2
 
     def test_scan_write_regression_defaults_and_dedupes(self, monkeypatch, tmp_path, capsys):
         monkeypatch.chdir(tmp_path)

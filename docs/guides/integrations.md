@@ -129,7 +129,7 @@ The combination tests a question that neither schema-driven generation nor fault
 
 ### Two patterns
 
-**Quick one-liner with `chaos_api_test()`**: loads the schema, generates test cases for every endpoint, and randomly injects faults. Good for CI or quick validation.
+**Quick one-liner with `chaos_api_test()`**: loads the schema, generates test cases for every endpoint, follows supported OpenAPI links into short stateful sequences, and randomly injects faults. Good for CI or quick validation.
 
 ```python
 from ordeal.integrations.openapi import chaos_api_test
@@ -142,6 +142,9 @@ chaos_api_test(
         io.error_on_call("myapp.storage.save"),
     ],
 )
+
+# If your schema declares response links, stateful=True follows them automatically.
+chaos_api_test("http://localhost:8080/openapi.json", faults=[...], stateful=True)
 
 # With swarm mode — random fault subset per session, better coverage:
 chaos_api_test(

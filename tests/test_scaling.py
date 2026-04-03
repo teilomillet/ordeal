@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import math
+from types import SimpleNamespace
 
 import pytest
 
+import ordeal.scaling as scaling
 from ordeal.scaling import (
     amdahl,
     analyze,
+    benchmark,
     fit_usl,
     optimal_n,
     peak_throughput,
@@ -192,3 +196,88 @@ class TestAnalyze:
         data = [(n, usl(n, sigma, kappa)) for n in [1, 2, 4, 8, 16]]
         result = analyze(data)
         assert result.throughput(4) == pytest.approx(usl(4, sigma, kappa))
+
+
+class TestMutationBenchmark:
+    def test_benchmark_mutations_aggregates_trials(self, monkeypatch):
+        payloads = iter(
+            [
+                {
+                    "seconds": 0.30,
+                    "total": 4,
+                    "killed": 3,
+                    "score": 0.75,
+                    "timings": {"generate_seconds": 0.01, "pytest_seconds": 0.26},
+                    "diagnostics": {"selected_test_files": 2, "collected_tests": 5},
+                },
+                {
+                    "seconds": 0.28,
+                    "total": 4,
+                    "killed": 3,
+                    "score": 0.75,
+                    "timings": {"generate_seconds": 0.01, "pytest_seconds": 0.24},
+                    "diagnostics": {"selected_test_files": 2, "collected_tests": 5},
+                },
+                {
+                    "seconds": 0.34,
+                    "total": 4,
+                    "killed": 3,
+                    "score": 0.75,
+                    "timings": {"generate_seconds": 0.02, "pytest_seconds": 0.29},
+                    "diagnostics": {"selected_test_files": 3, "collected_tests": 6},
+                },
+            ]
+        )
+
+        def fake_run(args, cwd, text, capture_output, check):
+            payload = next(payloads)
+            return SimpleNamespace(
+                stdout="noise\n"
+                + scaling._MUTATION_BENCHMARK_MARKER
+                + json.dumps(payload)
+                + "\n",
+                stderr="",
+                returncode=0,
+            )
+
+        monkeypatch.setattr(scaling.subprocess, "run", fake_run)
+
+        suite = benchmark(
+            mutate_targets=["pkg.mod.compute"],
+            repeats=3,
+            workers=2,
+            preset="essential",
+            cwd="/tmp",
+        )
+
+        case = suite.cases[0]
+        assert suite.repeats == 3
+        assert case.median_seconds == pytest.approx(0.30)
+        assert case.phase_medians["pytest_seconds"] == pytest.approx(0.26)
+        assert case.median_selected_test_files == 2
+        assert case.median_collected_tests == 5
+
+    def test_benchmark_mutations_summary(self, monkeypatch):
+        payload = {
+            "seconds": 0.25,
+            "total": 2,
+            "killed": 2,
+            "score": 1.0,
+            "timings": {"total_seconds": 0.25, "pytest_seconds": 0.20},
+            "diagnostics": {"selected_test_files": 1, "collected_tests": 2},
+        }
+
+        def fake_run(args, cwd, text, capture_output, check):
+            return SimpleNamespace(
+                stdout=scaling._MUTATION_BENCHMARK_MARKER + json.dumps(payload) + "\n",
+                stderr="",
+                returncode=0,
+            )
+
+        monkeypatch.setattr(scaling.subprocess, "run", fake_run)
+
+        suite = benchmark(mutate_targets=["pkg.mod.compute"], repeats=1, cwd="/tmp")
+        text = suite.summary()
+        assert "Mutation Benchmark" in text
+        assert "pkg.mod.compute" in text
+        assert "pytest_seconds" in text

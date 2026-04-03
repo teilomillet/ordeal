@@ -19,9 +19,12 @@ source the Python runtime exposes:
    inputs are identical.
 2. **Time** — ``time.time()`` and ``time.sleep()`` are replaced with
    ``simulate.Clock``.  Execution timing is deterministic.
-3. **Hash randomization** — ``PYTHONHASHSEED`` is logged (can't be changed
+3. **Process boundary** — ``subprocess.run`` / ``check_output`` /
+   ``Popen`` can be registered against deterministic outputs and the
+   supervisor clock.  Child-process interactions become replayable.
+4. **Hash randomization** — ``PYTHONHASHSEED`` is logged (can't be changed
    at runtime, but knowing it enables exact reproduction).
-4. **State trajectory** — every (state_hash, action, next_state_hash)
+5. **State trajectory** — every (state_hash, action, next_state_hash)
    transition is logged.  The exploration is a Markov chain that can be
    replayed, forked from any point, and analyzed for unexplored transitions.
 
@@ -37,6 +40,11 @@ Usage::
         # All RNGs seeded, time is simulated, trajectory is logged
         result = my_function()
         sup.log_transition("called my_function", state_hash=hash(result))
+
+    with DeterministicSupervisor(seed=42, patch_io=True) as sup:
+        sup.register_subprocess(["worker", "--once"], stdout="ok\n", delay=2.0)
+        # Child process call advances simulated time, not wall clock
+        subprocess.check_output(["worker", "--once"])
 
     # Replay: same seed → same execution
     with DeterministicSupervisor(seed=42) as sup:
@@ -69,9 +77,11 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import json
 import os
 import random
+import subprocess as _sp
 import unittest.mock
 from dataclasses import dataclass, field
 from typing import Any
@@ -92,6 +102,159 @@ class Transition:
         before = f"{self.state_before:#06x}"
         after = f"{self.state_after:#06x}"
         return f"  [{self.step}] {before} -> {self.action} -> {after}"
+
+
+@dataclass(frozen=True)
+class _RegisteredSubprocess:
+    """One deterministic subprocess registration."""
+
+    command: str
+    match: str
+    stdout: bytes
+    stderr: bytes
+    returncode: int
+    delay: float
+
+
+def _normalize_command(command: Any) -> str:
+    """Normalize subprocess args into one comparable command string."""
+    if isinstance(command, (list, tuple)):
+        return " ".join(str(part) for part in command)
+    return str(command)
+
+
+def _encode_stream(data: str | bytes) -> bytes:
+    """Normalize subprocess stream data to bytes."""
+    return data.encode() if isinstance(data, str) else data
+
+
+def _decode_stream(
+    data: bytes,
+    *,
+    text: bool,
+    encoding: str | None,
+    errors: str | None,
+) -> str | bytes:
+    """Convert bytes to the caller's requested subprocess stream type."""
+    if not text:
+        return data
+    return data.decode(encoding or "utf-8", errors or "strict")
+
+
+class _DeterministicPopen:
+    """Minimal in-memory ``Popen`` backed by the supervisor clock."""
+
+    def __init__(
+        self,
+        supervisor: "DeterministicSupervisor",
+        args: Any,
+        registration: _RegisteredSubprocess,
+        *,
+        text: bool,
+        encoding: str | None,
+        errors: str | None,
+        stdout_pipe: bool,
+        stderr_pipe: bool,
+    ) -> None:
+        self._supervisor = supervisor
+        self.args = args
+        self._command = _normalize_command(args)
+        self._registration = registration
+        self._text = text
+        self._encoding = encoding
+        self._errors = errors
+        self._stdout_pipe = stdout_pipe
+        self._stderr_pipe = stderr_pipe
+        self._stdout_value = _decode_stream(
+            registration.stdout,
+            text=text,
+            encoding=encoding,
+            errors=errors,
+        )
+        self._stderr_value = _decode_stream(
+            registration.stderr,
+            text=text,
+            encoding=encoding,
+            errors=errors,
+        )
+        self.returncode: int | None = None
+        self.pid = supervisor._next_pid
+        supervisor._next_pid += 1
+        supervisor._subprocess_calls += 1
+        self._complete_at = supervisor.clock.time() + registration.delay
+        self.stdout = None
+        self.stderr = None
+        if stdout_pipe:
+            self.stdout = (
+                io.StringIO(self._stdout_value)
+                if text
+                else io.BytesIO(self._stdout_value)
+            )
+        if stderr_pipe:
+            self.stderr = (
+                io.StringIO(self._stderr_value)
+                if text
+                else io.BytesIO(self._stderr_value)
+            )
+        supervisor.log_transition(f"subprocess.Popen({self._command}) pid={self.pid}")
+
+    def _finish(self) -> int:
+        """Mark the subprocess complete and log the exit once."""
+        if self.returncode is None:
+            self.returncode = self._registration.returncode
+            self._supervisor.log_transition(
+                f"subprocess.exit({self._command}) -> {self.returncode}"
+            )
+        return self.returncode
+
+    def poll(self) -> int | None:
+        """Return the process return code if it has completed."""
+        if self.returncode is not None:
+            return self.returncode
+        if self._supervisor.clock.time() >= self._complete_at:
+            return self._finish()
+        return None
+
+    def wait(self, timeout: float | None = None) -> int:
+        """Wait for deterministic completion, advancing simulated time."""
+        if self.returncode is not None:
+            return self.returncode
+
+        remaining = max(0.0, self._complete_at - self._supervisor.clock.time())
+        if timeout is not None and remaining > timeout:
+            self._supervisor.clock.sleep(timeout)
+            raise _sp.TimeoutExpired(self.args, timeout)
+
+        self._supervisor.clock.sleep(remaining)
+        return self._finish()
+
+    def communicate(
+        self,
+        input: Any = None,
+        timeout: float | None = None,
+    ) -> tuple[str | bytes | None, str | bytes | None]:
+        """Wait for completion and return deterministic stdout/stderr."""
+        del input
+        self.wait(timeout=timeout)
+        stdout = self._stdout_value if self._stdout_pipe else None
+        stderr = self._stderr_value if self._stderr_pipe else None
+        return stdout, stderr
+
+    def kill(self) -> None:
+        """Terminate the simulated subprocess immediately."""
+        self.returncode = -9
+        self._supervisor.log_transition(f"subprocess.kill({self._command})")
+
+    def terminate(self) -> None:
+        """Terminate the simulated subprocess gracefully."""
+        self.returncode = -15
+        self._supervisor.log_transition(f"subprocess.terminate({self._command})")
+
+    def __enter__(self) -> "_DeterministicPopen":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.wait()
 
 
 class DeterministicSupervisor:
@@ -134,6 +297,53 @@ class DeterministicSupervisor:
         self._current_state: int = 0
         self._patches: list[Any] = []
         self._saved_random_state: Any = None
+        self._registered_subprocesses: list[_RegisteredSubprocess] = []
+        self._subprocess_calls = 0
+        self._next_pid = 1000
+
+    def register_subprocess(
+        self,
+        command: str | list[str] | tuple[str, ...],
+        *,
+        stdout: str | bytes = b"",
+        stderr: str | bytes = b"",
+        returncode: int = 0,
+        delay: float = 0.0,
+        match: str = "exact",
+    ) -> None:
+        """Register a deterministic subprocess result for ``patch_io=True``.
+
+        This is the first step from process-local determinism toward a
+        system substrate: code under test can cross a process boundary
+        and still remain reproducible.  Registered commands run against
+        the supervisor clock, never the OS scheduler.
+
+        Args:
+            command: Exact command or argv to match.
+            stdout: Simulated standard output.
+            stderr: Simulated standard error.
+            returncode: Exit status returned by the child.
+            delay: Simulated runtime in seconds.
+            match: ``"exact"`` or ``"contains"``.
+        """
+        if match not in {"exact", "contains"}:
+            raise ValueError("match must be 'exact' or 'contains'")
+        if delay < 0:
+            raise ValueError("delay must be >= 0")
+        self._registered_subprocesses.append(
+            _RegisteredSubprocess(
+                command=_normalize_command(command),
+                match=match,
+                stdout=_encode_stream(stdout),
+                stderr=_encode_stream(stderr),
+                returncode=returncode,
+                delay=delay,
+            )
+        )
+
+    def clear_subprocesses(self) -> None:
+        """Remove all deterministic subprocess registrations."""
+        self._registered_subprocesses.clear()
 
     def __enter__(self) -> DeterministicSupervisor:
         """Activate deterministic mode: seed RNGs, patch I/O, start logging.
@@ -152,6 +362,8 @@ class DeterministicSupervisor:
         - ``time.time()`` / ``time.sleep()`` → ``simulate.Clock``
         - ``builtins.open()`` → ``simulate.FileSystem`` (in-memory)
         - ``socket.create_connection`` → raises ``ConnectionRefusedError``
+        - ``subprocess.run`` / ``check_output`` / ``Popen`` → deterministic,
+          registered child processes on the supervisor clock
 
         **Thread tracking** (observable, logged):
         - ``threading.Thread.start`` → wrapped to log thread creation
@@ -170,13 +382,14 @@ class DeterministicSupervisor:
         random.seed(self.seed)
 
         # -- 2. Hypothesis --
-        # Hypothesis has its own internal RNG (ConjectureData) seeded by
-        # a hash of the test source, not our seed.  We disable the database
-        # to prevent cross-run leakage, but cannot make Hypothesis fully
-        # deterministic from outside.
+        # Hypothesis has its own internal RNG. In supervisor mode we force
+        # derandomized execution and disable the example database so
+        # property mining and scan phases are reproducible across runs.
         #
-        # What this means: mine() property confidence may vary slightly.
-        # Mutation scores, edge counts, crash status are fully deterministic.
+        # Important nuance: Hypothesis's derandomized trajectory is tied to
+        # the test source, not to ``self.seed``. The supervisor seed still
+        # controls Python RNGs, buggify, and mutation loops; Hypothesis gets
+        # exact replay, but not seed-based exploration diversity.
         try:
             from hypothesis import settings
 
@@ -184,6 +397,7 @@ class DeterministicSupervisor:
             settings.default = settings(
                 settings.default,
                 database=None,
+                derandomize=True,
             )
         except Exception:
             self._saved_hypothesis_settings = None
@@ -215,6 +429,7 @@ class DeterministicSupervisor:
         # When patch_io is True, all I/O is deterministic:
         #   - open() routes to in-memory FileSystem
         #   - socket connections are refused (no network)
+        #   - subprocess calls use registered deterministic outputs
         #   - thread creation is logged in the trajectory
         # When patch_io is False (default), only RNGs and time are
         # patched — real I/O works normally. Use patch_io=True when
@@ -235,6 +450,24 @@ class DeterministicSupervisor:
             )
             self._socket_patch.start()
 
+            self._subprocess_run_patch = unittest.mock.patch(
+                "subprocess.run",
+                side_effect=self._deterministic_run,
+            )
+            self._subprocess_run_patch.start()
+
+            self._check_output_patch = unittest.mock.patch(
+                "subprocess.check_output",
+                side_effect=self._deterministic_check_output,
+            )
+            self._check_output_patch.start()
+
+            self._popen_patch = unittest.mock.patch(
+                "subprocess.Popen",
+                side_effect=self._deterministic_popen,
+            )
+            self._popen_patch.start()
+
             import threading as _threading
 
             self._original_thread_start = _threading.Thread.start
@@ -251,6 +484,119 @@ class DeterministicSupervisor:
             self._thread_patch.start()
 
         return self
+
+    def _resolve_subprocess(self, command: Any) -> _RegisteredSubprocess:
+        """Find the deterministic registration for a subprocess command."""
+        command_str = _normalize_command(command)
+        for entry in reversed(self._registered_subprocesses):
+            if entry.match == "exact" and command_str == entry.command:
+                return entry
+            if entry.match == "contains" and entry.command in command_str:
+                return entry
+        raise FileNotFoundError(
+            "DeterministicSupervisor: subprocess not registered: "
+            f"{command_str!r}. Register it with supervisor.register_subprocess()."
+        )
+
+    @staticmethod
+    def _subprocess_stream_flags(kwargs: dict[str, Any]) -> tuple[bool, bool]:
+        """Determine whether stdout/stderr are captured for this call."""
+        capture_output = bool(kwargs.get("capture_output"))
+        stdout_pipe = capture_output or kwargs.get("stdout") == _sp.PIPE
+        stderr_pipe = capture_output or kwargs.get("stderr") == _sp.PIPE
+        return stdout_pipe, stderr_pipe
+
+    @staticmethod
+    def _subprocess_text_mode(kwargs: dict[str, Any]) -> bool:
+        """Whether subprocess output should be decoded to text."""
+        return bool(
+            kwargs.get("text")
+            or kwargs.get("universal_newlines")
+            or kwargs.get("encoding") is not None
+        )
+
+    def _deterministic_run(self, *args: Any, **kwargs: Any) -> _sp.CompletedProcess[Any]:
+        """Deterministic ``subprocess.run`` backed by registered outputs."""
+        command = args[0] if args else kwargs.get("args")
+        registration = self._resolve_subprocess(command)
+        command_str = _normalize_command(command)
+        timeout = kwargs.get("timeout")
+        text_mode = self._subprocess_text_mode(kwargs)
+        encoding = kwargs.get("encoding")
+        errors = kwargs.get("errors")
+        stdout_pipe, stderr_pipe = self._subprocess_stream_flags(kwargs)
+        stdout_value = _decode_stream(
+            registration.stdout,
+            text=text_mode,
+            encoding=encoding,
+            errors=errors,
+        )
+        stderr_value = _decode_stream(
+            registration.stderr,
+            text=text_mode,
+            encoding=encoding,
+            errors=errors,
+        )
+
+        self._subprocess_calls += 1
+        if timeout is not None and registration.delay > timeout:
+            self.clock.sleep(timeout)
+            self.log_transition(f"subprocess.run({command_str}) -> timeout")
+            raise _sp.TimeoutExpired(
+                command,
+                timeout,
+                output=stdout_value if stdout_pipe else None,
+                stderr=stderr_value if stderr_pipe else None,
+            )
+
+        self.clock.sleep(registration.delay)
+        self.log_transition(
+            f"subprocess.run({command_str}) -> {registration.returncode}"
+        )
+
+        result = _sp.CompletedProcess(
+            args=command,
+            returncode=registration.returncode,
+            stdout=stdout_value if stdout_pipe else None,
+            stderr=stderr_value if stderr_pipe else None,
+        )
+
+        if kwargs.get("check") and registration.returncode != 0:
+            raise _sp.CalledProcessError(
+                registration.returncode,
+                command,
+                output=result.stdout,
+                stderr=result.stderr,
+            )
+
+        return result
+
+    def _deterministic_check_output(self, *args: Any, **kwargs: Any) -> str | bytes:
+        """Deterministic ``subprocess.check_output``."""
+        kwargs = dict(kwargs)
+        kwargs["stdout"] = _sp.PIPE
+        kwargs["check"] = True
+        result = self._deterministic_run(*args, **kwargs)
+        return result.stdout if result.stdout is not None else ("" if kwargs.get("text") else b"")
+
+    def _deterministic_popen(self, *args: Any, **kwargs: Any) -> _DeterministicPopen:
+        """Deterministic ``subprocess.Popen`` with virtual time semantics."""
+        command = args[0] if args else kwargs.get("args")
+        registration = self._resolve_subprocess(command)
+        text_mode = self._subprocess_text_mode(kwargs)
+        encoding = kwargs.get("encoding")
+        errors = kwargs.get("errors")
+        stdout_pipe, stderr_pipe = self._subprocess_stream_flags(kwargs)
+        return _DeterministicPopen(
+            self,
+            command,
+            registration,
+            text=text_mode,
+            encoding=encoding,
+            errors=errors,
+            stdout_pipe=stdout_pipe,
+            stderr_pipe=stderr_pipe,
+        )
 
     def _deterministic_open(self, path: Any, mode: str = "r", *a: Any, **kw: Any) -> Any:
         """Route open() through the in-memory FileSystem.
@@ -292,6 +638,9 @@ class DeterministicSupervisor:
         # Stop all patches in reverse order
         for patch_name in (
             "_thread_patch",
+            "_popen_patch",
+            "_check_output_patch",
+            "_subprocess_run_patch",
             "_socket_patch",
             "_open_patch",
             "_sleep_patch",
@@ -398,6 +747,8 @@ class DeterministicSupervisor:
             f"  unique states: {len(self.visited_states)}",
             f"  unique transitions: {self.unique_transitions}",
             f"  clock: {self.clock.time():.1f}s simulated",
+            f"  patch_io: {self.patch_io}",
+            f"  subprocess calls: {self._subprocess_calls}",
         ]
         if self.trajectory:
             lines.append("  trajectory (last 10):")
@@ -417,10 +768,12 @@ class DeterministicSupervisor:
         return {
             "seed": self.seed,
             "hash_seed": self.hash_seed,
+            "patch_io": self.patch_io,
             "steps": self._step,
             "unique_states": len(self.visited_states),
             "unique_transitions": self.unique_transitions,
             "final_state": self._current_state,
+            "subprocess_calls": self._subprocess_calls,
         }
 
 

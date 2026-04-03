@@ -8,6 +8,7 @@ import hypothesis.strategies as st
 from hypothesis import settings as hsettings
 
 import ordeal.cli as cli
+import ordeal.scaling as scaling
 from ordeal import ChaosTest, always, invariant, rule
 from ordeal.assertions import tracker
 from ordeal.cli import main
@@ -156,6 +157,43 @@ verbose = false
         assert "Anytime Signal (N=1 Baseline)" in out
         assert "5s: runs=12, steps=120, edges=8, checkpoints=3, failures=0" in out
         assert "10s: runs=20, steps=220, edges=11, checkpoints=4, failures=1" in out
+
+    def test_benchmark_mutation_mode(self, monkeypatch, capsys):
+        calls: dict[str, object] = {}
+
+        class _FakeSuite:
+            def summary(self) -> str:
+                return "Mutation Benchmark\npkg.mod.compute"
+
+        def fake_benchmark(*args, **kwargs):
+            calls.update(kwargs)
+            return _FakeSuite()
+
+        monkeypatch.setattr(scaling, "benchmark", fake_benchmark)
+
+        rc = main(
+            [
+                "benchmark",
+                "--mutate",
+                "pkg.mod.compute",
+                "--repeat",
+                "3",
+                "--workers",
+                "2",
+                "--preset",
+                "essential",
+                "--no-filter-equivalent",
+            ]
+        )
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Mutation Benchmark" in out
+        assert calls["mutate_targets"] == ["pkg.mod.compute"]
+        assert calls["repeats"] == 3
+        assert calls["workers"] == 2
+        assert calls["preset"] == "essential"
+        assert calls["filter_equivalent"] is False
 
 
 # ============================================================================

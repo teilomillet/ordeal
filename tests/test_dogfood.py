@@ -398,6 +398,91 @@ class TestDeterministicSupervisor:
                 "trajectory records thread name",
             )
 
+    def test_subprocess_run_is_deterministic(self):
+        """Registered subprocesses run on the supervisor clock."""
+        import subprocess
+        import time
+
+        with DeterministicSupervisor(seed=42, patch_io=True) as sup:
+            sup.register_subprocess(
+                ["echo", "hi"],
+                stdout="hi\n",
+                delay=2.5,
+            )
+            result = subprocess.run(
+                ["echo", "hi"],
+                capture_output=True,
+                check=True,
+            )
+
+            always(result.stdout == b"hi\n", "stdout captured deterministically")
+            always(time.time() == 2.5, "subprocess advanced simulated clock")
+            always(sup._subprocess_calls == 1, "subprocess call counted")
+            always(
+                any("subprocess.run(echo hi)" in t.action for t in sup.trajectory),
+                "trajectory logs subprocess.run",
+            )
+
+    def test_subprocess_check_output_text(self):
+        """check_output should respect text=True decoding."""
+        import subprocess
+
+        with DeterministicSupervisor(seed=42, patch_io=True) as sup:
+            sup.register_subprocess("python -c print(1)", stdout="1\n")
+            out = subprocess.check_output(
+                ["python", "-c", "print(1)"],
+                text=True,
+            )
+
+            always(out == "1\n", "check_output decodes text deterministically")
+            info = sup.reproduction_info()
+            always(info["patch_io"] is True, "reproduction info records patch_io")
+            always(info["subprocess_calls"] == 1, "reproduction info counts subprocesses")
+
+    def test_subprocess_popen_timeout_and_completion(self):
+        """Popen waits and timeouts use deterministic virtual time."""
+        import subprocess
+        import time
+
+        with DeterministicSupervisor(seed=42, patch_io=True) as sup:
+            sup.register_subprocess(
+                ["worker", "--once"],
+                stdout="done\n",
+                delay=5.0,
+            )
+            proc = subprocess.Popen(
+                ["worker", "--once"],
+                stdout=subprocess.PIPE,
+            )
+
+            with pytest.raises(subprocess.TimeoutExpired):
+                proc.wait(timeout=1.0)
+
+            always(time.time() == 1.0, "timeout advanced simulated time")
+            always(proc.poll() is None, "process still running after timeout")
+
+            out, err = proc.communicate()
+            always(out == b"done\n", "communicate returns deterministic stdout")
+            always(err is None, "stderr omitted when not piped")
+            always(time.time() == 5.0, "communicate advanced to completion")
+            always(proc.returncode == 0, "process completed successfully")
+            always(
+                any("subprocess.Popen(worker --once)" in t.action for t in sup.trajectory),
+                "trajectory logs Popen start",
+            )
+            always(
+                any("subprocess.exit(worker --once)" in t.action for t in sup.trajectory),
+                "trajectory logs subprocess exit",
+            )
+
+    def test_unregistered_subprocess_fails_deterministically(self):
+        """Unknown subprocesses should fail with an actionable message."""
+        import subprocess
+
+        with DeterministicSupervisor(seed=42, patch_io=True):
+            with pytest.raises(FileNotFoundError, match="register_subprocess"):
+                subprocess.run(["missing-cmd"], capture_output=True)
+
     def test_without_patch_io_real_io_works(self):
         """Default (patch_io=False) doesn't break real I/O."""
         import os
@@ -431,6 +516,14 @@ class TestDeterministicSupervisor:
         always(state.supervisor_info["seed"] == 123, "correct seed recorded")
         always("trajectory_steps" in state.supervisor_info, "trajectory recorded")
         always(state.supervisor_info["trajectory_steps"] > 0, "transitions logged")
+
+    def test_explore_records_patch_io_flag(self):
+        """explore() should propagate patch_io into supervisor metadata."""
+        from ordeal.state import explore
+
+        state = explore("ordeal.demo", time_limit=0, seed=42, max_examples=5, patch_io=True)
+
+        always(state.supervisor_info["patch_io"] is True, "patch_io recorded in state")
 
     def test_json_roundtrip_preserves_key_data(self):
         """Serialized state preserves findings, frontier, seed."""

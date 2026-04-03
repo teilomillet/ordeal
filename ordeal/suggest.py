@@ -92,7 +92,7 @@ def suggest(result: Any) -> list[str]:
     # patch_io not active → available for I/O-heavy code
     supervisor_info = getattr(result, "supervisor_info", {})
     if supervisor_info and not supervisor_info.get("patch_io"):
-        suggestions.append("patch_io (deterministic file/network I/O)")
+        suggestions.append("patch_io (deterministic file/network/subprocess I/O)")
 
     # State tree available
     tree = getattr(result, "tree", None)

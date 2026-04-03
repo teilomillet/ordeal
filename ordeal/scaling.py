@@ -30,10 +30,15 @@ Usage::
 from __future__ import annotations
 
 import functools
+import json
 import math
 import os
+import statistics
+import subprocess
+import sys
+import textwrap
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 # ============================================================================
@@ -209,6 +214,96 @@ class ScalingAnalysis:
         return usl(n, self.sigma, self.kappa)
 
 
+@dataclass
+class MutationBenchmarkTrial:
+    """One fresh-process mutation benchmark run."""
+
+    seconds: float
+    total: int
+    killed: int
+    score: float
+    timings: dict[str, float] = field(default_factory=dict)
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class MutationBenchmarkCase:
+    """Aggregated timings for one mutation target."""
+
+    target: str
+    trials: list[MutationBenchmarkTrial]
+
+    @property
+    def median_seconds(self) -> float:
+        """Median wall time across fresh subprocess runs."""
+        return statistics.median(trial.seconds for trial in self.trials)
+
+    @property
+    def phase_medians(self) -> dict[str, float]:
+        """Median per-phase wall times across trials."""
+        keys: set[str] = set()
+        for trial in self.trials:
+            keys.update(trial.timings.keys())
+        return {
+            key: statistics.median(trial.timings.get(key, 0.0) for trial in self.trials)
+            for key in sorted(keys)
+        }
+
+    @property
+    def median_selected_test_files(self) -> int:
+        """Median count of heuristic test files handed to pytest."""
+        values = [int(trial.diagnostics.get("selected_test_files", 0)) for trial in self.trials]
+        return int(statistics.median(values)) if values else 0
+
+    @property
+    def median_collected_tests(self) -> int:
+        """Median collected pytest item count across trials."""
+        values = [int(trial.diagnostics.get("collected_tests", 0)) for trial in self.trials]
+        return int(statistics.median(values)) if values else 0
+
+    def summary(self) -> str:
+        """Human-readable mutation latency report."""
+        first = self.trials[0]
+        lines = [
+            f"{self.target}",
+            (
+                f"  Median: {self.median_seconds:.3f}s over {len(self.trials)} run(s), "
+                f"score={first.killed}/{first.total} ({first.score:.0%})"
+            ),
+            (
+                f"  Selection: files={self.median_selected_test_files}, "
+                f"collected_tests={self.median_collected_tests}"
+            ),
+        ]
+        phases = self.phase_medians
+        if phases:
+            lines.append("  Phases:")
+            for name, seconds in phases.items():
+                lines.append(f"    {name}: {seconds:.3f}s")
+        return "\n".join(lines)
+
+
+@dataclass
+class MutationBenchmarkSuite:
+    """Benchmark results for one or more mutation targets."""
+
+    cases: list[MutationBenchmarkCase]
+    repeats: int
+    workers: int
+    preset: str | None
+
+    def summary(self) -> str:
+        """Human-readable summary for the whole mutation suite."""
+        lines = [
+            "Mutation Benchmark",
+            f"  repeats={self.repeats}, workers={self.workers}, preset={self.preset or 'all'}",
+        ]
+        for case in self.cases:
+            lines.append("")
+            lines.append(case.summary())
+        return "\n".join(lines)
+
+
 def analyze(measurements: list[tuple[int | float, float]]) -> ScalingAnalysis:
     """Fit USL from (N, throughput) measurements and return full analysis.
 
@@ -242,8 +337,115 @@ def analyze(measurements: list[tuple[int | float, float]]) -> ScalingAnalysis:
 # ============================================================================
 
 
+_MUTATION_BENCHMARK_MARKER = "__ORDEAL_MUTATION_BENCH__ "
+
+
+def _run_mutation_benchmark_trial(
+    target: str,
+    *,
+    preset: str | None,
+    workers: int,
+    filter_equivalent: bool,
+    test_filter: str | None,
+    python_executable: str,
+    cwd: str,
+) -> MutationBenchmarkTrial:
+    """Run one mutation benchmark trial in a fresh Python subprocess."""
+    script = textwrap.dedent(
+        f"""
+        from __future__ import annotations
+
+        import json
+        import time
+        import warnings
+
+        from ordeal import mutate
+
+        warnings.simplefilter("ignore")
+        started = time.perf_counter()
+        result = mutate(
+            {target!r},
+            preset={preset!r},
+            workers={workers!r},
+            filter_equivalent={filter_equivalent!r},
+            test_filter={test_filter!r},
+            resume=False,
+        )
+        elapsed = time.perf_counter() - started
+        payload = {{
+            "seconds": elapsed,
+            "total": result.total,
+            "killed": result.killed,
+            "score": result.score,
+            "timings": result.timings,
+            "diagnostics": result.diagnostics,
+        }}
+        print({_MUTATION_BENCHMARK_MARKER!r} + json.dumps(payload, sort_keys=True))
+        """
+    )
+    proc = subprocess.run(
+        [python_executable, "-c", script],
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    for line in reversed(proc.stdout.splitlines()):
+        if line.startswith(_MUTATION_BENCHMARK_MARKER):
+            payload = json.loads(line[len(_MUTATION_BENCHMARK_MARKER) :])
+            return MutationBenchmarkTrial(
+                seconds=float(payload["seconds"]),
+                total=int(payload["total"]),
+                killed=int(payload["killed"]),
+                score=float(payload["score"]),
+                timings={k: float(v) for k, v in payload.get("timings", {}).items()},
+                diagnostics=dict(payload.get("diagnostics", {})),
+            )
+    raise RuntimeError(
+        "Mutation benchmark trial produced no parseable payload.\n"
+        f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+    )
+
+
+def _benchmark_mutations(
+    targets: list[str],
+    *,
+    repeats: int,
+    workers: int,
+    preset: str | None,
+    filter_equivalent: bool,
+    test_filter: str | None,
+    python_executable: str | None,
+    cwd: str | None,
+) -> MutationBenchmarkSuite:
+    """Benchmark mutation latency on one or more targets."""
+    executable = python_executable or sys.executable
+    workdir = cwd or os.getcwd()
+    cases: list[MutationBenchmarkCase] = []
+    for target in targets:
+        trials = [
+            _run_mutation_benchmark_trial(
+                target,
+                preset=preset,
+                workers=workers,
+                filter_equivalent=filter_equivalent,
+                test_filter=test_filter,
+                python_executable=executable,
+                cwd=workdir,
+            )
+            for _ in range(repeats)
+        ]
+        cases.append(MutationBenchmarkCase(target=target, trials=trials))
+    return MutationBenchmarkSuite(
+        cases=cases,
+        repeats=repeats,
+        workers=workers,
+        preset=preset,
+    )
+
+
 def benchmark(
-    test_class: type,
+    test_class: type | None = None,
     *,
     target_modules: list[str] | None = None,
     max_workers: int | None = None,
@@ -251,8 +453,16 @@ def benchmark(
     seed: int = 42,
     steps_per_run: int = 50,
     metric: str = "runs",
-) -> ScalingAnalysis:
-    """Benchmark exploration scaling and fit USL parameters.
+    mutate_targets: list[str] | None = None,
+    repeats: int = 5,
+    workers: int = 1,
+    preset: str | None = "standard",
+    filter_equivalent: bool = True,
+    test_filter: str | None = None,
+    python_executable: str | None = None,
+    cwd: str | None = None,
+) -> ScalingAnalysis | MutationBenchmarkSuite:
+    """Benchmark exploration scaling or mutation latency.
 
     Runs exploration at N=1, 2, 4, ... workers, measures throughput,
     normalizes to C(1)=1, and fits sigma/kappa.
@@ -265,10 +475,35 @@ def benchmark(
         seed: Base RNG seed.
         steps_per_run: Steps per exploration run.
         metric: ``"runs"`` (runs/sec) or ``"edges"`` (unique edges/sec).
+        mutate_targets: Mutation targets to benchmark in fresh subprocesses.
+            When provided, mutation latency benchmarking runs instead of
+            explorer scaling analysis.
+        repeats: Fresh subprocess runs per mutation target.
+        workers: Worker count for mutation benchmarking.
+        preset: Mutation preset for mutation benchmarking.
+        filter_equivalent: Whether to keep equivalence filtering enabled.
+        test_filter: Optional pytest ``-k`` expression for mutation runs.
+        python_executable: Python interpreter to use for fresh subprocess trials.
+        cwd: Working directory for mutation benchmark subprocesses.
 
     Returns:
-        A :class:`ScalingAnalysis` with fitted sigma and kappa.
+        A :class:`ScalingAnalysis` for exploration benchmarks, or a
+        :class:`MutationBenchmarkSuite` when *mutate_targets* is provided.
     """
+    if mutate_targets:
+        return _benchmark_mutations(
+            mutate_targets,
+            repeats=repeats,
+            workers=workers,
+            preset=preset,
+            filter_equivalent=filter_equivalent,
+            test_filter=test_filter,
+            python_executable=python_executable,
+            cwd=cwd,
+        )
+    if test_class is None:
+        raise ValueError("test_class is required for exploration benchmarks")
+
     from ordeal.explore import Explorer
 
     max_w = max_workers or min(os.cpu_count() or 4, 32)

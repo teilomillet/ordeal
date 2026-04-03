@@ -1240,7 +1240,7 @@ Fit USL and return full analysis with diagnosis.
 
 ```python
 benchmark(
-    test_class: type,
+    test_class: type | None = None,
     *,
     target_modules: list[str] | None = None,
     max_workers: int | None = None,       # default: CPU count
@@ -1248,15 +1248,31 @@ benchmark(
     seed: int = 42,
     steps_per_run: int = 50,
     metric: str = "runs",                 # "runs" or "edges"
-) -> ScalingAnalysis
+    mutate_targets: list[str] | None = None,
+    repeats: int = 5,
+    workers: int = 1,
+    preset: str | None = "standard",
+    filter_equivalent: bool = True,
+    test_filter: str | None = None,
+) -> ScalingAnalysis | MutationBenchmarkSuite
 ```
 
-Benchmark exploration at N=1, 2, 4, ... workers, measure throughput, fit USL parameters automatically.
+Benchmark exploration at N=1, 2, 4, ... workers, measure throughput, fit USL parameters automatically. When `mutate_targets=[...]` is provided, benchmark mutation latency in fresh subprocesses instead and report median wall time plus per-phase timings.
 
 ```python
 from ordeal.scaling import benchmark
 analysis = benchmark(MyServiceChaos, target_modules=["myapp"])
 print(analysis.summary())
+```
+
+```python
+from ordeal.scaling import benchmark
+suite = benchmark(
+    mutate_targets=["tests._mutation_bench_target.tiny_add"],
+    repeats=5,
+    preset="standard",
+)
+print(suite.summary())
 ```
 
 ### scales_linearly
@@ -1545,10 +1561,12 @@ explore(
     time_limit: float | None = None,
     workers: int = 1,                       # parallel mutation testing
     max_examples: int = 50,                 # input space sampling depth
+    seed: int = 42,
+    patch_io: bool = False,                 # deterministic file/network/subprocess I/O
 ) -> ExplorationState
 ```
 
-Runs all exploration strategies in sequence: mine → scan → mutate → chaos. Each step enriches the shared `ExplorationState`. Scales with `workers` (mutation parallelism) and `max_examples` (input sampling depth). Resume from a previous state to accumulate confidence across sessions.
+Runs all exploration strategies in sequence: mine → scan → mutate → chaos. Each step enriches the shared `ExplorationState`. Scales with `workers` (mutation parallelism) and `max_examples` (input sampling depth). Resume from a previous state to accumulate confidence across sessions. Set `patch_io=True` to run the pipeline inside the deterministic supervisor's file/network/subprocess substrate.
 
 Individual steps (`explore_mine`, `explore_scan`, `explore_mutate`, `explore_chaos`) are available for finer control.
 
@@ -1593,21 +1611,30 @@ from ordeal.supervisor import DeterministicSupervisor, StateTree, StateNode
 ### DeterministicSupervisor
 
 ```python
+import subprocess
+
 with DeterministicSupervisor(seed=42) as sup:
     # random, buggify, numpy all seeded
     # time.time() and time.sleep() are deterministic
     result = my_function()
     sup.log_transition("called my_function", state_hash=hash(result))
+
+with DeterministicSupervisor(seed=42, patch_io=True) as sup:
+    sup.register_subprocess(["worker", "--once"], stdout="ok\n", delay=2.0)
+    out = subprocess.check_output(["worker", "--once"], text=True)
+    assert out == "ok\n"
 ```
 
 | Method | Description |
 |---|---|
 | `log_transition(action, state_hash=)` | Record a state transition |
+| `register_subprocess(command, stdout=, stderr=, returncode=, delay=, match=)` | Register deterministic `subprocess.run` / `check_output` / `Popen` behavior |
+| `clear_subprocesses()` | Remove registered deterministic subprocesses |
 | `fork(new_seed=)` | Create a new supervisor from current state with different seed |
 | `state` | Current state hash |
 | `trajectory` | List of `Transition` objects |
 | `visited_states` | All states visited |
-| `reproduction_info()` | Dict with seed, hash_seed, steps — everything needed to replay |
+| `reproduction_info()` | Dict with seed, `patch_io`, subprocess count, hash seed, steps — everything needed to replay |
 | `summary()` | Human-readable trajectory report |
 
 ### StateTree

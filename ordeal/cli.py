@@ -651,6 +651,20 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     import os
 
     from ordeal.scaling import analyze as _analyze_scaling
+    from ordeal.scaling import benchmark as _benchmark
+
+    if args.mutate_targets:
+        suite = _benchmark(
+            mutate_targets=args.mutate_targets,
+            repeats=args.repeat,
+            workers=args.workers,
+            preset=args.preset,
+            filter_equivalent=args.filter_equivalent,
+            test_filter=args.test_filter,
+            cwd=os.getcwd(),
+        )
+        print(suite.summary())
+        return 0
 
     try:
         cfg = load_config(args.config)
@@ -1544,6 +1558,43 @@ def main(argv: list[str] | None = None) -> int:
         default="runs",
         help="Throughput metric to fit (default: runs)",
     )
+    bench_p.add_argument(
+        "--mutate",
+        dest="mutate_targets",
+        action="append",
+        default=[],
+        help="Benchmark mutation latency for this target (repeat for multiple targets)",
+    )
+    bench_p.add_argument(
+        "--repeat",
+        type=int,
+        default=5,
+        help="Fresh subprocess runs per mutation target (default: 5)",
+    )
+    bench_p.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Workers to use for mutation benchmarks (default: 1)",
+    )
+    bench_p.add_argument(
+        "--preset",
+        choices=["essential", "standard", "thorough"],
+        default="standard",
+        help="Mutation preset for mutation benchmarks (default: standard)",
+    )
+    bench_p.add_argument(
+        "--test-filter",
+        default=None,
+        help="Pytest -k filter for mutation benchmarks",
+    )
+    bench_p.add_argument(
+        "--no-filter-equivalent",
+        dest="filter_equivalent",
+        action="store_false",
+        help="Disable equivalence filtering during mutation benchmarks",
+    )
+    bench_p.set_defaults(filter_equivalent=True)
 
     # -- ordeal skill --
     skill_p = sub.add_parser("skill", help="Install ordeal skill for AI coding agents")

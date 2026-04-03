@@ -91,8 +91,14 @@ from ordeal.faults import PatchFault
 # ============================================================================
 
 
-# Tiny function-mutation jobs are still faster on the original direct path.
-_FUNCTION_BATCH_MIN_MUTANTS = 8
+@contextmanager
+def _timed_phase(timings: dict[str, float], name: str) -> Callable[[], None]:
+    """Accumulate elapsed wall time for a named mutation phase."""
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        timings[name] = timings.get(name, 0.0) + (time.perf_counter() - start)
 
 
 def _unwrap_func(func: object) -> object:
@@ -448,6 +454,7 @@ class MutationResult:
     operators_used: list[str] | None = None
     preset_used: str | None = None
     concern: str | None = None
+    timings: dict[str, float] = field(default_factory=dict)
     diagnostics: dict[str, int] = field(
         default_factory=lambda: {
             "generated": 0,
@@ -925,6 +932,7 @@ def _save_cache(target: str, result: MutationResult, module_hash: str) -> None:
         "preset_used": result.preset_used,
         "operators_used": result.operators_used,
         "mutants": [_mutant_to_dict(m) for m in result.mutants],
+        "timings": result.timings,
         "diagnostics": result.diagnostics,
         "timestamp": time.time(),
     }
@@ -970,6 +978,7 @@ def _load_cache(
         preset_used=data.get("preset_used"),
     )
     result.mutants = [_mutant_from_dict(m) for m in data.get("mutants", [])]
+    result.timings = data.get("timings", {})
     result.diagnostics = data.get("diagnostics", {})
     result.diagnostics["cached"] = result.total
     result.diagnostics["retested"] = 0
@@ -2080,7 +2089,7 @@ def _generate_toml(
 
     for cls in test_classes:
         lines.append("[[tests]]")
-        lines.append(f'class = "{cls}"')
+        lines.append(f"class = '{cls}'")
         lines.append("")
 
     # Mutation targets: all function-containing modules
@@ -3772,13 +3781,218 @@ def _module_is_equivalent(
     return True
 
 
-def _mutation_k_filter(target: str, test_filter: str | None = None) -> str:
-    """Return the pytest ``-k`` filter used for mutation testing."""
-    if test_filter is not None:
-        return test_filter
-    parts = target.rsplit(".", 1)
-    module_name = parts[0] if len(parts) >= 2 else target
-    return module_name.split(".")[-1]
+@dataclass(frozen=True)
+class _MutationTestSelection:
+    """Pytest selection derived for a mutation target."""
+
+    paths: tuple[str, ...]
+    k_filter: str | None
+
+    def pytest_args(self) -> list[str]:
+        """Build positional pytest args plus any ``-k`` filter."""
+        args = list(self.paths)
+        if self.k_filter:
+            args.extend(["-k", self.k_filter])
+        return args
+
+
+@functools.lru_cache(maxsize=128)
+def _split_mutation_target(target: str) -> tuple[str, str | None]:
+    """Return ``(module_name, func_name)`` for a mutation target."""
+    try:
+        importlib.import_module(target)
+        return target, None
+    except ImportError:
+        module_name, func_name = target.rsplit(".", 1)
+        return module_name, func_name
+
+
+@functools.lru_cache(maxsize=8)
+def _all_test_files() -> tuple[str, ...]:
+    """Return every discovered ``test_*.py`` file under the project."""
+    seen: set[str] = set()
+    found: list[str] = []
+    for test_dir in _find_test_dirs():
+        patterns = ("test_*.py",)
+        for pattern in patterns:
+            for path in sorted(test_dir.glob(pattern)):
+                resolved = str(path)
+                if resolved not in seen:
+                    seen.add(resolved)
+                    found.append(resolved)
+            for path in sorted(test_dir.rglob(pattern)):
+                resolved = str(path)
+                if resolved not in seen:
+                    seen.add(resolved)
+                    found.append(resolved)
+    return tuple(found)
+
+
+@functools.lru_cache(maxsize=128)
+def _named_mutation_test_candidates(module_name: str) -> tuple[str, ...]:
+    """Return likely test files based on the target module name."""
+    short = module_name.rsplit(".", 1)[-1]
+    seen: set[str] = set()
+    found: list[str] = []
+    for test_dir in _find_test_dirs():
+        exact = test_dir / f"test_{short}.py"
+        if exact.exists():
+            resolved = str(exact)
+            if resolved not in seen:
+                seen.add(resolved)
+                found.append(resolved)
+        for match in sorted(test_dir.glob(f"test_{short}_*.py")):
+            resolved = str(match)
+            if resolved not in seen:
+                seen.add(resolved)
+                found.append(resolved)
+        for match in sorted(test_dir.rglob(f"test_{short}.py")):
+            resolved = str(match)
+            if resolved not in seen:
+                seen.add(resolved)
+                found.append(resolved)
+        for match in sorted(test_dir.rglob(f"test_{short}_*.py")):
+            resolved = str(match)
+            if resolved not in seen:
+                seen.add(resolved)
+                found.append(resolved)
+    return tuple(found)
+
+
+def _score_mutation_test_file(
+    path: str,
+    *,
+    target: str,
+    module_name: str,
+    func_name: str | None,
+) -> int:
+    """Score how likely a test file is to execute the mutation target."""
+    try:
+        source = Path(path).read_text(encoding="utf-8", errors="ignore")
+        tree = ast.parse(source, filename=path)
+    except Exception:
+        return 0
+
+    def _iter_test_nodes(module_tree: ast.Module) -> list[ast.AST]:
+        tests: list[ast.AST] = []
+        for node in module_tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
+                tests.append(node)
+            elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name.startswith(
+                        "test_"
+                    ):
+                        tests.append(item)
+        return tests
+
+    def _walk_test_body(node: ast.AST) -> list[ast.AST]:
+        stack = list(ast.iter_child_nodes(node))
+        walked: list[ast.AST] = []
+        while stack:
+            current = stack.pop()
+            walked.append(current)
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                continue
+            stack.extend(ast.iter_child_nodes(current))
+        return walked
+
+    module_scope_aliases: set[str] = set()
+    module_scope_direct_names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == module_name:
+                    module_scope_aliases.add(alias.asname or alias.name.split(".")[-1])
+        elif isinstance(node, ast.ImportFrom) and node.module == module_name:
+            for alias in node.names:
+                if alias.name == "*" or func_name is None or alias.name == func_name:
+                    module_scope_direct_names.add(alias.asname or alias.name)
+
+    score = 0
+    for test_node in _iter_test_nodes(tree):
+        module_aliases = set(module_scope_aliases)
+        direct_names = set(module_scope_direct_names)
+        for current in _walk_test_body(test_node):
+            if isinstance(current, ast.Import):
+                for alias in current.names:
+                    if alias.name == module_name:
+                        module_aliases.add(alias.asname or alias.name.split(".")[-1])
+            elif isinstance(current, ast.ImportFrom) and current.module == module_name:
+                for alias in current.names:
+                    if alias.name == "*" or func_name is None or alias.name == func_name:
+                        direct_names.add(alias.asname or alias.name)
+            elif isinstance(current, ast.Call):
+                call = current.func
+                if func_name is None:
+                    if isinstance(call, ast.Name) and call.id in direct_names:
+                        score += 4
+                    elif (
+                        isinstance(call, ast.Attribute)
+                        and isinstance(call.value, ast.Name)
+                        and call.value.id in module_aliases
+                    ):
+                        score += 4
+                else:
+                    if isinstance(call, ast.Name) and call.id in direct_names:
+                        score += 12
+                    elif (
+                        isinstance(call, ast.Attribute)
+                        and isinstance(call.value, ast.Name)
+                        and call.value.id in module_aliases
+                        and call.attr == func_name
+                    ):
+                        score += 10
+    return score
+
+
+@functools.lru_cache(maxsize=128)
+def _mutation_test_selection(
+    target: str,
+    test_filter: str | None = None,
+) -> _MutationTestSelection:
+    """Choose pytest file/path arguments for mutation testing."""
+    module_name, func_name = _split_mutation_target(target)
+    named = list(_named_mutation_test_candidates(module_name))
+
+    scored: list[tuple[int, str]] = []
+    for path in named:
+        score = _score_mutation_test_file(
+            path,
+            target=target,
+            module_name=module_name,
+            func_name=func_name,
+        )
+        if score > 0:
+            scored.append((score, path))
+
+    if not scored and func_name is not None:
+        for path in _all_test_files():
+            score = _score_mutation_test_file(
+                path,
+                target=target,
+                module_name=module_name,
+                func_name=func_name,
+            )
+            if score > 0:
+                scored.append((score, path))
+
+    if scored:
+        seen: set[str] = set()
+        ranked_paths: list[str] = []
+        for _, path in sorted(scored, key=lambda item: (-item[0], item[1])):
+            if path not in seen:
+                seen.add(path)
+                ranked_paths.append(path)
+        return _MutationTestSelection(paths=tuple(ranked_paths), k_filter=test_filter)
+
+    if named:
+        fallback_filter = test_filter if test_filter is not None else func_name
+        return _MutationTestSelection(paths=tuple(named), k_filter=fallback_filter)
+
+    short = module_name.split(".")[-1]
+    fallback_filter = test_filter if test_filter is not None else (func_name or f"test_{short}")
+    return _MutationTestSelection(paths=(), k_filter=fallback_filter)
 
 
 def _raise_no_tests_found(target: str) -> None:
@@ -3801,6 +4015,8 @@ def _batch_module_test(
     mutant_pairs: list[tuple[Mutant, ast.Module]],
     *,
     disk_mutation: bool = False,
+    stats: dict[str, int] | None = None,
+    timings: dict[str, float] | None = None,
 ) -> list[tuple[Mutant, bool, str | None]]:
     """Run all mutants in a single pytest session via a custom plugin.
 
@@ -3809,22 +4025,25 @@ def _batch_module_test(
     """
     import pytest
 
-    parts = target.rsplit(".", 1)
-    module_name = parts[0] if len(parts) >= 2 else target
-    short_name = module_name.split(".")[-1]
-
     results: list[tuple[Mutant, bool, str | None]] = []
+    phase_timings = timings if timings is not None else {}
+    with _timed_phase(phase_timings, "test_selection_seconds"):
+        selection = _mutation_test_selection(target)
+    if stats is not None:
+        stats["selected_test_files"] = len(selection.paths)
 
     class _BatchPlugin:
         """Pytest plugin that tests multiple mutants in one session."""
 
         def __init__(self) -> None:
             self.no_tests_found = False
+            self.collected_tests = 0
 
         @pytest.hookimpl(tryfirst=True)
         def pytest_runtestloop(self, session: pytest.Session) -> bool:
             """Override the default test loop to iterate mutants."""
             if not session.config.option.collectonly:
+                self.collected_tests = len(session.items)
                 if not session.items:
                     self.no_tests_found = True
                     return True
@@ -3858,10 +4077,22 @@ def _batch_module_test(
             return True  # prevent default loop from running
 
     plugin = _BatchPlugin()
-    pytest.main(
-        ["-x", "-q", "--tb=no", "--no-header", "--chaos", "-o", "addopts=", "-k", short_name],
-        plugins=[plugin],
-    )
+    with _timed_phase(phase_timings, "pytest_seconds"):
+        pytest.main(
+            [
+                "-x",
+                "-q",
+                "--tb=no",
+                "--no-header",
+                "--chaos",
+                "-o",
+                "addopts=",
+                *selection.pytest_args(),
+            ],
+            plugins=[plugin],
+        )
+    if stats is not None:
+        stats["collected_tests"] = plugin.collected_tests
     if plugin.no_tests_found:
         _raise_no_tests_found(target)
     return results
@@ -3964,6 +4195,8 @@ def _batch_function_test(
     *,
     test_filter: str | None = None,
     disk_mutation: bool = False,
+    stats: dict[str, int] | None = None,
+    timings: dict[str, float] | None = None,
 ) -> list[tuple[Mutant, bool, str | None, str | None]]:
     """Run function mutants in a single pytest session.
 
@@ -3976,20 +4209,25 @@ def _batch_function_test(
 
     module_path, func_name = target.rsplit(".", 1)
     module = importlib.import_module(module_path)
-    k_filter = _mutation_k_filter(target, test_filter)
+    phase_timings = timings if timings is not None else {}
+    with _timed_phase(phase_timings, "test_selection_seconds"):
+        selection = _mutation_test_selection(target, test_filter=test_filter)
+    if stats is not None:
+        stats["selected_test_files"] = len(selection.paths)
 
     compiled: list[tuple[Mutant, Callable, ast.Module]] = []
-    for mutant, mutated_tree in mutant_pairs:
-        try:
-            code = compile(mutated_tree, f"<mutant:{mutant.description}>", "exec")
-            namespace = dict(module.__dict__)
-            exec(code, namespace)  # noqa: S102
-            mutated_func = namespace.get(func_name)
-            if mutated_func is None:
+    with _timed_phase(phase_timings, "compile_seconds"):
+        for mutant, mutated_tree in mutant_pairs:
+            try:
+                code = compile(mutated_tree, f"<mutant:{mutant.description}>", "exec")
+                namespace = dict(module.__dict__)
+                exec(code, namespace)  # noqa: S102
+                mutated_func = namespace.get(func_name)
+                if mutated_func is None:
+                    continue
+                compiled.append((mutant, mutated_func, mutated_tree))
+            except Exception:
                 continue
-            compiled.append((mutant, mutated_func, mutated_tree))
-        except Exception:
-            continue
 
     results: list[tuple[Mutant, bool, str | None, str | None]] = []
 
@@ -3998,10 +4236,12 @@ def _batch_function_test(
 
         def __init__(self) -> None:
             self.no_tests_found = False
+            self.collected_tests = 0
 
         @pytest.hookimpl(tryfirst=True)
         def pytest_runtestloop(self, session: pytest.Session) -> bool:
             if not session.config.option.collectonly:
+                self.collected_tests = len(session.items)
                 if not session.items:
                     self.no_tests_found = True
                     return True
@@ -4036,10 +4276,22 @@ def _batch_function_test(
             return True
 
     plugin = _BatchPlugin()
-    pytest.main(
-        ["-x", "-q", "--tb=no", "--no-header", "--chaos", "-o", "addopts=", "-k", k_filter],
-        plugins=[plugin],
-    )
+    with _timed_phase(phase_timings, "pytest_seconds"):
+        pytest.main(
+            [
+                "-x",
+                "-q",
+                "--tb=no",
+                "--no-header",
+                "--chaos",
+                "-o",
+                "addopts=",
+                *selection.pytest_args(),
+            ],
+            plugins=[plugin],
+        )
+    if stats is not None:
+        stats["collected_tests"] = plugin.collected_tests
     if plugin.no_tests_found:
         _raise_no_tests_found(target)
     return results
@@ -4052,6 +4304,8 @@ def _parallel_function_batch_test(
     *,
     test_filter: str | None = None,
     disk_mutation: bool = False,
+    stats: dict[str, int] | None = None,
+    timings: dict[str, float] | None = None,
 ) -> list[tuple[Mutant, bool, str | None, str | None]]:
     """Run function-level mutation batches in parallel worker processes."""
     import multiprocessing as mp
@@ -4062,6 +4316,9 @@ def _parallel_function_batch_test(
             serialized.append((mutant, ast.unparse(tree)))
         except Exception:
             continue
+    if stats is not None:
+        selection = _mutation_test_selection(target, test_filter=test_filter)
+        stats["selected_test_files"] = len(selection.paths)
 
     chunk_size = max(1, (len(serialized) + workers - 1) // workers)
     chunks: list[list[tuple[Mutant, str]]] = []
@@ -4069,11 +4326,12 @@ def _parallel_function_batch_test(
         chunks.append(serialized[i : i + chunk_size])
 
     ctx = mp.get_context("fork" if sys.platform != "win32" else "spawn")
-    with ctx.Pool(min(workers, len(chunks))) as pool:
-        chunk_results = pool.map(
-            _parallel_function_batch_worker,
-            [(target, chunk, test_filter, disk_mutation) for chunk in chunks],
-        )
+    with _timed_phase(timings if timings is not None else {}, "pytest_seconds"):
+        with ctx.Pool(min(workers, len(chunks))) as pool:
+            chunk_results = pool.map(
+                _parallel_function_batch_worker,
+                [(target, chunk, test_filter, disk_mutation) for chunk in chunks],
+            )
 
     results: list[tuple[Mutant, bool, str | None, str | None]] = []
     for chunk_result in chunk_results:
@@ -4233,6 +4491,8 @@ def mutate_and_test(
             When exceeded, returns whatever mutants have been generated so
             far.  Prevents hanging on complex AST expressions (numpy, cv2).
     """
+    started_at = time.perf_counter()
+    timings: dict[str, float] = {}
     disk_mutation = _resolve_disk_mutation(disk_mutation, target)
     used_preset = preset
     operators = _resolve_operators(operators, preset)
@@ -4247,29 +4507,31 @@ def mutate_and_test(
         source = f.read()
 
     stats: dict[str, int] = {}
-    mutant_pairs = generate_mutants(
-        source,
-        operators,
-        extra_mutants=extra_mutants,
-        llm=llm,
-        concern=concern,
-        _stats=stats,
-        timeout=mutant_timeout,
-    )
+    with _timed_phase(timings, "generate_seconds"):
+        mutant_pairs = generate_mutants(
+            source,
+            operators,
+            extra_mutants=extra_mutants,
+            llm=llm,
+            concern=concern,
+            _stats=stats,
+            timeout=mutant_timeout,
+        )
 
     # Filter equivalent mutants (same outputs on random inputs)
     if filter_equivalent:
-        filtered = []
-        for mutant, tree in mutant_pairs:
-            if _module_is_equivalent(module, tree, equivalence_samples):
-                mutant.killed = True
-                mutant.error = "equivalent (filtered)"
-                stats["filtered_module_equivalent"] = (
-                    stats.get("filtered_module_equivalent", 0) + 1
-                )
-            else:
-                filtered.append((mutant, tree))
-        mutant_pairs = filtered
+        with _timed_phase(timings, "equivalence_seconds"):
+            filtered = []
+            for mutant, tree in mutant_pairs:
+                if _module_is_equivalent(module, tree, equivalence_samples):
+                    mutant.killed = True
+                    mutant.error = "equivalent (filtered)"
+                    stats["filtered_module_equivalent"] = (
+                        stats.get("filtered_module_equivalent", 0) + 1
+                    )
+                else:
+                    filtered.append((mutant, tree))
+            mutant_pairs = filtered
 
     result = MutationResult(
         target=target, operators_used=operators, preset_used=used_preset, concern=concern
@@ -4277,10 +4539,17 @@ def mutate_and_test(
 
     # Batch mode: single pytest session for all mutants (much faster)
     if use_batch and mutant_pairs:
-        if workers > 1 and len(mutant_pairs) > 1:
-            batch_results = _parallel_module_test(target, mutant_pairs, workers)
-        else:
-            batch_results = _batch_module_test(target, mutant_pairs, disk_mutation=disk_mutation)
+        with _timed_phase(timings, "test_execution_seconds"):
+            if workers > 1 and len(mutant_pairs) > 1:
+                batch_results = _parallel_module_test(target, mutant_pairs, workers)
+            else:
+                batch_results = _batch_module_test(
+                    target,
+                    mutant_pairs,
+                    disk_mutation=disk_mutation,
+                    stats=stats,
+                    timings=timings,
+                )
         for item in batch_results:
             mutant, killed, error = item[0], item[1], item[2]
             killer = item[3] if len(item) > 3 else None
@@ -4292,47 +4561,55 @@ def mutate_and_test(
         # nothing, try calling each public function directly (mine oracle).
         # Same logic as mutate_function_and_test's fallback.
         if result.total > 0 and result.killed == 0:
-            mine_kills = _module_mine_oracle_fallback(
-                target,
-                module,
-                result,
-                operators,
-                stats,
-                filter_equivalent=filter_equivalent,
-                equivalence_samples=equivalence_samples,
-                preset_used=used_preset,
-                mutant_timeout=mutant_timeout,
-            )
+            with _timed_phase(timings, "mine_fallback_seconds"):
+                mine_kills = _module_mine_oracle_fallback(
+                    target,
+                    module,
+                    result,
+                    operators,
+                    stats,
+                    filter_equivalent=filter_equivalent,
+                    equivalence_samples=equivalence_samples,
+                    preset_used=used_preset,
+                    mutant_timeout=mutant_timeout,
+                )
             if mine_kills is not None:
+                mine_kills.timings.update(timings)
+                mine_kills.timings["total_seconds"] = time.perf_counter() - started_at
                 return mine_kills
 
         result.diagnostics.update(stats)
         result.diagnostics["tested"] = result.total
+        result.timings.update(timings)
+        result.timings["total_seconds"] = time.perf_counter() - started_at
         return result
 
     # Fallback: serial per-mutant testing (custom test_fn)
     test_name = getattr(test_fn, "__qualname__", getattr(test_fn, "__name__", "test_fn"))
-    for mutant, mutated_tree in mutant_pairs:
-        try:
-            cm = (
-                _mutated_module_on_disk(target, mutated_tree)
-                if disk_mutation
-                else _mutated_module(target, mutated_tree)
-            )
-            with cm:
-                if not disk_mutation:
-                    importlib.invalidate_caches()
-                test_fn()
-            mutant.killed = False
-        except Exception as e:
-            mutant.killed = True
-            mutant.error = str(e)[:200]
-            mutant.killed_by = test_name
+    with _timed_phase(timings, "test_execution_seconds"):
+        for mutant, mutated_tree in mutant_pairs:
+            try:
+                cm = (
+                    _mutated_module_on_disk(target, mutated_tree)
+                    if disk_mutation
+                    else _mutated_module(target, mutated_tree)
+                )
+                with cm:
+                    if not disk_mutation:
+                        importlib.invalidate_caches()
+                    test_fn()
+                    mutant.killed = False
+            except Exception as e:
+                mutant.killed = True
+                mutant.error = str(e)[:200]
+                mutant.killed_by = test_name
 
-        result.mutants.append(mutant)
+            result.mutants.append(mutant)
 
     result.diagnostics.update(stats)
     result.diagnostics["tested"] = result.total
+    result.timings.update(timings)
+    result.timings["total_seconds"] = time.perf_counter() - started_at
     return result
 
 
@@ -4504,7 +4781,7 @@ def _auto_test_fn(target: str, test_filter: str | None = None) -> Callable[[], N
     def run_tests() -> None:
         import pytest
 
-        k_filter = _mutation_k_filter(target, test_filter)
+        selection = _mutation_test_selection(target, test_filter=test_filter)
         rc = pytest.main(
             [
                 "-x",
@@ -4514,8 +4791,7 @@ def _auto_test_fn(target: str, test_filter: str | None = None) -> Callable[[], N
                 "--chaos",
                 "-o",
                 "addopts=",
-                "-k",
-                k_filter,
+                *selection.pytest_args(),
             ]
         )
         if rc == 5:
@@ -4625,6 +4901,8 @@ def mutate_function_and_test(
             When exceeded, returns whatever mutants have been generated so
             far.  Prevents hanging on complex AST expressions (numpy, cv2).
     """
+    started_at = time.perf_counter()
+    timings: dict[str, float] = {}
     # Try auto-discovering tests; fall back to mine()-based oracle
     disk_mutation = _resolve_disk_mutation(disk_mutation, target)
     # Resume: check cache before doing any work
@@ -4639,68 +4917,72 @@ def mutate_function_and_test(
     source = _get_source(func)
 
     stats: dict[str, int] = {}
-    mutant_pairs = generate_mutants(
-        source,
-        operators,
-        extra_mutants=extra_mutants,
-        llm=llm,
-        concern=concern,
-        _stats=stats,
-        timeout=mutant_timeout,
-    )
+    with _timed_phase(timings, "generate_seconds"):
+        mutant_pairs = generate_mutants(
+            source,
+            operators,
+            extra_mutants=extra_mutants,
+            llm=llm,
+            concern=concern,
+            _stats=stats,
+            timeout=mutant_timeout,
+        )
 
     assert test_fn is not None
     result = MutationResult(
         target=target, operators_used=operators, preset_used=used_preset, concern=concern
     )
 
-    use_batched_function_path = (
-        auto_discovered_tests
-        and bool(mutant_pairs)
-        and (workers > 1 or len(mutant_pairs) >= _FUNCTION_BATCH_MIN_MUTANTS)
-    )
-
-    if use_batched_function_path:
-        mutant_pairs = _filter_function_mutant_pairs(
-            func,
-            module,
-            func_name,
-            mutant_pairs,
-            filter_equivalent=filter_equivalent,
-            equivalence_samples=equivalence_samples,
-            stats=stats,
-        )
-        try:
-            if workers > 1 and len(mutant_pairs) > 1:
-                batch_results = _parallel_function_batch_test(
-                    target,
-                    mutant_pairs,
-                    workers,
-                    test_filter=test_filter,
-                    disk_mutation=disk_mutation,
-                )
-            else:
-                batch_results = _batch_function_test(
-                    target,
-                    mutant_pairs,
-                    test_filter=test_filter,
-                    disk_mutation=disk_mutation,
-                )
-        except NoTestsFoundError:
-            mine_result = _mine_based_mutation_test(
-                target,
+    if auto_discovered_tests and mutant_pairs:
+        with _timed_phase(timings, "equivalence_seconds"):
+            mutant_pairs = _filter_function_mutant_pairs(
                 func,
-                func_name,
                 module,
+                func_name,
                 mutant_pairs,
                 filter_equivalent=filter_equivalent,
                 equivalence_samples=equivalence_samples,
-                operators_used=operators,
-                preset_used=used_preset,
-                _stats=stats,
+                stats=stats,
             )
+        try:
+            with _timed_phase(timings, "test_execution_seconds"):
+                if workers > 1 and len(mutant_pairs) > 1:
+                    batch_results = _parallel_function_batch_test(
+                        target,
+                        mutant_pairs,
+                        workers,
+                        test_filter=test_filter,
+                        disk_mutation=disk_mutation,
+                        stats=stats,
+                        timings=timings,
+                    )
+                else:
+                    batch_results = _batch_function_test(
+                        target,
+                        mutant_pairs,
+                        test_filter=test_filter,
+                        disk_mutation=disk_mutation,
+                        stats=stats,
+                        timings=timings,
+                    )
+        except NoTestsFoundError:
+            with _timed_phase(timings, "mine_fallback_seconds"):
+                mine_result = _mine_based_mutation_test(
+                    target,
+                    func,
+                    func_name,
+                    module,
+                    mutant_pairs,
+                    filter_equivalent=filter_equivalent,
+                    equivalence_samples=equivalence_samples,
+                    operators_used=operators,
+                    preset_used=used_preset,
+                    _stats=stats,
+                )
             mine_result.diagnostics.update(stats)
             mine_result.diagnostics["tested"] = mine_result.total
+            mine_result.timings.update(timings)
+            mine_result.timings["total_seconds"] = time.perf_counter() - started_at
             return mine_result
         for mutant, killed, error, killer in batch_results:
             mutant.killed = killed
@@ -4708,55 +4990,64 @@ def mutate_function_and_test(
             mutant.killed_by = killer
             result.mutants.append(mutant)
     elif workers > 1:
-        result = _parallel_function_test(target, test_fn, mutant_pairs, module, func_name, workers)
+        with _timed_phase(timings, "test_execution_seconds"):
+            result = _parallel_function_test(
+                target,
+                test_fn,
+                mutant_pairs,
+                module,
+                func_name,
+                workers,
+            )
         result.preset_used = used_preset
         result.operators_used = operators
         result.concern = concern
     else:
-        for mutant, mutated_tree in mutant_pairs:
-            # Compile the mutated function in the module's namespace
-            try:
-                code = compile(mutated_tree, f"<mutant:{mutant.description}>", "exec")
-                namespace = dict(module.__dict__)
-                exec(code, namespace)
-                mutated_func = namespace.get(func_name)
-                if mutated_func is None:
+        with _timed_phase(timings, "test_execution_seconds"):
+            for mutant, mutated_tree in mutant_pairs:
+                # Compile the mutated function in the module's namespace
+                try:
+                    code = compile(mutated_tree, f"<mutant:{mutant.description}>", "exec")
+                    namespace = dict(module.__dict__)
+                    exec(code, namespace)
+                    mutated_func = namespace.get(func_name)
+                    if mutated_func is None:
+                        stats["compilation_failed"] = stats.get("compilation_failed", 0) + 1
+                        continue
+                except Exception:
                     stats["compilation_failed"] = stats.get("compilation_failed", 0) + 1
                     continue
-            except Exception:
-                stats["compilation_failed"] = stats.get("compilation_failed", 0) + 1
-                continue
 
-            # Runtime equivalence filter: skip if outputs match on samples
-            if filter_equivalent and _is_runtime_equivalent(
-                func, mutated_func, n_samples=equivalence_samples
-            ):
-                stats["filtered_runtime_equivalent"] = (
-                    stats.get("filtered_runtime_equivalent", 0) + 1
+                # Runtime equivalence filter: skip if outputs match on samples
+                if filter_equivalent and _is_runtime_equivalent(
+                    func, mutated_func, n_samples=equivalence_samples
+                ):
+                    stats["filtered_runtime_equivalent"] = (
+                        stats.get("filtered_runtime_equivalent", 0) + 1
+                    )
+                    continue
+
+                # Swap via PatchFault (in-process) + optional disk mutation (subprocesses)
+                fn_name = getattr(test_fn, "__qualname__", getattr(test_fn, "__name__", "test_fn"))
+                fault = PatchFault(target, lambda orig, mf=mutated_func: mf)
+                disk_cm = (
+                    _function_mutated_on_disk(module_path, func_name, mutated_tree)
+                    if disk_mutation
+                    else contextlib.nullcontext()
                 )
-                continue
+                with disk_cm:
+                    fault.activate()
+                    try:
+                        test_fn()
+                        mutant.killed = False
+                    except Exception as e:
+                        mutant.killed = True
+                        mutant.error = str(e)[:200]
+                        mutant.killed_by = fn_name
+                    finally:
+                        fault.deactivate()
 
-            # Swap via PatchFault (in-process) + optional disk mutation (subprocesses)
-            fn_name = getattr(test_fn, "__qualname__", getattr(test_fn, "__name__", "test_fn"))
-            fault = PatchFault(target, lambda orig, mf=mutated_func: mf)
-            disk_cm = (
-                _function_mutated_on_disk(module_path, func_name, mutated_tree)
-                if disk_mutation
-                else contextlib.nullcontext()
-            )
-            with disk_cm:
-                fault.activate()
-                try:
-                    test_fn()
-                    mutant.killed = False
-                except Exception as e:
-                    mutant.killed = True
-                    mutant.error = str(e)[:200]
-                    mutant.killed_by = fn_name
-                finally:
-                    fault.deactivate()
-
-            result.mutants.append(mutant)
+                result.mutants.append(mutant)
 
     # 0% score fallback: if auto-discovered tests killed nothing, try mine
     # oracle directly.  This catches process-isolation (Ray workers, long-lived
@@ -4764,25 +5055,26 @@ def mutate_function_and_test(
     # Only for auto-discovered tests — if the user provided test_fn, the 0%
     # score is the correct result (their test may intentionally be weak).
     if result.total > 0 and result.killed == 0 and auto_discovered_tests:
-        mine_result = _mine_based_mutation_test(
-            target,
-            func,
-            func_name,
-            module,
-            # Re-generate mutant pairs (originals were consumed)
-            generate_mutants(
-                source,
-                operators,
-                extra_mutants=extra_mutants,
-                concern=concern,
-                timeout=mutant_timeout,
-            ),
-            filter_equivalent=filter_equivalent,
-            equivalence_samples=equivalence_samples,
-            operators_used=operators,
-            preset_used=used_preset,
-            _stats={},
-        )
+        with _timed_phase(timings, "mine_fallback_seconds"):
+            mine_result = _mine_based_mutation_test(
+                target,
+                func,
+                func_name,
+                module,
+                # Re-generate mutant pairs (originals were consumed)
+                generate_mutants(
+                    source,
+                    operators,
+                    extra_mutants=extra_mutants,
+                    concern=concern,
+                    timeout=mutant_timeout,
+                ),
+                filter_equivalent=filter_equivalent,
+                equivalence_samples=equivalence_samples,
+                operators_used=operators,
+                preset_used=used_preset,
+                _stats={},
+            )
         if mine_result.killed > 0:
             import warnings
 
@@ -4797,6 +5089,8 @@ def mutate_function_and_test(
             mine_result.diagnostics["fallback_reason"] = "process_isolation"
             mine_result.diagnostics.update(stats)
             mine_result.diagnostics["tested"] = mine_result.total
+            mine_result.timings.update(timings)
+            mine_result.timings["total_seconds"] = time.perf_counter() - started_at
             return mine_result
 
     # LLM equivalence filter on surviving mutants
@@ -4813,6 +5107,8 @@ def mutate_function_and_test(
 
     result.diagnostics.update(stats)
     result.diagnostics["tested"] = result.total
+    result.timings.update(timings)
+    result.timings["total_seconds"] = time.perf_counter() - started_at
     return result
 
 

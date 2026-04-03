@@ -389,6 +389,48 @@ class TestParseEndpoints:
         assert len(eps) == 1
         assert eps[0].path_params[0]["name"] == "id"
 
+    def test_response_links(self):
+        spec = {
+            "paths": {
+                "/items": {
+                    "post": {
+                        "operationId": "createItem",
+                        "responses": {
+                            "201": {
+                                "description": "Created",
+                                "links": {
+                                    "GetCreatedItem": {
+                                        "operationId": "getItem",
+                                        "parameters": {"item_id": "$response.body#/id"},
+                                    }
+                                },
+                            }
+                        },
+                    }
+                },
+                "/items/{item_id}": {
+                    "get": {
+                        "operationId": "getItem",
+                        "parameters": [
+                            {
+                                "name": "item_id",
+                                "in": "path",
+                                "required": True,
+                                "schema": {"type": "integer"},
+                            }
+                        ],
+                        "responses": {"200": {"description": "OK"}},
+                    }
+                },
+            }
+        }
+        eps = _parse_endpoints(spec)
+        post = [ep for ep in eps if ep.method == "POST"][0]
+        assert post.operation_id == "createItem"
+        assert 201 in post.response_links
+        assert post.response_links[201][0].operation_id == "getItem"
+        assert post.response_links[201][0].parameters == {"item_id": "$response.body#/id"}
+
 
 # ============================================================================
 # Endpoint strategy
@@ -1074,6 +1116,32 @@ class TestChaosApiTestASGI:
     def test_no_app_no_url_raises(self):
         with pytest.raises(ValueError, match="Provide either"):
             chaos_api_test(faults=[])
+
+    def test_summary_reports_stateful_fallback(self):
+        result = ChaosAPIResult(
+            total_requests=1,
+            failures=[],
+            fault_activations={},
+            duration_seconds=0.1,
+            deferred_ok=True,
+            _requested_stateful=True,
+            _stateful_links_available=False,
+            _used_stateful=False,
+        )
+        assert "fallback to parametrized" in result.summary()
+
+    def test_summary_reports_stateful_usage(self):
+        result = ChaosAPIResult(
+            total_requests=2,
+            failures=[],
+            fault_activations={},
+            duration_seconds=0.1,
+            deferred_ok=True,
+            _requested_stateful=True,
+            _stateful_links_available=True,
+            _used_stateful=True,
+        )
+        assert "followed OpenAPI links" in result.summary()
 
 
 class TestChaosApiTestWSGI:

@@ -441,7 +441,7 @@ def pytest_collect_file(parent: pytest.Collector, file_path: Any) -> OrdealScanC
 
     try:
         cfg = load_config(str(file_path))
-    except (ConfigError, FileNotFoundError, UnicodeDecodeError):
+    except (ConfigError, FileNotFoundError, UnicodeDecodeError, ValueError):
         return None
 
     if not cfg.scan:

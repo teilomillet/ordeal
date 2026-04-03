@@ -487,6 +487,7 @@ def explore(
     workers: int = 1,
     max_examples: int = 50,
     seed: int = 42,
+    patch_io: bool = False,
     include_private: bool = False,
 ) -> ExplorationState:
     """Run all exploration strategies on a module.
@@ -520,6 +521,8 @@ def explore(
             examples = more input space sampled = higher confidence.
         seed: RNG seed for deterministic exploration. Same seed = same
             trajectory. Default 42.
+        patch_io: If ``True``, enable deterministic file/network/subprocess
+            I/O inside the supervisor while exploring.
     """
     import time as _time
 
@@ -538,7 +541,7 @@ def explore(
     if not hasattr(state, "tree") or state.tree is None:
         state.tree = StateTree()
 
-    sup = DeterministicSupervisor(seed=seed)
+    sup = DeterministicSupervisor(seed=seed, patch_io=patch_io)
     sup.__enter__()
 
     try:

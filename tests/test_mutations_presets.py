@@ -18,6 +18,7 @@ from ordeal.mutations import (
     NoTestsFoundError,
     _get_source,
     _is_runtime_equivalent,
+    _mutation_test_selection,
     _resolve_operators,
     _unwrap_func,
     generate_mutants,
@@ -204,7 +205,6 @@ def test_auto_discovered_function_mutation_uses_batch_path(monkeypatch):
         return run
 
     monkeypatch.setattr(mutations, "_auto_test_fn", fake_auto_test_fn)
-    monkeypatch.setattr(mutations, "_FUNCTION_BATCH_MIN_MUTANTS", 1)
     monkeypatch.setattr(
         mutations,
         "generate_mutants",
@@ -216,7 +216,7 @@ def test_auto_discovered_function_mutation_uses_batch_path(monkeypatch):
         lambda func, module, func_name, mutant_pairs, **kwargs: mutant_pairs,
     )
 
-    def fake_batch(target, mutant_pairs, *, test_filter=None, disk_mutation=False):
+    def fake_batch(target, mutant_pairs, *, test_filter=None, disk_mutation=False, **kwargs):
         calls["target"] = target
         calls["count"] = len(mutant_pairs)
         calls["test_filter"] = test_filter
@@ -240,44 +240,6 @@ def test_auto_discovered_function_mutation_uses_batch_path(monkeypatch):
     assert result.total == 1
     assert result.killed == 1
     assert result.mutants[0].killed_by == "tests.test_mutations_presets::test_add"
-
-
-def test_auto_discovered_small_function_mutation_uses_direct_path(monkeypatch):
-    mutant = Mutant(operator="arithmetic", description="+ -> -", line=1, col=0)
-    mutated_tree = ast.parse("def _add(a: int, b: int) -> int:\n    return a - b\n")
-    calls = {"test_fn_runs": 0}
-
-    def fake_auto_test_fn(target, test_filter=None):
-        def run():
-            calls["test_fn_runs"] += 1
-            raise AssertionError("killed")
-
-        return run
-
-    monkeypatch.setattr(mutations, "_auto_test_fn", fake_auto_test_fn)
-    monkeypatch.setattr(
-        mutations,
-        "generate_mutants",
-        lambda *args, **kwargs: [(mutant, mutated_tree)],
-    )
-    monkeypatch.setattr(
-        mutations,
-        "_batch_function_test",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("tiny auto-discovered jobs should stay on the direct path")
-        ),
-    )
-
-    result = mutate_function_and_test(
-        f"{__name__}._add",
-        test_fn=None,
-        preset="essential",
-        filter_equivalent=False,
-    )
-
-    assert calls["test_fn_runs"] == 1
-    assert result.total == 1
-    assert result.killed == 1
 
 
 def test_auto_discovered_function_mutation_uses_parallel_batch_path(monkeypatch):
@@ -312,6 +274,7 @@ def test_auto_discovered_function_mutation_uses_parallel_batch_path(monkeypatch)
         *,
         test_filter=None,
         disk_mutation=False,
+        **kwargs,
     ):
         calls["target"] = target
         calls["count"] = len(mutant_pairs)
@@ -352,7 +315,6 @@ def test_auto_discovered_function_mutation_falls_back_to_mine_after_batch_collec
     mutant.killed = True
     mutant.killed_by = "mine"
 
-    monkeypatch.setattr(mutations, "_FUNCTION_BATCH_MIN_MUTANTS", 1)
     monkeypatch.setattr(
         mutations,
         "_auto_test_fn",
@@ -389,6 +351,43 @@ def test_auto_discovered_function_mutation_falls_back_to_mine_after_batch_collec
     assert result is fallback
     assert result.killed == 1
     assert result.diagnostics["tested"] == 1
+
+
+def test_mutation_test_selection_prefers_content_matches(monkeypatch, tmp_path: Path):
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "mod.py").write_text("def compute(x: int) -> int:\n    return x + 1\n")
+
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    battle = tests_dir / "test_battle.py"
+    battle.write_text(
+        textwrap.dedent("""\
+        from pkg.mod import compute
+
+        def test_generic_regression():
+            assert compute(1) == 2
+        """)
+    )
+    (tests_dir / "test_mod.py").write_text(
+        textwrap.dedent("""\
+        def test_unrelated():
+            assert True
+        """)
+    )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    mutations._all_test_files.cache_clear()
+    mutations._named_mutation_test_candidates.cache_clear()
+    mutations._split_mutation_target.cache_clear()
+    _mutation_test_selection.cache_clear()
+
+    selection = _mutation_test_selection("pkg.mod.compute")
+
+    assert selection.paths[0] == str(battle)
+    assert selection.k_filter is None
 
 
 # ============================================================================
@@ -853,6 +852,19 @@ def test_diagnostics_populated_after_mutate():
     d = result.diagnostics
     assert d["generated"] > 0, "should count generated mutants"
     assert d["tested"] == result.total, "tested should equal final mutant count"
+
+
+def test_timings_populated_after_mutate():
+    """mutate_function_and_test records per-phase timings."""
+    result = mutate_function_and_test(
+        f"{__name__}._add",
+        _test_add,
+        preset="essential",
+        filter_equivalent=False,
+    )
+    assert result.timings["generate_seconds"] >= 0.0
+    assert result.timings["test_execution_seconds"] >= 0.0
+    assert result.timings["total_seconds"] >= result.timings["test_execution_seconds"]
 
 
 def test_diagnostics_counts_ast_equivalent():

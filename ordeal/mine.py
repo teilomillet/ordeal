@@ -951,7 +951,7 @@ def mine(
 
     # Resolve target module for coverage tracking
     fn_module = getattr(fn, "__module__", "")
-    target_path = fn_module.split(".")[0] if fn_module else ""
+    target_path = fn_module if fn_module else ""
 
     collector = None
     if target_path:

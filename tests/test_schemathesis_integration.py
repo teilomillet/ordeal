@@ -162,9 +162,38 @@ OPENAPI_SCHEMA = {
     },
 }
 
+OPENAPI_SCHEMA_WITH_LINKS = {
+    **OPENAPI_SCHEMA,
+    "paths": {
+        **OPENAPI_SCHEMA["paths"],
+        "/items": {
+            **OPENAPI_SCHEMA["paths"]["/items"],
+            "post": {
+                **OPENAPI_SCHEMA["paths"]["/items"]["post"],
+                "responses": {
+                    **OPENAPI_SCHEMA["paths"]["/items"]["post"]["responses"],
+                    "201": {
+                        **OPENAPI_SCHEMA["paths"]["/items"]["post"]["responses"]["201"],
+                        "links": {
+                            "GetCreatedItem": {
+                                "operationId": "getItem",
+                                "parameters": {"item_id": "$response.body#/id"},
+                            }
+                        },
+                    },
+                },
+            },
+        },
+    },
+}
+
 
 async def openapi_schema(request: Request) -> JSONResponse:
     return JSONResponse(OPENAPI_SCHEMA)
+
+
+async def openapi_schema_with_links(request: Request) -> JSONResponse:
+    return JSONResponse(OPENAPI_SCHEMA_WITH_LINKS)
 
 
 async def _not_found(request: Request) -> JSONResponse:
@@ -177,6 +206,7 @@ asgi_app = Starlette(
         Route("/items", create_item, methods=["POST"]),
         Route("/items/{item_id:int}", get_item),
         Route("/openapi.json", openapi_schema),
+        Route("/openapi-links.json", openapi_schema_with_links),
     ],
     exception_handlers={404: lambda req, exc: JSONResponse({"error": "not found"}, 404)},
 )
@@ -308,6 +338,21 @@ class TestChaosApiTestASGI:
         )
         # Should still produce a result (fallback to parametrized)
         assert isinstance(result, ChaosAPIResult)
+        assert "fallback to parametrized" in result.summary()
+
+    def test_stateful_true_follows_openapi_links(self):
+        result = chaos_api_test(
+            app=asgi_app,
+            schema_path="/openapi-links.json",
+            faults=[],
+            stateful=True,
+            max_examples=1,
+            seed=42,
+        )
+        assert isinstance(result, ChaosAPIResult)
+        assert result.total_requests >= 2
+        assert result.passed is True
+        assert "followed OpenAPI links" in result.summary()
 
     def test_result_passed_property(self):
         result = chaos_api_test(

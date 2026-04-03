@@ -29,10 +29,11 @@ class TestCLI:
         with pytest.raises(SystemExit):
             main(["--help"])
         out = capsys.readouterr().out
+        assert "ordeal scan mymod --save-artifacts" in out
         assert "ordeal scan mymod --report-file report.md" in out
         assert "shareable bug report" in out
-        assert "--write-regression tests/test_ordeal_regressions.py" in out
-        assert "ordeal mine mymod.func --write-regression tests/test_ordeal_regressions.py" in out
+        assert "ordeal scan mymod --write-regression" in out
+        assert "ordeal mine mymod.func --write-regression" in out
 
     def test_python_module_entrypoint_runs(self):
         proc = subprocess.run(
@@ -81,7 +82,10 @@ class TestCLI:
         assert main(["catalog"]) == 0
         out = capsys.readouterr().out
         assert "--report-file report.md" in out
-        assert "--write-regression tests/test_ordeal_regressions.py" in out
+        assert "--write-regression" in out
+        assert "tests/test_ordeal_regressions.py" in out
+        assert "--save-artifacts" in out
+        assert ".ordeal/findings/mymod.md" in out
 
     def test_explore_missing_config(self):
         assert main(["explore", "--config", "/nonexistent.toml"]) == 1
@@ -120,7 +124,8 @@ class TestCLI:
         assert "shareable Markdown finding report" in out
         assert "runnable pytest regressions" in out
         assert "--report-file PATH" in out
-        assert "--write-regression PATH" in out
+        assert "--write-regression" in out
+        assert "default: tests/test_ordeal_regressions.py" in out
 
     def test_mine_shows_report_hint_when_findings_exist(self, monkeypatch, capsys):
         result = MineResult(
@@ -146,7 +151,7 @@ class TestCLI:
 
         assert main(["mine", "ordeal.demo.normalize", "-n", "10"]) == 0
         out = capsys.readouterr().out
-        assert "--write-regression tests/test_ordeal_regressions.py" in out
+        assert "--write-regression (tests/test_ordeal_regressions.py)" in out
 
     def test_scan_help_mentions_shareable_report(self, capsys):
         with pytest.raises(SystemExit):
@@ -154,8 +159,11 @@ class TestCLI:
         out = capsys.readouterr().out
         assert "shareable Markdown bug report" in out
         assert "runnable pytest regressions" in out
+        assert "--save-artifacts" in out
+        assert ".ordeal/findings/mymod.md" in out
         assert "--report-file PATH" in out
-        assert "--write-regression PATH" in out
+        assert "--write-regression" in out
+        assert "default: tests/test_ordeal_regressions.py" in out
 
     def test_scan_suppresses_inner_noise_and_formats_summary(self, monkeypatch, capsys):
         class _FakeTree:
@@ -187,7 +195,7 @@ class TestCLI:
         assert "ordeal scan: pkg.mod" in captured.out
         assert "status: findings found" in captured.out
         assert "gaps to close:" in captured.out
-        assert "--write-regression tests/test_ordeal_regressions.py" in captured.out
+        assert "--save-artifacts" in captured.out
 
     def test_scan_no_findings_returns_zero(self, monkeypatch, capsys):
         state = SimpleNamespace(
@@ -299,6 +307,116 @@ class TestCLI:
         assert "Regression tests written:" in captured.err
         assert f"Run: uv run pytest {regression_path} -q" in captured.err
 
+    def test_scan_save_artifacts_writes_default_report_and_regression(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        state = SimpleNamespace(
+            module="pkg.mod",
+            confidence=0.63,
+            functions={"normalize": object()},
+            supervisor_info={"seed": 42, "trajectory_steps": 5},
+            tree=SimpleNamespace(size=3),
+            findings=["normalize: idempotent (87%)"],
+            frontier={"normalize": ["property: idempotent (87%)"]},
+            finding_details=[
+                {
+                    "kind": "property",
+                    "function": "normalize",
+                    "name": "idempotent",
+                    "summary": "idempotent (87%)",
+                    "confidence": 0.87,
+                    "holds": 26,
+                    "total": 30,
+                    "counterexample": {
+                        "input": {"xs": [9, 8, 7, 6, 5, 4, 3, 2]},
+                        "output": [1.0, 0.5, 0.0],
+                        "replayed": [0.66, 0.33, 0.0],
+                    },
+                }
+            ],
+        )
+
+        monkeypatch.setattr(ordeal_state, "explore", lambda *args, **kwargs: state)
+
+        rc = main(["scan", "pkg.mod", "--save-artifacts", "-n", "10"])
+        captured = capsys.readouterr()
+
+        report_path = tmp_path / ".ordeal" / "findings" / "pkg" / "mod.md"
+        regression_path = tmp_path / "tests" / "test_ordeal_regressions.py"
+        assert rc == 1
+        assert report_path.exists()
+        assert regression_path.exists()
+        assert "Target: `pkg.mod`" in report_path.read_text()
+        assert "def test_normalize_idempotent_regression() -> None:" in regression_path.read_text()
+        assert "Scan report saved:" in captured.err
+        assert "Regression tests written:" in captured.err
+
+    def test_scan_save_artifacts_skips_writes_without_findings(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.chdir(tmp_path)
+        state = SimpleNamespace(
+            module="pkg.clean",
+            confidence=0.91,
+            functions={"a": object()},
+            supervisor_info={},
+            tree=SimpleNamespace(size=0),
+            findings=[],
+            frontier={},
+        )
+
+        monkeypatch.setattr(ordeal_state, "explore", lambda *args, **kwargs: state)
+
+        rc = main(["scan", "pkg.clean", "--save-artifacts", "-n", "10"])
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert not (tmp_path / ".ordeal").exists()
+        assert not (tmp_path / "tests").exists()
+        assert "No findings yet; no artifacts written." in captured.err
+
+    def test_scan_write_regression_defaults_and_dedupes(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.chdir(tmp_path)
+        state = SimpleNamespace(
+            module="pkg.mod",
+            confidence=0.63,
+            functions={"normalize": object()},
+            supervisor_info={"seed": 42, "trajectory_steps": 5},
+            tree=SimpleNamespace(size=3),
+            findings=["normalize: idempotent (87%)"],
+            frontier={"normalize": ["property: idempotent (87%)"]},
+            finding_details=[
+                {
+                    "kind": "property",
+                    "function": "normalize",
+                    "name": "idempotent",
+                    "summary": "idempotent (87%)",
+                    "confidence": 0.87,
+                    "holds": 26,
+                    "total": 30,
+                    "counterexample": {
+                        "input": {"xs": [9, 8, 7, 6, 5, 4, 3, 2]},
+                        "output": [1.0, 0.5, 0.0],
+                        "replayed": [0.66, 0.33, 0.0],
+                    },
+                }
+            ],
+        )
+
+        monkeypatch.setattr(ordeal_state, "explore", lambda *args, **kwargs: state)
+
+        assert main(["scan", "pkg.mod", "--write-regression", "-n", "10"]) == 1
+        first = capsys.readouterr()
+        regression_path = tmp_path / "tests" / "test_ordeal_regressions.py"
+        assert regression_path.exists()
+        assert "Regression tests written:" in first.err
+
+        assert main(["scan", "pkg.mod", "--write-regression", "-n", "10"]) == 1
+        second = capsys.readouterr()
+        regression = regression_path.read_text()
+        assert regression.count("def test_normalize_idempotent_regression() -> None:") == 1
+        assert "Regression tests already present:" in second.err
+        assert "Skipped 1 existing regression" in second.err
+
     def test_mine_report_file_writes_markdown(self, monkeypatch, tmp_path, capsys):
         report_path = tmp_path / "mine-report.md"
         result = MineResult(
@@ -382,6 +500,42 @@ class TestCLI:
         assert "... +2 more item(s)" not in regression
         assert "Regression tests written:" in captured.err
         assert f"Run: uv run pytest {regression_path} -q" in captured.err
+
+    def test_mine_write_regression_defaults_and_dedupes(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.chdir(tmp_path)
+        result = MineResult(
+            function="normalize",
+            examples=20,
+            properties=[
+                MinedProperty(
+                    "idempotent",
+                    18,
+                    20,
+                    {
+                        "input": {"xs": [9, 8, 7, 6, 5, 4, 3, 2]},
+                        "output": [1.0, 0.5, 0.0],
+                        "replayed": [0.66, 0.33, 0.0],
+                    },
+                )
+            ],
+        )
+
+        import ordeal.mine as ordeal_mine
+
+        monkeypatch.setattr(ordeal_mine, "mine", lambda *args, **kwargs: result)
+
+        assert main(["mine", "ordeal.demo.normalize", "--write-regression", "-n", "10"]) == 0
+        first = capsys.readouterr()
+        regression_path = tmp_path / "tests" / "test_ordeal_regressions.py"
+        assert regression_path.exists()
+        assert "Regression tests written:" in first.err
+
+        assert main(["mine", "ordeal.demo.normalize", "--write-regression", "-n", "10"]) == 0
+        second = capsys.readouterr()
+        regression = regression_path.read_text()
+        assert regression.count("def test_normalize_idempotent_regression() -> None:") == 1
+        assert "Regression tests already present:" in second.err
+        assert "Skipped 1 existing regression" in second.err
 
     # -- ordeal mine-pair --
 

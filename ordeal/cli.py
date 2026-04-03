@@ -84,6 +84,8 @@ class _ProgressPrinter:
 
 
 _BENCHMARK_SIGNAL_CHECKPOINTS: tuple[float, ...] = (5.0, 10.0, 30.0)
+_DEFAULT_REGRESSION_PATH = "tests/test_ordeal_regressions.py"
+_DEFAULT_FINDINGS_DIR = ".ordeal/findings"
 
 
 def _make_signal_profiler(
@@ -187,8 +189,12 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
     print("\nRun 'ordeal scan <module>' to explore a module fully.")
     print("Add '--report-file report.md' to scan or mine for a shareable Markdown report.")
     print(
-        "Add '--write-regression tests/test_ordeal_regressions.py' to scan or mine for"
-        " runnable pytest regressions."
+        "Add '--write-regression' to scan or mine for runnable pytest regressions"
+        f" (default: {_DEFAULT_REGRESSION_PATH})."
+    )
+    print(
+        "Add '--save-artifacts' to scan for the full bug bundle:"
+        f" {_default_scan_report_path('mymod')} + {_DEFAULT_REGRESSION_PATH}."
     )
     print("Run 'ordeal catalog --detail' for signatures and docs.")
     print("Python: from ordeal import catalog; catalog()")
@@ -323,17 +329,27 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         print(_format_scan_summary(state))
         if (
             state.findings
+            and not getattr(args, "save_artifacts", False)
             and not getattr(args, "report_file", None)
             and not getattr(args, "write_regression", None)
         ):
             print(
-                "  tip: add --report-file report.md or --write-regression"
-                " tests/test_ordeal_regressions.py"
+                "  tip: add --save-artifacts or use --report-file / --write-regression"
+                f" ({_DEFAULT_REGRESSION_PATH})"
             )
-    if getattr(args, "report_file", None):
-        _write_scan_report(state, args.report_file)
-    if getattr(args, "write_regression", None):
-        _write_scan_regressions(state, args.write_regression)
+
+    save_artifacts = getattr(args, "save_artifacts", False)
+    report_path = args.report_file
+    regression_path = args.write_regression
+    if save_artifacts and state.findings:
+        report_path = report_path or _default_scan_report_path(state.module)
+        regression_path = regression_path or _DEFAULT_REGRESSION_PATH
+    if report_path:
+        _write_scan_report(state, report_path)
+    if regression_path:
+        _write_scan_regressions(state, regression_path)
+    if save_artifacts and not state.findings:
+        _stderr("No findings yet; no artifacts written.\n")
 
     return 1 if state.findings else 0
 
@@ -678,10 +694,7 @@ def _cmd_mine(args: argparse.Namespace) -> int:
             suspicious_count=suspicious,
         )
     elif suspicious and not getattr(args, "report_file", None):
-        print(
-            "tip: add --report-file report.md or --write-regression"
-            " tests/test_ordeal_regressions.py"
-        )
+        print(f"tip: add --report-file report.md or --write-regression ({_DEFAULT_REGRESSION_PATH})")
 
     return 0
 
@@ -1531,6 +1544,18 @@ def _slugify_report_name(text: str) -> str:
     return slug or "finding"
 
 
+def _regression_test_name(stub: str) -> str | None:
+    """Extract the pytest test name from a generated regression stub."""
+    match = re.search(r"^def (test_[0-9A-Za-z_]+)\(", stub, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def _default_scan_report_path(module: str) -> str:
+    """Return the default Markdown artifact path for a scanned module."""
+    parts = module.split(".")
+    return str(Path(_DEFAULT_FINDINGS_DIR).joinpath(*parts).with_suffix(".md"))
+
+
 def _python_literal(value: Any, *, trim: bool = True) -> str:
     """Render a stable Python literal for regression stubs."""
     rendered = (
@@ -1804,6 +1829,89 @@ def _render_scan_report_markdown(state: Any) -> str:
     return _render_findings_report_markdown(_build_scan_report(state))
 
 
+def _split_regression_stub(stub: str) -> tuple[str | None, str, str | None]:
+    """Split a stub into import line, function body, and test name."""
+    lines = stub.rstrip().splitlines()
+    import_line = lines[0] if lines and lines[0].startswith("from ") else None
+    body_start = next((idx for idx, line in enumerate(lines) if line.startswith("def ")), None)
+    body = "\n".join(lines[body_start:]).rstrip() if body_start is not None else stub.rstrip()
+    return import_line, body, _regression_test_name(stub)
+
+
+def _render_regression_file(header: list[str], stubs: list[str]) -> str:
+    """Render a fresh regression module from generated stubs."""
+    imports: list[str] = []
+    seen_imports: set[str] = set()
+    bodies: list[str] = []
+    for stub in stubs:
+        import_line, body, _ = _split_regression_stub(stub)
+        if import_line and import_line not in seen_imports:
+            imports.append(import_line)
+            seen_imports.add(import_line)
+        bodies.append(body)
+
+    lines = header[:]
+    if imports:
+        lines.extend(imports)
+        lines.extend(["", ""])
+    for idx, body in enumerate(bodies):
+        if idx:
+            lines.extend(["", ""])
+        lines.append(body)
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _merge_regression_file(existing: str, stubs: list[str]) -> tuple[str, int, int]:
+    """Append stubs into an existing regression file, deduping by test name."""
+    source = existing.rstrip()
+    existing_imports = set(re.findall(r"^from .+$", existing, re.MULTILINE))
+    existing_tests = set(re.findall(r"^def (test_[0-9A-Za-z_]+)\(", existing, re.MULTILINE))
+    added = 0
+    skipped = 0
+
+    for stub in stubs:
+        import_line, body, test_name = _split_regression_stub(stub)
+        if test_name and test_name in existing_tests:
+            skipped += 1
+            continue
+
+        chunk: list[str] = []
+        if import_line and import_line not in existing_imports:
+            chunk.append(import_line)
+            existing_imports.add(import_line)
+        if chunk:
+            chunk.extend(["", ""])
+        chunk.append(body)
+
+        if source:
+            source += "\n\n\n" + "\n".join(chunk)
+        else:
+            source = "\n".join(chunk)
+        added += 1
+        if test_name:
+            existing_tests.add(test_name)
+
+    return source.rstrip() + "\n", added, skipped
+
+
+def _write_regression_file(
+    *,
+    path_str: str,
+    header: list[str],
+    stubs: list[str],
+) -> tuple[Path, int, int]:
+    """Create or extend a regression file from generated stubs."""
+    path = Path(path_str)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        merged, added, skipped = _merge_regression_file(path.read_text(encoding="utf-8"), stubs)
+        path.write_text(merged, encoding="utf-8")
+        return path, added, skipped
+    path.write_text(_render_regression_file(header, stubs), encoding="utf-8")
+    return path, len(stubs), 0
+
+
 def _regression_stubs_from_details(
     *,
     module: str,
@@ -1836,19 +1944,16 @@ def _render_scan_regression_file(state: Any) -> str | None:
     stubs, _ = _scan_regression_stubs(state)
     if not stubs:
         return None
-    lines = [
-        '"""Generated by `ordeal scan --write-regression`.',
-        "",
-        f"Target: {state.module}",
-        '"""',
-        "",
-    ]
-    for idx, stub in enumerate(stubs):
-        if idx:
-            lines.extend(["", ""])
-        lines.append(stub.rstrip())
-    lines.append("")
-    return "\n".join(lines)
+    return _render_regression_file(
+        [
+            '"""Generated by `ordeal scan --write-regression`.',
+            "",
+            f"Target: {state.module}",
+            '"""',
+            "",
+        ],
+        stubs,
+    )
 
 
 def _mine_regression_stubs(
@@ -1889,19 +1994,16 @@ def _render_mine_regression_file(
     )
     if not stubs:
         return None
-    lines = [
-        '"""Generated by `ordeal mine --write-regression`.',
-        "",
-        f"Target: {target}",
-        '"""',
-        "",
-    ]
-    for idx, stub in enumerate(stubs):
-        if idx:
-            lines.extend(["", ""])
-        lines.append(stub.rstrip())
-    lines.append("")
-    return "\n".join(lines)
+    return _render_regression_file(
+        [
+            '"""Generated by `ordeal mine --write-regression`.',
+            "",
+            f"Target: {target}",
+            '"""',
+            "",
+        ],
+        stubs,
+    )
 
 
 def _build_mine_report(
@@ -1972,20 +2074,33 @@ def _write_scan_report(state: Any, path_str: str) -> None:
 
 def _write_scan_regressions(state: Any, path_str: str) -> None:
     """Write runnable pytest regressions for concrete scan findings."""
-    path = Path(path_str)
-    source = _render_scan_regression_file(state)
-    _, skipped = _scan_regression_stubs(state)
-    if source is None:
+    stubs, skipped = _scan_regression_stubs(state)
+    if not stubs:
         _stderr("No concrete regression tests could be generated from current scan findings.\n")
         if skipped:
             _stderr(f"Skipped {len(skipped)} finding(s) without replayable concrete inputs.\n")
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(source, encoding="utf-8")
-    _stderr(f"Regression tests written: {path}\n")
+    path, added, deduped = _write_regression_file(
+        path_str=path_str,
+        header=[
+            '"""Generated by `ordeal scan --write-regression`.',
+            "",
+            f"Target: {state.module}",
+            '"""',
+            "",
+        ],
+        stubs=stubs,
+    )
+    if added > 0:
+        verb = "written" if added == len(stubs) and deduped == 0 else "updated"
+        _stderr(f"Regression tests {verb}: {path}\n")
+    else:
+        _stderr(f"Regression tests already present: {path}\n")
     _stderr(f"Run: uv run pytest {path} -q\n")
     if skipped:
         _stderr(f"Skipped {len(skipped)} finding(s) without replayable concrete inputs.\n")
+    if deduped:
+        _stderr(f"Skipped {deduped} existing regression(s) already present in {path.name}.\n")
 
 
 def _write_mine_regressions(
@@ -1998,36 +2113,43 @@ def _write_mine_regressions(
     suspicious_count: int,
 ) -> None:
     """Write runnable pytest regressions for concrete mine findings."""
-    path = Path(path_str)
-    source = _render_mine_regression_file(
+    stubs, skipped_findings = _mine_regression_stubs(
         target=target,
         module=module,
         results=results,
         skipped=skipped,
         suspicious_count=suspicious_count,
     )
-    _, skipped_findings = _mine_regression_stubs(
-        target=target,
-        module=module,
-        results=results,
-        skipped=skipped,
-        suspicious_count=suspicious_count,
-    )
-    if source is None:
+    if not stubs:
         _stderr("No concrete regression tests could be generated from current mine findings.\n")
         if skipped_findings:
             _stderr(
                 f"Skipped {len(skipped_findings)} finding(s) without replayable concrete inputs.\n"
             )
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(source, encoding="utf-8")
-    _stderr(f"Regression tests written: {path}\n")
+    path, added, deduped = _write_regression_file(
+        path_str=path_str,
+        header=[
+            '"""Generated by `ordeal mine --write-regression`.',
+            "",
+            f"Target: {target}",
+            '"""',
+            "",
+        ],
+        stubs=stubs,
+    )
+    if added > 0:
+        verb = "written" if added == len(stubs) and deduped == 0 else "updated"
+        _stderr(f"Regression tests {verb}: {path}\n")
+    else:
+        _stderr(f"Regression tests already present: {path}\n")
     _stderr(f"Run: uv run pytest {path} -q\n")
     if skipped_findings:
         _stderr(
             f"Skipped {len(skipped_findings)} finding(s) without replayable concrete inputs.\n"
         )
+    if deduped:
+        _stderr(f"Skipped {deduped} existing regression(s) already present in {path.name}.\n")
 
 
 def _write_mine_report(
@@ -2108,14 +2230,16 @@ def main(argv: list[str] | None = None) -> int:
         description=(
             "Ordeal — discovers what's true about your code.\n\n"
             "Start here:\n"
+            "  ordeal scan mymod --save-artifacts\n"
+            f"                              Save {_default_scan_report_path('mymod')} and {_DEFAULT_REGRESSION_PATH}\n"
             "  ordeal scan mymod --report-file report.md\n"
             "                              Run everything and save a shareable bug report\n"
-            "  ordeal scan mymod --write-regression tests/test_ordeal_regressions.py\n"
-            "                              Save pytest regressions for findings\n"
+            "  ordeal scan mymod --write-regression\n"
+            f"                              Save pytest regressions to {_DEFAULT_REGRESSION_PATH}\n"
             "  ordeal mine mymod.func --report-file finding.md\n"
             "                              Mine one target and save a finding report\n"
-            "  ordeal mine mymod.func --write-regression tests/test_ordeal_regressions.py\n"
-            "                              Save pytest regressions for suspicious findings\n"
+            "  ordeal mine mymod.func --write-regression\n"
+            f"                              Save pytest regressions to {_DEFAULT_REGRESSION_PATH}\n"
             "  ordeal catalog              See every capability\n"
             "  catalog() in Python         Full API reference"
         ),
@@ -2160,9 +2284,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Explore a module and optionally write reports or pytest regressions",
         description=(
             f"{scan_desc}\n\n"
+            f"Use --save-artifacts to save both {_default_scan_report_path('mymod')} and"
+            f" {_DEFAULT_REGRESSION_PATH} when findings exist.\n"
             "Use --report-file report.md to save a shareable Markdown bug report.\n"
-            "Use --write-regression tests/test_ordeal_regressions.py to save runnable pytest"
-            " regressions."
+            f"Use --write-regression or --write-regression PATH to save runnable pytest"
+            f" regressions (default: {_DEFAULT_REGRESSION_PATH})."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -2181,6 +2307,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     scan_p.add_argument("--json", action="store_true", help="Output JSON instead of text")
     scan_p.add_argument(
+        "--save-artifacts",
+        action="store_true",
+        help=(
+            "When findings exist, write both the default Markdown dossier and"
+            f" regression file ({_default_scan_report_path('mymod')}, {_DEFAULT_REGRESSION_PATH})"
+        ),
+    )
+    scan_p.add_argument(
         "--report-file",
         type=str,
         default=None,
@@ -2191,8 +2325,13 @@ def main(argv: list[str] | None = None) -> int:
         "--write-regression",
         type=str,
         default=None,
+        nargs="?",
+        const=_DEFAULT_REGRESSION_PATH,
         metavar="PATH",
-        help="Write runnable pytest regressions for replayable findings to PATH",
+        help=(
+            "Write runnable pytest regressions for replayable findings"
+            f" (default: {_DEFAULT_REGRESSION_PATH})"
+        ),
     )
     scan_p.add_argument(
         "--include-private",
@@ -2306,8 +2445,8 @@ def main(argv: list[str] | None = None) -> int:
         description=(
             "Discover properties of a function or module.\n\n"
             "Use --report-file report.md to save a shareable Markdown finding report.\n"
-            "Use --write-regression tests/test_ordeal_regressions.py to save runnable pytest"
-            " regressions."
+            f"Use --write-regression or --write-regression PATH to save runnable pytest"
+            f" regressions (default: {_DEFAULT_REGRESSION_PATH})."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -2334,8 +2473,13 @@ def main(argv: list[str] | None = None) -> int:
         "--write-regression",
         type=str,
         default=None,
+        nargs="?",
+        const=_DEFAULT_REGRESSION_PATH,
         metavar="PATH",
-        help="Write runnable pytest regressions for suspicious findings to PATH",
+        help=(
+            "Write runnable pytest regressions for suspicious findings"
+            f" (default: {_DEFAULT_REGRESSION_PATH})"
+        ),
     )
 
     # -- ordeal mine-pair --

@@ -16,9 +16,11 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 import time as _time
 from pathlib import Path
+from pprint import pformat
 from typing import TYPE_CHECKING, Any, Callable
 
 from ordeal.config import ConfigError, OrdealConfig, load_config
@@ -183,6 +185,7 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
         print(f"    {names}")
 
     print("\nRun 'ordeal scan <module>' to explore a module fully.")
+    print("Add '--report-file report.md' to scan or mine for a shareable Markdown report.")
     print("Run 'ordeal catalog --detail' for signatures and docs.")
     print("Python: from ordeal import catalog; catalog()")
 
@@ -314,6 +317,10 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         print(state.to_json())
     else:
         print(_format_scan_summary(state))
+        if state.findings and not getattr(args, "report_file", None):
+            print("  tip: add --report-file report.md to save a shareable Markdown dossier")
+    if getattr(args, "report_file", None):
+        _write_scan_report(state, args.report_file)
 
     return 1 if state.findings else 0
 
@@ -558,7 +565,7 @@ def _cmd_mine(args: argparse.Namespace) -> int:
     """Discover properties of a function or all public functions in a module."""
     from importlib import import_module
 
-    from ordeal.mine import mine
+    from ordeal.mine import _is_suspicious_property, mine
 
     target = args.target
     max_examples = args.max_examples
@@ -586,6 +593,9 @@ def _cmd_mine(args: argparse.Namespace) -> int:
         from ordeal.auto import _unwrap
 
         funcs = [(attr, _unwrap(getattr(mod, attr)))]
+        report_target = target
+        report_namespace = mod.__name__
+        report_is_function = True
     else:
         # Maybe the full target is a module (e.g. "ordeal.demo")
         from ordeal.auto import _get_public_functions
@@ -600,8 +610,13 @@ def _cmd_mine(args: argparse.Namespace) -> int:
             hint = " (try --include-private for _prefixed functions)" if not inc_private else ""
             _stderr(f"No testable functions found in {target}{hint}\n")
             return 1
+        report_target = getattr(mod, "__name__", target)
+        report_namespace = getattr(mod, "__name__", target)
+        report_is_function = False
 
     skipped: list[tuple[str, str]] = []
+    mined_results: list[tuple[str, Any]] = []
+    suspicious = 0
     for name, func in funcs:
         try:
             result = mine(func, max_examples=max_examples)
@@ -610,6 +625,8 @@ def _cmd_mine(args: argparse.Namespace) -> int:
             skipped.append((name, reason))
             continue
 
+        mined_results.append((name, result))
+        suspicious += sum(1 for prop in result.properties if _is_suspicious_property(prop))
         print(result.summary())
         if getattr(args, "verbose", False) and result.not_applicable:
             print(f"    n/a: {', '.join(result.not_applicable)}")
@@ -619,6 +636,19 @@ def _cmd_mine(args: argparse.Namespace) -> int:
         print(f"Skipped {len(skipped)} function(s):")
         for name, reason in skipped:
             print(f"  {name}: {reason}")
+
+    if getattr(args, "report_file", None):
+        _write_mine_report(
+            target=report_target,
+            module=report_namespace,
+            results=mined_results,
+            skipped=skipped,
+            path_str=args.report_file,
+            include_scan_hint=not report_is_function,
+            suspicious_count=suspicious,
+        )
+    elif suspicious:
+        print("tip: add --report-file report.md to save a shareable Markdown dossier")
 
     return 0
 
@@ -1347,13 +1377,7 @@ def _format_scan_summary(state: Any) -> str:
     lines.append(f"  status: {status}")
     lines.append(f"  confidence: {state.confidence:.0%}")
 
-    checked = [f"{len(state.functions)} functions"]
-    if getattr(state, "supervisor_info", None):
-        checked.append(f"{state.supervisor_info.get('trajectory_steps', 0)} transitions")
-    tree = getattr(state, "tree", None)
-    if tree is not None and getattr(tree, "size", 0) > 0:
-        checked.append(f"{tree.size} checkpoints")
-    lines.append(f"  checked: {', '.join(checked)}")
+    lines.append(f"  checked: {', '.join(_scan_checked_items(state))}")
 
     if state.findings:
         lines.append("  findings:")
@@ -1378,6 +1402,435 @@ def _format_scan_summary(state: Any) -> str:
     if avail:
         lines.append(avail)
     return "\n".join(lines)
+
+
+def _scan_report_details(state: Any) -> list[dict[str, Any]]:
+    """Return structured finding details for scan report generation."""
+    details = getattr(state, "finding_details", None)
+    if details is not None:
+        return list(details)
+    return []
+
+
+def _scan_checked_items(state: Any) -> list[str]:
+    """Return the coarse coverage summary for a scan report."""
+    checked = [f"{len(state.functions)} functions"]
+    if getattr(state, "supervisor_info", None):
+        checked.append(f"{state.supervisor_info.get('trajectory_steps', 0)} transitions")
+    tree = getattr(state, "tree", None)
+    if tree is not None and getattr(tree, "size", 0) > 0:
+        checked.append(f"{tree.size} checkpoints")
+    return checked
+
+
+def _trim_report_value(
+    value: Any,
+    *,
+    max_depth: int = 3,
+    max_items: int = 6,
+    max_string: int = 120,
+) -> Any:
+    """Trim large nested values so reports stay readable."""
+    if max_depth <= 0:
+        text = repr(value)
+        return text if len(text) <= max_string else text[: max_string - 3] + "..."
+    if isinstance(value, str):
+        return value if len(value) <= max_string else value[: max_string - 3] + "..."
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    if isinstance(value, dict):
+        items = list(value.items())
+        trimmed = {
+            str(key): _trim_report_value(
+                item,
+                max_depth=max_depth - 1,
+                max_items=max_items,
+                max_string=max_string,
+            )
+            for key, item in items[:max_items]
+        }
+        if len(items) > max_items:
+            trimmed["..."] = f"+{len(items) - max_items} more field(s)"
+        return trimmed
+    if isinstance(value, (list, tuple, set, frozenset)):
+        seq = list(value)
+        trimmed = [
+            _trim_report_value(
+                item,
+                max_depth=max_depth - 1,
+                max_items=max_items,
+                max_string=max_string,
+            )
+            for item in seq[:max_items]
+        ]
+        if len(seq) > max_items:
+            trimmed.append(f"... +{len(seq) - max_items} more item(s)")
+        return trimmed
+    text = repr(value)
+    return text if len(text) <= max_string else text[: max_string - 3] + "..."
+
+
+def _json_block(value: Any) -> list[str]:
+    """Render a fenced JSON block for Markdown reports."""
+    trimmed = _trim_report_value(value)
+    return ["```json", json.dumps(trimmed, indent=2, default=str), "```"]
+
+
+def _python_block(code: str) -> list[str]:
+    """Render a fenced Python block for Markdown reports."""
+    return ["```python", code.rstrip(), "```"]
+
+
+def _slugify_report_name(text: str) -> str:
+    """Collapse free-form finding names into test-friendly identifiers."""
+    slug = re.sub(r"[^0-9a-zA-Z]+", "_", text).strip("_").lower()
+    return slug or "finding"
+
+
+def _python_literal(value: Any) -> str:
+    """Render a stable Python literal for regression stubs."""
+    return pformat(
+        _trim_report_value(value, max_depth=4, max_items=6, max_string=80),
+        width=88,
+        sort_dicts=False,
+    )
+
+
+def _property_impact(detail: dict[str, Any]) -> str:
+    """Explain why a mined property violation matters."""
+    name = detail.get("name", "")
+    messages = {
+        "deterministic": "the same input produced different outputs across repeated calls.",
+        "idempotent": "calling the function again changed a value that should have stabilized.",
+        "involution": "running the function twice failed to recover the original value.",
+        "never None": "a generated input returned None where callers likely expect a real value.",
+        "no NaN": "a generated input produced NaN, which can silently poison downstream math.",
+        "commutative": "swapping the operands changed the result, so behavior depends on argument order.",
+        "associative": "grouping equivalent operations changed the result, which hints at an algebraic edge case.",
+        "bijective": "distinct inputs collapsed to the same output, so information is being lost.",
+    }
+    return messages.get(
+        name,
+        "this property held for most examples but not all, which suggests a boundary or consistency bug.",
+    )
+
+
+def _render_regression_stub(module: str, detail: dict[str, Any]) -> str | None:
+    """Generate a compact pytest stub for concrete findings when possible."""
+    function = detail.get("function")
+    if not function:
+        return None
+
+    test_name = f"test_{function}_{_slugify_report_name(detail.get('name') or detail.get('kind', 'finding'))}_regression"
+    lines = [f"from {module} import {function}", "", "", f"def {test_name}() -> None:"]
+
+    kind = detail.get("kind")
+    counterexample = detail.get("counterexample") or {}
+    failing_args = detail.get("failing_args")
+    input_args = counterexample.get("input") if isinstance(counterexample.get("input"), dict) else None
+
+    if kind == "crash" and isinstance(failing_args, dict):
+        lines.append(f"    args = {_python_literal(failing_args)}")
+        lines.append(f"    {function}(**args)")
+        return "\n".join(lines)
+
+    if kind != "property" or not isinstance(input_args, dict) or not input_args:
+        return None
+
+    first_param = next(iter(input_args))
+    name = detail.get("name")
+    lines.append(f"    args = {_python_literal(input_args)}")
+
+    if name == "deterministic":
+        lines.append(f"    first = {function}(**args)")
+        lines.append(f"    second = {function}(**args)")
+        lines.append("    assert second == first")
+        return "\n".join(lines)
+
+    if name == "idempotent":
+        lines.append(f"    first = {function}(**args)")
+        lines.append("    replay_args = dict(args)")
+        lines.append(f"    replay_args[{first_param!r}] = first")
+        lines.append(f"    second = {function}(**replay_args)")
+        lines.append("    assert second == first")
+        return "\n".join(lines)
+
+    if name == "involution":
+        lines.append(f"    first = {function}(**args)")
+        lines.append("    replay_args = dict(args)")
+        lines.append(f"    replay_args[{first_param!r}] = first")
+        lines.append(f"    second = {function}(**replay_args)")
+        lines.append(f"    assert second == args[{first_param!r}]")
+        return "\n".join(lines)
+
+    if name == "never None":
+        lines.append(f"    assert {function}(**args) is not None")
+        return "\n".join(lines)
+
+    if name == "commutative" and isinstance(counterexample.get("swapped_input"), dict):
+        lines.append(f"    swapped = {_python_literal(counterexample['swapped_input'])}")
+        lines.append(f"    left = {function}(**args)")
+        lines.append(f"    right = {function}(**swapped)")
+        lines.append("    assert right == left")
+        return "\n".join(lines)
+
+    return None
+
+
+def _render_finding_section(detail: dict[str, Any]) -> list[str]:
+    """Render one finding block for a Markdown dossier."""
+    qualname = detail.get("qualname") or detail.get("function", "?")
+    kind = detail.get("kind", "finding")
+    title = detail.get("name") or detail.get("summary") or kind
+    module = detail.get("module", "")
+
+    lines = [f"### {detail['index']}. `{qualname}`", "", f"- Type: {kind}", f"- Finding: {title}"]
+
+    if kind == "property":
+        holds = detail.get("holds")
+        total = detail.get("total")
+        confidence = detail.get("confidence")
+        if holds is not None and total is not None and confidence is not None:
+            lines.append(f"- Evidence: `{holds}/{total}` examples (`{confidence:.0%}` confidence)")
+        lines.append(f"- Why this matters: {_property_impact(detail)}")
+        counterexample = detail.get("counterexample")
+        if counterexample:
+            lines.extend(["", "Counterexample:"])
+            lines.extend(_json_block(counterexample))
+        stub = _render_regression_stub(module, detail)
+        if stub:
+            lines.extend(["", "Regression test stub:"])
+            lines.extend(_python_block(stub))
+        lines.extend(
+            [
+                "",
+                "Next steps:",
+                f"- `ordeal check {qualname} -p \"{detail.get('name', '')}\" -n 200`",
+                f"- `ordeal mutate {qualname}`",
+            ]
+        )
+        return lines
+
+    if kind == "crash":
+        error = detail.get("error") or "unknown error"
+        lines.append(f"- Evidence: `{error}`")
+        lines.append("- Why this matters: the function crashes under generated inputs, so basic robustness is not yet established.")
+        if detail.get("failing_args"):
+            lines.extend(["", "Failing input:"])
+            lines.extend(_json_block(detail["failing_args"]))
+        stub = _render_regression_stub(module, detail)
+        if stub:
+            lines.extend(["", "Regression test stub:"])
+            lines.extend(_python_block(stub))
+        lines.extend(
+            [
+                "",
+                "Next steps:",
+                f"- `ordeal mine {qualname} -n 200`",
+                f"- Reproduce the crash directly in a regression test for `{qualname}`",
+            ]
+        )
+        return lines
+
+    if kind == "mutation":
+        score = detail.get("mutation_score")
+        survived = detail.get("survived_mutants")
+        if score is not None:
+            lines.append(f"- Evidence: mutation score `{score:.0%}`")
+        if survived is not None:
+            lines.append(f"- Surviving mutants: `{survived}`")
+        lines.append("- Why this matters: existing tests still miss at least one meaningful code change.")
+        lines.extend(
+            [
+                "",
+                "Next steps:",
+                f"- `ordeal mutate {qualname}`",
+                f"- Add regression tests for the surviving mutant cases in `{qualname}`",
+            ]
+        )
+        return lines
+
+    lines.append(f"- Evidence: {detail.get('summary', title)}")
+    return lines
+
+
+def _render_findings_report_markdown(report: dict[str, Any]) -> str:
+    """Render a shareable Markdown report from normalized finding data."""
+    lines = ["# Ordeal Finding Report", ""]
+    lines.append(f"Target: `{report['target']}`")
+    lines.append(f"Tool: `ordeal {report['tool']}`")
+    lines.append(f"Status: {report['status']}")
+    confidence = report.get("confidence")
+    if confidence is not None:
+        lines.append(f"Confidence: `{confidence}`")
+    seed = report.get("seed")
+    if seed is not None:
+        lines.append(f"Seed: `{seed}`")
+    lines.append("")
+
+    lines.extend(["## Summary", ""])
+    for item in report.get("summary", []):
+        lines.append(f"- {item}")
+    lines.append("")
+
+    details = report.get("details", [])
+    lines.extend(["## Findings", ""])
+    if details:
+        for idx, detail in enumerate(details, start=1):
+            enriched = {"index": idx, **detail}
+            lines.extend(_render_finding_section(enriched))
+            lines.append("")
+    else:
+        lines.append("No findings yet.")
+        lines.append("")
+
+    gaps = report.get("gaps", [])
+    if gaps:
+        lines.extend(["## Gaps To Close", ""])
+        for gap in gaps:
+            lines.append(f"- {gap}")
+        lines.append("")
+
+    for title, items in report.get("extra_sections", []):
+        if not items:
+            continue
+        lines.extend([f"## {title}", ""])
+        for item in items:
+            lines.append(f"- {item}")
+        lines.append("")
+
+    lines.extend(["## Suggested Commands", ""])
+    for command in report.get("suggested_commands", []):
+        lines.append(f"- `{command}`")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _build_scan_report(state: Any) -> dict[str, Any]:
+    """Normalize scan output into the shared finding report shape."""
+    return {
+        "target": state.module,
+        "tool": "scan",
+        "status": "findings found" if state.findings else "no findings yet",
+        "confidence": f"{state.confidence:.0%}",
+        "seed": getattr(state, "supervisor_info", {}).get("seed"),
+        "summary": [
+            f"Checked: {', '.join(_scan_checked_items(state))}",
+            f"Findings: {len(state.findings)}",
+            f"Gaps: {sum(len(v) for v in state.frontier.values()) if state.frontier else 0}",
+        ],
+        "details": [
+            {
+                **detail,
+                "module": state.module,
+                "qualname": f"{state.module}.{detail.get('function', '?')}",
+            }
+            for detail in _scan_report_details(state)
+        ],
+        "gaps": [
+            f"`{state.module}.{name}`: {', '.join(gaps)}" for name, gaps in state.frontier.items()
+        ],
+        "suggested_commands": [
+            f"ordeal scan {state.module}",
+            f"ordeal mine {state.module} -n 200",
+            f"ordeal mutate {state.module}",
+        ],
+    }
+
+
+def _render_scan_report_markdown(state: Any) -> str:
+    """Render a shareable Markdown finding report for `ordeal scan`."""
+    return _render_findings_report_markdown(_build_scan_report(state))
+
+
+def _build_mine_report(
+    *,
+    target: str,
+    module: str,
+    results: list[tuple[str, Any]],
+    skipped: list[tuple[str, str]],
+    include_scan_hint: bool,
+    suspicious_count: int,
+) -> dict[str, Any]:
+    """Normalize mine output into the shared finding report shape."""
+    from ordeal.mine import _is_suspicious_property
+
+    details: list[dict[str, Any]] = []
+    blind_spots: list[str] = []
+    for name, result in results:
+        blind_spots.extend(result.not_checked)
+        suspicious = sorted(
+            [prop for prop in result.properties if _is_suspicious_property(prop)],
+            key=lambda prop: (-prop.confidence, prop.name),
+        )
+        for prop in suspicious:
+            details.append(
+                {
+                    "kind": "property",
+                    "module": module,
+                    "function": name,
+                    "qualname": f"{module}.{name}",
+                    "name": prop.name,
+                    "summary": f"{prop.name} ({prop.confidence:.0%})",
+                    "confidence": prop.confidence,
+                    "holds": prop.holds,
+                    "total": prop.total,
+                    "counterexample": prop.counterexample,
+                }
+            )
+
+    suggested = [f"ordeal mine {target} -n 200", f"ordeal mutate {target}"]
+    if include_scan_hint:
+        suggested.insert(1, f"ordeal scan {module}")
+
+    return {
+        "target": target,
+        "tool": "mine",
+        "status": "findings found" if details else "no suspicious findings",
+        "summary": [
+            f"Checked: {len(results)} function(s)",
+            f"Suspicious findings: {suspicious_count}",
+            f"Skipped: {len(skipped)} function(s)",
+        ],
+        "details": details,
+        "extra_sections": [
+            ("What Mine Did Not Check", list(dict.fromkeys(blind_spots))),
+            ("Skipped Functions", [f"`{module}.{name}`: {reason}" for name, reason in skipped]),
+        ],
+        "suggested_commands": suggested,
+    }
+
+
+def _write_scan_report(state: Any, path_str: str) -> None:
+    """Write a Markdown report for `ordeal scan`."""
+    path = Path(path_str)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_render_scan_report_markdown(state), encoding="utf-8")
+    _stderr(f"Scan report saved: {path}\n")
+
+
+def _write_mine_report(
+    *,
+    target: str,
+    module: str,
+    results: list[tuple[str, Any]],
+    skipped: list[tuple[str, str]],
+    path_str: str,
+    include_scan_hint: bool,
+    suspicious_count: int,
+) -> None:
+    """Write a Markdown report for `ordeal mine`."""
+    path = Path(path_str)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    report = _build_mine_report(
+        target=target,
+        module=module,
+        results=results,
+        skipped=skipped,
+        include_scan_hint=include_scan_hint,
+        suspicious_count=suspicious_count,
+    )
+    path.write_text(_render_findings_report_markdown(report), encoding="utf-8")
+    _stderr(f"Mine report saved: {path}\n")
 
 
 def _write_json_report(
@@ -1433,7 +1886,10 @@ def main(argv: list[str] | None = None) -> int:
         description=(
             "Ordeal — discovers what's true about your code.\n\n"
             "Start here:\n"
-            "  ordeal scan mymod           Run everything: mine + scan + mutate + chaos\n"
+            "  ordeal scan mymod --report-file report.md\n"
+            "                              Run everything and save a shareable bug report\n"
+            "  ordeal mine mymod.func --report-file finding.md\n"
+            "                              Mine one target and save a shareable finding report\n"
             "  ordeal catalog              See every capability\n"
             "  catalog() in Python         Full API reference"
         ),
@@ -1475,8 +1931,11 @@ def main(argv: list[str] | None = None) -> int:
     scan_desc = (_explore_fn.__doc__ or "").strip().split("\n\n")[0]
     scan_p = sub.add_parser(
         "scan",
-        help="Explore a module: mine + scan + mutate + chaos in one pass",
-        description=scan_desc,
+        help="Explore a module and optionally write a shareable Markdown bug report",
+        description=(
+            f"{scan_desc}\n\n"
+            "Use --report-file report.md to save a shareable Markdown bug report."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     scan_p.add_argument("target", help="Module path (e.g. myapp.scoring)")
@@ -1493,6 +1952,13 @@ def main(argv: list[str] | None = None) -> int:
         "--time-limit", "-t", type=float, default=None, help="Time budget in seconds"
     )
     scan_p.add_argument("--json", action="store_true", help="Output JSON instead of text")
+    scan_p.add_argument(
+        "--report-file",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Write a shareable Markdown finding report to PATH",
+    )
     scan_p.add_argument(
         "--include-private",
         action="store_true",
@@ -1577,7 +2043,15 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # -- ordeal mine --
-    mine_p = sub.add_parser("mine", help="Discover properties of a function or module")
+    mine_p = sub.add_parser(
+        "mine",
+        help="Discover properties and optionally write a shareable Markdown report",
+        description=(
+            "Discover properties of a function or module.\n\n"
+            "Use --report-file report.md to save a shareable Markdown finding report."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     mine_p.add_argument("target", help="Dotted path: mymod.func or mymod")
     mine_p.add_argument(
         "--max-examples", "-n", type=int, default=500, help="Examples to sample (default: 500)"
@@ -1589,6 +2063,13 @@ def main(argv: list[str] | None = None) -> int:
         "--include-private",
         action="store_true",
         help="Include _private functions (many codebases have logic there)",
+    )
+    mine_p.add_argument(
+        "--report-file",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Write a shareable Markdown finding report to PATH",
     )
 
     # -- ordeal mine-pair --

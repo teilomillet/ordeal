@@ -6,6 +6,7 @@ import sys
 from types import SimpleNamespace
 
 import hypothesis.strategies as st
+import pytest
 from hypothesis import settings as hsettings
 
 import ordeal.cli as cli
@@ -15,12 +16,25 @@ from ordeal import ChaosTest, always, invariant, rule
 from ordeal.assertions import tracker
 from ordeal.cli import main
 from ordeal.explore import ProgressSnapshot
+from ordeal.mine import MineResult, MinedProperty
 from ordeal.quickcheck import quickcheck
 
 
 class TestCLI:
     def test_no_command_returns_0(self):
         assert main([]) == 0
+
+    def test_top_level_help_mentions_report_examples(self, capsys):
+        with pytest.raises(SystemExit):
+            main(["--help"])
+        out = capsys.readouterr().out
+        assert "ordeal scan mymod --report-file report.md" in out
+        assert "shareable bug report" in out
+
+    def test_catalog_mentions_report_file(self, capsys):
+        assert main(["catalog"]) == 0
+        out = capsys.readouterr().out
+        assert "--report-file report.md" in out
 
     def test_explore_missing_config(self):
         assert main(["explore", "--config", "/nonexistent.toml"]) == 1
@@ -52,6 +66,46 @@ class TestCLI:
         out = capsys.readouterr().out
         assert "mine(bounded)" in out
 
+    def test_mine_help_mentions_shareable_report(self, capsys):
+        with pytest.raises(SystemExit):
+            main(["mine", "--help"])
+        out = capsys.readouterr().out
+        assert "shareable Markdown finding report" in out
+        assert "--report-file PATH" in out
+
+    def test_mine_shows_report_hint_when_findings_exist(self, monkeypatch, capsys):
+        result = MineResult(
+            function="normalize",
+            examples=20,
+            properties=[
+                MinedProperty(
+                    "idempotent",
+                    18,
+                    20,
+                    {
+                        "input": {"xs": [1, 2, 3]},
+                        "output": [0.1, 0.2, 0.3],
+                        "replayed": [0.2, 0.3, 0.5],
+                    },
+                )
+            ],
+        )
+
+        import ordeal.mine as ordeal_mine
+
+        monkeypatch.setattr(ordeal_mine, "mine", lambda *args, **kwargs: result)
+
+        assert main(["mine", "ordeal.demo.normalize", "-n", "10"]) == 0
+        out = capsys.readouterr().out
+        assert "tip: add --report-file report.md" in out
+
+    def test_scan_help_mentions_shareable_report(self, capsys):
+        with pytest.raises(SystemExit):
+            main(["scan", "--help"])
+        out = capsys.readouterr().out
+        assert "shareable Markdown bug report" in out
+        assert "--report-file PATH" in out
+
     def test_scan_suppresses_inner_noise_and_formats_summary(self, monkeypatch, capsys):
         class _FakeTree:
             size = 3
@@ -82,6 +136,7 @@ class TestCLI:
         assert "ordeal scan: pkg.mod" in captured.out
         assert "status: findings found" in captured.out
         assert "gaps to close:" in captured.out
+        assert "tip: add --report-file report.md" in captured.out
 
     def test_scan_no_findings_returns_zero(self, monkeypatch, capsys):
         state = SimpleNamespace(
@@ -102,6 +157,90 @@ class TestCLI:
         assert rc == 0
         assert "status: no findings yet" in out
         assert "findings: none" in out
+
+    def test_scan_report_file_writes_markdown(self, monkeypatch, tmp_path, capsys):
+        report_path = tmp_path / "scan-report.md"
+        state = SimpleNamespace(
+            module="pkg.mod",
+            confidence=0.63,
+            functions={"normalize": object()},
+            supervisor_info={"seed": 42, "trajectory_steps": 5},
+            tree=SimpleNamespace(size=3),
+            findings=["normalize: idempotent (87%)"],
+            frontier={"normalize": ["property: idempotent (87%)"]},
+            finding_details=[
+                {
+                    "kind": "property",
+                    "function": "normalize",
+                    "name": "idempotent",
+                    "summary": "idempotent (87%)",
+                    "confidence": 0.87,
+                    "holds": 26,
+                    "total": 30,
+                    "counterexample": {
+                        "input": {"xs": [9, 8, 7, 6, 5, 4, 3, 2]},
+                        "output": [1.0, 0.5, 0.0],
+                        "replayed": [0.66, 0.33, 0.0],
+                    },
+                }
+            ],
+        )
+
+        monkeypatch.setattr(ordeal_state, "explore", lambda *args, **kwargs: state)
+
+        rc = main(["scan", "pkg.mod", "--report-file", str(report_path), "-n", "10"])
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        assert report_path.exists()
+        report = report_path.read_text()
+        assert "# Ordeal Finding Report" in report
+        assert "Target: `pkg.mod`" in report
+        assert "### 1. `pkg.mod.normalize`" in report
+        assert "`ordeal check pkg.mod.normalize -p \"idempotent\" -n 200`" in report
+        assert "Counterexample:" in report
+        assert '"... +2 more item(s)"' in report
+        assert "Regression test stub:" in report
+        assert "replay_args['xs'] = first" in report
+        assert "Scan report saved:" in captured.err
+
+    def test_mine_report_file_writes_markdown(self, monkeypatch, tmp_path, capsys):
+        report_path = tmp_path / "mine-report.md"
+        result = MineResult(
+            function="normalize",
+            examples=20,
+            properties=[
+                MinedProperty(
+                    "idempotent",
+                    18,
+                    20,
+                    {
+                        "input": {"xs": [9, 8, 7, 6, 5, 4, 3, 2]},
+                        "output": [1.0, 0.5, 0.0],
+                        "replayed": [0.66, 0.33, 0.0],
+                    },
+                )
+            ],
+            not_checked=["state mutation and side effects"],
+        )
+
+        import ordeal.mine as ordeal_mine
+
+        monkeypatch.setattr(ordeal_mine, "mine", lambda *args, **kwargs: result)
+
+        rc = main(["mine", "ordeal.demo.normalize", "--report-file", str(report_path), "-n", "10"])
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert report_path.exists()
+        report = report_path.read_text()
+        assert "Tool: `ordeal mine`" in report
+        assert "Target: `ordeal.demo.normalize`" in report
+        assert "### 1. `ordeal.demo.normalize`" in report
+        assert "Regression test stub:" in report
+        assert "`ordeal mutate ordeal.demo.normalize`" in report
+        assert "## What Mine Did Not Check" in report
+        assert "Mine report saved:" in captured.err
 
     # -- ordeal mine-pair --
 

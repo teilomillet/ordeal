@@ -56,6 +56,7 @@ class FunctionState:
     mined: bool = False
     properties: list[dict[str, Any]] = field(default_factory=list)
     property_violations: list[str] = field(default_factory=list)
+    property_violation_details: list[dict[str, Any]] = field(default_factory=list)
     edges_discovered: int = 0
     saturated: bool = False
 
@@ -72,6 +73,8 @@ class FunctionState:
     # scan/fuzz results
     scanned: bool = False
     crash_free: bool | None = None
+    scan_error: str | None = None
+    failing_args: dict[str, Any] | None = None
     fuzz_examples: int = 0
 
     # chaos testing
@@ -111,6 +114,7 @@ class FunctionState:
         self.mined = False
         self.properties = []
         self.property_violations = []
+        self.property_violation_details = []
         self.edges_discovered = 0
         self.saturated = False
         self.mutated = False
@@ -121,6 +125,8 @@ class FunctionState:
         self.hardened_kills = 0
         self.scanned = False
         self.crash_free = None
+        self.scan_error = None
+        self.failing_args = None
         self.fuzz_examples = 0
         self.chaos_tested = False
         self.faults_tested = []
@@ -233,6 +239,35 @@ class ExplorationState:
                 results.append(f"{name}: mutation score {fs.mutation_score:.0%}")
         return results
 
+    @property
+    def finding_details(self) -> list[dict[str, Any]]:
+        """Structured finding details for reports and AI handoff."""
+        details: list[dict[str, Any]] = []
+        for name, fs in self.functions.items():
+            if fs.crash_free is False:
+                details.append(
+                    {
+                        "kind": "crash",
+                        "function": name,
+                        "summary": f"{name}: crashes on random inputs",
+                        "error": fs.scan_error,
+                        "failing_args": fs.failing_args,
+                    }
+                )
+            for item in fs.property_violation_details:
+                details.append({"kind": "property", "function": name, **item})
+            if fs.mutation_score is not None and fs.mutation_score < 0.5:
+                details.append(
+                    {
+                        "kind": "mutation",
+                        "function": name,
+                        "summary": f"{name}: mutation score {fs.mutation_score:.0%}",
+                        "mutation_score": fs.mutation_score,
+                        "survived_mutants": fs.survived_mutants,
+                    }
+                )
+        return details
+
     def summary(self) -> str:
         """Human-readable exploration report."""
         lines = [f"Exploration: {self.module}"]
@@ -280,6 +315,7 @@ class ExplorationState:
             "confidence": round(self.confidence, 4),
             "functions": {name: asdict(fs) for name, fs in self.functions.items()},
             "findings": self.findings,
+            "finding_details": self.finding_details,
             "frontier": self.frontier,
             "suggestions": suggest(self),
             "skipped": self.skipped,
@@ -348,12 +384,23 @@ def explore_mine(
         ]
         fs.edges_discovered = result.edges_discovered
         fs.saturated = result.saturated
-        # Flag suspicious properties
-        fs.property_violations = [
-            f"{p.name} ({p.confidence:.0%})"
-            for p in result.properties
-            if _is_suspicious_property(p)
-        ]
+        fs.property_violations = []
+        fs.property_violation_details = []
+        for prop in result.properties:
+            if not _is_suspicious_property(prop):
+                continue
+            label = f"{prop.name} ({prop.confidence:.0%})"
+            fs.property_violations.append(label)
+            fs.property_violation_details.append(
+                {
+                    "name": prop.name,
+                    "summary": label,
+                    "confidence": round(prop.confidence, 4),
+                    "holds": prop.holds,
+                    "total": prop.total,
+                    "counterexample": prop.counterexample,
+                }
+            )
     return state
 
 
@@ -366,6 +413,8 @@ def explore_scan(state: ExplorationState, *, max_examples: int = 30) -> Explorat
         fs = state.function(fr.name)
         fs.scanned = True
         fs.crash_free = fr.passed
+        fs.scan_error = fr.error
+        fs.failing_args = fr.failing_args
         if fr.property_violations:
             # Merge, don't duplicate
             existing = set(fs.property_violations)

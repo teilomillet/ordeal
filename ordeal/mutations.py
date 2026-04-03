@@ -85,7 +85,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Literal
 
 if TYPE_CHECKING:
-    from ordeal.mine import MineResult, MinedProperty
+    from ordeal.mine import MinedProperty, MineResult
 
 from ordeal.faults import PatchFault
 

@@ -694,7 +694,9 @@ def _cmd_mine(args: argparse.Namespace) -> int:
             suspicious_count=suspicious,
         )
     elif suspicious and not getattr(args, "report_file", None):
-        print(f"tip: add --report-file report.md or --write-regression ({_DEFAULT_REGRESSION_PATH})")
+        print(
+            f"tip: add --report-file report.md or --write-regression ({_DEFAULT_REGRESSION_PATH})"
+        )
 
     return 0
 
@@ -2231,15 +2233,15 @@ def main(argv: list[str] | None = None) -> int:
             "Ordeal — discovers what's true about your code.\n\n"
             "Start here:\n"
             "  ordeal scan mymod --save-artifacts\n"
-            f"                              Save {_default_scan_report_path('mymod')} and {_DEFAULT_REGRESSION_PATH}\n"
+            "                              Save report + regressions\n"
             "  ordeal scan mymod --report-file report.md\n"
-            "                              Run everything and save a shareable bug report\n"
+            "                              Save a shareable bug report\n"
             "  ordeal scan mymod --write-regression\n"
-            f"                              Save pytest regressions to {_DEFAULT_REGRESSION_PATH}\n"
+            "                              Save pytest regressions\n"
             "  ordeal mine mymod.func --report-file finding.md\n"
-            "                              Mine one target and save a finding report\n"
+            "                              Save a finding report\n"
             "  ordeal mine mymod.func --write-regression\n"
-            f"                              Save pytest regressions to {_DEFAULT_REGRESSION_PATH}\n"
+            "                              Save pytest regressions\n"
             "  ordeal catalog              See every capability\n"
             "  catalog() in Python         Full API reference"
         ),

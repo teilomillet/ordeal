@@ -352,7 +352,9 @@ class TestCLI:
         assert "Scan report saved:" in captured.err
         assert "Regression tests written:" in captured.err
 
-    def test_scan_save_artifacts_skips_writes_without_findings(self, monkeypatch, tmp_path, capsys):
+    def test_scan_save_artifacts_skips_writes_without_findings(
+        self, monkeypatch, tmp_path, capsys
+    ):
         monkeypatch.chdir(tmp_path)
         state = SimpleNamespace(
             module="pkg.clean",

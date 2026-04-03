@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import sys
 import types
-import warnings
-
 import pytest
 
 from ordeal.faults import PatchFault
@@ -222,17 +220,18 @@ class TestModuleMineOracleFallback:
             dummy_result = MutationResult(target="_test_priv_mod")
             dummy_result.mutants = []  # 0 killed by tests
 
-            result = _module_mine_oracle_fallback(
-                "_test_priv_mod",
-                mod,
-                dummy_result,
-                ["arithmetic", "comparison", "negate"],
-                {},
-                filter_equivalent=True,
-                equivalence_samples=5,
-                preset_used="essential",
-                mutant_timeout=None,
-            )
+            with pytest.warns(UserWarning, match="tests killed 0/0 mutants but mine oracle killed"):
+                result = _module_mine_oracle_fallback(
+                    "_test_priv_mod",
+                    mod,
+                    dummy_result,
+                    ["arithmetic", "comparison", "negate"],
+                    {},
+                    filter_equivalent=True,
+                    equivalence_samples=5,
+                    preset_used="essential",
+                    mutant_timeout=None,
+                )
             # Should find and mine private functions
             # Result is None only if zero mine kills — but _normalize and _validate
             # have clear properties that mutations would violate
@@ -304,17 +303,18 @@ class TestModuleMineOracleFallback:
             dummy_result = MutationResult(target="_test_ray_mod")
             dummy_result.mutants = []
 
-            result = _module_mine_oracle_fallback(
-                "_test_ray_mod",
-                mod,
-                dummy_result,
-                ["arithmetic", "comparison"],
-                {},
-                filter_equivalent=True,
-                equivalence_samples=5,
-                preset_used="essential",
-                mutant_timeout=None,
-            )
+            with pytest.warns(UserWarning, match="tests killed 0/0 mutants but mine oracle killed"):
+                result = _module_mine_oracle_fallback(
+                    "_test_ray_mod",
+                    mod,
+                    dummy_result,
+                    ["arithmetic", "comparison"],
+                    {},
+                    filter_equivalent=True,
+                    equivalence_samples=5,
+                    preset_used="essential",
+                    mutant_timeout=None,
+                )
             # Should find _compute after unwrapping, not skip it
             if result is not None:
                 assert result.total > 0
@@ -343,8 +343,7 @@ class TestFunctionMineOracleFallback:
 
         try:
             # No tests match -k _test_fallback_mod → 0 kills → mine fallback
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
+            with pytest.warns(UserWarning, match="tests killed 0/"):
                 result = mutate_function_and_test(
                     "_test_fallback_mod.add",
                     preset="essential",

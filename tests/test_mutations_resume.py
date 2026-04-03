@@ -6,6 +6,7 @@ If it does, the cache is hiding bugs.
 
 from __future__ import annotations
 
+import importlib
 import shutil
 import sys
 from pathlib import Path
@@ -26,9 +27,10 @@ from ordeal.mutations import (
 
 
 @pytest.fixture()
-def clean_cache():
-    """Remove .ordeal/mutate/ before and after each test."""
-    cache_dir = Path(".ordeal") / "mutate"
+def clean_cache(tmp_path, monkeypatch):
+    """Run each cache test in its own project-local cache directory."""
+    monkeypatch.chdir(tmp_path)
+    cache_dir = tmp_path / ".ordeal" / "mutate"
     if cache_dir.exists():
         shutil.rmtree(cache_dir, ignore_errors=True)
     yield
@@ -190,8 +192,13 @@ class TestResumeInvariant:
         """When source changes, cache is discarded and tests re-run."""
         mod_name, mod_dir = sample_module
 
+        def test_add() -> None:
+            mod = importlib.import_module(mod_name)
+            assert mod.add(1, 2) == 3
+            assert mod.add(-1, 5) == 4
+
         # First run: populate cache
-        mutate(f"{mod_name}.add", preset="essential", resume=True)
+        mutate(f"{mod_name}.add", test_fn=test_add, preset="essential", resume=True)
 
         # Edit the source
         init = mod_dir / "__init__.py"
@@ -201,7 +208,7 @@ class TestResumeInvariant:
                 del sys.modules[key]
 
         # Second run: cache should be invalidated
-        r2 = mutate(f"{mod_name}.add", preset="essential", resume=True)
+        r2 = mutate(f"{mod_name}.add", test_fn=test_add, preset="essential", resume=True)
         # r2 should have re-run (not returned stale r1)
         assert r2.diagnostics.get("cached", 0) == 0
 
@@ -235,21 +242,33 @@ class TestResumeInvariant:
         )
         assert result.diagnostics.get("cached") is None
 
-    def test_mine_oracle_results_not_cached(self, clean_cache):
+    def test_mine_oracle_results_not_cached(self, clean_cache, tmp_path):
         """Mine oracle results are stochastic — must not be cached.
 
         mine() uses random inputs, so re-running can discover different
         properties. Results where killed_by='mine()' must not be saved
         to cache.
         """
-        # ordeal.demo.score has no matching tests → mine oracle
-        r1 = mutate("ordeal.demo.score", preset="essential", resume=True)
-        assert any(m.killed_by == "mine()" for m in r1.mutants)
+        mod_dir = tmp_path / "oraclenomod"
+        mod_dir.mkdir()
+        (mod_dir / "__init__.py").write_text(
+            "def mystery_transform(x: int) -> int:\n"
+            "    return (x * 2) + 1\n"
+        )
+        sys.path.insert(0, str(tmp_path))
+        try:
+            r1 = mutate("oraclenomod.mystery_transform", preset="essential", resume=True)
+            assert any(m.killed_by == "mine()" for m in r1.mutants)
 
-        # Second run should NOT be cached — mine should run fresh again
-        r2 = mutate("ordeal.demo.score", preset="essential", resume=True)
-        assert r2.diagnostics.get("cached") is None
-        assert any(m.killed_by == "mine()" for m in r2.mutants)
+            # Second run should NOT be cached — mine should run fresh again
+            r2 = mutate("oraclenomod.mystery_transform", preset="essential", resume=True)
+            assert r2.diagnostics.get("cached") is None
+            assert any(m.killed_by == "mine()" for m in r2.mutants)
+        finally:
+            sys.path.remove(str(tmp_path))
+            for key in list(sys.modules):
+                if key.startswith("oraclenomod"):
+                    del sys.modules[key]
 
 
 # ============================================================================

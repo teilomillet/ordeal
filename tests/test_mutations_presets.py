@@ -356,8 +356,10 @@ def test_auto_discovered_function_mutation_falls_back_to_mine_after_batch_collec
     monkeypatch.setattr(
         mutations,
         "_auto_test_fn",
-        lambda target, test_filter=None: lambda: (_ for _ in ()).throw(
-            AssertionError("auto-discovered tests should not be probed eagerly")
+        lambda target, test_filter=None: (
+            lambda: (_ for _ in ()).throw(
+                AssertionError("auto-discovered tests should not be probed eagerly")
+            )
         ),
     )
     monkeypatch.setattr(

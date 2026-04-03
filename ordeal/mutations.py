@@ -4654,8 +4654,10 @@ def mutate_function_and_test(
         target=target, operators_used=operators, preset_used=used_preset, concern=concern
     )
 
-    use_batched_function_path = auto_discovered_tests and bool(mutant_pairs) and (
-        workers > 1 or len(mutant_pairs) >= _FUNCTION_BATCH_MIN_MUTANTS
+    use_batched_function_path = (
+        auto_discovered_tests
+        and bool(mutant_pairs)
+        and (workers > 1 or len(mutant_pairs) >= _FUNCTION_BATCH_MIN_MUTANTS)
     )
 
     if use_batched_function_path:

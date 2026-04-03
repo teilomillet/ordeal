@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import hypothesis.strategies as st
@@ -38,7 +38,8 @@ def _write_verify_fixture(
     if regression_path is not None:
         regression_file = tmp_path / regression_path
         regression_file.parent.mkdir(parents=True, exist_ok=True)
-        regression_file.write_text("def test_normalize_idempotent_regression() -> None:\n    pass\n")
+        stub = "def test_normalize_idempotent_regression() -> None:\n    pass\n"
+        regression_file.write_text(stub)
 
     bundle = {
         "version": 1,
@@ -379,6 +380,7 @@ class TestCLI:
         out = capsys.readouterr().out
         assert "shareable Markdown bug report" in out
         assert "runnable pytest regressions" in out
+        assert "ordeal verify <finding-id>" in out
         assert "--save-artifacts" in out
         assert ".ordeal/findings/mymod.md" in out
         assert ".ordeal/findings/mymod.json" in out
@@ -626,6 +628,8 @@ class TestCLI:
         assert "regression: tests/test_ordeal_regressions.py" in captured.out
         assert "index: .ordeal/findings/index.json" in captured.out
         assert "next:" in captured.out
+        fid = bundle["findings"][0]["finding_id"]
+        assert f"verify: uv run ordeal verify {fid}" in captured.out
         assert "run: uv run pytest tests/test_ordeal_regressions.py -q" in captured.out
         assert "after fix: uv run ordeal scan pkg.mod --save-artifacts" in captured.out
         assert "Scan report saved:" in captured.err
@@ -713,6 +717,7 @@ class TestCLI:
         assert "Scan bundle saved:" in captured.err
         assert "Artifact index updated:" in captured.err
         assert "bundle: .ordeal/findings/pkg/mod.json" in captured.out
+        assert "verify:" not in captured.out
         assert "regression: not generated from current findings" in captured.out
         assert "after fix: uv run ordeal scan pkg.mod --save-artifacts" in captured.out
 
@@ -826,7 +831,8 @@ class TestCLI:
         assert artifact_index["entries"][1]["status"] == "verified"
         assert "verify:" in captured.out
         assert "status: verified" in captured.out
-        assert "tests/test_ordeal_regressions.py::test_normalize_idempotent_regression" in captured.out
+        expected = "tests/test_ordeal_regressions.py::test_normalize_idempotent_regression"
+        assert expected in captured.out
 
     def test_verify_marks_finding_reproduced(self, monkeypatch, tmp_path, capsys):
         index_path, bundle_path, finding_id = _write_verify_fixture(tmp_path)
@@ -1271,8 +1277,8 @@ verbose = false
         assert "--output-json requires --perf-contract" in err
 
     def test_mutate_json_outputs_agent_envelope(self, monkeypatch, capsys):
-        from ordeal.mutations import Mutant, MutationResult
         import ordeal.mutations as mutations_mod
+        from ordeal.mutations import Mutant, MutationResult
 
         result = MutationResult(target="pkg.mod.normalize")
         result.mutants.append(
@@ -1321,7 +1327,8 @@ verbose = false
         assert payload["tool"] == "mutate"
         assert payload["status"] == "blocked"
         assert payload["suggested_test_file"] == "tests/test_pkg_mod.py"
-        assert payload["raw_details"]["blockers"][0]["starter_tests"].startswith("def test_pkg_mod")
+        starters = payload["raw_details"]["blockers"][0]["starter_tests"]
+        assert starters.startswith("def test_pkg_mod")
 
 
 # ============================================================================

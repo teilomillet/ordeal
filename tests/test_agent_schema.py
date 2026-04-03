@@ -6,10 +6,10 @@ import json
 from pathlib import Path
 
 from ordeal.agent_schema import (
+    SCHEMA_VERSION,
     AgentArtifact,
     AgentEnvelope,
     AgentFinding,
-    SCHEMA_VERSION,
     build_agent_envelope,
 )
 

@@ -20,6 +20,39 @@ uv run ordeal explore      # inside project venv
 
 ## Commands
 
+### `ordeal catalog`
+
+List everything ordeal exposes, grouped by subsystem. This is the quickest way to discover capabilities before choosing a narrower command, and it mirrors the Python `catalog()` API.
+
+```bash
+ordeal catalog
+ordeal catalog --detail
+```
+
+Use `--detail` when you want signatures and the first line of each docstring, which is especially useful for coding agents and repo onboarding.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--detail` | off | Show signatures and docstrings for each capability |
+
+### `ordeal check`
+
+Verify one mined property, or the default bug-catching contracts, for a single function. Exit code is `0` when the property holds and `1` when ordeal finds a counterexample.
+
+```bash
+ordeal check myapp.scoring.normalize
+ordeal check myapp.scoring.normalize -p idempotent
+ordeal check myapp.scoring.score -p "output in [0, 1]" -n 500
+```
+
+Without `-p`, `check` verifies the standard contracts that catch real bugs quickly: `never None`, `no NaN`, `never empty`, `deterministic`, `idempotent`, and `finite`.
+
+| Flag | Default | Description |
+|---|---|---|
+| `target` | required | Dotted function path such as `myapp.scoring.normalize` |
+| `--property`, `-p` | all standard contracts | Check one property by name or substring match |
+| `--max-examples`, `-n` | `200` | Examples to test |
+
 ### `ordeal scan`
 
 !!! quote "Why start here"
@@ -49,6 +82,27 @@ Use `--save-artifacts` when you want the full handoff package: `.ordeal/findings
 | `--write-regression [PATH]` | `tests/test_ordeal_regressions.py` | Save runnable pytest regressions |
 | `--save-artifacts` | off | Write the report, JSON bundle, regressions, and update the artifact index |
 | `--include-private` | off | Include `_private` functions |
+
+### `ordeal init`
+
+Bootstrap ordeal into an existing package. `init` generates starter tests for untested modules, writes `ordeal.toml` when missing, and can add both a CI workflow and the bundled AI-agent skill.
+
+```bash
+ordeal init
+ordeal init myapp
+ordeal init myapp --dry-run
+ordeal init myapp --ci
+```
+
+`--dry-run` is the safe preview mode: it discovers modules from the filesystem and signatures from AST only, without importing the target package, executing functions, or writing files.
+
+| Flag | Default | Description |
+|---|---|---|
+| `target` | auto-detect | Package path such as `myapp`; omit to detect from the current directory |
+| `--output-dir`, `-o` | `tests` | Directory where generated tests are written |
+| `--dry-run` | off | Preview generated files without imports or writes |
+| `--ci` | off | Generate `.github/workflows/<name>.yml` |
+| `--ci-name` | `ordeal` | Workflow filename stem |
 
 ### `ordeal mutate`
 
@@ -190,6 +244,23 @@ Use this to understand a function before writing tests. The `ALWAYS` properties 
 | `target` | required | Dotted path: `mymod.func` or `mymod` (positional) |
 | `--max-examples`, `-n` | `500` | Examples to sample |
 
+### `ordeal seeds`
+
+Inspect the persistent seed corpus that `ordeal explore` builds when it finds failures. Each saved seed is a content-addressed failing trace that ordeal can replay on later runs to confirm the bug still reproduces.
+
+```bash
+ordeal seeds
+ordeal seeds --dir .ordeal/seeds
+ordeal seeds --prune-fixed
+```
+
+`--prune-fixed` replays every saved seed first, then removes the ones that no longer reproduce.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--dir` | `.ordeal/seeds` | Seed corpus directory |
+| `--prune-fixed` | off | Remove seeds that replay as fixed |
+
 ### `ordeal benchmark`
 
 !!! quote "What you can do with this"
@@ -329,6 +400,21 @@ ordeal audit myapp.scoring --json
 ```
 
 The payload is a stable envelope with top-level keys like `schema_version`, `tool`, `target`, `status`, `summary`, `recommended_action`, `findings`, `artifacts`, and `raw_details`. For `scan`, `--save-artifacts` complements this with a persistent JSON bug bundle under `.ordeal/findings/`.
+
+### `ordeal skill`
+
+Install ordeal's bundled `SKILL.md` into `.claude/skills/ordeal/` so an AI coding agent has the local usage guide in-repo.
+
+```bash
+ordeal skill
+ordeal skill --dry-run
+```
+
+Run this directly when you want to refresh the skill file without re-running `ordeal init`. `init` already installs the same skill as part of bootstrapping.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--dry-run` | off | Show the path that would be written without writing it |
 
 ## Workflows
 

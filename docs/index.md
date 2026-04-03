@@ -51,6 +51,9 @@ Ordeal called each function hundreds of times with random inputs and told you wh
 If your project has a file like `myapp/scoring.py`, the module path is `myapp.scoring` — the file path with slashes replaced by dots, without the `.py`:
 
 ```bash
+uvx ordeal scan myapp.scoring --save-artifacts  # find a bug, save report + regressions
+uvx ordeal verify fnd_123456789abc              # re-run one saved finding later
+uvx ordeal init myapp                           # bootstrap starter tests for an existing package
 uvx ordeal mine myapp.scoring       # what do my functions actually do?
 uvx ordeal audit myapp.scoring      # what are my tests missing?
 ```
@@ -98,6 +101,8 @@ Every goal maps to a starting point — a command to run, a module to import, an
 | I want to... | Start here | Learn more |
 |---|---|---|
 | Capture a bug and lock it in | `ordeal scan mymodule --save-artifacts` | [Bug Bundle](guides/bug-bundle.md) |
+| Re-run one saved finding | `ordeal verify fnd_123456789abc` | [Bug Bundle](guides/bug-bundle.md) |
+| Bootstrap tests for an existing package | `ordeal init mymodule` | [CLI](guides/cli.md) |
 | Find bugs without writing tests | `ordeal mine mymodule` | [Auto Testing](guides/auto.md) |
 | Check if my tests are good enough | `ordeal audit mymodule` | [Mutations](guides/mutations.md) |
 | Write a chaos test | `from ordeal import ChaosTest` | [Getting Started](getting-started.md) |
@@ -111,6 +116,7 @@ Every goal maps to a starting point — a command to run, a module to import, an
 | Test API endpoints for faults | `from ordeal.integrations.openapi import chaos_api_test` | [Integrations](guides/integrations.md) |
 | Extend ordeal with a new fault | Follow the pattern in `ordeal/faults/*.py` | [Fault Injection](concepts/fault-injection.md) |
 | Configure reproducible runs | Create `ordeal.toml` | [Configuration](guides/configuration.md) |
+| Inspect every capability before choosing a tool | `ordeal catalog --detail` | [API Reference](reference/api.md) |
 | Discover all available faults, assertions, strategies | `from ordeal import catalog; catalog()` | [API Reference](reference/api.md) |
 
 !!! quote "Pick your starting point"
@@ -182,6 +188,7 @@ Every goal maps to a starting point — a command to run, a module to import, an
 <div class="grid cards" markdown>
 
 -   **[CLI](guides/cli.md)** — ordeal explore, ordeal replay, pytest --chaos
+-   **[CLI](guides/cli.md)** — ordeal scan, verify, init, explore, replay
 -   **[Configuration](guides/configuration.md)** — ordeal.toml schema and tuning
 -   **[API Reference](reference/api.md)** — Every function, every parameter, every type
 -   **[Troubleshooting](troubleshooting.md)** — Common issues and how to fix them

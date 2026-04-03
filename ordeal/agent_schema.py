@@ -32,10 +32,7 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="backslashreplace")
     if is_dataclass(value):
-        return {
-            field.name: _jsonable(getattr(value, field.name))
-            for field in fields(value)
-        }
+        return {field.name: _jsonable(getattr(value, field.name)) for field in fields(value)}
     if hasattr(value, "to_dict") and callable(getattr(value, "to_dict")):
         return _jsonable(value.to_dict())
     if isinstance(value, Mapping):
@@ -99,11 +96,7 @@ def _coerce_finding(value: AgentFinding | Mapping[str, Any]) -> AgentFinding:
     return AgentFinding(
         kind=str(value["kind"]),
         summary=str(value["summary"]),
-        confidence=(
-            float(value["confidence"])
-            if value.get("confidence") is not None
-            else None
-        ),
+        confidence=(float(value["confidence"]) if value.get("confidence") is not None else None),
         target=str(value["target"]) if value.get("target") is not None else None,
         location=str(value["location"]) if value.get("location") is not None else None,
         details=dict(value.get("details", {})),

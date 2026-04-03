@@ -157,7 +157,8 @@ class TestCLIAgentJson:
             )
 
         monkeypatch.setattr(mutations_mod, "mutate", fake_mutate)
-        monkeypatch.setattr(mutations_mod, "generate_starter_tests", lambda target: "def test_x():\n    pass\n")
+        starter_fn = lambda target: "def test_x():\n    pass\n"  # noqa: E731
+        monkeypatch.setattr(mutations_mod, "generate_starter_tests", starter_fn)
 
         rc = main(["mutate", "pkg.mod.compute", "--json"])
 

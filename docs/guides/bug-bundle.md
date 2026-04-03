@@ -45,7 +45,7 @@ next:
 
 ## Close the loop
 
-1. Run the generated regression:
+1. Run the generated regression file:
 
    ```bash
    uv run pytest tests/test_ordeal_regressions.py -q
@@ -53,7 +53,7 @@ next:
 
 2. Fix the bug in your code.
 
-3. Re-run the regression:
+3. Re-run the regression file:
 
    ```bash
    uv run pytest tests/test_ordeal_regressions.py -q
@@ -66,6 +66,14 @@ next:
    ```
 
 The goal is simple: the regression turns green, and the next scan has fewer or no findings.
+
+## Optional: verify one finding directly
+
+When you want a precise rerun for one saved finding, usually in automation or an agent handoff, use the stable `finding_id` from the JSON bundle:
+
+```bash
+uv run ordeal verify fnd_dcb0fc0808d3
+```
 
 ## Notes
 

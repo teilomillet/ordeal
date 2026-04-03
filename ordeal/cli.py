@@ -374,6 +374,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                 module=state.module,
                 report_path=written_report_path,
                 bundle_path=bundle_path,
+                finding_ids=[finding["finding_id"] for finding in bundle["findings"]],
                 regression_path=written_regression_path,
                 index_path=index_path,
             )
@@ -532,7 +533,8 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         return 1
 
     if not getattr(args, "json", False):
-        _stderr(f"Replaying {trace.test_class} (run {trace.run_id}, {len(trace.steps)} steps)...\n")
+        msg = f"Replaying {trace.test_class} (run {trace.run_id}, {len(trace.steps)} steps)..."
+        _stderr(f"{msg}\n")
 
     error = replay(trace)
     shrunk = None
@@ -774,7 +776,9 @@ def _cmd_mine(args: argparse.Namespace) -> int:
                         target=target,
                         summary=f"no testable functions found in {target}",
                         blocking_reason="module has no discoverable callable targets",
-                        suggested_commands=((f"ordeal mine {target} --include-private",) if not inc_private else ()),
+                        suggested_commands=(
+                            (f"ordeal mine {target} --include-private",) if not inc_private else ()
+                        ),
                         raw_details={"target": target, "include_private": inc_private},
                     ).to_json()
                 )
@@ -830,7 +834,9 @@ def _cmd_mine(args: argparse.Namespace) -> int:
             path_str=args.write_regression,
             suspicious_count=suspicious,
         )
-    elif suspicious and not getattr(args, "report_file", None) and not getattr(args, "json", False):
+    elif (
+        suspicious and not getattr(args, "report_file", None) and not getattr(args, "json", False)
+    ):
         print(
             f"tip: add --report-file report.md or --write-regression ({_DEFAULT_REGRESSION_PATH})"
         )
@@ -1539,8 +1545,9 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
 
         try:
             if getattr(args, "json", False):
-                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
-                    io.StringIO()
+                with (
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(io.StringIO()),
                 ):
                     result = mutate(
                         target,
@@ -1829,7 +1836,7 @@ def _default_scan_bundle_path(module: str) -> str:
 
 def _default_artifact_index_path() -> str:
     """Return the default artifact index path for saved scan findings."""
-    return str(Path(_DEFAULT_FINDINGS_DIR) / "index.json")
+    return f"{_DEFAULT_FINDINGS_DIR}/index.json"
 
 
 def _display_path(path: Path) -> str:
@@ -2167,84 +2174,6 @@ def _build_scan_report(state: Any) -> dict[str, Any]:
     }
 
 
-def _build_scan_agent_envelope(
-    state: Any,
-    *,
-    report_path: Path | None = None,
-    regression_path: Path | None = None,
-    index_path: Path | None = None,
-) -> object:
-    """Build the stable agent-facing JSON envelope for ``ordeal scan``."""
-    from ordeal.agent_schema import AgentArtifact
-
-    report = _build_scan_report(state)
-    artifacts: list[object] = []
-    if report_path is not None:
-        artifacts.append(
-            AgentArtifact(
-                kind="report",
-                uri=_display_path(report_path),
-                description="shareable scan finding report",
-            )
-        )
-    if regression_path is not None:
-        artifacts.append(
-            AgentArtifact(
-                kind="regression",
-                uri=_display_path(regression_path),
-                description="generated pytest regressions from scan findings",
-            )
-        )
-    if index_path is not None:
-        artifacts.append(
-            AgentArtifact(
-                kind="index",
-                uri=_display_path(index_path),
-                description="scan artifact index",
-            )
-        )
-
-    details = report["details"]
-    crash = next((detail for detail in details if detail.get("kind") == "crash"), None)
-    mutation_gap = next((detail for detail in details if detail.get("kind") == "mutation"), None)
-    property_gap = next((detail for detail in details if detail.get("kind") == "property"), None)
-    frontier = getattr(state, "frontier", {})
-    if crash is not None:
-        recommended_action = (
-            f"write a regression for {_detail_target(crash) or state.module} using the captured "
-            "failing input, then rerun scan"
-        )
-    elif mutation_gap is not None:
-        recommended_action = (
-            f"add tests for the surviving mutation gap in {_detail_target(mutation_gap) or state.module}"
-        )
-    elif property_gap is not None:
-        recommended_action = (
-            f"write a regression for {_detail_target(property_gap) or state.module} and validate it "
-            "with mutate"
-        )
-    elif frontier:
-        first_name = next(iter(frontier))
-        recommended_action = f"close the first frontier gap for {state.module}.{first_name}"
-    else:
-        recommended_action = f"run ordeal mutate {state.module} for deeper semantic validation"
-
-    return _build_agent_envelope_from_report(
-        report,
-        recommended_action=recommended_action,
-        confidence=float(getattr(state, "confidence", 0.0)),
-        artifacts=artifacts,
-        raw_details={
-            "checked": _scan_checked_items(state),
-            "frontier": getattr(state, "frontier", {}),
-            "finding_details": _scan_report_details(state),
-            "skipped": list(getattr(state, "skipped", [])),
-            "seed": getattr(state, "supervisor_info", {}).get("seed"),
-            "artifacts_requested": bool(report_path or regression_path or index_path),
-        },
-    )
-
-
 def _render_scan_report_markdown(state: Any) -> str:
     """Render a shareable Markdown finding report for `ordeal scan`."""
     return _render_findings_report_markdown(_build_scan_report(state))
@@ -2532,460 +2461,6 @@ def _build_mine_report(
     }
 
 
-def _build_mine_agent_envelope(
-    *,
-    target: str,
-    module: str,
-    results: list[tuple[str, Any]],
-    skipped: list[tuple[str, str]],
-    include_scan_hint: bool,
-    suspicious_count: int,
-    report_path: Path | None = None,
-    regression_path: Path | None = None,
-) -> object:
-    """Build the stable agent-facing JSON envelope for ``ordeal mine``."""
-    from ordeal.agent_schema import AgentArtifact
-
-    report = _build_mine_report(
-        target=target,
-        module=module,
-        results=results,
-        skipped=skipped,
-        include_scan_hint=include_scan_hint,
-        suspicious_count=suspicious_count,
-    )
-    artifacts: list[object] = []
-    if report_path is not None:
-        artifacts.append(
-            AgentArtifact(
-                kind="report",
-                uri=_display_path(report_path),
-                description="shareable mine finding report",
-            )
-        )
-    if regression_path is not None:
-        artifacts.append(
-            AgentArtifact(
-                kind="regression",
-                uri=_display_path(regression_path),
-                description="generated pytest regressions from mine findings",
-            )
-        )
-
-    if report["details"]:
-        first = report["details"][0]
-        recommended_action = (
-            f"write a regression for {_detail_target(first) or target} and validate it with mutate"
-        )
-    elif skipped and not results:
-        recommended_action = "add type hints or fixtures for the skipped functions, then rerun mine"
-    else:
-        recommended_action = f"run ordeal mutate {target} to verify the discovered invariants"
-
-    blocking_reason = "all candidate functions were skipped" if skipped and not results else None
-    return _build_agent_envelope_from_report(
-        report,
-        recommended_action=recommended_action,
-        confidence=None,
-        blocking_reason=blocking_reason,
-        artifacts=artifacts,
-        raw_details={
-            "results": results,
-            "skipped": skipped,
-            "include_scan_hint": include_scan_hint,
-            "suspicious_count": suspicious_count,
-        },
-    )
-
-
-def _build_audit_agent_envelope(
-    *,
-    modules: list[str],
-    results: list[Any],
-    test_dir: str,
-    max_examples: int,
-    workers: int,
-    validation_mode: str,
-    generated_path: Path | None = None,
-) -> object:
-    """Build the stable agent-facing JSON envelope for ``ordeal audit``."""
-    from ordeal.agent_schema import AgentArtifact
-
-    findings: list[dict[str, Any]] = []
-    modules_with_warnings = 0
-    coverage_failures = 0
-    first_blocking_reason: str | None = None
-    first_suggestion: tuple[str, str] | None = None
-    first_gap_function: tuple[str, str] | None = None
-    first_mutation_gap: tuple[str, str] | None = None
-    modules_with_findings = 0
-
-    for result in results:
-        module_has_finding = False
-        current_status = getattr(result.current_coverage.status, "value", result.current_coverage.status)
-        migrated_status = getattr(
-            result.migrated_coverage.status,
-            "value",
-            result.migrated_coverage.status,
-        )
-        if current_status == "failed":
-            coverage_failures += 1
-            module_has_finding = True
-            error = result.current_coverage.error or "current coverage measurement failed"
-            first_blocking_reason = first_blocking_reason or error
-            findings.append(
-                {
-                    "kind": "coverage-measurement-failed",
-                    "summary": f"{result.module}: current coverage failed",
-                    "target": result.module,
-                    "details": {
-                        "phase": "current",
-                        "error": error,
-                    },
-                }
-            )
-        if migrated_status == "failed":
-            coverage_failures += 1
-            module_has_finding = True
-            error = result.migrated_coverage.error or "migrated coverage measurement failed"
-            first_blocking_reason = first_blocking_reason or error
-            findings.append(
-                {
-                    "kind": "coverage-measurement-failed",
-                    "summary": f"{result.module}: migrated coverage failed",
-                    "target": result.module,
-                    "details": {
-                        "phase": "migrated",
-                        "error": error,
-                    },
-                }
-            )
-        for suggestion in result.suggestions:
-            module_has_finding = True
-            first_suggestion = first_suggestion or (result.module, suggestion)
-            findings.append(
-                {
-                    "kind": "coverage-gap",
-                    "summary": suggestion,
-                    "target": result.module,
-                    "details": {
-                        "validation_mode": result.validation_mode,
-                    },
-                }
-            )
-        for gap_function in result.gap_functions:
-            module_has_finding = True
-            first_gap_function = first_gap_function or (result.module, gap_function)
-            findings.append(
-                {
-                    "kind": "fixture-gap",
-                    "summary": f"{result.module}.{gap_function} needs fixtures",
-                    "target": f"{result.module}.{gap_function}",
-                    "details": {
-                        "module": result.module,
-                    },
-                }
-            )
-        if result.mutation_score_fraction is not None and result.mutation_score_fraction < 1.0:
-            module_has_finding = True
-            first_mutation_gap = first_mutation_gap or (result.module, result.mutation_score)
-            findings.append(
-                {
-                    "kind": "mutation-gap",
-                    "summary": f"{result.module}: mutation score {result.mutation_score}",
-                    "target": result.module,
-                    "details": {
-                        "mutation_score": result.mutation_score,
-                        "validation_mode": result.validation_mode,
-                    },
-                }
-            )
-        if result.warnings:
-            modules_with_warnings += 1
-            module_has_finding = True
-            first_blocking_reason = first_blocking_reason or result.warnings[0]
-            for warning in result.warnings:
-                findings.append(
-                    {
-                        "kind": "warning",
-                        "summary": f"{result.module}: {warning}",
-                        "target": result.module,
-                        "details": {
-                            "warning": warning,
-                        },
-                    }
-                )
-        if module_has_finding:
-            modules_with_findings += 1
-
-    target = ",".join(modules)
-    status = "findings found" if findings else "no findings yet"
-    summary_items = [
-        f"Audited: {len(results)} module(s)",
-        f"Modules with findings: {modules_with_findings}",
-        f"Coverage failures: {coverage_failures}",
-        f"Warnings: {modules_with_warnings}",
-    ]
-    first_module = modules[0] if modules else ""
-    suggested_commands = [f"ordeal audit {first_module} --show-generated"] if first_module else []
-    if first_module:
-        suggested_commands.append(f"ordeal mutate {first_module}")
-        suggested_commands.append(f"ordeal init {first_module}")
-
-    if first_suggestion is not None:
-        module, suggestion = first_suggestion
-        recommended_action = f"add a targeted test for {module}: {suggestion}"
-    elif first_gap_function is not None:
-        module, gap_function = first_gap_function
-        recommended_action = f"provide fixtures for {module}.{gap_function} and rerun audit"
-    elif first_mutation_gap is not None:
-        module, _score = first_mutation_gap
-        recommended_action = f"add tests for the surviving mutation gaps in {module}"
-    elif first_blocking_reason is not None and first_module:
-        recommended_action = f"run ordeal init {first_module} or fix the blocking audit error"
-    elif first_module:
-        recommended_action = (
-            f"inspect the generated migration for {first_module} and adopt the highest-value assertions"
-        )
-    else:
-        recommended_action = "rerun audit with at least one module target"
-
-    artifacts: list[object] = []
-    if generated_path is not None:
-        artifacts.append(
-            AgentArtifact(
-                kind="generated-test",
-                uri=_display_path(generated_path),
-                description="saved ordeal-generated audit test file",
-            )
-        )
-
-    report = {
-        "tool": "audit",
-        "target": target,
-        "status": status,
-        "summary": summary_items,
-        "details": findings,
-        "suggested_commands": suggested_commands,
-    }
-    return _build_agent_envelope_from_report(
-        report,
-        recommended_action=recommended_action,
-        confidence=None,
-        blocking_reason=first_blocking_reason,
-        artifacts=artifacts,
-        raw_details={
-            "modules": results,
-            "test_dir": test_dir,
-            "max_examples": max_examples,
-            "workers": workers,
-            "validation_mode": validation_mode,
-        },
-    )
-
-
-def _build_mutation_agent_envelope(
-    *,
-    targets: list[str],
-    results: list[tuple[str, Any]],
-    blocked_targets: list[dict[str, Any]],
-    threshold: float,
-    stubs_path: Path | None = None,
-) -> object:
-    """Build the stable agent-facing JSON envelope for ``ordeal mutate``."""
-    from ordeal.agent_schema import AgentArtifact
-
-    findings: list[dict[str, Any]] = []
-    total_mutants = sum(result.total for _, result in results)
-    total_killed = sum(result.killed for _, result in results)
-    total_survivors = sum(len(result.survived) for _, result in results)
-    overall = total_killed / total_mutants if total_mutants > 0 else 1.0
-
-    for target, result in results:
-        for mutant in result.survived:
-            findings.append(
-                {
-                    "kind": "mutation-gap",
-                    "summary": f"{target}: {mutant.description}",
-                    "target": target,
-                    "location": mutant.location,
-                    "details": {
-                        "operator": mutant.operator,
-                        "source_line": mutant.source_line,
-                        "remediation": mutant.remediation,
-                    },
-                }
-            )
-    for blocked in blocked_targets:
-        findings.append(
-            {
-                "kind": blocked.get("kind", "blocked"),
-                "summary": blocked["summary"],
-                "target": blocked["target"],
-                "details": blocked,
-            }
-        )
-
-    if blocked_targets and not results:
-        status = "blocked"
-    elif findings:
-        status = "findings found"
-    else:
-        status = "no findings yet"
-
-    summary_items = [
-        f"Targets: {len(targets)}",
-        f"Mutation score: {total_killed}/{total_mutants} ({overall:.0%})",
-        f"Surviving mutants: {total_survivors}",
-        f"Blocked targets: {len(blocked_targets)}",
-    ]
-    first_target = targets[0] if targets else ""
-    suggested_commands = [f"ordeal mutate {first_target}"] if first_target else []
-    if first_target:
-        suggested_commands.append(f"ordeal init {first_target}")
-        suggested_commands.append(f"ordeal mine {first_target} -n 200")
-
-    if blocked_targets and not results:
-        recommended_action = f"run ordeal init {blocked_targets[0]['target']} to bootstrap tests"
-    elif total_survivors > 0 and results:
-        recommended_action = f"write tests for surviving mutants in {results[0][0]} and rerun mutate"
-    elif total_mutants == 0:
-        recommended_action = (
-            "inspect the target or disable equivalent filtering to understand why no mutants were tested"
-        )
-    else:
-        recommended_action = "move to the next low-confidence module or raise the mutation threshold"
-
-    artifacts: list[object] = []
-    if stubs_path is not None:
-        artifacts.append(
-            AgentArtifact(
-                kind="regression",
-                uri=_display_path(stubs_path),
-                description="generated mutation test stubs",
-            )
-        )
-
-    report = {
-        "tool": "mutate",
-        "target": ",".join(targets),
-        "status": status,
-        "summary": summary_items,
-        "details": findings,
-        "suggested_commands": suggested_commands,
-    }
-    blocking_reason = blocked_targets[0]["reason"] if blocked_targets else None
-    return _build_agent_envelope_from_report(
-        report,
-        recommended_action=recommended_action,
-        confidence=None,
-        blocking_reason=blocking_reason,
-        artifacts=artifacts,
-        raw_details={
-            "results": [result for _, result in results],
-            "blocked_targets": blocked_targets,
-            "threshold": threshold,
-            "overall_score": overall,
-        },
-    )
-
-
-def _build_replay_agent_envelope(
-    *,
-    trace: Any | None,
-    trace_file: str,
-    error: Exception | None,
-    shrunk_trace: Any | None = None,
-    ablation: dict[str, bool] | None = None,
-    saved_path: Path | None = None,
-    load_error: str | None = None,
-) -> object:
-    """Build the stable agent-facing JSON envelope for ``ordeal replay``."""
-    from ordeal.agent_schema import AgentArtifact, build_agent_envelope
-
-    if load_error is not None:
-        return _build_blocked_agent_envelope(
-            tool="replay",
-            target=trace_file,
-            summary=load_error,
-            recommended_action="check the trace path or capture a fresh trace",
-            blocking_reason=load_error,
-            suggested_commands=(f"ordeal replay {trace_file}",),
-            raw_details={"trace_file": trace_file},
-        )
-
-    findings: list[dict[str, Any]] = []
-    status = "failure not reproduced"
-    recommended_action = "rescan the target and capture a fresh trace"
-    if error is not None:
-        status = "failure reproduced"
-        findings.append(
-            {
-                "kind": "reproduced-failure",
-                "summary": f"{type(error).__name__}: {error}",
-                "target": getattr(trace, "test_class", trace_file),
-                "details": {
-                    "run_id": getattr(trace, "run_id", None),
-                    "seed": getattr(trace, "seed", None),
-                    "steps": len(getattr(trace, "steps", [])),
-                },
-            }
-        )
-        if ablation is not None:
-            findings.append(
-                {
-                    "kind": "fault-analysis",
-                    "summary": "fault ablation completed",
-                    "target": getattr(trace, "test_class", trace_file),
-                    "details": {
-                        "necessary_faults": [name for name, needed in ablation.items() if needed],
-                        "unnecessary_faults": [name for name, needed in ablation.items() if not needed],
-                    },
-                }
-            )
-        if shrunk_trace is None and ablation is None:
-            recommended_action = "rerun replay with --shrink --ablate to minimize and isolate the failure"
-        elif ablation is None:
-            recommended_action = "rerun replay with --ablate to determine which faults are necessary"
-        else:
-            recommended_action = "turn the reproducing trace into a regression and fix the bug"
-
-    artifacts: list[object] = []
-    if saved_path is not None:
-        artifacts.append(
-            AgentArtifact(
-                kind="trace",
-                uri=_display_path(saved_path),
-                description="saved shrunk trace",
-            )
-        )
-
-    return build_agent_envelope(
-        tool="replay",
-        target=trace_file,
-        status=status,
-        summary=(
-            f"trace replay reproduced {type(error).__name__}: {error}"
-            if error is not None
-            else "trace replay did not reproduce the failure"
-        ),
-        recommended_action=recommended_action,
-        suggested_commands=(
-            f"ordeal replay {trace_file} --shrink --ablate",
-            f"ordeal replay {trace_file}",
-        ),
-        confidence=None,
-        blocking_reason=None if error is not None else "saved trace did not reproduce",
-        findings=findings,
-        artifacts=artifacts,
-        raw_details={
-            "trace": trace.to_dict() if trace is not None else None,
-            "shrunk_trace": shrunk_trace.to_dict() if shrunk_trace is not None else None,
-            "ablation": ablation,
-        },
-    )
-
-
 def _detail_confidence(detail: Mapping[str, Any]) -> float | None:
     """Extract a numeric confidence-like score when one exists naturally."""
     value = detail.get("confidence")
@@ -3101,7 +2576,10 @@ def _recommended_action_for_report(report: Mapping[str, Any]) -> str:
         if kind == "mutation_gap":
             return f"Strengthen tests or mined properties for {qualname}."
         if kind == "warning":
-            return f"Resolve the verification warning for {qualname} before trusting this {tool} result."
+            return (
+                f"Resolve the verification warning for {qualname}"
+                f" before trusting this {tool} result."
+            )
     suggested = list(report.get("suggested_commands", []))
     if suggested:
         return f"Run `{suggested[0]}` next."
@@ -3144,6 +2622,27 @@ def _build_agent_envelope_from_report(
     )
 
 
+def _scan_state_payload(state: Any) -> dict[str, Any]:
+    """Serialize scan state for agent consumers without assuming a concrete type."""
+    to_dict = getattr(state, "to_dict", None)
+    if callable(to_dict):
+        return dict(to_dict())
+
+    to_json = getattr(state, "to_json", None)
+    if callable(to_json):
+        return dict(json.loads(to_json()))
+
+    return {
+        "module": getattr(state, "module", None),
+        "confidence": getattr(state, "confidence", None),
+        "findings": list(getattr(state, "findings", [])),
+        "finding_details": _scan_report_details(state),
+        "frontier": dict(getattr(state, "frontier", {})),
+        "skipped": list(getattr(state, "skipped", [])),
+        "supervisor_info": dict(getattr(state, "supervisor_info", {})),
+    }
+
+
 def _build_scan_agent_envelope(
     state: Any,
     *,
@@ -3155,7 +2654,9 @@ def _build_scan_agent_envelope(
     report = _build_scan_report(state)
     artifacts: list[Any] = []
     if written_report_path is not None:
-        artifacts.append(_agent_artifact("report", written_report_path, "shareable finding report"))
+        artifacts.append(
+            _agent_artifact("report", written_report_path, "shareable finding report")
+        )
     if written_regression_path is not None:
         artifacts.append(
             _agent_artifact("regression", written_regression_path, "generated pytest regressions")
@@ -3170,18 +2671,12 @@ def _build_scan_agent_envelope(
         artifacts=artifacts,
         raw_details={
             "report": report,
-            "state": (
-                state.to_dict()
-                if hasattr(state, "to_dict") and callable(getattr(state, "to_dict"))
-                else json.loads(state.to_json())
-            ),
+            "state": _scan_state_payload(state),
             "seed": getattr(state, "supervisor_info", {}).get("seed"),
             "finding_count": len(report.get("details", [])),
             "gap_count": len(report.get("gaps", [])),
         },
-        suggested_test_file=(
-            _DEFAULT_REGRESSION_PATH if report.get("details") else None
-        ),
+        suggested_test_file=(_DEFAULT_REGRESSION_PATH if report.get("details") else None),
     )
 
 
@@ -3223,7 +2718,9 @@ def _build_mine_agent_envelope(
             f"{suspicious_count} suspicious finding(s)",
             "property confidence is derived from holds/total examples",
         ),
-        blocking_reason=("all candidate functions were skipped" if skipped and not results else None),
+        blocking_reason=(
+            "all candidate functions were skipped" if skipped and not results else None
+        ),
         artifacts=artifacts,
         raw_details={
             "report": report,
@@ -3239,9 +2736,9 @@ def _build_mine_agent_envelope(
             "include_scan_hint": include_scan_hint,
         },
         suggested_test_file=(
-            str(regression_path) if regression_path is not None else (
-                _DEFAULT_REGRESSION_PATH if details else None
-            )
+            str(regression_path)
+            if regression_path is not None
+            else (_DEFAULT_REGRESSION_PATH if details else None)
         ),
     )
 
@@ -3320,7 +2817,11 @@ def _build_audit_agent_envelope(
         "summary": [
             f"Audited: {len(results)} module(s)",
             f"Findings: {len(details)}",
-            f"Coverage preserved: {sum(1 for result in results if result.coverage_preserved)}/{len(results)}",
+            (
+                "Coverage preserved:"
+                f" {sum(1 for result in results if result.coverage_preserved)}"
+                f"/{len(results)}"
+            ),
         ],
         "details": details,
         "suggested_commands": deduped_commands,
@@ -3361,7 +2862,9 @@ def _build_audit_agent_envelope(
             "report": report,
             "modules": [_module_audit_to_dict(result) for result in results],
         },
-        suggested_test_file=(str(saved_generated_path) if saved_generated_path is not None else None),
+        suggested_test_file=(
+            str(saved_generated_path) if saved_generated_path is not None else None
+        ),
     )
 
 
@@ -3411,7 +2914,8 @@ def _build_mutate_agent_envelope(
     for target, _ in results:
         suggested_commands.append(f"ordeal mutate {target}")
     if results:
-        suggested_commands.append(f"ordeal mutate {results[0][0]} --generate-stubs {_DEFAULT_REGRESSION_PATH}")
+        cmd = f"ordeal mutate {results[0][0]} --generate-stubs {_DEFAULT_REGRESSION_PATH}"
+        suggested_commands.append(cmd)
     seen: set[str] = set()
     deduped_commands = [cmd for cmd in suggested_commands if not (cmd in seen or seen.add(cmd))]
     total_mutants = sum(result.total for _, result in results)
@@ -3442,7 +2946,10 @@ def _build_mutate_agent_envelope(
     )
     recommended = _recommended_action_for_report(report)
     if blockers and not results:
-        recommended = f"Bootstrap tests with `ordeal init {blockers[0]['target']}` or save the provided starter scaffold."
+        target = blockers[0]["target"]
+        recommended = (
+            f"Bootstrap tests with `ordeal init {target}` or save the provided starter scaffold."
+        )
     return _build_agent_envelope_from_report(
         {**report, "recommended_action": recommended},
         status=status,
@@ -3527,11 +3034,7 @@ def _build_replay_agent_envelope(
         ),
         "summary": [
             f"Trace file: {trace_file}",
-            (
-                f"Steps replayed: {len(trace.steps)}"
-                if trace is not None
-                else "Steps replayed: 0"
-            ),
+            (f"Steps replayed: {len(trace.steps)}" if trace is not None else "Steps replayed: 0"),
         ],
         "details": details,
         "suggested_commands": suggested_commands,
@@ -3732,6 +3235,7 @@ def _print_scan_artifact_workflow(
     module: str,
     report_path: Path,
     bundle_path: Path,
+    finding_ids: list[str],
     regression_path: Path | None,
     index_path: Path,
 ) -> None:
@@ -3747,6 +3251,9 @@ def _print_scan_artifact_workflow(
     print(f"  index: {_display_path(index_path)}")
     print("next:")
     print(f"  review: {_display_path(report_path)}")
+    if len(finding_ids) == 1 and regression_path is not None:
+        verify_cmd = _shell_command("uv", "run", "ordeal", "verify", finding_ids[0])
+        print(f"  verify: {verify_cmd}")
     if regression_path is not None:
         run_cmd = _shell_command("uv", "run", "pytest", _display_path(regression_path), "-q")
         print(f"  run: {run_cmd}")
@@ -4102,6 +3609,8 @@ def main(argv: list[str] | None = None) -> int:
             f"Use --save-artifacts to save both {_default_scan_report_path('mymod')} and"
             f" {_default_scan_bundle_path('mymod')} + {_DEFAULT_REGRESSION_PATH},"
             f" then update {_default_artifact_index_path()}.\n"
+            "When one finding is saved, the workflow prints an exact"
+            " `ordeal verify <finding-id>` follow-up command.\n"
             "Use --report-file report.md to save a shareable Markdown bug report.\n"
             f"Use --write-regression or --write-regression PATH to save runnable pytest"
             f" regressions (default: {_DEFAULT_REGRESSION_PATH})."

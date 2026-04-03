@@ -33,6 +33,21 @@ from ordeal.auto import _get_public_functions, _infer_strategies
 
 _REL_TOL = 1e-9
 _ABS_TOL = 1e-12
+_SUSPICIOUS_CONFIDENCE = 0.8
+_MAX_SUSPICIOUS_PROPERTIES = 4
+_NOT_CHECKED_PREVIEW = 3
+
+_SUMMARY_OMIT_PREFIXES = ("observed range",)
+_SUSPICIOUS_PREFIXES = (
+    "never None",
+    "no NaN",
+    "deterministic",
+    "idempotent",
+    "involution",
+    "commutative",
+    "associative",
+    "bijective",
+)
 
 
 def _approx_equal(a: Any, b: Any) -> bool:
@@ -56,6 +71,78 @@ def _approx_equal(a: Any, b: Any) -> bool:
         return bool(result)
     except Exception:
         return False
+
+
+def _short_repr(value: Any, *, limit: int = 40) -> str:
+    """Return a compact repr suitable for one-line summaries."""
+    text = repr(value)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _show_in_summary(name: str) -> bool:
+    """Return True when a property should appear in the default summary."""
+    return not name.startswith(_SUMMARY_OMIT_PREFIXES)
+
+
+def _is_suspicious_property(prop: "MinedProperty") -> bool:
+    """Return True for partial properties worth surfacing by default."""
+    if prop.universal or prop.total == 0 or prop.confidence < _SUSPICIOUS_CONFIDENCE:
+        return False
+    if not _show_in_summary(prop.name):
+        return False
+    return prop.name.startswith(_SUSPICIOUS_PREFIXES)
+
+
+def _property_sort_key(prop: "MinedProperty") -> tuple[float, int, str]:
+    """Sort stronger, higher-signal properties first."""
+    has_counterexample = 0 if prop.counterexample else 1
+    return (-prop.confidence, has_counterexample, prop.name)
+
+
+def _format_counterexample(counterexample: dict[str, Any] | None) -> str | None:
+    """Render a compact counterexample line for suspicious findings."""
+    if not counterexample:
+        return None
+
+    preferred = [
+        ("input", "input"),
+        ("output", "output"),
+        ("value", "value"),
+        ("first", "first"),
+        ("second", "second"),
+        ("replayed", "replayed"),
+        ("expected", "expected"),
+        ("got", "got"),
+    ]
+    parts: list[str] = []
+    for key, label in preferred:
+        if key in counterexample:
+            parts.append(f"{label}={_short_repr(counterexample[key])}")
+
+    if not parts:
+        for key, value in counterexample.items():
+            if key == "index":
+                continue
+            parts.append(f"{key}={_short_repr(value)}")
+            if len(parts) >= 3:
+                break
+
+    if not parts:
+        return None
+    return ", ".join(parts[:3])
+
+
+def _format_not_checked(not_checked: list[str]) -> str:
+    """Render a short reminder of mine()'s structural blind spots."""
+    if not not_checked:
+        return ""
+    preview = ", ".join(not_checked[:_NOT_CHECKED_PREVIEW])
+    remaining = len(not_checked) - _NOT_CHECKED_PREVIEW
+    if remaining > 0:
+        preview += f", +{remaining} more"
+    return preview
 
 
 @dataclass
@@ -197,9 +284,29 @@ class MineResult:
         if self.saturated:
             header += " (saturated)"
         lines = [header]
-        for p in sorted(self.properties, key=lambda p: -p.confidence):
-            if p.confidence >= 0.5:
-                lines.append(str(p))
+        universal = sorted(
+            [p for p in self.properties if p.universal and _show_in_summary(p.name)],
+            key=_property_sort_key,
+        )
+        suspicious = sorted(
+            [p for p in self.properties if _is_suspicious_property(p)],
+            key=_property_sort_key,
+        )[:_MAX_SUSPICIOUS_PROPERTIES]
+
+        for prop in universal:
+            lines.append(str(prop))
+
+        if suspicious:
+            lines.append("  suspicious findings:")
+            for prop in suspicious:
+                lines.append(str(prop))
+                ce = _format_counterexample(prop.counterexample)
+                if ce:
+                    lines.append(f"           counterexample: {ce}")
+
+        not_checked = _format_not_checked(self.not_checked)
+        if not_checked:
+            lines.append(f"  not checked: {not_checked}")
         from ordeal.suggest import format_suggestions
 
         avail = format_suggestions(self)
@@ -282,19 +389,28 @@ def _check_type_consistent(
 
 def _check_never_none(outputs: list[Any]) -> MinedProperty:
     """Output is never None."""
-    holds = sum(1 for o in outputs if o is not None)
-    return MinedProperty("never None", holds, len(outputs))
+    holds = 0
+    ce = None
+    for i, output in enumerate(outputs):
+        if output is not None:
+            holds += 1
+        elif ce is None:
+            ce = {"index": i}
+    return MinedProperty("never None", holds, len(outputs), ce)
 
 
 def _check_no_nan(outputs: list[Any]) -> MinedProperty:
     """Output never contains NaN (for floats)."""
     total = 0
     holds = 0
+    ce = None
     for o in outputs:
         if isinstance(o, float):
             total += 1
             if not math.isnan(o):
                 holds += 1
+            elif ce is None:
+                ce = {"value": o}
         elif hasattr(o, "shape"):
             total += 1
             try:
@@ -302,53 +418,64 @@ def _check_no_nan(outputs: list[Any]) -> MinedProperty:
 
                 if not np.any(np.isnan(o)):
                     holds += 1
+                elif ce is None:
+                    ce = {"value": o}
             except (ImportError, TypeError):
                 holds += 1
     if total == 0:
         return MinedProperty("no NaN", len(outputs), len(outputs))
-    return MinedProperty("no NaN", holds, total)
+    return MinedProperty("no NaN", holds, total, ce)
 
 
 def _check_non_negative(outputs: list[Any]) -> MinedProperty:
     """Output is always >= 0 (for numeric outputs)."""
     total = 0
     holds = 0
-    for o in outputs:
+    ce = None
+    for i, o in enumerate(outputs):
         if isinstance(o, (int, float)) and not isinstance(o, bool):
             total += 1
             if o >= 0:
                 holds += 1
+            elif ce is None:
+                ce = {"index": i, "value": o}
     if total == 0:
         return MinedProperty("output >= 0", 0, 0)
-    return MinedProperty("output >= 0", holds, total)
+    return MinedProperty("output >= 0", holds, total, ce)
 
 
 def _check_bounded_01(outputs: list[Any]) -> MinedProperty:
     """Output is always in [0, 1]."""
     total = 0
     holds = 0
-    for o in outputs:
+    ce = None
+    for i, o in enumerate(outputs):
         if isinstance(o, (int, float)) and not isinstance(o, bool):
             total += 1
             if 0.0 <= o <= 1.0:
                 holds += 1
+            elif ce is None:
+                ce = {"index": i, "value": o}
     if total == 0:
         return MinedProperty("output in [0, 1]", 0, 0)
-    return MinedProperty("output in [0, 1]", holds, total)
+    return MinedProperty("output in [0, 1]", holds, total, ce)
 
 
 def _check_never_empty(outputs: list[Any]) -> MinedProperty:
     """Output is never empty (for sequences/strings)."""
     total = 0
     holds = 0
-    for o in outputs:
+    ce = None
+    for i, o in enumerate(outputs):
         if isinstance(o, (list, tuple, str, dict)):
             total += 1
             if len(o) > 0:
                 holds += 1
+            elif ce is None:
+                ce = {"index": i}
     if total == 0:
         return MinedProperty("never empty", 0, 0)
-    return MinedProperty("never empty", holds, total)
+    return MinedProperty("never empty", holds, total, ce)
 
 
 def _check_deterministic(
@@ -358,6 +485,7 @@ def _check_deterministic(
     """Same input always gives the same output."""
     total = 0
     holds = 0
+    ce = None
     for kwargs in inputs[:50]:  # cap at 50 to keep runtime sane
         try:
             out1 = fn(**kwargs)
@@ -365,11 +493,13 @@ def _check_deterministic(
             total += 1
             if _approx_equal(out1, out2):
                 holds += 1
+            elif ce is None:
+                ce = {"input": kwargs, "first": out1, "second": out2}
         except Exception:
             pass
     if total == 0:
         return MinedProperty("deterministic", 0, 0)
-    return MinedProperty("deterministic", holds, total)
+    return MinedProperty("deterministic", holds, total, ce)
 
 
 def _check_idempotent(
@@ -392,6 +522,7 @@ def _check_idempotent(
     first_param = params[0]
     total = 0
     holds = 0
+    ce = None
     for i, (output, kwargs) in enumerate(zip(outputs[:30], inputs[:30])):
         if output is None:
             continue
@@ -402,11 +533,13 @@ def _check_idempotent(
             total += 1
             if _approx_equal(out2, output):
                 holds += 1
+            elif ce is None:
+                ce = {"index": i, "input": kwargs, "output": output, "replayed": out2}
         except (TypeError, ValueError, AttributeError):
             pass  # output type doesn't fit as input — skip
     if total == 0:
         return MinedProperty("idempotent", 0, 0)
-    return MinedProperty("idempotent", holds, total)
+    return MinedProperty("idempotent", holds, total, ce)
 
 
 def _check_involution(
@@ -428,7 +561,8 @@ def _check_involution(
     first_param = params[0]
     total = 0
     holds = 0
-    for output, kwargs in zip(outputs[:30], inputs[:30]):
+    ce = None
+    for i, (output, kwargs) in enumerate(zip(outputs[:30], inputs[:30])):
         if output is None:
             continue
         try:
@@ -438,11 +572,13 @@ def _check_involution(
             total += 1
             if _approx_equal(out2, kwargs[first_param]):
                 holds += 1
+            elif ce is None:
+                ce = {"index": i, "input": kwargs, "output": output, "replayed": out2}
         except (TypeError, ValueError, AttributeError):
             pass
     if total == 0:
         return MinedProperty("involution", 0, 0)
-    return MinedProperty("involution", holds, total)
+    return MinedProperty("involution", holds, total, ce)
 
 
 def _check_monotonic(
@@ -562,6 +698,7 @@ def _check_commutative(
     a_name, b_name = params
     total = 0
     holds = 0
+    ce = None
     for kwargs, out in zip(inputs[:50], outputs[:50]):
         try:
             swapped = {a_name: kwargs[b_name], b_name: kwargs[a_name]}
@@ -569,11 +706,18 @@ def _check_commutative(
             total += 1
             if _approx_equal(out, out_swapped):
                 holds += 1
+            elif ce is None:
+                ce = {
+                    "input": kwargs,
+                    "output": out,
+                    "swapped_input": swapped,
+                    "swapped_output": out_swapped,
+                }
         except Exception:
             pass
     if total == 0:
         return MinedProperty("commutative", 0, 0)
-    return MinedProperty("commutative", holds, total)
+    return MinedProperty("commutative", holds, total, ce)
 
 
 def _check_associative(
@@ -591,6 +735,7 @@ def _check_associative(
     a_name, b_name = params
     total = 0
     holds = 0
+    ce = None
     # Take triples of values from the first parameter
     for i in range(0, min(len(inputs) - 2, 30), 3):
         a = inputs[i][a_name]
@@ -604,11 +749,13 @@ def _check_associative(
             total += 1
             if _approx_equal(left, right):
                 holds += 1
+            elif ce is None:
+                ce = {"input": {a_name: a, b_name: b, "third": c}, "left": left, "right": right}
         except Exception:
             pass
     if total == 0:
         return MinedProperty("associative", 0, 0)
-    return MinedProperty("associative", holds, total)
+    return MinedProperty("associative", holds, total, ce)
 
 
 def _check_output_subset_of_input(
@@ -655,7 +802,8 @@ def _check_sorted(outputs: list[Any]) -> MinedProperty:
     """Check if the output is always sorted (for list returns)."""
     total = 0
     holds = 0
-    for o in outputs:
+    ce = None
+    for i, o in enumerate(outputs):
         if not isinstance(o, (list, tuple)):
             continue
         if len(o) <= 1:
@@ -666,12 +814,14 @@ def _check_sorted(outputs: list[Any]) -> MinedProperty:
         try:
             if list(o) == sorted(o):
                 holds += 1
+            elif ce is None:
+                ce = {"index": i, "output": o}
         except TypeError:
             # uncomparable elements — skip this sample
             total -= 1
     if total == 0:
         return MinedProperty("output is sorted", 0, 0)
-    return MinedProperty("output is sorted", holds, total)
+    return MinedProperty("output is sorted", holds, total, ce)
 
 
 def _check_constant_output(outputs: list[Any]) -> MinedProperty:
@@ -680,7 +830,13 @@ def _check_constant_output(outputs: list[Any]) -> MinedProperty:
         return MinedProperty("constant output", 0, 0)
     first = outputs[0]
     holds = sum(1 for o in outputs if _approx_equal(o, first))
-    return MinedProperty("constant output", holds, len(outputs))
+    ce = None
+    if holds < len(outputs):
+        for i, output in enumerate(outputs[1:], start=1):
+            if not _approx_equal(output, first):
+                ce = {"index": i, "expected": first, "got": output}
+                break
+    return MinedProperty("constant output", holds, len(outputs), ce)
 
 
 def _check_linear_relationship(
@@ -808,8 +964,16 @@ def _check_bijective(
     unique_inputs = len(seen_inputs)
     if unique_outputs == unique_inputs:
         return MinedProperty("bijective", unique_inputs, unique_inputs)
-    else:
-        return MinedProperty("bijective", unique_outputs, unique_inputs)
+
+    collisions: dict[Any, list[Any]] = {}
+    for key, value in seen_inputs.items():
+        collisions.setdefault(value, []).append(key)
+    ce = None
+    for value, keys in collisions.items():
+        if len(keys) > 1:
+            ce = {"output": value, "colliding_inputs": keys[:2]}
+            break
+    return MinedProperty("bijective", unique_outputs, unique_inputs, ce)
 
 
 def _check_preserves_type(

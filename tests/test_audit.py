@@ -18,6 +18,7 @@ from ordeal.audit import (
     CoverageResult,
     ModuleAudit,
     Status,
+    _format_change_summary,
     _count_lines_in_file,
     _count_tests_in_file,
     _find_test_files,
@@ -329,6 +330,27 @@ class TestModuleAuditSummary:
         assert "commutative(add, mul)" in s
         assert "deterministic(add)" in s
 
+    def test_growth_uses_change_label(self):
+        a = ModuleAudit(module="myapp.scoring")
+        a.current_test_count = 5
+        a.current_test_lines = 20
+        a.migrated_test_count = 8
+        a.migrated_lines = 35
+        a.current_coverage = CoverageMeasurement(
+            Status.VERIFIED,
+            result=CoverageResult(45.0, 50, 10, frozenset({1}), "test"),
+        )
+        a.migrated_coverage = CoverageMeasurement(
+            Status.VERIFIED,
+            result=CoverageResult(42.0, 50, 11, frozenset({1, 2}), "test"),
+        )
+
+        s = a.summary()
+        assert "change:" in s
+        assert "more tests" in s
+        assert "more code" in s
+        assert "coverage -3%" in s
+
 
 class TestGroupMinedProperties:
     def test_groups_by_property(self):
@@ -348,6 +370,20 @@ class TestGroupMinedProperties:
         raw = ["bounded: never None (50/50, >=93% CI)"]
         result = _group_mined_properties(raw)
         assert "never None(bounded)" in result
+
+
+class TestChangeSummary:
+    def test_savings_summary(self):
+        label, summary = _format_change_summary(10, 4, 100, 40)
+        assert label == "saving"
+        assert "fewer tests" in summary
+        assert "less code" in summary
+
+    def test_growth_summary(self):
+        label, summary = _format_change_summary(10, 20, 100, 120)
+        assert label == "change"
+        assert "more tests" in summary
+        assert "more code" in summary
 
 
 # ============================================================================

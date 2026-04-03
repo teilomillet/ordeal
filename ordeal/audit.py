@@ -80,6 +80,67 @@ indefinitely.  Measured: ordeal's own 276 tests complete in ~9s;
 vauban's 3000 tests complete in ~14s.
 """
 
+
+def _format_relative_change(
+    current: int,
+    migrated: int,
+    *,
+    lower_word: str,
+    higher_word: str,
+    same_word: str,
+) -> str:
+    """Describe a relative change without producing nonsensical negatives."""
+    if current <= 0:
+        return same_word
+    if migrated == current:
+        return same_word
+    pct = abs(1.0 - migrated / current) * 100
+    if migrated < current:
+        return f"{pct:.0f}% {lower_word}"
+    return f"{pct:.0f}% {higher_word}"
+
+
+def _format_change_summary(
+    current_tests: int,
+    migrated_tests: int,
+    current_lines: int,
+    migrated_lines: int,
+    *,
+    coverage_delta: float | None = None,
+) -> tuple[str, str]:
+    """Return a label/value pair for audit count deltas."""
+    tests_change = _format_relative_change(
+        current_tests,
+        migrated_tests,
+        lower_word="fewer tests",
+        higher_word="more tests",
+        same_word="same number of tests",
+    )
+    lines_change = _format_relative_change(
+        current_lines,
+        migrated_lines,
+        lower_word="less code",
+        higher_word="more code",
+        same_word="same amount of code",
+    )
+
+    parts = [tests_change, lines_change]
+    if coverage_delta is not None:
+        parts.append(
+            "same coverage"
+            if abs(coverage_delta) < COVERAGE_TOLERANCE_PCT
+            else f"coverage {coverage_delta:+.0f}%"
+        )
+
+    label = (
+        "saving"
+        if migrated_tests <= current_tests
+        and migrated_lines <= current_lines
+        and (migrated_tests < current_tests or migrated_lines < current_lines)
+        else "change"
+    )
+    return label, " | ".join(parts)
+
 COVERAGE_TOLERANCE_PCT: float = 2.0
 """Tolerance for the ``coverage_preserved`` comparison, in percentage points.
 
@@ -401,15 +462,15 @@ class ModuleAudit:
             and self.current_test_count > 0
             and self.current_test_lines > 0
         ):
-            test_pct = (1.0 - self.migrated_test_count / self.current_test_count) * 100
-            line_pct = (1.0 - self.migrated_lines / self.current_test_lines) * 100
             delta = mig.percent - cur.percent
-            cov_str = "same coverage" if abs(delta) < COVERAGE_TOLERANCE_PCT else f"{delta:+.0f}%"
-            lines.append(
-                f"    saving:   {test_pct:.0f}% fewer tests "
-                f"| {line_pct:.0f}% less code "
-                f"| {cov_str}"
+            label, summary = _format_change_summary(
+                self.current_test_count,
+                self.migrated_test_count,
+                self.current_test_lines,
+                self.migrated_lines,
+                coverage_delta=delta,
             )
+            lines.append(f"    {label}:   {summary}")
 
         if self.mined_properties:
             grouped = _group_mined_properties(self.mined_properties)
@@ -1634,9 +1695,13 @@ def audit_report(
         lines.append(f"    current:  {total_cur_tests} tests | {total_cur_lines} lines")
         lines.append(f"    migrated: {total_mig_tests} tests | {total_mig_lines} lines")
         if total_cur_tests > 0:
-            test_red = (1 - total_mig_tests / total_cur_tests) * 100
-            line_red = (1 - total_mig_lines / total_cur_lines) * 100 if total_cur_lines > 0 else 0
-            lines.append(f"    saving:   {test_red:.0f}% fewer tests | {line_red:.0f}% less code")
+            label, summary = _format_change_summary(
+                total_cur_tests,
+                total_mig_tests,
+                total_cur_lines,
+                total_mig_lines,
+            )
+            lines.append(f"    {label}:   {summary}")
         if total_warnings > 0:
             lines.append(f"    warnings: {total_warnings} (run with --verbose)")
 

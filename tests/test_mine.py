@@ -109,6 +109,7 @@ class TestMine:
         none_prop = next(p for p in result.properties if p.name == "never None")
         # Should NOT be universal since sometimes_none returns None
         assert not none_prop.universal
+        assert none_prop.counterexample is not None
 
     def test_discovers_determinism(self):
         result = mine(identity, max_examples=50)
@@ -133,6 +134,15 @@ class TestMine:
         result = mine(clamp, max_examples=50)
         s = result.summary()
         assert "mine(clamp)" in s
+        assert "not checked:" in s
+        assert "observed range" not in s
+
+    def test_summary_highlights_suspicious_findings(self):
+        result = mine(sometimes_none, max_examples=200)
+        s = result.summary()
+        assert "suspicious findings:" in s
+        assert "never None" in s
+        assert "counterexample:" in s
 
     def test_with_fixture(self):
         result = mine(

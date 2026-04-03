@@ -390,6 +390,42 @@ def test_mutation_test_selection_prefers_content_matches(monkeypatch, tmp_path: 
     assert selection.k_filter is None
 
 
+def test_mutation_test_selection_matches_private_module_names(monkeypatch, tmp_path: Path):
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "_mod.py").write_text("def compute(x: int) -> int:\n    return x + 1\n")
+
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    target_test = tests_dir / "test_mod.py"
+    target_test.write_text(
+        textwrap.dedent("""\
+        from pkg._mod import compute
+
+        def test_compute():
+            assert compute(1) == 2
+        """)
+    )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    mutations._all_test_files.cache_clear()
+    mutations._named_mutation_test_candidates.cache_clear()
+    mutations._split_mutation_target.cache_clear()
+    _mutation_test_selection.cache_clear()
+    monkeypatch.setattr(
+        mutations,
+        "_all_test_files",
+        lambda: (_ for _ in ()).throw(AssertionError("should not scan every test file")),
+    )
+
+    selection = _mutation_test_selection("pkg._mod.compute")
+
+    assert selection.paths == (str(target_test),)
+    assert selection.k_filter is None
+
+
 # ============================================================================
 # generate_mutants respects operator lists from presets
 # ============================================================================
@@ -834,6 +870,27 @@ def test_runtime_equivalent_truly_equivalent():
 
     result = _is_runtime_equivalent(original, mutant)
     assert result is True
+
+
+def test_runtime_equivalent_isolates_mutable_inputs(monkeypatch):
+    """Original and mutant should not share mutable arguments during comparison."""
+
+    def original(xs: list[int]) -> list[int]:
+        if xs:
+            xs.pop(0)
+        return xs
+
+    def mutant(xs: list[int]) -> list[int]:
+        return xs
+
+    monkeypatch.setattr(
+        mutations,
+        "_equivalence_sample_plan",
+        lambda func, n: mutations._EquivalenceSamplePlan(samples=(([1, 2],),)),
+    )
+
+    result = _is_runtime_equivalent(original, mutant)
+    assert result is False
 
 
 # ============================================================================

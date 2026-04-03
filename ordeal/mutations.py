@@ -3796,6 +3796,13 @@ class _MutationTestSelection:
         return args
 
 
+@dataclass(frozen=True)
+class _EquivalenceSamplePlan:
+    """Prepared argument tuples reused across runtime-equivalence checks."""
+
+    samples: tuple[tuple[object, ...], ...]
+
+
 @functools.lru_cache(maxsize=128)
 def _split_mutation_target(target: str) -> tuple[str, str | None]:
     """Return ``(module_name, func_name)`` for a mutation target."""
@@ -3805,6 +3812,16 @@ def _split_mutation_target(target: str) -> tuple[str, str | None]:
     except ImportError:
         module_name, func_name = target.rsplit(".", 1)
         return module_name, func_name
+
+
+def _mutation_test_name_variants(module_name: str) -> tuple[str, ...]:
+    """Return likely filename stems for tests covering *module_name*."""
+    short = module_name.rsplit(".", 1)[-1]
+    variants = [short]
+    normalized = short.lstrip("_")
+    if normalized and normalized != short:
+        variants.append(normalized)
+    return tuple(variants)
 
 
 @functools.lru_cache(maxsize=8)
@@ -3831,31 +3848,31 @@ def _all_test_files() -> tuple[str, ...]:
 @functools.lru_cache(maxsize=128)
 def _named_mutation_test_candidates(module_name: str) -> tuple[str, ...]:
     """Return likely test files based on the target module name."""
-    short = module_name.rsplit(".", 1)[-1]
     seen: set[str] = set()
     found: list[str] = []
     for test_dir in _find_test_dirs():
-        exact = test_dir / f"test_{short}.py"
-        if exact.exists():
-            resolved = str(exact)
-            if resolved not in seen:
-                seen.add(resolved)
-                found.append(resolved)
-        for match in sorted(test_dir.glob(f"test_{short}_*.py")):
-            resolved = str(match)
-            if resolved not in seen:
-                seen.add(resolved)
-                found.append(resolved)
-        for match in sorted(test_dir.rglob(f"test_{short}.py")):
-            resolved = str(match)
-            if resolved not in seen:
-                seen.add(resolved)
-                found.append(resolved)
-        for match in sorted(test_dir.rglob(f"test_{short}_*.py")):
-            resolved = str(match)
-            if resolved not in seen:
-                seen.add(resolved)
-                found.append(resolved)
+        for short in _mutation_test_name_variants(module_name):
+            exact = test_dir / f"test_{short}.py"
+            if exact.exists():
+                resolved = str(exact)
+                if resolved not in seen:
+                    seen.add(resolved)
+                    found.append(resolved)
+            for match in sorted(test_dir.glob(f"test_{short}_*.py")):
+                resolved = str(match)
+                if resolved not in seen:
+                    seen.add(resolved)
+                    found.append(resolved)
+            for match in sorted(test_dir.rglob(f"test_{short}.py")):
+                resolved = str(match)
+                if resolved not in seen:
+                    seen.add(resolved)
+                    found.append(resolved)
+            for match in sorted(test_dir.rglob(f"test_{short}_*.py")):
+                resolved = str(match)
+                if resolved not in seen:
+                    seen.add(resolved)
+                    found.append(resolved)
     return tuple(found)
 
 
@@ -4686,12 +4703,42 @@ def _is_runtime_equivalent(
     Returns ``True`` (skip) when all samples agree.  Falls back to ``False``
     (test it) when inputs can't be generated or any sample disagrees.
     """
+    plan = _equivalence_sample_plan(original, n_samples)
+    if plan is None:
+        return False
+
+    for args in plan.samples:
+        original_args = _clone_equivalence_args(args)
+        mutant_args = _clone_equivalence_args(args)
+        try:
+            if original(*original_args) != mutant_fn(*mutant_args):
+                return False
+        except Exception:
+            return False
+
+    return True
+
+
+def _clone_equivalence_args(args: tuple[object, ...]) -> list[object]:
+    """Copy runtime-equivalence inputs so one call cannot taint the next."""
+    try:
+        return copy.deepcopy(list(args))
+    except Exception:
+        return list(args)
+
+
+@functools.lru_cache(maxsize=128)
+def _equivalence_sample_plan(
+    original: Callable,
+    n_samples: int,
+) -> _EquivalenceSamplePlan | None:
+    """Prepare deterministic sample inputs for runtime-equivalence checks."""
     import warnings
 
     try:
         sig = inspect.signature(original)
     except (ValueError, TypeError):
-        return False
+        return None
 
     params = [
         p
@@ -4699,10 +4746,7 @@ def _is_runtime_equivalent(
         if p.name != "self" and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
     ]
     if not params:
-        try:
-            return original() == mutant_fn()
-        except Exception:
-            return False
+        return _EquivalenceSamplePlan(samples=((),))
 
     try:
         from typing import get_type_hints
@@ -4711,59 +4755,45 @@ def _is_runtime_equivalent(
 
         hints = get_type_hints(original)
     except Exception:
-        return False
+        return None
 
-    param_hints = []
-    strategies = []
+    param_hints: list[object] = []
+    strategies: list[object] = []
     for p in params:
         if p.name not in hints:
-            return False
+            return None
         hint = hints[p.name]
         param_hints.append(hint)
         try:
             strategies.append(strategy_for_type(hint))
         except Exception:
-            return False
+            return None
 
-    # --- Phase 1: boundary values (catches < vs <=, off-by-one, etc.) ---
-    boundary_lists = []
+    boundary_lists: list[list[object]] = []
     for hint in param_hints:
         origin = getattr(hint, "__origin__", hint)
-        values = _BOUNDARY_VALUES.get(origin, [])
-        boundary_lists.append(values)
+        boundary_lists.append(list(_BOUNDARY_VALUES.get(origin, [])))
 
-    # Build boundary arg combos: for each param pick each boundary value
-    # while using the first boundary (or a random draw) for other params.
-    def _check(args: list) -> bool:
-        try:
-            return original(*args) == mutant_fn(*args)
-        except Exception:
-            return False
+    samples: list[tuple[object, ...]] = []
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            defaults: list[object] = []
+            for i, values in enumerate(boundary_lists):
+                defaults.append(values[0] if values else strategies[i].example())
 
-    # Defaults: first boundary value per param, or a random draw
-    defaults = []
-    for i, bl in enumerate(boundary_lists):
-        defaults.append(bl[0] if bl else strategies[i].example())
+            for i, values in enumerate(boundary_lists):
+                for value in values:
+                    args = list(defaults)
+                    args[i] = value
+                    samples.append(tuple(args))
 
-    for i, bl in enumerate(boundary_lists):
-        for val in bl:
-            args = list(defaults)
-            args[i] = val
-            if not _check(args):
-                return False
+            for _ in range(n_samples):
+                samples.append(tuple(strategy.example() for strategy in strategies))
+    except Exception:
+        return None
 
-    # --- Phase 2: random samples ---
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        for _ in range(n_samples):
-            try:
-                args = [s.example() for s in strategies]
-                if original(*args) != mutant_fn(*args):
-                    return False
-            except Exception:
-                return False
-
-    return True
+    return _EquivalenceSamplePlan(samples=tuple(samples))
 
 
 def _auto_test_fn(target: str, test_filter: str | None = None) -> Callable[[], None]:

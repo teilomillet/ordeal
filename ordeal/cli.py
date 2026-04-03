@@ -19,11 +19,16 @@ import os
 import sys
 import time as _time
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from ordeal.config import ConfigError, OrdealConfig, load_config
-from ordeal.explore import ExplorationResult, Explorer, ProgressSnapshot
-from ordeal.trace import Trace, ablate_faults, replay, shrink
+
+if TYPE_CHECKING:
+    from ordeal.explore import ExplorationResult, ProgressSnapshot
+
+# Tests monkeypatch this symbol; keep the override point without paying
+# the import cost on every short CLI command.
+Explorer = None
 
 
 def _stderr(msg: str) -> None:
@@ -315,6 +320,10 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 
 def _cmd_explore(args: argparse.Namespace) -> int:
     """Run coverage-guided exploration from ordeal.toml."""
+    explorer_cls = Explorer
+    if explorer_cls is None:
+        from ordeal.explore import Explorer as explorer_cls
+
     try:
         cfg = load_config(args.config)
     except FileNotFoundError:
@@ -351,7 +360,7 @@ def _cmd_explore(args: argparse.Namespace) -> int:
         _stderr(f"Exploring {test_cfg.class_path}...\n")
 
         corpus_dir = None if args.no_seeds else cfg.report.corpus_dir
-        explorer = Explorer(
+        explorer = explorer_cls(
             test_class,
             target_modules=cfg.explorer.target_modules,
             seed=cfg.explorer.seed,
@@ -431,6 +440,8 @@ def _cmd_explore(args: argparse.Namespace) -> int:
 
 def _cmd_replay(args: argparse.Namespace) -> int:
     """Replay a saved trace."""
+    from ordeal.trace import Trace, ablate_faults, replay, shrink
+
     try:
         trace = Trace.load(args.trace_file)
     except (FileNotFoundError, json.JSONDecodeError) as e:
@@ -656,6 +667,10 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     from ordeal.scaling import analyze as _analyze_scaling
     from ordeal.scaling import benchmark as _benchmark
 
+    explorer_cls = Explorer
+    if explorer_cls is None:
+        from ordeal.explore import Explorer as explorer_cls
+
     if args.mutate_targets:
         suite = _benchmark(
             mutate_targets=args.mutate_targets,
@@ -703,7 +718,7 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     while n <= max_workers:
         _stderr(f"  N={n:2d} ... ")
 
-        explorer = Explorer(
+        explorer = explorer_cls(
             test_class,
             target_modules=cfg.explorer.target_modules,
             seed=cfg.explorer.seed,

@@ -13,6 +13,9 @@ appearing here, these tests fail — preventing invisible features.
 
 from __future__ import annotations
 
+import subprocess
+import sys
+
 import ordeal
 
 # ============================================================================
@@ -106,6 +109,46 @@ def test_dir_includes_top_level():
         f"These names are missing from dir(ordeal): {missing}\n"
         f"Check __dir__() in ordeal/__init__.py."
     )
+
+
+def test_import_keeps_heavy_modules_lazy():
+    """Importing ordeal alone should not eagerly load heavy optional modules."""
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys, ordeal; "
+                "print(int('ordeal.mutations' in sys.modules)); "
+                "print(int('hypothesis.stateful' in sys.modules))"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc.stdout.splitlines() == ["0", "0"]
+
+
+def test_accessing_lazy_exports_loads_modules_on_demand():
+    """Lazy exports should still resolve correctly when first accessed."""
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys, ordeal; "
+                "_ = ordeal.mutate; "
+                "_ = ordeal.rule; "
+                "print(int('ordeal.mutations' in sys.modules)); "
+                "print(int('hypothesis.stateful' in sys.modules))"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc.stdout.splitlines() == ["1", "1"]
 
 
 # ============================================================================

@@ -353,6 +353,54 @@ def test_auto_discovered_function_mutation_falls_back_to_mine_after_batch_collec
     assert result.diagnostics["tested"] == 1
 
 
+def test_auto_discovered_function_mutation_skips_pytest_when_all_mutants_filter_out(monkeypatch):
+    mutant = Mutant(operator="comparison", description="< -> <=", line=1, col=0)
+    mutated_tree = ast.parse(
+        "def _add(a: int, b: int) -> int:\n"
+        "    if a <= 0:\n"
+        "        return -a + b\n"
+        "    return a + b\n"
+    )
+    calls: dict[str, int] = {"probe_runs": 0}
+
+    def fake_auto_test_fn(target, test_filter=None):
+        def run():
+            calls["probe_runs"] += 1
+            raise AssertionError("pytest path should be skipped when nothing remains to test")
+
+        return run
+
+    monkeypatch.setattr(mutations, "_auto_test_fn", fake_auto_test_fn)
+    monkeypatch.setattr(
+        mutations,
+        "generate_mutants",
+        lambda *args, **kwargs: [(mutant, mutated_tree)],
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_filter_function_mutant_pairs",
+        lambda func, module, func_name, mutant_pairs, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_batch_function_test",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("batch pytest should not run when there are no mutants left")
+        ),
+    )
+
+    result = mutate_function_and_test(
+        f"{__name__}._add",
+        test_fn=None,
+        preset="essential",
+        filter_equivalent=True,
+    )
+
+    assert calls["probe_runs"] == 0
+    assert result.total == 0
+    assert result.diagnostics["tested"] == 0
+
+
 def test_mutation_test_selection_prefers_content_matches(monkeypatch, tmp_path: Path):
     pkg = tmp_path / "pkg"
     pkg.mkdir()

@@ -23,11 +23,10 @@ Output::
 
 **How coverage is measured:**
 
-When ``pytest-cov`` is available, the audit runs
-``pytest --cov=<module> --cov-report=json:<path>`` as a subprocess and
-parses the JSON report. When it is not available, ordeal falls back to
-an internal tracer and computes executed/missing lines directly.
-Both paths are cross-checked for internal consistency.
+When ``coverage.py`` is available, the audit runs pytest under its tracer
+and parses a structured JSON report. When it is not available, ordeal
+falls back to an internal tracer and computes executed/missing lines
+directly. Both paths are cross-checked for internal consistency.
 
 **How the migrated test is generated:**
 
@@ -58,21 +57,21 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import ModuleType
 
 from ordeal.auto import (
     _get_public_functions,
     _infer_strategies,
     _resolve_module,
-    scan_module,
 )
-from ordeal.mine import mine
+from ordeal.mine import MineResult, mine
 
 # ============================================================================
 # Constants — every number has a documented rationale
 # ============================================================================
 
 SUBPROCESS_TIMEOUT_SECONDS: int = 120
-"""Timeout for the pytest-cov subprocess, in seconds.
+"""Timeout for the coverage/pytest subprocess, in seconds.
 
 **Why 120s:** Large projects with 500+ tests may take 60-90s under
 coverage instrumentation.  120s provides 2x margin without hanging
@@ -584,6 +583,56 @@ def _find_test_files(module_name: str, test_dir: Path) -> list[Path]:
 
 
 # ============================================================================
+# Audit planning helpers
+# ============================================================================
+
+
+def _collect_audit_functions(
+    module: str | ModuleType,
+) -> tuple[list[tuple[str, object]], list[str]]:
+    """Split public module functions into scannable and skipped groups.
+
+    ``scannable`` means ordeal can infer Hypothesis strategies for the
+    function, so audit can fuzz it, mine properties, and generate tests.
+    ``skipped`` functions still appear in the summary as fixture gaps.
+    """
+    mod = _resolve_module(module)
+    scannable: list[tuple[str, object]] = []
+    skipped: list[str] = []
+    for name, func in _get_public_functions(mod):
+        if _infer_strategies(func) is None:
+            skipped.append(name)
+        else:
+            scannable.append((name, func))
+    return scannable, skipped
+
+
+def _mine_audit_functions(
+    functions: list[tuple[str, object]],
+    *,
+    max_examples: int,
+    warnings: list[str],
+) -> dict[str, MineResult]:
+    """Mine each scannable function once for reuse across the audit.
+
+    The resulting mine outputs drive both generated property tests and the
+    human-readable summary, avoiding redundant calls to ``mine()``.
+    """
+    results: dict[str, MineResult] = {}
+    for name, func in functions:
+        try:
+            results[name] = mine(func, max_examples=max_examples)
+        except Exception as exc:
+            warnings.append(f"mining failed for {name}: {type(exc).__name__}: {exc}")
+    return results
+
+
+def _is_generated_test_file(path: Path) -> bool:
+    """Return True when *path* lives under the generated ``.ordeal`` tree."""
+    return ".ordeal" in path.parts
+
+
+# ============================================================================
 # Coverage measurement — via JSON, not stdout parsing
 # ============================================================================
 
@@ -592,19 +641,19 @@ def _measure_coverage(
     test_files: list[Path],
     module_name: str,
 ) -> CoverageMeasurement:
-    """Run tests and measure coverage via pytest-cov or an internal tracer.
+    """Run tests and measure coverage via coverage.py or an internal tracer.
 
-    **Preferred path:** When ``pytest-cov`` is available, ordeal reads its
-    JSON report instead of parsing terminal output. The JSON format has a
-    stable schema and is easy to cross-check.
+    **Preferred path:** When ``coverage.py`` is available, ordeal runs
+    pytest under its tracer and reads a structured JSON report. The JSON
+    schema is stable and easy to cross-check.
 
-    **Fallback path:** When ``pytest-cov`` is not installed, ordeal traces
+    **Fallback path:** When ``coverage.py`` is not installed, ordeal traces
     the target module directly in a subprocess and computes executed/missing
     lines itself. This keeps ``ordeal audit`` usable in a fresh environment.
 
     **How it works:**
 
-    1. Run the preferred backend (pytest-cov JSON) or fallback tracer
+    1. Run the preferred backend (coverage.py JSON) or fallback tracer
     2. Parse the structured output
     3. Cross-check: verify ``percent ≈ (stmts - missing) / stmts * 100``
     4. On ANY failure: return ``CoverageMeasurement(status=FAILED)``
@@ -647,13 +696,151 @@ def _measure_coverage(
     if not in_project:
         pytest_args.extend(["--override-ini", f"confcutdir={test_files[0].parent}"])
 
+    if importlib.util.find_spec("coverage") is not None:
+        return _measure_coverage_with_coverage_py(module_name, pytest_args, cwd, env)
+
     if importlib.util.find_spec("pytest_cov") is not None:
         return _measure_coverage_with_pytest_cov(module_name, pytest_args, cwd, env)
 
-    if all("/.ordeal/" in str(f) for f in test_files):
-        return _measure_generated_coverage_with_trace(module_name, test_files, cwd, env)
+    if all(_is_generated_test_file(f) for f in test_files):
+        return _measure_coverage_with_trace(module_name, pytest_args, cwd, env)
 
     return _measure_coverage_with_trace(module_name, pytest_args, cwd, env)
+
+
+def _measure_coverage_with_coverage_py(
+    module_name: str,
+    pytest_args: list[str],
+    cwd: str,
+    env: dict[str, str],
+) -> CoverageMeasurement:
+    """Measure coverage via the ``coverage.py`` API when available.
+
+    This avoids the pytest-cov plugin dependency while still using
+    coverage.py's much faster tracer instead of Python-level ``sys.settrace``.
+    """
+    with tempfile.NamedTemporaryFile(
+        suffix=".json",
+        prefix="ordeal_cov_",
+        delete=False,
+    ) as tmp:
+        json_path = Path(tmp.name)
+
+    script = """
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+import coverage
+import pytest
+
+module_name = sys.argv[1]
+json_path = sys.argv[2]
+pytest_args = sys.argv[3:]
+
+payload = {"return_code": 0, "coverage": None, "error": None}
+cov_json = Path(tempfile.mkstemp(prefix="ordeal_cov_raw_", suffix=".json")[1])
+cov = coverage.Coverage(source=[module_name], config_file=False, data_file=None)
+
+try:
+    cov.start()
+    payload["return_code"] = int(pytest.main(pytest_args))
+except Exception as exc:
+    payload["return_code"] = 2
+    payload["error"] = f"{type(exc).__name__}: {exc}"
+finally:
+    try:
+        cov.stop()
+    except Exception:
+        pass
+
+try:
+    cov.json_report(outfile=str(cov_json))
+    payload["coverage"] = json.loads(cov_json.read_text(encoding="utf-8"))
+except Exception as exc:
+    payload["error"] = payload["error"] or f"coverage JSON failed: {type(exc).__name__}: {exc}"
+finally:
+    cov_json.unlink(missing_ok=True)
+
+Path(json_path).write_text(json.dumps(payload), encoding="utf-8")
+"""
+
+    with tempfile.NamedTemporaryFile(
+        suffix=".py",
+        prefix="ordeal_cov_runner_",
+        delete=False,
+        mode="w",
+        encoding="utf-8",
+    ) as script_file:
+        script_file.write(script)
+        script_path = Path(script_file.name)
+
+    cmd = [
+        sys.executable,
+        str(script_path),
+        module_name,
+        str(json_path),
+        *pytest_args,
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+            cwd=cwd,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        json_path.unlink(missing_ok=True)
+        script_path.unlink(missing_ok=True)
+        return CoverageMeasurement(
+            Status.FAILED,
+            error=f"timed out after {SUBPROCESS_TIMEOUT_SECONDS}s",
+        )
+    except FileNotFoundError:
+        json_path.unlink(missing_ok=True)
+        script_path.unlink(missing_ok=True)
+        return CoverageMeasurement(Status.FAILED, error="python not found")
+
+    try:
+        raw = json.loads(json_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        stderr_hint = (result.stderr or "")[:200]
+        return CoverageMeasurement(
+            Status.FAILED,
+            error=f"coverage report not generated. stderr: {stderr_hint}",
+        )
+    except json.JSONDecodeError as exc:
+        stderr_hint = (result.stderr or "")[:200]
+        return CoverageMeasurement(
+            Status.FAILED,
+            error=f"invalid JSON: {exc}"
+            + (f" (subprocess stderr: {stderr_hint})" if stderr_hint else ""),
+        )
+    finally:
+        json_path.unlink(missing_ok=True)
+        script_path.unlink(missing_ok=True)
+
+    if raw.get("error"):
+        return CoverageMeasurement(Status.FAILED, error=str(raw["error"]))
+    return_code = int(raw.get("return_code", 0))
+    if return_code not in (0, 1):
+        return CoverageMeasurement(
+            Status.FAILED,
+            error=f"pytest exited with code {return_code} during coverage measurement",
+        )
+    coverage_json = raw.get("coverage")
+    if not isinstance(coverage_json, dict):
+        return CoverageMeasurement(Status.FAILED, error="coverage report missing payload")
+
+    return _coverage_measurement_from_json(
+        coverage_json,
+        module_name,
+        source="coverage.py API",
+    )
 
 
 def _measure_coverage_with_pytest_cov(
@@ -1337,6 +1524,10 @@ def _generate_migrated_test(
     module: str,
     max_examples: int,
     warnings: list[str],
+    *,
+    scannable_functions: list[tuple[str, object]] | None = None,
+    skipped_functions: list[str] | None = None,
+    mine_results: dict[str, MineResult] | None = None,
 ) -> tuple[str, int, list[str]]:
     """Generate a consolidated test file: ordeal fuzz + mined property assertions.
 
@@ -1352,6 +1543,9 @@ def _generate_migrated_test(
         module: Dotted module path.
         max_examples: Hypothesis examples for fuzz and mine.
         warnings: Mutable list — mining failures are appended here.
+        scannable_functions: Optional pre-filtered ``(name, func)`` pairs.
+        skipped_functions: Optional names missing inferred strategies.
+        mine_results: Optional precomputed mine outputs keyed by function name.
     """
     mod = _resolve_module(module)
 
@@ -1370,14 +1564,11 @@ def _generate_migrated_test(
     ]
     body: list[str] = []
 
-    scannable = []
-    skipped = []
-    for name, func in _get_public_functions(mod):
-        strategies = _infer_strategies(func)
-        if strategies is not None:
-            scannable.append((name, func))
-        else:
-            skipped.append(name)
+    if scannable_functions is None or skipped_functions is None:
+        scannable, skipped = _collect_audit_functions(mod)
+    else:
+        scannable = list(scannable_functions)
+        skipped = list(skipped_functions)
 
     test_count = 0
     for name, _func in scannable:
@@ -1389,13 +1580,14 @@ def _generate_migrated_test(
         body.append("")
 
     # Mine properties and generate assertion tests
-    mine_cap = min(max_examples, MINE_EXAMPLES_FOR_GENERATED_TEST)
     for name, func in scannable:
-        try:
-            mine_result = mine(func, max_examples=mine_cap)
-        except Exception as exc:
-            warnings.append(f"mining failed for {name}: {type(exc).__name__}: {exc}")
-            continue
+        mine_result = None if mine_results is None else mine_results.get(name)
+        if mine_result is None:
+            try:
+                mine_result = mine(func, max_examples=min(max_examples, MINE_EXAMPLES_FOR_GENERATED_TEST))
+            except Exception as exc:
+                warnings.append(f"mining failed for {name}: {type(exc).__name__}: {exc}")
+                continue
 
         strong = [
             p
@@ -1549,18 +1741,27 @@ def audit(
 
     # -- 2. Generate migrated test --
     try:
-        _resolve_module(module)
+        mod = _resolve_module(module)
     except ImportError as exc:
         result.warnings.append(f"cannot import {module}: {exc}")
         return result
 
-    scan_result = scan_module(module, max_examples=max_examples)
-    result.gap_functions = [name for name, _reason in scan_result.skipped]
+    scannable, skipped = _collect_audit_functions(mod)
+    result.gap_functions = skipped
+    mine_examples = min(max_examples, MINE_EXAMPLES_FOR_GENERATED_TEST)
+    mine_results = _mine_audit_functions(
+        scannable,
+        max_examples=mine_examples,
+        warnings=result.warnings,
+    )
 
     generated, test_count, _skipped = _generate_migrated_test(
         module,
         max_examples,
         result.warnings,
+        scannable_functions=scannable,
+        skipped_functions=skipped,
+        mine_results=mine_results,
     )
     result.generated_test = generated
     result.migrated_test_count = test_count
@@ -1569,19 +1770,13 @@ def audit(
     )
 
     # Collect mined properties with confidence bounds
-    for name, func in _get_public_functions(_resolve_module(module)):
-        try:
-            mine_result = mine(func, max_examples=min(max_examples, 30))
-            for p in mine_result.properties:
-                if p.universal and p.total >= 5:
-                    lower = wilson_lower(p.holds, p.total)
-                    result.mined_properties.append(
-                        f"{name}: {p.name} ({p.holds}/{p.total}, >={lower:.0%} CI)"
-                    )
-        except Exception as exc:
-            result.warnings.append(
-                f"mining failed for {name}: {type(exc).__name__}: {exc}",
-            )
+    for name, mine_result in mine_results.items():
+        for p in mine_result.properties:
+            if p.universal and p.total >= 5:
+                lower = wilson_lower(p.holds, p.total)
+                result.mined_properties.append(
+                    f"{name}: {p.name} ({p.holds}/{p.total}, >={lower:.0%} CI)"
+                )
 
     # Suggest metamorphic relations from mined properties
     result.suggested_relations = _suggest_relations(result.mined_properties)
@@ -1590,13 +1785,17 @@ def audit(
     from ordeal.mutations import validate_mined_properties
 
     total_killed = total_mutants = 0
-    for name, func in _get_public_functions(_resolve_module(module)):
+    for name, _func in scannable:
+        mine_result = mine_results.get(name)
+        if mine_result is None:
+            continue
         target_path = f"{module}.{name}"
         try:
             mr = validate_mined_properties(
                 target_path,
                 max_examples=min(max_examples, 20),
                 preset="standard",
+                mine_result=mine_result,
             )
             total_killed += mr.killed
             total_mutants += mr.total

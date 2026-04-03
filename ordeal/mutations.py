@@ -893,6 +893,93 @@ def _module_source_hash(target: str) -> str:
     return h.hexdigest()[:16]
 
 
+def _normalize_extra_mutants(
+    extra_mutants: list[str | tuple[str, str]] | None,
+) -> list[dict[str, str | None]] | None:
+    """Convert extra-mutant inputs into a stable JSON-serializable shape."""
+    if extra_mutants is None:
+        return None
+    normalized: list[dict[str, str | None]] = []
+    for item in extra_mutants:
+        if isinstance(item, tuple):
+            description, source = item
+        else:
+            description, source = None, item
+        normalized.append({"description": description, "source": source})
+    return normalized
+
+
+def _test_fn_fingerprint(test_fn: Callable[[], None]) -> str:
+    """Best-effort fingerprint for a custom test callable."""
+    source_obj = test_fn
+    if not inspect.isfunction(source_obj) and hasattr(source_obj, "__call__"):
+        source_obj = source_obj.__call__
+
+    payload: dict[str, object] = {
+        "module": getattr(test_fn, "__module__", None),
+        "qualname": getattr(test_fn, "__qualname__", getattr(test_fn, "__name__", None)),
+        "type": type(test_fn).__qualname__,
+    }
+
+    try:
+        payload["source"] = textwrap.dedent(inspect.getsource(source_obj))
+    except (OSError, TypeError):
+        payload["source"] = None
+
+    code = getattr(source_obj, "__code__", None)
+    if code is not None:
+        payload["bytecode"] = code.co_code.hex()
+        payload["consts"] = repr(code.co_consts)
+        payload["names"] = list(code.co_names)
+        payload["varnames"] = list(code.co_varnames)
+        payload["freevars"] = list(code.co_freevars)
+    else:
+        payload["repr"] = repr(test_fn)
+
+    payload["defaults"] = repr(getattr(test_fn, "__defaults__", None))
+    payload["kwdefaults"] = repr(getattr(test_fn, "__kwdefaults__", None))
+
+    closure = getattr(source_obj, "__closure__", None)
+    if closure is not None:
+        payload["closure"] = [repr(cell.cell_contents) for cell in closure]
+
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _mutation_cache_config_hash(
+    *,
+    test_fn: Callable[[], None] | None,
+    test_filter: str | None,
+    filter_equivalent: bool,
+    equivalence_samples: int,
+    extra_mutants: list[str | tuple[str, str]] | None,
+    llm: Callable[[str], str] | None,
+    llm_equivalence: bool,
+    concern: str | None,
+    mutant_timeout: float | None,
+    disk_mutation: bool,
+) -> str | None:
+    """Hash the mutation settings that materially change the result."""
+    if llm is not None:
+        return None
+
+    payload = {
+        "auto_discovered_tests": test_fn is None,
+        "test_fn_fingerprint": None if test_fn is None else _test_fn_fingerprint(test_fn),
+        "test_filter": test_filter,
+        "filter_equivalent": filter_equivalent,
+        "equivalence_samples": equivalence_samples,
+        "extra_mutants": _normalize_extra_mutants(extra_mutants),
+        "llm_equivalence": llm_equivalence,
+        "concern": concern,
+        "mutant_timeout": mutant_timeout,
+        "disk_mutation": disk_mutation,
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
 def _cache_path(target: str) -> Path:
     safe = target.replace(".", "_")
     return Path(".ordeal") / "mutate" / f"{safe}.json"
@@ -924,13 +1011,15 @@ def _mutant_from_dict(d: dict) -> Mutant:
     )
 
 
-def _save_cache(target: str, result: MutationResult, module_hash: str) -> None:
+def _save_cache(target: str, result: MutationResult, module_hash: str, config_hash: str) -> None:
     """Persist a mutation result to .ordeal/mutate/<target>.json."""
     data = {
         "target": target,
         "module_source_hash": module_hash,
+        "config_hash": config_hash,
         "preset_used": result.preset_used,
         "operators_used": result.operators_used,
+        "concern": result.concern,
         "mutants": [_mutant_to_dict(m) for m in result.mutants],
         "timings": result.timings,
         "diagnostics": result.diagnostics,
@@ -948,6 +1037,7 @@ def _load_cache(
     module_hash: str,
     preset: str | None,
     operators: list[str] | None,
+    config_hash: str | None,
 ) -> MutationResult | None:
     """Load cached mutation result if valid.
 
@@ -971,11 +1061,14 @@ def _load_cache(
         return None
     if data.get("operators_used") != operators:
         return None
+    if config_hash is None or data.get("config_hash") != config_hash:
+        return None
 
     result = MutationResult(
         target=target,
         operators_used=data.get("operators_used"),
         preset_used=data.get("preset_used"),
+        concern=data.get("concern"),
     )
     result.mutants = [_mutant_from_dict(m) for m in data.get("mutants", [])]
     result.timings = data.get("timings", {})
@@ -4644,6 +4737,7 @@ def validate_mined_properties(
     operators: list[str] | None = None,
     *,
     preset: PresetName | None = None,
+    mine_result: "MineResult | None" = None,
 ) -> MutationResult:
     """Mine properties of *target*, then mutate it and check the properties catch the mutations.
 
@@ -4657,17 +4751,20 @@ def validate_mined_properties(
         operators: Mutation operators to use (default: all).
         preset: Named operator group: ``"essential"``, ``"standard"``,
             or ``"thorough"``. Mutually exclusive with *operators*.
+        mine_result: Optional precomputed ``mine()`` result for the original
+            function. Reusing it avoids re-mining when a caller already has
+            those properties (for example, inside ``ordeal.audit``).
     """
     operators = _resolve_operators(operators, preset)
-    from ordeal.mine import mine
+    from ordeal.mine import MineResult, mine
 
     module_path, func_name = target.rsplit(".", 1)
     module = importlib.import_module(module_path)
     func = getattr(module, func_name)
 
     # Mine the original function's properties
-    mine_result = mine(func, max_examples=max_examples)
-    universal = mine_result.universal
+    original_mine: MineResult = mine_result or mine(func, max_examples=max_examples)
+    universal = original_mine.universal
     if not universal:
         return MutationResult(target=target)  # nothing to validate
 
@@ -4977,6 +5074,12 @@ def mutate_function_and_test(
                 equivalence_samples=equivalence_samples,
                 stats=stats,
             )
+        if not mutant_pairs:
+            result.diagnostics.update(stats)
+            result.diagnostics["tested"] = 0
+            result.timings.update(timings)
+            result.timings["total_seconds"] = time.perf_counter() - started_at
+            return result
         try:
             with _timed_phase(timings, "test_execution_seconds"):
                 if workers > 1 and len(mutant_pairs) > 1:
@@ -5403,10 +5506,15 @@ def mutate(
             - ``tests/conftest.py`` or ``conftest.py``
             - Lockfile (``uv.lock``, ``poetry.lock``, ``requirements.txt``)
             - Preset or operators
+            - Test-selection and equivalence settings
+            - Extra mutants or the custom test callable fingerprint
 
             Mine oracle results (``killed_by='mine()'``) are **never**
             cached because mine uses random inputs — re-running can
             discover more properties.
+
+            LLM-generated mutants are also not cached because the supplied
+            generator may return a different set of mutants on each run.
 
             **Caveat**: test files that don't follow ``test_<module>*.py``
             naming (e.g. ``test_battle.py``) are not tracked.  If you use
@@ -5417,10 +5525,23 @@ def mutate(
     """
     # Resume: check cache before dispatching
     resolved_operators = _resolve_operators(operators, preset)
+    resolved_disk_mutation = _resolve_disk_mutation(disk_mutation, target)
+    config_hash = _mutation_cache_config_hash(
+        test_fn=test_fn,
+        test_filter=test_filter,
+        filter_equivalent=filter_equivalent,
+        equivalence_samples=equivalence_samples,
+        extra_mutants=extra_mutants,
+        llm=llm,
+        llm_equivalence=llm_equivalence,
+        concern=concern,
+        mutant_timeout=mutant_timeout,
+        disk_mutation=resolved_disk_mutation,
+    )
     if resume:
         try:
             module_hash = _module_source_hash(target)
-            cached = _load_cache(target, module_hash, preset, resolved_operators)
+            cached = _load_cache(target, module_hash, preset, resolved_operators, config_hash)
             if cached is not None:
                 return cached
         except Exception:
@@ -5441,17 +5562,17 @@ def mutate(
         concern=concern,
         test_filter=test_filter,
         mutant_timeout=mutant_timeout,
-        disk_mutation=disk_mutation,
+        disk_mutation=resolved_disk_mutation,
     )
 
     # Save cache after fresh run — but NOT if the result came from the
     # mine oracle (primary or fallback), which is stochastic. mine() uses
     # random inputs, so re-running can discover more properties.
     mine_used = any(m.killed_by == "mine()" for m in result.mutants)
-    if resume and not mine_used:
+    if resume and config_hash is not None and not mine_used:
         try:
             module_hash = _module_source_hash(target)
-            _save_cache(target, result, module_hash)
+            _save_cache(target, result, module_hash, config_hash)
         except Exception:
             pass
 

@@ -15,29 +15,6 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _get_version
 from pathlib import Path
 
-# Re-export Hypothesis stateful testing API for convenience
-from hypothesis.stateful import (
-    Bundle,
-    initialize,
-    invariant,
-    precondition,
-    rule,
-)
-
-from ordeal.assertions import always, declare, reachable, report, sometimes, unreachable
-from ordeal.buggify import buggify, buggify_value
-from ordeal.chaos import ChaosTest, RuleTimeoutError, chaos_test
-from ordeal.mutations import (
-    OPERATORS,
-    PRESETS,
-    MutationResult,
-    NoTestsFoundError,
-    generate_starter_tests,
-    init_project,
-    mutate,
-    mutate_function_and_test,
-)
-
 try:
     __version__ = _get_version("ordeal")
 except PackageNotFoundError:
@@ -84,7 +61,12 @@ __all__ = [
 # Submodules whose public exports are re-exported from ordeal.
 # Add a public function or class to any of these → it becomes
 # importable via ``from ordeal import X`` with zero registration.
+_STATEFUL_EXPORTS = ("Bundle", "initialize", "invariant", "precondition", "rule")
 _LAZY_SUBMODULES = (
+    "ordeal.assertions",
+    "ordeal.buggify",
+    "ordeal.chaos",
+    "ordeal.mutations",
     "ordeal.mine",
     "ordeal.audit",
     "ordeal.auto",
@@ -109,6 +91,13 @@ def __getattr__(name: str) -> object:
     """Lazy import: search submodules for the requested name."""
     import importlib
 
+    if name in _STATEFUL_EXPORTS:
+        from hypothesis import stateful as _stateful
+
+        obj = getattr(_stateful, name)
+        globals()[name] = obj
+        return obj
+
     for mod_path in _LAZY_SUBMODULES:
         try:
             mod = importlib.import_module(mod_path)
@@ -127,6 +116,8 @@ def __dir__() -> list[str]:
     import inspect as _inspect
 
     names = set(globals().keys())
+    names.update(_STATEFUL_EXPORTS)
+    names.update(__all__)
     for mod_path in _LAZY_SUBMODULES:
         try:
             mod = importlib.import_module(mod_path)

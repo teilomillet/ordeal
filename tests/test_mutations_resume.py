@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib
 import shutil
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +18,7 @@ from ordeal.mutations import (
     _load_cache,
     _module_source_hash,
     _save_cache,
+    validate_mined_properties,
     mutate,
 )
 
@@ -91,6 +93,7 @@ class TestCacheHelpers:
             target="test.target",
             operators_used=["arithmetic"],
             preset_used="essential",
+            concern="boundary behavior",
         )
         from ordeal.mutations import Mutant
 
@@ -116,11 +119,12 @@ class TestCacheHelpers:
             ),
         ]
 
-        _save_cache("test.target", result, "abc123")
-        loaded = _load_cache("test.target", "abc123", "essential", ["arithmetic"])
+        _save_cache("test.target", result, "abc123", "cfg123")
+        loaded = _load_cache("test.target", "abc123", "essential", ["arithmetic"], "cfg123")
         assert loaded is not None
         assert loaded.total == 2
         assert loaded.killed == 1
+        assert loaded.concern == "boundary behavior"
         assert loaded.mutants[0].operator == "arithmetic"
         assert loaded.mutants[0].killed is True
         assert loaded.mutants[1].killed is False
@@ -128,15 +132,15 @@ class TestCacheHelpers:
     def test_load_rejects_different_hash(self, clean_cache):
         """Cache miss when module source changed."""
         result = MutationResult(target="test.target", preset_used="essential")
-        _save_cache("test.target", result, "old_hash")
-        loaded = _load_cache("test.target", "new_hash", "essential", None)
+        _save_cache("test.target", result, "old_hash", "cfg123")
+        loaded = _load_cache("test.target", "new_hash", "essential", None, "cfg123")
         assert loaded is None
 
     def test_load_rejects_different_preset(self, clean_cache):
         """Cache miss when preset changed."""
         result = MutationResult(target="test.target", preset_used="essential")
-        _save_cache("test.target", result, "same_hash")
-        loaded = _load_cache("test.target", "same_hash", "standard", None)
+        _save_cache("test.target", result, "same_hash", "cfg123")
+        loaded = _load_cache("test.target", "same_hash", "standard", None, "cfg123")
         assert loaded is None
 
     def test_load_rejects_different_operators(self, clean_cache):
@@ -146,13 +150,26 @@ class TestCacheHelpers:
             operators_used=["arithmetic"],
             preset_used=None,
         )
-        _save_cache("test.target", result, "same_hash")
-        loaded = _load_cache("test.target", "same_hash", None, ["arithmetic", "comparison"])
+        _save_cache("test.target", result, "same_hash", "cfg123")
+        loaded = _load_cache(
+            "test.target",
+            "same_hash",
+            None,
+            ["arithmetic", "comparison"],
+            "cfg123",
+        )
+        assert loaded is None
+
+    def test_load_rejects_different_config(self, clean_cache):
+        """Cache miss when non-source mutation settings change."""
+        result = MutationResult(target="test.target", preset_used="essential")
+        _save_cache("test.target", result, "same_hash", "cfg-old")
+        loaded = _load_cache("test.target", "same_hash", "essential", None, "cfg-new")
         assert loaded is None
 
     def test_load_returns_none_when_no_cache(self, clean_cache):
         """Cache miss when no cache file exists."""
-        loaded = _load_cache("nonexistent.target", "any_hash", None, None)
+        loaded = _load_cache("nonexistent.target", "any_hash", None, None, "cfg123")
         assert loaded is None
 
 
@@ -226,6 +243,25 @@ class TestResumeInvariant:
         assert r2.diagnostics.get("cached", 0) > 0
         assert r2.diagnostics.get("retested", 0) == 0
 
+    def test_resume_invalidated_when_test_fn_changes(self, sample_module, clean_cache):
+        """A different custom test oracle must not reuse the old cache."""
+        mod_name, _ = sample_module
+
+        def weak_test() -> None:
+            mod = importlib.import_module(mod_name)
+            assert mod.add(1, 2) == 3
+
+        def strong_test() -> None:
+            mod = importlib.import_module(mod_name)
+            assert mod.add(1, 2) == 3
+            assert mod.add(-1, 5) == 4
+
+        first = mutate(f"{mod_name}.add", test_fn=weak_test, preset="essential", resume=True)
+        second = mutate(f"{mod_name}.add", test_fn=strong_test, preset="essential", resume=True)
+
+        assert second.diagnostics.get("cached", 0) == 0
+        assert second.killed >= first.killed
+
     def test_fresh_run_no_cached_diagnostic(self, clean_cache):
         """Fresh run (resume=False) should not have cached diagnostic."""
         import tests._mutation_target as mod
@@ -267,6 +303,67 @@ class TestResumeInvariant:
             for key in list(sys.modules):
                 if key.startswith("oraclenomod"):
                     del sys.modules[key]
+
+    def test_llm_mutation_results_not_cached(self, clean_cache):
+        """LLM-generated mutants are nondeterministic, so resume must stay fresh."""
+
+        def fake_llm(prompt: str) -> str:
+            return "```python\ndef add(a: int, b: int) -> int:\n    return a - b\n```"
+
+        def test_add() -> None:
+            import tests._mutation_target as mod
+
+            assert mod.add(1, 2) == 3
+            assert mod.add(-1, 5) == 4
+
+        r1 = mutate(
+            "tests._mutation_target.add",
+            test_fn=test_add,
+            preset="essential",
+            llm=fake_llm,
+            resume=True,
+        )
+        r2 = mutate(
+            "tests._mutation_target.add",
+            test_fn=test_add,
+            preset="essential",
+            llm=fake_llm,
+            resume=True,
+        )
+
+        assert r1.total >= 1
+        assert r2.diagnostics.get("cached") is None
+
+    def test_validate_mined_properties_uses_precomputed_mine_result(self, monkeypatch):
+        """A supplied mine result should bypass the initial mine() call."""
+        import ordeal.mutations as mutations_mod
+        import ordeal.mine as mine_mod
+
+        fake_mine_result = SimpleNamespace(
+            universal=[SimpleNamespace(name="deterministic")],
+        )
+
+        def fail_mine(*args, **kwargs):
+            raise AssertionError("mine() should not run when mine_result is supplied")
+
+        monkeypatch.setattr(mine_mod, "mine", fail_mine)
+        monkeypatch.setattr(
+            mutations_mod,
+            "mutate_function_and_test",
+            lambda target, test_fn, operators: MutationResult(
+                target=target,
+                operators_used=operators,
+            ),
+        )
+
+        result = validate_mined_properties(
+            "tests._mutation_target.add",
+            operators=["arithmetic"],
+            mine_result=fake_mine_result,
+        )
+
+        assert result.target == "tests._mutation_target.add"
+        assert result.operators_used == ["arithmetic"]
 
 
 # ============================================================================

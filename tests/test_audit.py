@@ -13,6 +13,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+import ordeal.audit as audit_mod
 from ordeal.audit import (
     CoverageMeasurement,
     CoverageResult,
@@ -175,6 +178,49 @@ class TestCoverageMeasurement:
     def test_failed_default(self):
         m = CoverageMeasurement(Status.FAILED, error="not measured yet")
         assert m.percent == 0.0
+
+
+class TestCoverageBackendSelection:
+    def test_prefers_coverage_module_when_available(self, monkeypatch):
+        sentinel = CoverageMeasurement(Status.FAILED, error="coverage backend used")
+
+        def fake_find_spec(name: str):
+            if name == "coverage":
+                return object()
+            return None
+
+        monkeypatch.setattr(audit_mod.importlib.util, "find_spec", fake_find_spec)
+        monkeypatch.setattr(
+            audit_mod,
+            "_measure_coverage_with_coverage_py",
+            lambda *args: sentinel,
+        )
+        monkeypatch.setattr(
+            audit_mod,
+            "_measure_coverage_with_pytest_cov",
+            lambda *args: pytest.fail("pytest-cov backend should not run"),
+        )
+        monkeypatch.setattr(
+            audit_mod,
+            "_measure_coverage_with_trace",
+            lambda *args: pytest.fail("trace backend should not run"),
+        )
+
+        result = audit_mod._measure_coverage([Path("tests/test_demo.py")], "ordeal.demo")
+        assert result is sentinel
+
+    def test_generated_relative_path_uses_trace_fallback_without_coverage(self, monkeypatch):
+        sentinel = CoverageMeasurement(Status.FAILED, error="trace backend used")
+
+        monkeypatch.setattr(audit_mod.importlib.util, "find_spec", lambda _name: None)
+        monkeypatch.setattr(
+            audit_mod,
+            "_measure_coverage_with_trace",
+            lambda *args: sentinel,
+        )
+
+        result = audit_mod._measure_coverage([Path(".ordeal/test_generated.py")], "ordeal.demo")
+        assert result is sentinel
 
 
 # ============================================================================

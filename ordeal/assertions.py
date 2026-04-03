@@ -24,6 +24,12 @@ Four assertion types, keyed by name (message string):
 - Does NOT control whether ``always``/``unreachable`` raise — they
   always raise on violation regardless.
 
+Use ``declare()`` to register deferred properties up front so they can
+fail even when never observed::
+
+    declare("timeout handler runs", "reachable")
+    declare("cache warms up", "sometimes")
+
 Each function is simple by default and unlocks depth through parameters::
 
     always(x > 0, "positive")                                     # fatal
@@ -160,6 +166,7 @@ class PropertyTracker:
 # auto_configure().
 # ---------------------------------------------------------------------------
 tracker = PropertyTracker()
+_DEFERRED_PROPERTY_TYPES = frozenset({"sometimes", "reachable"})
 
 
 def _stderr(msg: str) -> None:
@@ -199,6 +206,60 @@ def report() -> dict[str, list[dict[str, Any]]]:
         else:
             failed.append(entry)
     return {"passed": passed, "failed": failed}
+
+
+def declare(name: str, prop_type: str, **details: Any) -> None:
+    """Register a deferred property expectation before any hits are observed.
+
+    ``sometimes()`` and ``reachable()`` are observational by default: if the
+    call site is never reached, there is nothing to track.  ``declare()``
+    makes the expectation explicit so the property can fail at session end
+    even when it was never observed.
+
+    Typical use::
+
+        declare("timeout handler runs", "reachable")
+        declare("cache warms up", "sometimes")
+
+    Then, elsewhere in the code under test::
+
+        reachable("timeout handler runs")
+        sometimes(cache_hit, "cache warms up")
+
+    Args:
+        name: Human-readable property label.
+        prop_type: Either ``"reachable"`` or ``"sometimes"``.
+        **details: Optional metadata stored with the property.
+    """
+    if prop_type not in _DEFERRED_PROPERTY_TYPES:
+        raise ValueError(
+            "declare() only supports deferred property types: 'sometimes' or 'reachable'"
+        )
+    with tracker._lock:
+        if not tracker._active:
+            was_active = False
+        else:
+            prop = tracker._properties.get(name)
+            if prop is None:
+                tracker._properties[name] = Property(
+                    name=name,
+                    type=prop_type,
+                    first_failure_details=details or None,
+                )
+            elif prop.type != prop_type:
+                raise ValueError(
+                    f"Property {name!r} already declared as {prop.type!r}, "
+                    f"cannot redeclare as {prop_type!r}"
+                )
+            elif prop.first_failure_details is None and details:
+                prop.first_failure_details = details
+            was_active = True
+    if not was_active:
+        warnings.warn(
+            f"declare({name!r}, {prop_type!r}) called but tracker is inactive — this is a no-op. "
+            "Run with --chaos or call auto_configure() to enable property tracking.",
+            stacklevel=2,
+        )
 
 
 def always(condition: bool, name: str, *, mute: bool = False, **details: Any) -> None:

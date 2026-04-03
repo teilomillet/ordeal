@@ -293,11 +293,11 @@ def scores_valid(self):
 ## Using assertions effectively
 
 !!! quote "What you can do with this"
-    Assertions go inside your rules to check specific results. Ordeal gives you four kinds, each answering a different question: "must this always be true?" (`always`), "should this happen at least once?" (`sometimes`), "does this error path actually run?" (`reachable`), and "should this never happen?" (`unreachable`).
+    Assertions go inside your rules to check specific results. Ordeal gives you four property types, each answering a different question: "must this always be true?" (`always`), "should this happen at least once?" (`sometimes`), "does this error path actually run?" (`reachable`), and "should this never happen?" (`unreachable`). Use `declare()` when you want a deferred property to fail even if its marker is never observed.
 
     Together, they let you express both safety ("nothing bad happens") and liveness ("good things eventually happen"). These assertions live in `ordeal/assertions.py` and are all exported from `ordeal.__init__`.
 
-Ordeal provides four assertion types, inspired by [Antithesis](https://antithesis.com). Each serves a different purpose.
+Ordeal provides four assertion types, inspired by [Antithesis](https://antithesis.com), plus a `declare()` helper for deferred expectations. Each serves a different purpose.
 
 ### `always` -- safety properties
 

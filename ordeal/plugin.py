@@ -576,7 +576,7 @@ def pytest_terminal_summary(
 
     # Structured metadata — no hardcoded advice, just facts.
     seed = config.getoption("chaos_seed", default=None)
-    kinds = {p.kind for p in results if hasattr(p, "kind") and isinstance(p.kind, str)}
+    kinds = {p.type for p in results if isinstance(getattr(p, "type", None), str)}
     terminalreporter.line("")
     terminalreporter.line(
         f"  Config: seed={'none' if seed is None else seed}, "

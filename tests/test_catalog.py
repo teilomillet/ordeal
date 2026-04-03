@@ -134,10 +134,13 @@ class TestInvariantsCatalog:
 
 
 class TestAssertionsCatalog:
-    def test_four_assertion_types(self):
+    def test_assertion_api_surface(self):
         c = catalog()
         names = {e["name"] for e in c["assertions"]}
-        always(names == {"always", "sometimes", "reachable", "unreachable"}, "all 4 assertions")
+        always(
+            names == {"always", "declare", "sometimes", "reachable", "unreachable"},
+            "assertion API surface",
+        )
 
     def test_docs_indicate_behavior(self):
         """Each assertion doc should say whether it raises immediately or is deferred."""

@@ -164,10 +164,11 @@ clock.advance(15.0)  # advances time AND fires callback
 The audit never silently returns 0% — if a measurement fails, it says `FAILED: reason`. Common reasons:
 
 - **"no test files found"**: test files must be named `test_<module_short_name>.py` or `test_<module_short_name>_*.py`. Check the `--test-dir` flag.
-- **"pytest not found"** or **"coverage report not generated"**: install `pytest-cov` (`pip install pytest-cov`).
+- **"pytest not found"**: install `pytest`.
+- **"coverage report not generated"**: the subprocess crashed before coverage could be written. Check the stderr hint in the failure.
 - **"timed out after 120s"**: tests are too slow under coverage. Try with fewer tests or a faster machine.
-- **"module not found in coverage report"**: the module path doesn't match what coverage.py tracked. Check the dotted path matches the file location.
-- **"coverage data inconsistent"**: coverage.py's reported percentage doesn't match computed. This can happen with dynamic imports or conditional platform code.
+- **"module not found in coverage report"**: the module path doesn't match what ordeal traced. Check the dotted path matches the file location.
+- **"coverage data inconsistent"**: the measured percentage doesn't match the executed/missing line counts. This can happen with dynamic imports or generated code.
 
 Check the `warnings` field for details: `result.warnings` lists every problem encountered during the audit.
 

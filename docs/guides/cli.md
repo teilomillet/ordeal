@@ -105,7 +105,7 @@ ordeal audit
       - L67 in normalize(): test that ValueError is raised
 ```
 
-Every number is `[verified]` (measured via coverage.py JSON, cross-checked for consistency) or `FAILED: reason`. Mined properties are grouped by kind. The mutation score shows how many code mutations the mined properties catch — if it's below 100%, the surviving mutants reveal property gaps.
+Every number is `[verified]` (measured and cross-checked for consistency) or `FAILED: reason`. When `pytest-cov` is installed, ordeal uses its JSON report; otherwise it falls back to an internal tracer. Mined properties are grouped by kind. The mutation score shows how many code mutations the mined properties catch — if it's below 100%, the surviving mutants reveal property gaps.
 
 The "migrated" column shows what a real ordeal test file looks like: `fuzz()` for crash safety plus explicitly mined properties (bounds, determinism, type checks). It generates the test file a developer would write after adopting ordeal.
 

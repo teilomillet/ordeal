@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import ast
 import textwrap
 from pathlib import Path
 
 import pytest
 
+import ordeal.mutations as mutations
 from ordeal.config import ConfigError, load_config
 from ordeal.mutations import (
     OPERATORS,
     PRESETS,
+    Mutant,
     MutationResult,
+    NoTestsFoundError,
     _get_source,
     _is_runtime_equivalent,
     _resolve_operators,
@@ -44,6 +48,10 @@ def test_standard_preset_operators():
 def test_thorough_preset_has_all_operators():
     assert set(PRESETS["thorough"]) == set(OPERATORS.keys())
     assert len(PRESETS["thorough"]) == 14
+
+
+def test_thorough_preset_frontloads_standard_operators():
+    assert PRESETS["thorough"][: len(PRESETS["standard"])] == PRESETS["standard"]
 
 
 def test_all_preset_operators_are_valid():
@@ -181,6 +189,204 @@ def test_preset_and_operators_raises_in_api():
             operators=["arithmetic"],
             preset="essential",
         )
+
+
+def test_auto_discovered_function_mutation_uses_batch_path(monkeypatch):
+    mutant = Mutant(operator="arithmetic", description="+ -> -", line=1, col=0)
+    mutated_tree = ast.parse("def _add(a: int, b: int) -> int:\n    return a - b\n")
+    calls: dict[str, object] = {"probe_runs": 0}
+
+    def fake_auto_test_fn(target, test_filter=None):
+        def run():
+            calls["probe_runs"] = int(calls["probe_runs"]) + 1
+            raise AssertionError("auto-discovered tests should not be probed eagerly")
+
+        return run
+
+    monkeypatch.setattr(mutations, "_auto_test_fn", fake_auto_test_fn)
+    monkeypatch.setattr(mutations, "_FUNCTION_BATCH_MIN_MUTANTS", 1)
+    monkeypatch.setattr(
+        mutations,
+        "generate_mutants",
+        lambda *args, **kwargs: [(mutant, mutated_tree)],
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_filter_function_mutant_pairs",
+        lambda func, module, func_name, mutant_pairs, **kwargs: mutant_pairs,
+    )
+
+    def fake_batch(target, mutant_pairs, *, test_filter=None, disk_mutation=False):
+        calls["target"] = target
+        calls["count"] = len(mutant_pairs)
+        calls["test_filter"] = test_filter
+        return [(mutant, True, "killed", "tests.test_mutations_presets::test_add")]
+
+    monkeypatch.setattr(mutations, "_batch_function_test", fake_batch)
+
+    result = mutate_function_and_test(
+        f"{__name__}._add",
+        test_fn=None,
+        preset="essential",
+        filter_equivalent=False,
+    )
+
+    assert calls == {
+        "probe_runs": 0,
+        "target": f"{__name__}._add",
+        "count": 1,
+        "test_filter": None,
+    }
+    assert result.total == 1
+    assert result.killed == 1
+    assert result.mutants[0].killed_by == "tests.test_mutations_presets::test_add"
+
+
+def test_auto_discovered_small_function_mutation_uses_direct_path(monkeypatch):
+    mutant = Mutant(operator="arithmetic", description="+ -> -", line=1, col=0)
+    mutated_tree = ast.parse("def _add(a: int, b: int) -> int:\n    return a - b\n")
+    calls = {"test_fn_runs": 0}
+
+    def fake_auto_test_fn(target, test_filter=None):
+        def run():
+            calls["test_fn_runs"] += 1
+            raise AssertionError("killed")
+
+        return run
+
+    monkeypatch.setattr(mutations, "_auto_test_fn", fake_auto_test_fn)
+    monkeypatch.setattr(
+        mutations,
+        "generate_mutants",
+        lambda *args, **kwargs: [(mutant, mutated_tree)],
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_batch_function_test",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("tiny auto-discovered jobs should stay on the direct path")
+        ),
+    )
+
+    result = mutate_function_and_test(
+        f"{__name__}._add",
+        test_fn=None,
+        preset="essential",
+        filter_equivalent=False,
+    )
+
+    assert calls["test_fn_runs"] == 1
+    assert result.total == 1
+    assert result.killed == 1
+
+
+def test_auto_discovered_function_mutation_uses_parallel_batch_path(monkeypatch):
+    first = Mutant(operator="arithmetic", description="+ -> -", line=1, col=0)
+    second = Mutant(operator="comparison", description="< -> <=", line=2, col=0)
+    mutant_pairs = [
+        (first, ast.parse("def _add(a: int, b: int) -> int:\n    return a - b\n")),
+        (
+            second,
+            ast.parse(
+                "def _add(a: int, b: int) -> int:\n"
+                "    if a <= 0:\n"
+                "        return -a + b\n"
+                "    return a + b\n"
+            ),
+        ),
+    ]
+    calls: dict[str, object] = {}
+
+    monkeypatch.setattr(mutations, "_auto_test_fn", lambda target, test_filter=None: lambda: None)
+    monkeypatch.setattr(mutations, "generate_mutants", lambda *args, **kwargs: mutant_pairs)
+    monkeypatch.setattr(
+        mutations,
+        "_filter_function_mutant_pairs",
+        lambda func, module, func_name, mutant_pairs, **kwargs: mutant_pairs,
+    )
+
+    def fake_parallel_batch(
+        target,
+        mutant_pairs,
+        workers,
+        *,
+        test_filter=None,
+        disk_mutation=False,
+    ):
+        calls["target"] = target
+        calls["count"] = len(mutant_pairs)
+        calls["workers"] = workers
+        return [
+            (first, True, "killed", "tests.test_mutations_presets::test_add"),
+            (second, False, None, None),
+        ]
+
+    monkeypatch.setattr(mutations, "_parallel_function_batch_test", fake_parallel_batch)
+
+    result = mutate_function_and_test(
+        f"{__name__}._add",
+        test_fn=None,
+        preset="essential",
+        workers=2,
+        filter_equivalent=False,
+    )
+
+    assert calls == {
+        "target": f"{__name__}._add",
+        "count": 2,
+        "workers": 2,
+    }
+    assert result.total == 2
+    assert result.killed == 1
+
+
+def test_auto_discovered_function_mutation_falls_back_to_mine_after_batch_collection(monkeypatch):
+    mutant = Mutant(operator="arithmetic", description="+ -> -", line=1, col=0)
+    mutated_tree = ast.parse("def _add(a: int, b: int) -> int:\n    return a - b\n")
+    fallback = MutationResult(
+        target=f"{__name__}._add",
+        operators_used=PRESETS["essential"],
+        preset_used="essential",
+    )
+    fallback.mutants.append(mutant)
+    mutant.killed = True
+    mutant.killed_by = "mine"
+
+    monkeypatch.setattr(mutations, "_FUNCTION_BATCH_MIN_MUTANTS", 1)
+    monkeypatch.setattr(
+        mutations,
+        "_auto_test_fn",
+        lambda target, test_filter=None: lambda: (_ for _ in ()).throw(
+            AssertionError("auto-discovered tests should not be probed eagerly")
+        ),
+    )
+    monkeypatch.setattr(
+        mutations,
+        "generate_mutants",
+        lambda *args, **kwargs: [(mutant, mutated_tree)],
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_filter_function_mutant_pairs",
+        lambda func, module, func_name, mutant_pairs, **kwargs: mutant_pairs,
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_batch_function_test",
+        lambda *args, **kwargs: (_ for _ in ()).throw(NoTestsFoundError("no tests")),
+    )
+    monkeypatch.setattr(mutations, "_mine_based_mutation_test", lambda *args, **kwargs: fallback)
+
+    result = mutate_function_and_test(
+        f"{__name__}._add",
+        test_fn=None,
+        preset="essential",
+        filter_equivalent=False,
+    )
+
+    assert result is fallback
+    assert result.killed == 1
+    assert result.diagnostics["tested"] == 1
 
 
 # ============================================================================

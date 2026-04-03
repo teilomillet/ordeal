@@ -91,6 +91,10 @@ from ordeal.faults import PatchFault
 # ============================================================================
 
 
+# Tiny function-mutation jobs are still faster on the original direct path.
+_FUNCTION_BATCH_MIN_MUTANTS = 8
+
+
 def _unwrap_func(func: object) -> object:
     """Unwrap decorated/wrapped functions to reach the original source.
 
@@ -2756,8 +2760,37 @@ PRESETS: dict[str, list[str]] = {
         "delete_statement",
     ],
     # Comprehensive — every operator. Use before releases.
-    "thorough": list(OPERATORS.keys()),
+    "thorough": [
+        "arithmetic",
+        "comparison",
+        "negate",
+        "return_none",
+        "boundary",
+        "constant",
+        "logical",
+        "delete_statement",
+        *[
+            op
+            for op in OPERATORS.keys()
+            if op
+            not in {
+                "arithmetic",
+                "comparison",
+                "negate",
+                "return_none",
+                "boundary",
+                "constant",
+                "logical",
+                "delete_statement",
+            }
+        ],
+    ],
 }
+
+
+def _default_operator_order() -> list[str]:
+    """Return the default operator order for progressive mutation testing."""
+    return list(PRESETS["thorough"])
 
 
 def _resolve_operators(
@@ -2987,7 +3020,7 @@ def generate_mutants(
     deadline = time.monotonic() + timeout if timeout is not None else None
     tree = ast.parse(source)
     source_lines = source.splitlines()
-    ops = operators or list(OPERATORS.keys())
+    ops = operators or _default_operator_order()
     results: list[tuple[Mutant, ast.Module]] = []
     st = _stats  # alias for brevity
 
@@ -3739,6 +3772,30 @@ def _module_is_equivalent(
     return True
 
 
+def _mutation_k_filter(target: str, test_filter: str | None = None) -> str:
+    """Return the pytest ``-k`` filter used for mutation testing."""
+    if test_filter is not None:
+        return test_filter
+    parts = target.rsplit(".", 1)
+    module_name = parts[0] if len(parts) >= 2 else target
+    return module_name.split(".")[-1]
+
+
+def _raise_no_tests_found(target: str) -> None:
+    """Raise :class:`NoTestsFoundError` with the standard guidance."""
+    short = target.rsplit(".", 1)[-1]
+    suggested = f"tests/test_{short}.py"
+    raise NoTestsFoundError(
+        f"No tests found for {target!r}. "
+        "Mutation score is meaningless without tests.\n"
+        f"  Generate: generate_starter_tests({target!r})\n"
+        f"  CLI:      ordeal init {target}\n"
+        f"  Save to:  {suggested}",
+        target=target,
+        suggested_file=suggested,
+    )
+
+
 def _batch_module_test(
     target: str,
     mutant_pairs: list[tuple[Mutant, ast.Module]],
@@ -3761,22 +3818,16 @@ def _batch_module_test(
     class _BatchPlugin:
         """Pytest plugin that tests multiple mutants in one session."""
 
+        def __init__(self) -> None:
+            self.no_tests_found = False
+
         @pytest.hookimpl(tryfirst=True)
         def pytest_runtestloop(self, session: pytest.Session) -> bool:
             """Override the default test loop to iterate mutants."""
             if not session.config.option.collectonly:
                 if not session.items:
-                    short = target.rsplit(".", 1)[-1]
-                    suggested = f"tests/test_{short}.py"
-                    raise NoTestsFoundError(
-                        f"No tests found for {target!r}. "
-                        "Mutation score is meaningless without tests.\n"
-                        f"  Generate: generate_starter_tests({target!r})\n"
-                        f"  CLI:      ordeal init {target}\n"
-                        f"  Save to:  {suggested}",
-                        target=target,
-                        suggested_file=suggested,
-                    )
+                    self.no_tests_found = True
+                    return True
                 for mutant, mutated_tree in mutant_pairs:
                     killed = False
                     error = None
@@ -3811,6 +3862,8 @@ def _batch_module_test(
         ["-x", "-q", "--tb=no", "--no-header", "--chaos", "-o", "addopts=", "-k", short_name],
         plugins=[plugin],
     )
+    if plugin.no_tests_found:
+        _raise_no_tests_found(target)
     return results
 
 
@@ -3836,31 +3889,215 @@ def _parallel_module_test(
             continue
 
     # Chunk work across workers
-    chunk_size = max(1, len(serialized) // workers)
+    chunk_size = max(1, (len(serialized) + workers - 1) // workers)
     chunks: list[list[tuple[Mutant, str]]] = []
     for i in range(0, len(serialized), chunk_size):
         chunks.append(serialized[i : i + chunk_size])
 
-    def _worker_fn(chunk: list[tuple[Mutant, str]]) -> list[tuple[int, bool, str | None]]:
-        """Worker: re-parse ASTs and batch-test a chunk of mutants."""
-        reparsed = []
-        for mutant, source_text in chunk:
-            try:
-                tree = ast.parse(source_text)
-                reparsed.append((mutant, tree))
-            except Exception:
-                continue
-        return _batch_module_test(target, reparsed)
-
     ctx = mp.get_context("fork" if sys.platform != "win32" else "spawn")
     with ctx.Pool(min(workers, len(chunks))) as pool:
-        chunk_results = pool.map(_worker_fn, chunks)
+        chunk_results = pool.map(
+            _parallel_module_batch_worker,
+            [(target, chunk) for chunk in chunks],
+        )
 
     # Flatten results
     results: list[tuple[Mutant, bool, str | None]] = []
     for chunk_result in chunk_results:
         results.extend(chunk_result)
     return results
+
+
+def _parallel_module_batch_worker(
+    args: tuple[str, list[tuple[Mutant, str]]],
+) -> list[tuple[Mutant, bool, str | None]]:
+    """Re-parse ASTs and batch-test one module-level chunk."""
+    target, chunk = args
+    reparsed = []
+    for mutant, source_text in chunk:
+        try:
+            reparsed.append((mutant, ast.parse(source_text)))
+        except Exception:
+            continue
+    return _batch_module_test(target, reparsed)
+
+
+def _filter_function_mutant_pairs(
+    func: Callable,
+    module: types.ModuleType,
+    func_name: str,
+    mutant_pairs: list[tuple[Mutant, ast.Module]],
+    *,
+    filter_equivalent: bool,
+    equivalence_samples: int,
+    stats: dict[str, int],
+) -> list[tuple[Mutant, ast.Module]]:
+    """Filter function mutants before the batched pytest fast path."""
+    if not filter_equivalent:
+        return mutant_pairs
+
+    filtered: list[tuple[Mutant, ast.Module]] = []
+    for mutant, mutated_tree in mutant_pairs:
+        try:
+            code = compile(mutated_tree, f"<mutant:{mutant.description}>", "exec")
+            namespace = dict(module.__dict__)
+            exec(code, namespace)  # noqa: S102
+            mutated_func = namespace.get(func_name)
+            if mutated_func is None:
+                stats["compilation_failed"] = stats.get("compilation_failed", 0) + 1
+                continue
+        except Exception:
+            stats["compilation_failed"] = stats.get("compilation_failed", 0) + 1
+            continue
+
+        if _is_runtime_equivalent(func, mutated_func, n_samples=equivalence_samples):
+            stats["filtered_runtime_equivalent"] = stats.get("filtered_runtime_equivalent", 0) + 1
+            continue
+        filtered.append((mutant, mutated_tree))
+
+    return filtered
+
+
+def _batch_function_test(
+    target: str,
+    mutant_pairs: list[tuple[Mutant, ast.Module]],
+    *,
+    test_filter: str | None = None,
+    disk_mutation: bool = False,
+) -> list[tuple[Mutant, bool, str | None, str | None]]:
+    """Run function mutants in a single pytest session.
+
+    This keeps function-level mutation testing on the same fast path as
+    module-level mutation testing when tests are auto-discovered via
+    pytest: collect once, replay for each mutant, and avoid paying
+    pytest startup cost per mutant.
+    """
+    import pytest
+
+    module_path, func_name = target.rsplit(".", 1)
+    module = importlib.import_module(module_path)
+    k_filter = _mutation_k_filter(target, test_filter)
+
+    compiled: list[tuple[Mutant, Callable, ast.Module]] = []
+    for mutant, mutated_tree in mutant_pairs:
+        try:
+            code = compile(mutated_tree, f"<mutant:{mutant.description}>", "exec")
+            namespace = dict(module.__dict__)
+            exec(code, namespace)  # noqa: S102
+            mutated_func = namespace.get(func_name)
+            if mutated_func is None:
+                continue
+            compiled.append((mutant, mutated_func, mutated_tree))
+        except Exception:
+            continue
+
+    results: list[tuple[Mutant, bool, str | None, str | None]] = []
+
+    class _BatchPlugin:
+        """Pytest plugin that replays a collected session across mutants."""
+
+        def __init__(self) -> None:
+            self.no_tests_found = False
+
+        @pytest.hookimpl(tryfirst=True)
+        def pytest_runtestloop(self, session: pytest.Session) -> bool:
+            if not session.config.option.collectonly:
+                if not session.items:
+                    self.no_tests_found = True
+                    return True
+                for mutant, mutated_func, mutated_tree in compiled:
+                    killed = False
+                    error = None
+                    killer = None
+                    fault = PatchFault(target, lambda orig, mf=mutated_func: mf)
+                    disk_cm = (
+                        _function_mutated_on_disk(module_path, func_name, mutated_tree)
+                        if disk_mutation
+                        else contextlib.nullcontext()
+                    )
+                    with disk_cm:
+                        fault.activate()
+                        try:
+                            for i, item in enumerate(session.items):
+                                nxt = session.items[i + 1] if i + 1 < len(session.items) else None
+                                item.config.hook.pytest_runtest_protocol(item=item, nextitem=nxt)
+                                if item.session.testsfailed:
+                                    killed = True
+                                    killer = item.nodeid
+                                    error = f"{item.nodeid} failed"
+                                    break
+                        except Exception as exc:
+                            killed = True
+                            error = str(exc)[:200]
+                        finally:
+                            fault.deactivate()
+                    session.testsfailed = 0
+                    results.append((mutant, killed, error, killer))
+            return True
+
+    plugin = _BatchPlugin()
+    pytest.main(
+        ["-x", "-q", "--tb=no", "--no-header", "--chaos", "-o", "addopts=", "-k", k_filter],
+        plugins=[plugin],
+    )
+    if plugin.no_tests_found:
+        _raise_no_tests_found(target)
+    return results
+
+
+def _parallel_function_batch_test(
+    target: str,
+    mutant_pairs: list[tuple[Mutant, ast.Module]],
+    workers: int,
+    *,
+    test_filter: str | None = None,
+    disk_mutation: bool = False,
+) -> list[tuple[Mutant, bool, str | None, str | None]]:
+    """Run function-level mutation batches in parallel worker processes."""
+    import multiprocessing as mp
+
+    serialized: list[tuple[Mutant, str]] = []
+    for mutant, tree in mutant_pairs:
+        try:
+            serialized.append((mutant, ast.unparse(tree)))
+        except Exception:
+            continue
+
+    chunk_size = max(1, (len(serialized) + workers - 1) // workers)
+    chunks: list[list[tuple[Mutant, str]]] = []
+    for i in range(0, len(serialized), chunk_size):
+        chunks.append(serialized[i : i + chunk_size])
+
+    ctx = mp.get_context("fork" if sys.platform != "win32" else "spawn")
+    with ctx.Pool(min(workers, len(chunks))) as pool:
+        chunk_results = pool.map(
+            _parallel_function_batch_worker,
+            [(target, chunk, test_filter, disk_mutation) for chunk in chunks],
+        )
+
+    results: list[tuple[Mutant, bool, str | None, str | None]] = []
+    for chunk_result in chunk_results:
+        results.extend(chunk_result)
+    return results
+
+
+def _parallel_function_batch_worker(
+    args: tuple[str, list[tuple[Mutant, str]], str | None, bool],
+) -> list[tuple[Mutant, bool, str | None, str | None]]:
+    """Re-parse ASTs and batch-test one function-level chunk."""
+    target, chunk, test_filter, disk_mutation = args
+    reparsed = []
+    for mutant, source_text in chunk:
+        try:
+            reparsed.append((mutant, ast.parse(source_text)))
+        except Exception:
+            continue
+    return _batch_function_test(
+        target,
+        reparsed,
+        test_filter=test_filter,
+        disk_mutation=disk_mutation,
+    )
 
 
 def _module_mine_oracle_fallback(
@@ -4267,12 +4504,7 @@ def _auto_test_fn(target: str, test_filter: str | None = None) -> Callable[[], N
     def run_tests() -> None:
         import pytest
 
-        if test_filter is not None:
-            k_filter = test_filter
-        else:
-            parts = target.rsplit(".", 1)
-            module_name = parts[0] if len(parts) >= 2 else target
-            k_filter = module_name.split(".")[-1]
+        k_filter = _mutation_k_filter(target, test_filter)
         rc = pytest.main(
             [
                 "-x",
@@ -4287,17 +4519,7 @@ def _auto_test_fn(target: str, test_filter: str | None = None) -> Callable[[], N
             ]
         )
         if rc == 5:
-            short = target.rsplit(".", 1)[-1]
-            suggested = f"tests/test_{short}.py"
-            raise NoTestsFoundError(
-                f"No tests found for {target!r}. "
-                "Mutation score is meaningless without tests.\n"
-                f"  Generate: generate_starter_tests({target!r})\n"
-                f"  CLI:      ordeal init {target}\n"
-                f"  Save to:  {suggested}",
-                target=target,
-                suggested_file=suggested,
-            )
+            _raise_no_tests_found(target)
         if rc != 0:
             raise AssertionError(f"pytest returned exit code {rc}")
 
@@ -4409,17 +4631,8 @@ def mutate_function_and_test(
     used_preset = preset
     operators = _resolve_operators(operators, preset)
     auto_discovered_tests = test_fn is None
-    use_mine_oracle = False
     if test_fn is None:
-        try:
-            test_fn = _auto_test_fn(target, test_filter=test_filter)
-            # Probe for tests — if NoTestsFoundError, switch to mine oracle
-            test_fn()
-        except NoTestsFoundError:
-            use_mine_oracle = True
-            test_fn = None
-        except Exception:
-            pass  # tests exist but failed — that's fine for mutation testing
+        test_fn = _auto_test_fn(target, test_filter=test_filter)
     module_path, func_name = target.rsplit(".", 1)
     module = importlib.import_module(module_path)
     func = _unwrap_func(getattr(module, func_name))
@@ -4436,80 +4649,112 @@ def mutate_function_and_test(
         timeout=mutant_timeout,
     )
 
-    # Mine-based oracle: mine the original, use properties to kill mutants
-    if use_mine_oracle:
-        result = _mine_based_mutation_test(
-            target,
-            func,
-            func_name,
-            module,
-            mutant_pairs,
-            filter_equivalent=filter_equivalent,
-            equivalence_samples=equivalence_samples,
-            operators_used=operators,
-            preset_used=used_preset,
-            _stats=stats,
-        )
-        result.diagnostics.update(stats)
-        result.diagnostics["tested"] = result.total
-        return result
-
     assert test_fn is not None
-
-    if workers > 1:
-        result = _parallel_function_test(target, test_fn, mutant_pairs, module, func_name, workers)
-        result.preset_used = used_preset
-        result.operators_used = operators
-        result.diagnostics.update(stats)
-        result.diagnostics["tested"] = result.total
-        return result
-
     result = MutationResult(
         target=target, operators_used=operators, preset_used=used_preset, concern=concern
     )
 
-    for mutant, mutated_tree in mutant_pairs:
-        # Compile the mutated function in the module's namespace
+    use_batched_function_path = auto_discovered_tests and bool(mutant_pairs) and (
+        workers > 1 or len(mutant_pairs) >= _FUNCTION_BATCH_MIN_MUTANTS
+    )
+
+    if use_batched_function_path:
+        mutant_pairs = _filter_function_mutant_pairs(
+            func,
+            module,
+            func_name,
+            mutant_pairs,
+            filter_equivalent=filter_equivalent,
+            equivalence_samples=equivalence_samples,
+            stats=stats,
+        )
         try:
-            code = compile(mutated_tree, f"<mutant:{mutant.description}>", "exec")
-            namespace = dict(module.__dict__)
-            exec(code, namespace)
-            mutated_func = namespace.get(func_name)
-            if mutated_func is None:
+            if workers > 1 and len(mutant_pairs) > 1:
+                batch_results = _parallel_function_batch_test(
+                    target,
+                    mutant_pairs,
+                    workers,
+                    test_filter=test_filter,
+                    disk_mutation=disk_mutation,
+                )
+            else:
+                batch_results = _batch_function_test(
+                    target,
+                    mutant_pairs,
+                    test_filter=test_filter,
+                    disk_mutation=disk_mutation,
+                )
+        except NoTestsFoundError:
+            mine_result = _mine_based_mutation_test(
+                target,
+                func,
+                func_name,
+                module,
+                mutant_pairs,
+                filter_equivalent=filter_equivalent,
+                equivalence_samples=equivalence_samples,
+                operators_used=operators,
+                preset_used=used_preset,
+                _stats=stats,
+            )
+            mine_result.diagnostics.update(stats)
+            mine_result.diagnostics["tested"] = mine_result.total
+            return mine_result
+        for mutant, killed, error, killer in batch_results:
+            mutant.killed = killed
+            mutant.error = error
+            mutant.killed_by = killer
+            result.mutants.append(mutant)
+    elif workers > 1:
+        result = _parallel_function_test(target, test_fn, mutant_pairs, module, func_name, workers)
+        result.preset_used = used_preset
+        result.operators_used = operators
+        result.concern = concern
+    else:
+        for mutant, mutated_tree in mutant_pairs:
+            # Compile the mutated function in the module's namespace
+            try:
+                code = compile(mutated_tree, f"<mutant:{mutant.description}>", "exec")
+                namespace = dict(module.__dict__)
+                exec(code, namespace)
+                mutated_func = namespace.get(func_name)
+                if mutated_func is None:
+                    stats["compilation_failed"] = stats.get("compilation_failed", 0) + 1
+                    continue
+            except Exception:
                 stats["compilation_failed"] = stats.get("compilation_failed", 0) + 1
                 continue
-        except Exception:
-            stats["compilation_failed"] = stats.get("compilation_failed", 0) + 1
-            continue
 
-        # Runtime equivalence filter: skip if outputs match on samples
-        if filter_equivalent and _is_runtime_equivalent(
-            func, mutated_func, n_samples=equivalence_samples
-        ):
-            stats["filtered_runtime_equivalent"] = stats.get("filtered_runtime_equivalent", 0) + 1
-            continue
+            # Runtime equivalence filter: skip if outputs match on samples
+            if filter_equivalent and _is_runtime_equivalent(
+                func, mutated_func, n_samples=equivalence_samples
+            ):
+                stats["filtered_runtime_equivalent"] = (
+                    stats.get("filtered_runtime_equivalent", 0) + 1
+                )
+                continue
 
-        # Swap via PatchFault (in-process) + optional disk mutation (subprocesses)
-        fn_name = getattr(test_fn, "__qualname__", getattr(test_fn, "__name__", "test_fn"))
-        fault = PatchFault(target, lambda orig, mf=mutated_func: mf)
-        disk_cm = (
-            _function_mutated_on_disk(module_path, func_name, mutated_tree)
-            if disk_mutation
-            else contextlib.nullcontext()
-        )
-        with disk_cm:
-            fault.activate()
-            try:
-                test_fn()
-                mutant.killed = False
-            except Exception as e:
-                mutant.killed = True
-                mutant.error = str(e)[:200]
-                mutant.killed_by = fn_name
-            finally:
-                fault.deactivate()
+            # Swap via PatchFault (in-process) + optional disk mutation (subprocesses)
+            fn_name = getattr(test_fn, "__qualname__", getattr(test_fn, "__name__", "test_fn"))
+            fault = PatchFault(target, lambda orig, mf=mutated_func: mf)
+            disk_cm = (
+                _function_mutated_on_disk(module_path, func_name, mutated_tree)
+                if disk_mutation
+                else contextlib.nullcontext()
+            )
+            with disk_cm:
+                fault.activate()
+                try:
+                    test_fn()
+                    mutant.killed = False
+                except Exception as e:
+                    mutant.killed = True
+                    mutant.error = str(e)[:200]
+                    mutant.killed_by = fn_name
+                finally:
+                    fault.deactivate()
 
-        result.mutants.append(mutant)
+            result.mutants.append(mutant)
 
     # 0% score fallback: if auto-discovered tests killed nothing, try mine
     # oracle directly.  This catches process-isolation (Ray workers, long-lived

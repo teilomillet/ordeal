@@ -3,7 +3,7 @@
 [![CI](https://github.com/teilomillet/ordeal/actions/workflows/ci.yml/badge.svg)](https://github.com/teilomillet/ordeal/actions/workflows/ci.yml)
 [![Docs](https://github.com/teilomillet/ordeal/actions/workflows/docs.yml/badge.svg)](https://docs.byordeal.com/)
 [![PyPI](https://img.shields.io/pypi/v/ordeal)](https://pypi.org/project/ordeal/)
-[![Python 3.12+](https://img.shields.io/pypi/pyversions/ordeal)](https://pypi.org/project/ordeal/)
+[![Python 3.10+](https://img.shields.io/pypi/pyversions/ordeal)](https://pypi.org/project/ordeal/)
 [![License](https://img.shields.io/github/license/teilomillet/ordeal)](LICENSE)
 
 **Your tests pass. Your code still breaks.**
@@ -124,7 +124,7 @@ uvx ordeal explore             # ephemeral, no install
 # Development
 git clone https://github.com/teilomillet/ordeal
 cd ordeal && uv sync
-uv run pytest                  # 205 tests
+uv run pytest                  # run the full test suite
 ```
 
 ## What's in the box
@@ -159,18 +159,19 @@ Swarm mode: each run activates a random subset of faults. Over many runs, this c
 
 ### Property assertions
 
-Four types, each with different semantics:
+Four property types, plus an optional declaration helper for deferred checks:
 
 ```python
-from ordeal import always, sometimes, reachable, unreachable
+from ordeal import always, declare, sometimes, reachable, unreachable
 
 always(len(results) > 0, "never empty")          # must hold every time — fails immediately
 sometimes(cache_hit, "cache is used")             # must hold at least once — checked at session end
+declare("error-recovery-path", "reachable")       # declare deferred expectation up front
 reachable("error-recovery-path")                  # code path must execute at least once
 unreachable("silent-data-corruption")             # code path must never execute — fails immediately
 ```
 
-`always` and `unreachable` fail instantly, triggering Hypothesis shrinking. `sometimes` and `reachable` accumulate evidence across the full session — they're checked when testing ends. This is the [Antithesis assertion model](https://antithesis.com/docs/properties_assertions/assertions/), brought to Python.
+`always` and `unreachable` fail instantly, triggering Hypothesis shrinking. `sometimes` and `reachable` accumulate evidence across the full session. Use `declare()` when you want those deferred properties to fail even if the marker was never observed.
 
 ### Inline fault injection (BUGGIFY)
 
@@ -349,6 +350,7 @@ fuzz(my_function, max_time=60)
 # API chaos testing (built-in, no extra install)
 from ordeal.integrations.openapi import chaos_api_test
 chaos_api_test("http://localhost:8080/openapi.json", faults=[...])
+chaos_api_test("http://localhost:8080/openapi.json", faults=[...], stateful=True)
 ```
 
 ### Audit — justify adoption with data
@@ -369,7 +371,7 @@ myapp.scoring
     - L67 in normalize(): test that ValueError is raised
 ```
 
-Every number is either `[verified]` (measured via coverage.py JSON, cross-checked) or `FAILED: reason` — the audit never silently returns 0%. Mined properties include Wilson confidence intervals. When there are coverage gaps, it reads the source and tells you exactly what to test. Use `--show-generated` to inspect the test file, `--save-generated` to keep it.
+Every number is either `[verified]` (measured and cross-checked) or `FAILED: reason` — the audit never silently returns 0%. When `pytest-cov` is available, ordeal uses its JSON report; otherwise it falls back to an internal tracer. Mined properties include Wilson confidence intervals. When there are coverage gaps, it reads the source and tells you exactly what to test. Use `--show-generated` to inspect the test file, `--save-generated` to keep it.
 
 ## CLI
 

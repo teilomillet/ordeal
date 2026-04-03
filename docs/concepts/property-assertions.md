@@ -8,7 +8,7 @@ description: >-
 # Property Assertions
 
 !!! quote "In plain English"
-    A regular `assert` checks one thing at one moment. But what if you could make promises about *all* runs, *all* scenarios, *all* the chaos? That's what property assertions do. You get four simple tools that let you say "this must always be true," "this should happen at least once," "this code must run," or "this code must never run." Together, they cover every kind of correctness guarantee you'd ever want to make. All four live in `ordeal/assertions.py`.
+    A regular `assert` checks one thing at one moment. But what if you could make promises about *all* runs, *all* scenarios, *all* the chaos? That's what property assertions do. You get four property types that let you say "this must always be true," "this should happen at least once," "this code must run," or "this code must never run," plus a `declare()` helper to register deferred expectations up front. Together, they cover every kind of correctness guarantee you'd ever want to make. All of them live in `ordeal/assertions.py`.
 
 ## The problem with `assert`
 
@@ -41,10 +41,17 @@ That's what ordeal's four assertion types do.
 All four are imported from the top level:
 
 ```python
-from ordeal import always, sometimes, reachable, unreachable
+from ordeal import always, declare, sometimes, reachable, unreachable
 ```
 
 Each takes a name string that identifies the property. The name is how the tracker follows it across runs, and what shows up in reports.
+
+For deferred properties, you can register the expectation before the marker is ever hit:
+
+```python
+declare("timeout handler runs", "reachable")
+declare("cache warms up", "sometimes")
+```
 
 
 ### `always(condition, name)` -- this must be true every time
@@ -104,7 +111,7 @@ def handle_timeout(self):
     self.retry()
 ```
 
-`reachable` is simpler than `sometimes`. There's no condition to evaluate. The mere act of calling `reachable("name")` records a hit. If the line executes at least once during the session, the property passes. If the line never executes, the property fails.
+`reachable` is simpler than `sometimes`. There's no condition to evaluate. The mere act of calling `reachable("name")` records a hit. If the line executes at least once during the session, the property passes. If you want the property to fail even when the marker is never observed, declare it up front with `declare("name", "reachable")`.
 
 Think of it like a trip wire. You place it in a code path, and after the session you check: did anything cross the wire?
 

@@ -17,7 +17,7 @@ import os
 import sys
 import time as _time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ordeal.config import ConfigError, OrdealConfig, load_config
 from ordeal.explore import ExplorationResult, Explorer, ProgressSnapshot
@@ -72,6 +72,71 @@ class _ProgressPrinter:
             f"fails={snap.failures} "
             f"({snap.runs_per_second:.0f} runs/s)    "
         )
+
+
+_BENCHMARK_SIGNAL_CHECKPOINTS: tuple[float, ...] = (5.0, 10.0, 30.0)
+
+
+def _make_signal_profiler(
+    checkpoints: tuple[float, ...] = _BENCHMARK_SIGNAL_CHECKPOINTS,
+) -> tuple[
+    Callable[[ProgressSnapshot], None],
+    Callable[[ExplorationResult], list[dict[str, int | float]]],
+]:
+    """Collect coarse anytime metrics at fixed wall-clock checkpoints."""
+    ordered = [cp for cp in checkpoints if cp > 0]
+    remaining = list(sorted(dict.fromkeys(ordered)))
+    samples: list[dict[str, int | float]] = []
+
+    def _capture(
+        seconds: float,
+        *,
+        elapsed: float,
+        runs: int,
+        steps: int,
+        edges: int,
+        checkpoints_seen: int,
+        failures: int,
+    ) -> None:
+        samples.append(
+            {
+                "seconds": seconds,
+                "elapsed": elapsed,
+                "runs": runs,
+                "steps": steps,
+                "edges": edges,
+                "checkpoints": checkpoints_seen,
+                "failures": failures,
+            }
+        )
+
+    def _progress(snap: ProgressSnapshot) -> None:
+        while remaining and snap.elapsed >= remaining[0]:
+            seconds = remaining.pop(0)
+            _capture(
+                seconds,
+                elapsed=snap.elapsed,
+                runs=snap.total_runs,
+                steps=snap.total_steps,
+                edges=snap.unique_edges,
+                checkpoints_seen=snap.checkpoints,
+                failures=snap.failures,
+            )
+
+    def _finalize(result: ExplorationResult) -> list[dict[str, int | float]]:
+        for seconds in remaining:
+            _capture(
+                seconds,
+                elapsed=result.duration_seconds,
+                runs=result.total_runs,
+                steps=result.total_steps,
+                edges=result.unique_edges,
+                checkpoints_seen=result.checkpoints_saved,
+                failures=len(result.failures),
+            )
+        return samples
+
+    return _progress, _finalize
 
 
 # ============================================================================
@@ -616,6 +681,7 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     _stderr(f"  Time per trial: {time_per_trial}s, metric: {metric}\n\n")
 
     measurements: list[tuple[int, float]] = []
+    signal_profile: list[dict[str, int | float]] = []
     n = 1
     while n <= max_workers:
         _stderr(f"  N={n:2d} ... ")
@@ -635,11 +701,18 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
         import time as _t
 
         t0 = _t.monotonic()
+        progress = None
+        finalize_profile = None
+        if n == 1:
+            progress, finalize_profile = _make_signal_profiler()
         result = explorer.run(
             max_time=time_per_trial,
             steps_per_run=cfg.explorer.steps_per_run,
+            progress=progress,
         )
         wall = _t.monotonic() - t0
+        if finalize_profile is not None:
+            signal_profile = finalize_profile(result)
 
         if metric == "edges":
             throughput = result.unique_edges / max(wall, 0.001)
@@ -676,6 +749,19 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
         for n, t in measurements:
             c = t / baseline
             print(f"  N={n:2d}: {c:.2f}x ({c / n * 100:.1f}% efficient)")
+
+    if signal_profile:
+        print("")
+        print("Anytime Signal (N=1 Baseline)")
+        for sample in signal_profile:
+            print(
+                f"  {sample['seconds']:.0f}s: "
+                f"runs={sample['runs']}, "
+                f"steps={sample['steps']}, "
+                f"edges={sample['edges']}, "
+                f"checkpoints={sample['checkpoints']}, "
+                f"failures={sample['failures']}"
+            )
 
     return 0
 

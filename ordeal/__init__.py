@@ -24,7 +24,7 @@ from hypothesis.stateful import (
     rule,
 )
 
-from ordeal.assertions import always, reachable, report, sometimes, unreachable
+from ordeal.assertions import always, declare, reachable, report, sometimes, unreachable
 from ordeal.buggify import buggify, buggify_value
 from ordeal.chaos import ChaosTest, RuleTimeoutError, chaos_test
 from ordeal.mutations import (
@@ -50,6 +50,7 @@ __all__ = [
     "chaos_test",
     # Assertions
     "always",
+    "declare",
     "sometimes",
     "reachable",
     "unreachable",

@@ -6,6 +6,7 @@ from ordeal.assertions import (
     Property,
     PropertyTracker,
     always,
+    declare,
     reachable,
     sometimes,
     tracker,
@@ -190,6 +191,14 @@ class TestReport:
         r = report()
         assert r == {"passed": [], "failed": []}
 
+    def test_report_includes_declared_unreached_property(self):
+        from ordeal.assertions import report
+
+        declare("timeout handler runs", "reachable")
+        r = report()
+        assert r["failed"][0]["name"] == "timeout handler runs"
+        assert r["failed"][0]["type"] == "reachable"
+
 
 class TestReachable:
     def setup_method(self):
@@ -203,6 +212,15 @@ class TestReachable:
         reachable("code-path")
         assert tracker.results[0].hits == 1
 
+    def test_declared_reachable_fails_when_never_hit(self):
+        declare("declared-path", "reachable")
+        assert tracker.failures[0].name == "declared-path"
+
+    def test_declared_reachable_passes_once_hit(self):
+        declare("declared-path", "reachable")
+        reachable("declared-path")
+        assert tracker.results[0].passed is True
+
 
 class TestUnreachable:
     def setup_method(self):
@@ -215,3 +233,25 @@ class TestUnreachable:
     def test_raises_when_reached(self):
         with pytest.raises(AssertionError, match="unreachable code reached"):
             unreachable("dead-code")
+
+
+class TestDeclare:
+    def setup_method(self):
+        tracker.active = True
+        tracker.reset()
+
+    def teardown_method(self):
+        tracker.active = False
+
+    def test_declared_sometimes_fails_when_never_true(self):
+        declare("cache warms", "sometimes")
+        assert tracker.failures[0].name == "cache warms"
+
+    def test_declared_sometimes_passes_when_observed(self):
+        declare("cache warms", "sometimes")
+        sometimes(True, "cache warms")
+        assert tracker.results[0].passed is True
+
+    def test_invalid_type_raises(self):
+        with pytest.raises(ValueError, match="deferred property types"):
+            declare("never", "always")

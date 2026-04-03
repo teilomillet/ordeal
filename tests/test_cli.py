@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import hypothesis.strategies as st
 from hypothesis import settings as hsettings
 
+import ordeal.cli as cli
 from ordeal import ChaosTest, always, invariant, rule
 from ordeal.assertions import tracker
 from ordeal.cli import main
+from ordeal.explore import ProgressSnapshot
 from ordeal.quickcheck import quickcheck
 
 
@@ -84,6 +88,74 @@ verbose = false
         assert code in (0, 1)
         # JSON report should exist
         assert (tmp_path / "report.json").exists()
+
+    def test_benchmark_reports_anytime_signal(self, monkeypatch, capsys):
+        class _FakeTestCfg:
+            class_path = "tests.fake:Chaos"
+
+            def resolve(self):
+                return object
+
+        cfg = SimpleNamespace(
+            tests=[_FakeTestCfg()],
+            explorer=SimpleNamespace(
+                target_modules=["tests._explore_target"],
+                seed=42,
+                max_checkpoints=32,
+                checkpoint_prob=0.4,
+                checkpoint_strategy="energy",
+                fault_toggle_prob=0.3,
+                ngram=1,
+                steps_per_run=10,
+            ),
+        )
+
+        class _FakeExplorer:
+            def __init__(self, *args, **kwargs):
+                self.workers = kwargs["workers"]
+
+            def run(self, max_time, steps_per_run, progress=None):
+                if progress is not None:
+                    progress(
+                        ProgressSnapshot(
+                            elapsed=6.0,
+                            total_runs=12,
+                            total_steps=120,
+                            unique_edges=8,
+                            checkpoints=3,
+                            failures=0,
+                            runs_per_second=2.0,
+                        )
+                    )
+                    progress(
+                        ProgressSnapshot(
+                            elapsed=11.0,
+                            total_runs=20,
+                            total_steps=220,
+                            unique_edges=11,
+                            checkpoints=4,
+                            failures=1,
+                            runs_per_second=1.8,
+                        )
+                    )
+                return SimpleNamespace(
+                    total_runs=24 * self.workers,
+                    total_steps=240 * self.workers,
+                    unique_edges=12 * self.workers,
+                    checkpoints_saved=5 * self.workers,
+                    failures=[object()] if self.workers == 1 else [],
+                    duration_seconds=max_time,
+                )
+
+        monkeypatch.setattr(cli, "load_config", lambda path: cfg)
+        monkeypatch.setattr(cli, "Explorer", _FakeExplorer)
+
+        rc = main(["benchmark", "--config", "ignored.toml", "--max-workers", "2", "--time", "1"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Anytime Signal (N=1 Baseline)" in out
+        assert "5s: runs=12, steps=120, edges=8, checkpoints=3, failures=0" in out
+        assert "10s: runs=20, steps=220, edges=11, checkpoints=4, failures=1" in out
 
 
 # ============================================================================

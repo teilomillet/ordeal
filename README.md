@@ -372,7 +372,7 @@ myapp.scoring
     - L67 in normalize(): test that ValueError is raised
 ```
 
-Every number is either `[verified]` (measured and cross-checked) or `FAILED: reason` — the audit never silently returns 0%. When `pytest-cov` is available, ordeal uses its JSON report; otherwise it falls back to an internal tracer. Mined properties include Wilson confidence intervals. `--validation-mode fast` replays mined inputs against mutants for speed; `--validation-mode deep` keeps that replay check and then re-mines each mutant for broader search. When there are coverage gaps, it reads the source and tells you exactly what to test. Use `--show-generated` to inspect the test file, `--save-generated` to keep it.
+Every number is either `[verified]` (measured and cross-checked) or `FAILED: reason` — the audit never silently returns 0%. When `pytest-cov` is available, ordeal uses its JSON report; otherwise it falls back to an internal tracer. Mined properties include Wilson confidence intervals. `--validation-mode fast` replays mined inputs against mutants for speed; `--validation-mode deep` keeps that replay check and then re-mines each mutant for broader search. When there are coverage gaps, it reads the source and tells you exactly what to test. Use `--show-generated` to inspect the test file, `--save-generated` to keep it. For agent workflows, `ordeal benchmark --perf-contract ... --output-json PATH` writes a stable JSON artifact instead of only text output.
 
 ## CLI
 

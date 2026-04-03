@@ -24,7 +24,7 @@ import time as _time
 from datetime import UTC, datetime
 from pathlib import Path
 from pprint import pformat
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 from ordeal.config import ConfigError, OrdealConfig, load_config
 
@@ -317,7 +317,8 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     from ordeal.state import explore
 
     inc_private = getattr(args, "include_private", False)
-    _stderr(f"Scanning {args.target} (seed={args.seed})...\n")
+    if not args.json:
+        _stderr(f"Scanning {args.target} (seed={args.seed})...\n")
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         state = explore(
             args.target,
@@ -328,9 +329,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             include_private=inc_private,
         )
 
-    if args.json:
-        print(state.to_json())
-    else:
+    if not args.json:
         print(_format_scan_summary(state))
         if (
             state.findings
@@ -348,6 +347,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     regression_path = args.write_regression
     written_report_path: Path | None = None
     written_regression_path: Path | None = None
+    index_path: Path | None = None
     if save_artifacts and state.findings:
         report_path = report_path or _default_scan_report_path(state.module)
         regression_path = regression_path or _DEFAULT_REGRESSION_PATH
@@ -376,6 +376,16 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                 regression_path=written_regression_path,
                 index_path=index_path,
             )
+
+    if args.json:
+        print(
+            _build_scan_agent_envelope(
+                state,
+                written_report_path=written_report_path,
+                written_regression_path=written_regression_path,
+                index_path=index_path,
+            ).to_json()
+        )
 
     return 1 if state.findings else 0
 
@@ -507,26 +517,44 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     try:
         trace = Trace.load(args.trace_file)
     except (FileNotFoundError, json.JSONDecodeError) as e:
+        if getattr(args, "json", False):
+            print(
+                _build_replay_agent_envelope(
+                    trace_file=args.trace_file,
+                    trace=None,
+                    reproduced_error=None,
+                    blocking_reason=str(e),
+                ).to_json()
+            )
+            return 1
         _stderr(f"Cannot load trace: {e}\n")
         return 1
 
-    _stderr(f"Replaying {trace.test_class} (run {trace.run_id}, {len(trace.steps)} steps)...\n")
+    if not getattr(args, "json", False):
+        _stderr(f"Replaying {trace.test_class} (run {trace.run_id}, {len(trace.steps)} steps)...\n")
 
     error = replay(trace)
+    shrunk = None
+    faults = None
     if error is not None:
-        _stderr(f"Failure reproduced: {type(error).__name__}: {error}\n")
+        if not getattr(args, "json", False):
+            _stderr(f"Failure reproduced: {type(error).__name__}: {error}\n")
         if args.shrink:
-            _stderr("Shrinking...\n")
+            if not getattr(args, "json", False):
+                _stderr("Shrinking...\n")
             shrunk = shrink(trace)
-            _stderr(f"Shrunk to {len(shrunk.steps)} steps (from {len(trace.steps)})\n")
+            if not getattr(args, "json", False):
+                _stderr(f"Shrunk to {len(shrunk.steps)} steps (from {len(trace.steps)})\n")
             if args.output:
                 shrunk.save(args.output)
-                _stderr(f"Saved: {args.output}\n")
+                if not getattr(args, "json", False):
+                    _stderr(f"Saved: {args.output}\n")
             trace = shrunk  # use shrunk trace for ablation
         if args.ablate:
-            _stderr("Ablating faults...\n")
+            if not getattr(args, "json", False):
+                _stderr("Ablating faults...\n")
             faults = ablate_faults(trace)
-            if faults:
+            if faults and not getattr(args, "json", False):
                 needed = [f for f, necessary in faults.items() if necessary]
                 unneeded = [f for f, necessary in faults.items() if not necessary]
                 if needed:
@@ -535,11 +563,31 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                     _stderr(f"Unnecessary faults: {', '.join(unneeded)}\n")
                 if not needed:
                     _stderr("Bug reproduces without any faults.\n")
-            else:
+            elif not getattr(args, "json", False):
                 _stderr("No fault toggles in trace.\n")
+        if getattr(args, "json", False):
+            print(
+                _build_replay_agent_envelope(
+                    trace_file=args.trace_file,
+                    trace=trace,
+                    reproduced_error=error,
+                    shrunk_trace=shrunk,
+                    ablation=faults,
+                    output_path=Path(args.output) if args.output else None,
+                ).to_json()
+            )
         return 1
     else:
-        _stderr("Failure did not reproduce.\n")
+        if getattr(args, "json", False):
+            print(
+                _build_replay_agent_envelope(
+                    trace_file=args.trace_file,
+                    trace=trace,
+                    reproduced_error=None,
+                ).to_json()
+            )
+        else:
+            _stderr("Failure did not reproduce.\n")
         return 0
 
 
@@ -593,6 +641,29 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     """Run ordeal audit on specified modules."""
     from ordeal.audit import audit, audit_report
 
+    if getattr(args, "json", False):
+        results = [
+            audit(
+                mod,
+                test_dir=args.test_dir,
+                max_examples=args.max_examples,
+                workers=args.workers,
+                validation_mode=args.validation_mode,
+            )
+            for mod in args.modules
+        ]
+        saved_generated_path: Path | None = None
+        if args.save_generated and len(results) == 1 and results[0].generated_test:
+            saved_generated_path = Path(args.save_generated)
+            saved_generated_path.write_text(results[0].generated_test, encoding="utf-8")
+        print(
+            _build_audit_agent_envelope(
+                results,
+                saved_generated_path=saved_generated_path,
+            ).to_json()
+        )
+        return 0
+
     if args.show_generated or args.save_generated:
         # Single-module mode with generated test output
         for mod in args.modules:
@@ -636,6 +707,18 @@ def _cmd_mine(args: argparse.Namespace) -> int:
     # Split target into module path and optional function name
     parts = target.rsplit(".", 1)
     if len(parts) < 2:
+        if getattr(args, "json", False):
+            print(
+                _build_blocked_agent_envelope(
+                    tool="mine",
+                    target=target,
+                    summary=f"cannot resolve target {target}",
+                    blocking_reason="target must be a dotted path like mymod.func",
+                    suggested_commands=(f"ordeal mine {target}.func",),
+                    raw_details={"target": target},
+                ).to_json()
+            )
+            return 1
         _stderr(f"Target must be dotted path (e.g. mymod.func): {target}\n")
         return 1
 
@@ -648,6 +731,18 @@ def _cmd_mine(args: argparse.Namespace) -> int:
             mod = import_module(target)
             attr = None
         except ImportError:
+            if getattr(args, "json", False):
+                print(
+                    _build_blocked_agent_envelope(
+                        tool="mine",
+                        target=target,
+                        summary=f"cannot import {target}",
+                        blocking_reason=f"cannot import target: {target}",
+                        suggested_commands=(f"ordeal scan {mod_path}",),
+                        raw_details={"target": target, "module_path": mod_path},
+                    ).to_json()
+                )
+                return 1
             _stderr(f"Cannot import: {target}\n")
             return 1
 
@@ -671,6 +766,18 @@ def _cmd_mine(args: argparse.Namespace) -> int:
         funcs = _get_public_functions(mod, include_private=inc_private)
         if not funcs:
             hint = " (try --include-private for _prefixed functions)" if not inc_private else ""
+            if getattr(args, "json", False):
+                print(
+                    _build_blocked_agent_envelope(
+                        tool="mine",
+                        target=target,
+                        summary=f"no testable functions found in {target}",
+                        blocking_reason="module has no discoverable callable targets",
+                        suggested_commands=((f"ordeal mine {target} --include-private",) if not inc_private else ()),
+                        raw_details={"target": target, "include_private": inc_private},
+                    ).to_json()
+                )
+                return 1
             _stderr(f"No testable functions found in {target}{hint}\n")
             return 1
         report_target = getattr(mod, "__name__", target)
@@ -690,18 +797,20 @@ def _cmd_mine(args: argparse.Namespace) -> int:
 
         mined_results.append((name, result))
         suspicious += sum(1 for prop in result.properties if _is_suspicious_property(prop))
-        print(result.summary())
-        if getattr(args, "verbose", False) and result.not_applicable:
-            print(f"    n/a: {', '.join(result.not_applicable)}")
-        print()
+        if not getattr(args, "json", False):
+            print(result.summary())
+            if getattr(args, "verbose", False) and result.not_applicable:
+                print(f"    n/a: {', '.join(result.not_applicable)}")
+            print()
 
-    if skipped:
+    if skipped and not getattr(args, "json", False):
         print(f"Skipped {len(skipped)} function(s):")
         for name, reason in skipped:
             print(f"  {name}: {reason}")
 
+    written_report_path: Path | None = None
     if getattr(args, "report_file", None):
-        _write_mine_report(
+        written_report_path = _write_mine_report(
             target=report_target,
             module=report_namespace,
             results=mined_results,
@@ -710,8 +819,9 @@ def _cmd_mine(args: argparse.Namespace) -> int:
             include_scan_hint=not report_is_function,
             suspicious_count=suspicious,
         )
+    written_regression_path: Path | None = None
     if getattr(args, "write_regression", None):
-        _write_mine_regressions(
+        written_regression_path = _write_mine_regressions(
             target=report_target,
             module=report_namespace,
             results=mined_results,
@@ -719,11 +829,24 @@ def _cmd_mine(args: argparse.Namespace) -> int:
             path_str=args.write_regression,
             suspicious_count=suspicious,
         )
-    elif suspicious and not getattr(args, "report_file", None):
+    elif suspicious and not getattr(args, "report_file", None) and not getattr(args, "json", False):
         print(
             f"tip: add --report-file report.md or --write-regression ({_DEFAULT_REGRESSION_PATH})"
         )
 
+    if getattr(args, "json", False):
+        print(
+            _build_mine_agent_envelope(
+                target=report_target,
+                module=report_namespace,
+                results=mined_results,
+                skipped=skipped,
+                include_scan_hint=not report_is_function,
+                suspicious_count=suspicious,
+                report_path=written_report_path,
+                regression_path=written_regression_path,
+            ).to_json()
+        )
     return 0
 
 
@@ -1315,6 +1438,21 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
         try:
             cfg = load_config(config_path)
         except FileNotFoundError:
+            if getattr(args, "json", False):
+                print(
+                    _build_blocked_agent_envelope(
+                        tool="mutate",
+                        target=config_path,
+                        summary="no mutation targets configured",
+                        blocking_reason="no targets specified and no config file found",
+                        suggested_commands=(
+                            "ordeal mutate myapp.scoring.compute",
+                            "ordeal mutate myapp.scoring",
+                        ),
+                        raw_details={"config": config_path},
+                    ).to_json()
+                )
+                return 1
             _stderr(
                 "No targets specified. Use positional args or [mutations] in ordeal.toml.\n"
                 "  ordeal mutate myapp.scoring.compute\n"
@@ -1322,15 +1460,48 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
             )
             return 1
         except ConfigError as e:
+            if getattr(args, "json", False):
+                print(
+                    _build_blocked_agent_envelope(
+                        tool="mutate",
+                        target=config_path,
+                        summary=f"config error in {config_path}",
+                        blocking_reason=str(e),
+                        raw_details={"config": config_path},
+                    ).to_json()
+                )
+                return 1
             _stderr(f"Config error: {e}\n")
             return 1
 
         if cfg.mutations is None:
+            if getattr(args, "json", False):
+                print(
+                    _build_blocked_agent_envelope(
+                        tool="mutate",
+                        target=config_path,
+                        summary="no [mutations] section in config",
+                        blocking_reason="config has no [mutations] section",
+                        raw_details={"config": config_path},
+                    ).to_json()
+                )
+                return 1
             _stderr("No [mutations] section in config.\n")
             return 1
 
         targets = cfg.mutations.targets
         if not targets:
+            if getattr(args, "json", False):
+                print(
+                    _build_blocked_agent_envelope(
+                        tool="mutate",
+                        target=config_path,
+                        summary="no mutation targets in config",
+                        blocking_reason="config [mutations] section has no targets",
+                        raw_details={"config": config_path},
+                    ).to_json()
+                )
+                return 1
             _stderr("No targets in [mutations] section.\n")
             return 1
 
@@ -1357,39 +1528,69 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
         preset = "standard"
 
     all_results: list[tuple[str, MutationResult]] = []
+    blockers: list[dict[str, Any]] = []
     exit_code = 0
+    stubs_path = Path(args.generate_stubs) if args.generate_stubs else None
 
     for target in targets:
-        _stderr(f"Mutating {target}...\n")
+        if not getattr(args, "json", False):
+            _stderr(f"Mutating {target}...\n")
 
         try:
-            result = mutate(
-                target,
-                operators=operators,
-                preset=preset,
-                workers=workers,
-                filter_equivalent=filter_equivalent,
-                equivalence_samples=equivalence_samples,
-                test_filter=test_filter,
-                mutant_timeout=mutant_timeout,
-                disk_mutation=disk_mutation,
-                resume=resume,
-            )
+            if getattr(args, "json", False):
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
+                    io.StringIO()
+                ):
+                    result = mutate(
+                        target,
+                        operators=operators,
+                        preset=preset,
+                        workers=workers,
+                        filter_equivalent=filter_equivalent,
+                        equivalence_samples=equivalence_samples,
+                        test_filter=test_filter,
+                        mutant_timeout=mutant_timeout,
+                        disk_mutation=disk_mutation,
+                        resume=resume,
+                    )
+            else:
+                result = mutate(
+                    target,
+                    operators=operators,
+                    preset=preset,
+                    workers=workers,
+                    filter_equivalent=filter_equivalent,
+                    equivalence_samples=equivalence_samples,
+                    test_filter=test_filter,
+                    mutant_timeout=mutant_timeout,
+                    disk_mutation=disk_mutation,
+                    resume=resume,
+                )
         except NoTestsFoundError as e:
-            _stderr(f"  WARNING: No tests found for {target!r}\n")
+            if not getattr(args, "json", False):
+                _stderr(f"  WARNING: No tests found for {target!r}\n")
             starter = generate_starter_tests(target)
+            suggested = e.suggested_file or f"tests/test_{target.rsplit('.', 1)[-1]}.py"
+            blockers.append(
+                {
+                    "target": target,
+                    "summary": f"No tests found for {target}",
+                    "suggested_test_file": suggested,
+                    "starter_tests": starter,
+                }
+            )
             if starter:
-                suggested = e.suggested_file or f"tests/test_{target.rsplit('.', 1)[-1]}.py"
                 if args.generate_stubs:
-                    stubs_path = Path(args.generate_stubs)
+                    assert stubs_path is not None
                     stubs_path.parent.mkdir(parents=True, exist_ok=True)
                     existing = (
                         stubs_path.read_text(encoding="utf-8") if stubs_path.exists() else ""
                     )
                     sep = "\n\n" if existing else ""
                     stubs_path.write_text(existing + sep + starter, encoding="utf-8")
-                    _stderr(f"  Starter tests written: {stubs_path}\n")
-                else:
+                    if not getattr(args, "json", False):
+                        _stderr(f"  Starter tests written: {stubs_path}\n")
+                elif not getattr(args, "json", False):
                     # Print the scaffold directly — don't hide it behind a flag
                     print(f"\n# Save to: {suggested}\n")
                     print(starter)
@@ -1397,20 +1598,30 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
             exit_code = 1
             continue
         except (ImportError, AttributeError, ValueError) as e:
-            _stderr(f"  Error: {e}\n")
+            if getattr(args, "json", False):
+                blockers.append(
+                    {
+                        "target": target,
+                        "summary": str(e),
+                        "suggested_test_file": None,
+                        "starter_tests": None,
+                    }
+                )
+            else:
+                _stderr(f"  Error: {e}\n")
             exit_code = 1
             continue
 
         all_results.append((target, result))
-        print(result.summary())
-        print()
+        if not getattr(args, "json", False):
+            print(result.summary())
+            print()
 
         if threshold > 0.0 and result.score < threshold:
             exit_code = 1
 
     # Generate test stubs if requested
-    if args.generate_stubs:
-        stubs_path = Path(args.generate_stubs)
+    if args.generate_stubs and stubs_path is not None:
         all_stubs: list[str] = []
         for _, result in all_results:
             stub = result.generate_test_stubs()
@@ -1419,19 +1630,32 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
         if all_stubs:
             stubs_path.parent.mkdir(parents=True, exist_ok=True)
             stubs_path.write_text("\n\n".join(all_stubs), encoding="utf-8")
-            _stderr(f"Test stubs written: {stubs_path}\n")
+            if not getattr(args, "json", False):
+                _stderr(f"Test stubs written: {stubs_path}\n")
 
     # Final score line — always printed for CI parseability
     if all_results:
         total_mutants = sum(r.total for _, r in all_results)
         total_killed = sum(r.killed for _, r in all_results)
         overall = total_killed / total_mutants if total_mutants > 0 else 1.0
-        if len(all_results) > 1:
+        if len(all_results) > 1 and not getattr(args, "json", False):
             print(f"Overall: {total_killed}/{total_mutants} ({overall:.0%})")
-        print(f"Score: {total_killed}/{total_mutants} ({overall:.0%})")
-        if threshold > 0.0:
+        if not getattr(args, "json", False):
+            print(f"Score: {total_killed}/{total_mutants} ({overall:.0%})")
+        if threshold > 0.0 and not getattr(args, "json", False):
             status = "PASS" if overall >= threshold else "FAIL"
             print(f"Threshold: {threshold:.0%} — {status}")
+
+    if getattr(args, "json", False):
+        print(
+            _build_mutate_agent_envelope(
+                targets=targets,
+                results=all_results,
+                blockers=blockers,
+                threshold=threshold,
+                stubs_path=stubs_path,
+            ).to_json()
+        )
 
     return exit_code
 
@@ -1499,6 +1723,129 @@ def _format_scan_summary(state: Any) -> str:
     if avail:
         lines.append(avail)
     return "\n".join(lines)
+
+
+def _agent_summary_text(items: list[str] | tuple[str, ...] | str | None) -> str:
+    """Collapse summary lines into one stable agent-facing sentence."""
+    if items is None:
+        return ""
+    if isinstance(items, str):
+        return items
+    cleaned = [str(item).strip() for item in items if str(item).strip()]
+    return "; ".join(cleaned)
+
+
+def _detail_target(detail: dict[str, Any]) -> str | None:
+    """Resolve the most specific target identifier for a report detail."""
+    if detail.get("target") is not None:
+        return str(detail["target"])
+    if detail.get("qualname") is not None:
+        return str(detail["qualname"])
+    module = detail.get("module")
+    function = detail.get("function")
+    if module is not None and function is not None:
+        return f"{module}.{function}"
+    if function is not None:
+        return str(function)
+    return None
+
+
+def _detail_location(detail: dict[str, Any]) -> str | None:
+    """Resolve a stable location string for a report detail."""
+    if detail.get("location") is not None:
+        return str(detail["location"])
+    line = detail.get("line")
+    if line is None:
+        return None
+    col = detail.get("col")
+    return f"L{line}:{col}" if col is not None else f"L{line}"
+
+
+def _detail_to_agent_finding(detail: dict[str, Any]) -> object:
+    """Convert a normalized finding detail into an ``AgentFinding``."""
+    from ordeal.agent_schema import AgentFinding
+
+    summary = str(detail.get("summary") or detail.get("name") or detail.get("kind", "finding"))
+    confidence = detail.get("confidence")
+    numeric_confidence = float(confidence) if confidence is not None else None
+    extra = {
+        key: value
+        for key, value in detail.items()
+        if key
+        not in {
+            "kind",
+            "summary",
+            "confidence",
+            "target",
+            "qualname",
+            "module",
+            "function",
+            "location",
+        }
+    }
+    return AgentFinding(
+        kind=str(detail.get("kind", "finding")),
+        summary=summary,
+        confidence=numeric_confidence,
+        target=_detail_target(detail),
+        location=_detail_location(detail),
+        details=extra,
+    )
+
+
+def _build_blocked_agent_envelope(
+    *,
+    tool: str,
+    target: str,
+    summary: str,
+    recommended_action: str,
+    blocking_reason: str,
+    suggested_commands: tuple[str, ...] | list[str] = (),
+    raw_details: dict[str, Any] | None = None,
+) -> object:
+    """Build a blocked agent envelope for command-level failures."""
+    from ordeal.agent_schema import build_agent_envelope
+
+    return build_agent_envelope(
+        tool=tool,
+        target=target,
+        status="blocked",
+        summary=summary,
+        recommended_action=recommended_action,
+        suggested_commands=tuple(suggested_commands),
+        confidence=None,
+        blocking_reason=blocking_reason,
+        findings=(),
+        artifacts=(),
+        raw_details=raw_details or {},
+    )
+
+
+def _build_agent_envelope_from_report(
+    report: dict[str, Any],
+    *,
+    recommended_action: str,
+    confidence: float | None = None,
+    blocking_reason: str | None = None,
+    artifacts: list[object] | tuple[object, ...] = (),
+    raw_details: dict[str, Any] | None = None,
+) -> object:
+    """Convert a normalized command report into an ``AgentEnvelope``."""
+    from ordeal.agent_schema import build_agent_envelope
+
+    return build_agent_envelope(
+        tool=str(report["tool"]),
+        target=str(report["target"]),
+        status=str(report["status"]),
+        summary=_agent_summary_text(report.get("summary")) or str(report["status"]),
+        recommended_action=recommended_action,
+        suggested_commands=tuple(str(command) for command in report.get("suggested_commands", [])),
+        confidence=confidence,
+        blocking_reason=blocking_reason,
+        findings=[_detail_to_agent_finding(detail) for detail in report.get("details", [])],
+        artifacts=tuple(artifacts),
+        raw_details=raw_details or report,
+    )
 
 
 def _scan_report_details(state: Any) -> list[dict[str, Any]]:
@@ -1917,6 +2264,84 @@ def _build_scan_report(state: Any) -> dict[str, Any]:
     }
 
 
+def _build_scan_agent_envelope(
+    state: Any,
+    *,
+    report_path: Path | None = None,
+    regression_path: Path | None = None,
+    index_path: Path | None = None,
+) -> object:
+    """Build the stable agent-facing JSON envelope for ``ordeal scan``."""
+    from ordeal.agent_schema import AgentArtifact
+
+    report = _build_scan_report(state)
+    artifacts: list[object] = []
+    if report_path is not None:
+        artifacts.append(
+            AgentArtifact(
+                kind="report",
+                uri=_display_path(report_path),
+                description="shareable scan finding report",
+            )
+        )
+    if regression_path is not None:
+        artifacts.append(
+            AgentArtifact(
+                kind="regression",
+                uri=_display_path(regression_path),
+                description="generated pytest regressions from scan findings",
+            )
+        )
+    if index_path is not None:
+        artifacts.append(
+            AgentArtifact(
+                kind="index",
+                uri=_display_path(index_path),
+                description="scan artifact index",
+            )
+        )
+
+    details = report["details"]
+    crash = next((detail for detail in details if detail.get("kind") == "crash"), None)
+    mutation_gap = next((detail for detail in details if detail.get("kind") == "mutation"), None)
+    property_gap = next((detail for detail in details if detail.get("kind") == "property"), None)
+    frontier = getattr(state, "frontier", {})
+    if crash is not None:
+        recommended_action = (
+            f"write a regression for {_detail_target(crash) or state.module} using the captured "
+            "failing input, then rerun scan"
+        )
+    elif mutation_gap is not None:
+        recommended_action = (
+            f"add tests for the surviving mutation gap in {_detail_target(mutation_gap) or state.module}"
+        )
+    elif property_gap is not None:
+        recommended_action = (
+            f"write a regression for {_detail_target(property_gap) or state.module} and validate it "
+            "with mutate"
+        )
+    elif frontier:
+        first_name = next(iter(frontier))
+        recommended_action = f"close the first frontier gap for {state.module}.{first_name}"
+    else:
+        recommended_action = f"run ordeal mutate {state.module} for deeper semantic validation"
+
+    return _build_agent_envelope_from_report(
+        report,
+        recommended_action=recommended_action,
+        confidence=float(getattr(state, "confidence", 0.0)),
+        artifacts=artifacts,
+        raw_details={
+            "checked": _scan_checked_items(state),
+            "frontier": getattr(state, "frontier", {}),
+            "finding_details": _scan_report_details(state),
+            "skipped": list(getattr(state, "skipped", [])),
+            "seed": getattr(state, "supervisor_info", {}).get("seed"),
+            "artifacts_requested": bool(report_path or regression_path or index_path),
+        },
+    )
+
+
 def _render_scan_report_markdown(state: Any) -> str:
     """Render a shareable Markdown finding report for `ordeal scan`."""
     return _render_findings_report_markdown(_build_scan_report(state))
@@ -2203,6 +2628,1084 @@ def _build_mine_report(
     }
 
 
+def _build_mine_agent_envelope(
+    *,
+    target: str,
+    module: str,
+    results: list[tuple[str, Any]],
+    skipped: list[tuple[str, str]],
+    include_scan_hint: bool,
+    suspicious_count: int,
+    report_path: Path | None = None,
+    regression_path: Path | None = None,
+) -> object:
+    """Build the stable agent-facing JSON envelope for ``ordeal mine``."""
+    from ordeal.agent_schema import AgentArtifact
+
+    report = _build_mine_report(
+        target=target,
+        module=module,
+        results=results,
+        skipped=skipped,
+        include_scan_hint=include_scan_hint,
+        suspicious_count=suspicious_count,
+    )
+    artifacts: list[object] = []
+    if report_path is not None:
+        artifacts.append(
+            AgentArtifact(
+                kind="report",
+                uri=_display_path(report_path),
+                description="shareable mine finding report",
+            )
+        )
+    if regression_path is not None:
+        artifacts.append(
+            AgentArtifact(
+                kind="regression",
+                uri=_display_path(regression_path),
+                description="generated pytest regressions from mine findings",
+            )
+        )
+
+    if report["details"]:
+        first = report["details"][0]
+        recommended_action = (
+            f"write a regression for {_detail_target(first) or target} and validate it with mutate"
+        )
+    elif skipped and not results:
+        recommended_action = "add type hints or fixtures for the skipped functions, then rerun mine"
+    else:
+        recommended_action = f"run ordeal mutate {target} to verify the discovered invariants"
+
+    blocking_reason = "all candidate functions were skipped" if skipped and not results else None
+    return _build_agent_envelope_from_report(
+        report,
+        recommended_action=recommended_action,
+        confidence=None,
+        blocking_reason=blocking_reason,
+        artifacts=artifacts,
+        raw_details={
+            "results": results,
+            "skipped": skipped,
+            "include_scan_hint": include_scan_hint,
+            "suspicious_count": suspicious_count,
+        },
+    )
+
+
+def _build_audit_agent_envelope(
+    *,
+    modules: list[str],
+    results: list[Any],
+    test_dir: str,
+    max_examples: int,
+    workers: int,
+    validation_mode: str,
+    generated_path: Path | None = None,
+) -> object:
+    """Build the stable agent-facing JSON envelope for ``ordeal audit``."""
+    from ordeal.agent_schema import AgentArtifact
+
+    findings: list[dict[str, Any]] = []
+    modules_with_warnings = 0
+    coverage_failures = 0
+    first_blocking_reason: str | None = None
+    first_suggestion: tuple[str, str] | None = None
+    first_gap_function: tuple[str, str] | None = None
+    first_mutation_gap: tuple[str, str] | None = None
+    modules_with_findings = 0
+
+    for result in results:
+        module_has_finding = False
+        current_status = getattr(result.current_coverage.status, "value", result.current_coverage.status)
+        migrated_status = getattr(
+            result.migrated_coverage.status,
+            "value",
+            result.migrated_coverage.status,
+        )
+        if current_status == "failed":
+            coverage_failures += 1
+            module_has_finding = True
+            error = result.current_coverage.error or "current coverage measurement failed"
+            first_blocking_reason = first_blocking_reason or error
+            findings.append(
+                {
+                    "kind": "coverage-measurement-failed",
+                    "summary": f"{result.module}: current coverage failed",
+                    "target": result.module,
+                    "details": {
+                        "phase": "current",
+                        "error": error,
+                    },
+                }
+            )
+        if migrated_status == "failed":
+            coverage_failures += 1
+            module_has_finding = True
+            error = result.migrated_coverage.error or "migrated coverage measurement failed"
+            first_blocking_reason = first_blocking_reason or error
+            findings.append(
+                {
+                    "kind": "coverage-measurement-failed",
+                    "summary": f"{result.module}: migrated coverage failed",
+                    "target": result.module,
+                    "details": {
+                        "phase": "migrated",
+                        "error": error,
+                    },
+                }
+            )
+        for suggestion in result.suggestions:
+            module_has_finding = True
+            first_suggestion = first_suggestion or (result.module, suggestion)
+            findings.append(
+                {
+                    "kind": "coverage-gap",
+                    "summary": suggestion,
+                    "target": result.module,
+                    "details": {
+                        "validation_mode": result.validation_mode,
+                    },
+                }
+            )
+        for gap_function in result.gap_functions:
+            module_has_finding = True
+            first_gap_function = first_gap_function or (result.module, gap_function)
+            findings.append(
+                {
+                    "kind": "fixture-gap",
+                    "summary": f"{result.module}.{gap_function} needs fixtures",
+                    "target": f"{result.module}.{gap_function}",
+                    "details": {
+                        "module": result.module,
+                    },
+                }
+            )
+        if result.mutation_score_fraction is not None and result.mutation_score_fraction < 1.0:
+            module_has_finding = True
+            first_mutation_gap = first_mutation_gap or (result.module, result.mutation_score)
+            findings.append(
+                {
+                    "kind": "mutation-gap",
+                    "summary": f"{result.module}: mutation score {result.mutation_score}",
+                    "target": result.module,
+                    "details": {
+                        "mutation_score": result.mutation_score,
+                        "validation_mode": result.validation_mode,
+                    },
+                }
+            )
+        if result.warnings:
+            modules_with_warnings += 1
+            module_has_finding = True
+            first_blocking_reason = first_blocking_reason or result.warnings[0]
+            for warning in result.warnings:
+                findings.append(
+                    {
+                        "kind": "warning",
+                        "summary": f"{result.module}: {warning}",
+                        "target": result.module,
+                        "details": {
+                            "warning": warning,
+                        },
+                    }
+                )
+        if module_has_finding:
+            modules_with_findings += 1
+
+    target = ",".join(modules)
+    status = "findings found" if findings else "no findings yet"
+    summary_items = [
+        f"Audited: {len(results)} module(s)",
+        f"Modules with findings: {modules_with_findings}",
+        f"Coverage failures: {coverage_failures}",
+        f"Warnings: {modules_with_warnings}",
+    ]
+    first_module = modules[0] if modules else ""
+    suggested_commands = [f"ordeal audit {first_module} --show-generated"] if first_module else []
+    if first_module:
+        suggested_commands.append(f"ordeal mutate {first_module}")
+        suggested_commands.append(f"ordeal init {first_module}")
+
+    if first_suggestion is not None:
+        module, suggestion = first_suggestion
+        recommended_action = f"add a targeted test for {module}: {suggestion}"
+    elif first_gap_function is not None:
+        module, gap_function = first_gap_function
+        recommended_action = f"provide fixtures for {module}.{gap_function} and rerun audit"
+    elif first_mutation_gap is not None:
+        module, _score = first_mutation_gap
+        recommended_action = f"add tests for the surviving mutation gaps in {module}"
+    elif first_blocking_reason is not None and first_module:
+        recommended_action = f"run ordeal init {first_module} or fix the blocking audit error"
+    elif first_module:
+        recommended_action = (
+            f"inspect the generated migration for {first_module} and adopt the highest-value assertions"
+        )
+    else:
+        recommended_action = "rerun audit with at least one module target"
+
+    artifacts: list[object] = []
+    if generated_path is not None:
+        artifacts.append(
+            AgentArtifact(
+                kind="generated-test",
+                uri=_display_path(generated_path),
+                description="saved ordeal-generated audit test file",
+            )
+        )
+
+    report = {
+        "tool": "audit",
+        "target": target,
+        "status": status,
+        "summary": summary_items,
+        "details": findings,
+        "suggested_commands": suggested_commands,
+    }
+    return _build_agent_envelope_from_report(
+        report,
+        recommended_action=recommended_action,
+        confidence=None,
+        blocking_reason=first_blocking_reason,
+        artifacts=artifacts,
+        raw_details={
+            "modules": results,
+            "test_dir": test_dir,
+            "max_examples": max_examples,
+            "workers": workers,
+            "validation_mode": validation_mode,
+        },
+    )
+
+
+def _build_mutation_agent_envelope(
+    *,
+    targets: list[str],
+    results: list[tuple[str, Any]],
+    blocked_targets: list[dict[str, Any]],
+    threshold: float,
+    stubs_path: Path | None = None,
+) -> object:
+    """Build the stable agent-facing JSON envelope for ``ordeal mutate``."""
+    from ordeal.agent_schema import AgentArtifact
+
+    findings: list[dict[str, Any]] = []
+    total_mutants = sum(result.total for _, result in results)
+    total_killed = sum(result.killed for _, result in results)
+    total_survivors = sum(len(result.survived) for _, result in results)
+    overall = total_killed / total_mutants if total_mutants > 0 else 1.0
+
+    for target, result in results:
+        for mutant in result.survived:
+            findings.append(
+                {
+                    "kind": "mutation-gap",
+                    "summary": f"{target}: {mutant.description}",
+                    "target": target,
+                    "location": mutant.location,
+                    "details": {
+                        "operator": mutant.operator,
+                        "source_line": mutant.source_line,
+                        "remediation": mutant.remediation,
+                    },
+                }
+            )
+    for blocked in blocked_targets:
+        findings.append(
+            {
+                "kind": blocked.get("kind", "blocked"),
+                "summary": blocked["summary"],
+                "target": blocked["target"],
+                "details": blocked,
+            }
+        )
+
+    if blocked_targets and not results:
+        status = "blocked"
+    elif findings:
+        status = "findings found"
+    else:
+        status = "no findings yet"
+
+    summary_items = [
+        f"Targets: {len(targets)}",
+        f"Mutation score: {total_killed}/{total_mutants} ({overall:.0%})",
+        f"Surviving mutants: {total_survivors}",
+        f"Blocked targets: {len(blocked_targets)}",
+    ]
+    first_target = targets[0] if targets else ""
+    suggested_commands = [f"ordeal mutate {first_target}"] if first_target else []
+    if first_target:
+        suggested_commands.append(f"ordeal init {first_target}")
+        suggested_commands.append(f"ordeal mine {first_target} -n 200")
+
+    if blocked_targets and not results:
+        recommended_action = f"run ordeal init {blocked_targets[0]['target']} to bootstrap tests"
+    elif total_survivors > 0 and results:
+        recommended_action = f"write tests for surviving mutants in {results[0][0]} and rerun mutate"
+    elif total_mutants == 0:
+        recommended_action = (
+            "inspect the target or disable equivalent filtering to understand why no mutants were tested"
+        )
+    else:
+        recommended_action = "move to the next low-confidence module or raise the mutation threshold"
+
+    artifacts: list[object] = []
+    if stubs_path is not None:
+        artifacts.append(
+            AgentArtifact(
+                kind="regression",
+                uri=_display_path(stubs_path),
+                description="generated mutation test stubs",
+            )
+        )
+
+    report = {
+        "tool": "mutate",
+        "target": ",".join(targets),
+        "status": status,
+        "summary": summary_items,
+        "details": findings,
+        "suggested_commands": suggested_commands,
+    }
+    blocking_reason = blocked_targets[0]["reason"] if blocked_targets else None
+    return _build_agent_envelope_from_report(
+        report,
+        recommended_action=recommended_action,
+        confidence=None,
+        blocking_reason=blocking_reason,
+        artifacts=artifacts,
+        raw_details={
+            "results": [result for _, result in results],
+            "blocked_targets": blocked_targets,
+            "threshold": threshold,
+            "overall_score": overall,
+        },
+    )
+
+
+def _build_replay_agent_envelope(
+    *,
+    trace: Any | None,
+    trace_file: str,
+    error: Exception | None,
+    shrunk_trace: Any | None = None,
+    ablation: dict[str, bool] | None = None,
+    saved_path: Path | None = None,
+    load_error: str | None = None,
+) -> object:
+    """Build the stable agent-facing JSON envelope for ``ordeal replay``."""
+    from ordeal.agent_schema import AgentArtifact, build_agent_envelope
+
+    if load_error is not None:
+        return _build_blocked_agent_envelope(
+            tool="replay",
+            target=trace_file,
+            summary=load_error,
+            recommended_action="check the trace path or capture a fresh trace",
+            blocking_reason=load_error,
+            suggested_commands=(f"ordeal replay {trace_file}",),
+            raw_details={"trace_file": trace_file},
+        )
+
+    findings: list[dict[str, Any]] = []
+    status = "failure not reproduced"
+    recommended_action = "rescan the target and capture a fresh trace"
+    if error is not None:
+        status = "failure reproduced"
+        findings.append(
+            {
+                "kind": "reproduced-failure",
+                "summary": f"{type(error).__name__}: {error}",
+                "target": getattr(trace, "test_class", trace_file),
+                "details": {
+                    "run_id": getattr(trace, "run_id", None),
+                    "seed": getattr(trace, "seed", None),
+                    "steps": len(getattr(trace, "steps", [])),
+                },
+            }
+        )
+        if ablation is not None:
+            findings.append(
+                {
+                    "kind": "fault-analysis",
+                    "summary": "fault ablation completed",
+                    "target": getattr(trace, "test_class", trace_file),
+                    "details": {
+                        "necessary_faults": [name for name, needed in ablation.items() if needed],
+                        "unnecessary_faults": [name for name, needed in ablation.items() if not needed],
+                    },
+                }
+            )
+        if shrunk_trace is None and ablation is None:
+            recommended_action = "rerun replay with --shrink --ablate to minimize and isolate the failure"
+        elif ablation is None:
+            recommended_action = "rerun replay with --ablate to determine which faults are necessary"
+        else:
+            recommended_action = "turn the reproducing trace into a regression and fix the bug"
+
+    artifacts: list[object] = []
+    if saved_path is not None:
+        artifacts.append(
+            AgentArtifact(
+                kind="trace",
+                uri=_display_path(saved_path),
+                description="saved shrunk trace",
+            )
+        )
+
+    return build_agent_envelope(
+        tool="replay",
+        target=trace_file,
+        status=status,
+        summary=(
+            f"trace replay reproduced {type(error).__name__}: {error}"
+            if error is not None
+            else "trace replay did not reproduce the failure"
+        ),
+        recommended_action=recommended_action,
+        suggested_commands=(
+            f"ordeal replay {trace_file} --shrink --ablate",
+            f"ordeal replay {trace_file}",
+        ),
+        confidence=None,
+        blocking_reason=None if error is not None else "saved trace did not reproduce",
+        findings=findings,
+        artifacts=artifacts,
+        raw_details={
+            "trace": trace.to_dict() if trace is not None else None,
+            "shrunk_trace": shrunk_trace.to_dict() if shrunk_trace is not None else None,
+            "ablation": ablation,
+        },
+    )
+
+
+def _detail_confidence(detail: Mapping[str, Any]) -> float | None:
+    """Extract a numeric confidence-like score when one exists naturally."""
+    value = detail.get("confidence")
+    if value is not None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    value = detail.get("mutation_score")
+    if value is not None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _detail_location(detail: Mapping[str, Any]) -> str | None:
+    """Normalize common location fields into a stable string."""
+    if detail.get("location") is not None:
+        return str(detail["location"])
+    line = detail.get("line")
+    col = detail.get("col")
+    if line is None:
+        return None
+    if col is None:
+        return f"L{line}"
+    return f"L{line}:{col}"
+
+
+def _detail_target(detail: Mapping[str, Any], fallback: str) -> str:
+    """Pick the most specific target name available for a detail."""
+    qualname = detail.get("qualname")
+    if qualname is not None:
+        return str(qualname)
+    function = detail.get("function")
+    module = detail.get("module")
+    if function is not None and module is not None:
+        return f"{module}.{function}"
+    if function is not None:
+        return str(function)
+    return fallback
+
+
+def _agent_finding_from_detail(detail: Mapping[str, Any], fallback_target: str) -> Any:
+    """Convert a shared report detail into an agent-schema finding."""
+    from ordeal.agent_schema import AgentFinding
+
+    target = _detail_target(detail, fallback_target)
+    summary = str(detail.get("summary") or detail.get("name") or detail.get("kind", "finding"))
+    extras = {
+        key: value
+        for key, value in detail.items()
+        if key
+        not in {
+            "kind",
+            "summary",
+            "confidence",
+            "target",
+            "location",
+            "qualname",
+        }
+    }
+    return AgentFinding(
+        kind=str(detail.get("kind", "finding")),
+        summary=summary,
+        confidence=_detail_confidence(detail),
+        target=target,
+        location=_detail_location(detail),
+        details=extras,
+    )
+
+
+def _agent_artifact(kind: str, uri: str | Path, description: str, **metadata: Any) -> Any:
+    """Build an agent-schema artifact."""
+    from ordeal.agent_schema import AgentArtifact
+
+    return AgentArtifact(
+        kind=kind,
+        uri=Path(uri).as_posix() if isinstance(uri, Path) else str(uri),
+        description=description,
+        metadata=metadata,
+    )
+
+
+def _report_summary_text(report: Mapping[str, Any]) -> str:
+    """Collapse the shared report summary list into one agent-facing sentence."""
+    items = [str(item) for item in report.get("summary", []) if item]
+    if not items:
+        return str(report.get("status", "completed"))
+    return f"{report.get('status', 'completed')}: {' | '.join(items)}"
+
+
+def _recommended_action_for_report(report: Mapping[str, Any]) -> str:
+    """Return the highest-value next action for an agent consumer."""
+    details = list(report.get("details", []))
+    target = str(report.get("target", ""))
+    tool = str(report.get("tool", "ordeal"))
+    if details:
+        first = details[0]
+        qualname = _detail_target(first, target)
+        kind = str(first.get("kind", "finding"))
+        if kind == "property":
+            return f"Write a regression test for {qualname} from the recorded counterexample."
+        if kind == "crash":
+            return f"Reproduce the crash in a regression test for {qualname}."
+        if kind == "mutation":
+            return f"Strengthen tests for {qualname} until the surviving mutant is killed."
+        if kind == "coverage_gap":
+            return f"Add a targeted test to cover the uncovered behavior in {qualname}."
+        if kind == "fixture_gap":
+            return f"Provide fixtures or constructors so ordeal can verify {qualname}."
+        if kind == "mutation_gap":
+            return f"Strengthen tests or mined properties for {qualname}."
+        if kind == "warning":
+            return f"Resolve the verification warning for {qualname} before trusting this {tool} result."
+    suggested = list(report.get("suggested_commands", []))
+    if suggested:
+        return f"Run `{suggested[0]}` next."
+    return f"No immediate follow-up required for {target}."
+
+
+def _build_agent_envelope_from_report(
+    report: Mapping[str, Any],
+    *,
+    status: str,
+    confidence: float | None = None,
+    confidence_basis: Sequence[str] = (),
+    blocking_reason: str | None = None,
+    artifacts: Sequence[Any] = (),
+    raw_details: Mapping[str, Any] | None = None,
+    suggested_test_file: str | None = None,
+) -> Any:
+    """Wrap a shared report dict in the stable agent envelope."""
+    from ordeal.agent_schema import build_agent_envelope
+
+    target = str(report.get("target", ""))
+    details = list(report.get("details", []))
+    findings = [_agent_finding_from_detail(detail, target) for detail in details]
+    return build_agent_envelope(
+        tool=str(report.get("tool", "ordeal")),
+        target=target,
+        status=status,
+        summary=_report_summary_text(report),
+        recommended_action=str(
+            report.get("recommended_action") or _recommended_action_for_report(report)
+        ),
+        suggested_commands=tuple(str(item) for item in report.get("suggested_commands", [])),
+        suggested_test_file=suggested_test_file,
+        confidence=confidence,
+        confidence_basis=tuple(str(item) for item in confidence_basis),
+        blocking_reason=blocking_reason,
+        findings=findings,
+        artifacts=artifacts,
+        raw_details=dict(raw_details or {}),
+    )
+
+
+def _build_scan_agent_envelope(
+    state: Any,
+    *,
+    written_report_path: Path | None = None,
+    written_regression_path: Path | None = None,
+    index_path: Path | None = None,
+) -> Any:
+    """Build the agent-facing JSON envelope for `ordeal scan`."""
+    report = _build_scan_report(state)
+    artifacts: list[Any] = []
+    if written_report_path is not None:
+        artifacts.append(_agent_artifact("report", written_report_path, "shareable finding report"))
+    if written_regression_path is not None:
+        artifacts.append(
+            _agent_artifact("regression", written_regression_path, "generated pytest regressions")
+        )
+    if index_path is not None:
+        artifacts.append(_agent_artifact("index", index_path, "artifact index"))
+    return _build_agent_envelope_from_report(
+        report,
+        status="findings" if state.findings else "ok",
+        confidence=float(getattr(state, "confidence", 0.0)),
+        confidence_basis=_scan_checked_items(state),
+        artifacts=artifacts,
+        raw_details={
+            "report": report,
+            "state": (
+                state.to_dict()
+                if hasattr(state, "to_dict") and callable(getattr(state, "to_dict"))
+                else json.loads(state.to_json())
+            ),
+            "seed": getattr(state, "supervisor_info", {}).get("seed"),
+            "finding_count": len(report.get("details", [])),
+            "gap_count": len(report.get("gaps", [])),
+        },
+        suggested_test_file=(
+            _DEFAULT_REGRESSION_PATH if report.get("details") else None
+        ),
+    )
+
+
+def _build_mine_agent_envelope(
+    *,
+    target: str,
+    module: str,
+    results: list[tuple[str, Any]],
+    skipped: list[tuple[str, str]],
+    include_scan_hint: bool,
+    suspicious_count: int,
+    report_path: Path | None = None,
+    regression_path: Path | None = None,
+) -> Any:
+    """Build the agent-facing JSON envelope for `ordeal mine`."""
+    report = _build_mine_report(
+        target=target,
+        module=module,
+        results=results,
+        skipped=skipped,
+        include_scan_hint=include_scan_hint,
+        suspicious_count=suspicious_count,
+    )
+    details = list(report.get("details", []))
+    confidence = max((_detail_confidence(detail) or 0.0 for detail in details), default=None)
+    artifacts: list[Any] = []
+    if report_path is not None:
+        artifacts.append(_agent_artifact("report", report_path, "shareable finding report"))
+    if regression_path is not None:
+        artifacts.append(
+            _agent_artifact("regression", regression_path, "generated pytest regressions")
+        )
+    return _build_agent_envelope_from_report(
+        report,
+        status=("blocked" if skipped and not results else ("findings" if details else "ok")),
+        confidence=confidence,
+        confidence_basis=(
+            f"checked {len(results)} function(s)",
+            f"{suspicious_count} suspicious finding(s)",
+            "property confidence is derived from holds/total examples",
+        ),
+        blocking_reason=("all candidate functions were skipped" if skipped and not results else None),
+        artifacts=artifacts,
+        raw_details={
+            "report": report,
+            "results": [
+                {
+                    "function": name,
+                    "result": result,
+                }
+                for name, result in results
+            ],
+            "checked_functions": [name for name, _ in results],
+            "skipped_functions": skipped,
+            "include_scan_hint": include_scan_hint,
+        },
+        suggested_test_file=(
+            str(regression_path) if regression_path is not None else (
+                _DEFAULT_REGRESSION_PATH if details else None
+            )
+        ),
+    )
+
+
+def _audit_detail_items(result: Any) -> list[dict[str, Any]]:
+    """Normalize one ModuleAudit into finding-style detail items."""
+    details: list[dict[str, Any]] = []
+    score_fraction = result.mutation_score_fraction
+    if score_fraction is not None and score_fraction < 1.0:
+        details.append(
+            {
+                "kind": "mutation_gap",
+                "summary": f"mutation score {result.mutation_score}",
+                "confidence": score_fraction,
+                "module": result.module,
+                "qualname": result.module,
+                "details": {"validation_mode": result.validation_mode},
+            }
+        )
+    for function_name in result.gap_functions:
+        details.append(
+            {
+                "kind": "fixture_gap",
+                "summary": f"{function_name} needs fixtures before ordeal can verify it",
+                "module": result.module,
+                "function": function_name,
+                "qualname": f"{result.module}.{function_name}",
+            }
+        )
+    for suggestion in result.suggestions:
+        details.append(
+            {
+                "kind": "coverage_gap",
+                "summary": suggestion,
+                "module": result.module,
+                "qualname": result.module,
+            }
+        )
+    for warning in result.warnings:
+        details.append(
+            {
+                "kind": "warning",
+                "summary": warning,
+                "module": result.module,
+                "qualname": result.module,
+            }
+        )
+    return details
+
+
+def _build_audit_agent_envelope(
+    results: Sequence[Any],
+    *,
+    saved_generated_path: Path | None = None,
+) -> Any:
+    """Build the agent-facing JSON envelope for `ordeal audit`."""
+    from ordeal.audit import _generated_test_path, _module_audit_to_dict
+
+    details = [detail for result in results for detail in _audit_detail_items(result)]
+    modules = [result.module for result in results]
+    suggested_commands = []
+    for module in modules:
+        suggested_commands.extend(
+            [
+                f"ordeal audit {module} --show-generated",
+                f"ordeal mine {module} -n 200",
+                f"ordeal mutate {module}",
+            ]
+        )
+    seen: set[str] = set()
+    deduped_commands = [cmd for cmd in suggested_commands if not (cmd in seen or seen.add(cmd))]
+    report = {
+        "target": ", ".join(modules),
+        "tool": "audit",
+        "status": "findings found" if details else "no major gaps found",
+        "summary": [
+            f"Audited: {len(results)} module(s)",
+            f"Findings: {len(details)}",
+            f"Coverage preserved: {sum(1 for result in results if result.coverage_preserved)}/{len(results)}",
+        ],
+        "details": details,
+        "suggested_commands": deduped_commands,
+    }
+    verified_measurements = sum(
+        int(result.current_coverage.status.value == "verified")
+        + int(result.migrated_coverage.status.value == "verified")
+        for result in results
+    )
+    total_measurements = max(len(results) * 2, 1)
+    artifacts: list[Any] = []
+    if saved_generated_path is not None:
+        artifacts.append(
+            _agent_artifact("generated-test", saved_generated_path, "saved ordeal-generated test")
+        )
+    else:
+        for result in results:
+            generated_path = _generated_test_path(result.module)
+            if generated_path.exists():
+                artifacts.append(
+                    _agent_artifact(
+                        "generated-test",
+                        generated_path,
+                        "ordeal-generated migrated test",
+                        module=result.module,
+                    )
+                )
+    return _build_agent_envelope_from_report(
+        report,
+        status="findings" if details else "ok",
+        confidence=verified_measurements / total_measurements,
+        confidence_basis=(
+            f"{verified_measurements}/{total_measurements} coverage measurements verified",
+            "coverage confidence reflects measured verification coverage, not bug absence",
+        ),
+        artifacts=artifacts,
+        raw_details={
+            "report": report,
+            "modules": [_module_audit_to_dict(result) for result in results],
+        },
+        suggested_test_file=(str(saved_generated_path) if saved_generated_path is not None else None),
+    )
+
+
+def _mutant_to_detail(target: str, mutant: Any) -> dict[str, Any]:
+    """Normalize a surviving mutant into a finding-style detail item."""
+    return {
+        "kind": "mutation",
+        "summary": f"{mutant.location} {mutant.description}",
+        "module": target.rsplit(".", 1)[0] if "." in target else target,
+        "qualname": target,
+        "location": mutant.location,
+        "details": {
+            "operator": mutant.operator,
+            "source_line": mutant.source_line,
+            "remediation": mutant.remediation,
+        },
+    }
+
+
+def _build_mutate_agent_envelope(
+    *,
+    targets: Sequence[str],
+    results: Sequence[tuple[str, Any]],
+    blockers: Sequence[Mapping[str, Any]],
+    threshold: float,
+    stubs_path: Path | None = None,
+) -> Any:
+    """Build the agent-facing JSON envelope for `ordeal mutate`."""
+    details = []
+    for target, result in results:
+        details.extend(_mutant_to_detail(target, mutant) for mutant in result.survived)
+    for blocker in blockers:
+        details.append(
+            {
+                "kind": "no_tests",
+                "summary": str(blocker["summary"]),
+                "qualname": str(blocker["target"]),
+                "details": {
+                    "suggested_test_file": blocker.get("suggested_test_file"),
+                    "starter_tests": blocker.get("starter_tests"),
+                },
+            }
+        )
+    suggested_commands: list[str] = []
+    for blocker in blockers:
+        suggested_commands.append(f"ordeal init {blocker['target']}")
+    for target, _ in results:
+        suggested_commands.append(f"ordeal mutate {target}")
+    if results:
+        suggested_commands.append(f"ordeal mutate {results[0][0]} --generate-stubs {_DEFAULT_REGRESSION_PATH}")
+    seen: set[str] = set()
+    deduped_commands = [cmd for cmd in suggested_commands if not (cmd in seen or seen.add(cmd))]
+    total_mutants = sum(result.total for _, result in results)
+    total_killed = sum(result.killed for _, result in results)
+    overall = total_killed / total_mutants if total_mutants > 0 else (None if blockers else 1.0)
+    status = "ok"
+    if blockers and not results:
+        status = "blocked"
+    elif details:
+        status = "findings"
+    report = {
+        "target": ", ".join(targets),
+        "tool": "mutate",
+        "status": "findings found" if details else "all mutants killed",
+        "summary": [
+            f"Targets: {len(targets)}",
+            f"Mutants tested: {total_mutants}",
+            f"Survivors: {sum(len(result.survived) for _, result in results)}",
+        ],
+        "details": details,
+        "suggested_commands": deduped_commands,
+    }
+    blocking_reason = str(blockers[0]["summary"]) if blockers and not results else None
+    artifacts = (
+        [_agent_artifact("regression", stubs_path, "generated mutation test stubs")]
+        if stubs_path is not None and stubs_path.exists()
+        else []
+    )
+    recommended = _recommended_action_for_report(report)
+    if blockers and not results:
+        recommended = f"Bootstrap tests with `ordeal init {blockers[0]['target']}` or save the provided starter scaffold."
+    return _build_agent_envelope_from_report(
+        {**report, "recommended_action": recommended},
+        status=status,
+        confidence=overall,
+        confidence_basis=(
+            f"{total_mutants} mutant(s) tested" if total_mutants else "no mutants tested",
+            f"threshold={threshold:.0%}" if threshold > 0 else "no threshold configured",
+        ),
+        blocking_reason=blocking_reason,
+        artifacts=artifacts,
+        raw_details={
+            "targets": [
+                {
+                    "target": target,
+                    "score": result.score,
+                    "killed": result.killed,
+                    "total": result.total,
+                    "diagnostics": result.diagnostics,
+                    "survived_mutants": result.survived,
+                    "timings": result.timings,
+                }
+                for target, result in results
+            ],
+            "blockers": list(blockers),
+            "overall_score": overall,
+            "threshold": threshold,
+        },
+        suggested_test_file=(
+            str(stubs_path)
+            if stubs_path is not None
+            else (
+                str(blockers[0].get("suggested_test_file"))
+                if blockers
+                else (_DEFAULT_REGRESSION_PATH if details else None)
+            )
+        ),
+    )
+
+
+def _build_replay_agent_envelope(
+    *,
+    trace_file: str,
+    trace: Any | None,
+    reproduced_error: Exception | None,
+    shrunk_trace: Any | None = None,
+    ablation: Mapping[str, bool] | None = None,
+    output_path: Path | None = None,
+    blocking_reason: str | None = None,
+) -> Any:
+    """Build the agent-facing JSON envelope for `ordeal replay`."""
+    details = []
+    if reproduced_error is not None:
+        details.append(
+            {
+                "kind": "reproduced_failure",
+                "summary": f"{type(reproduced_error).__name__}: {reproduced_error}",
+                "qualname": trace.test_class if trace is not None else trace_file,
+                "details": {
+                    "error_type": type(reproduced_error).__name__,
+                    "error_message": str(reproduced_error),
+                },
+            }
+        )
+    artifacts = (
+        [_agent_artifact("trace", output_path, "saved shrunk trace")]
+        if output_path is not None and output_path.exists()
+        else []
+    )
+    suggested_commands: list[str] = []
+    if reproduced_error is not None and trace is not None:
+        if shrunk_trace is None:
+            suggested_commands.append(f"ordeal replay {trace_file} --shrink")
+        if ablation is None:
+            suggested_commands.append(f"ordeal replay {trace_file} --ablate")
+    report = {
+        "target": trace_file,
+        "tool": "replay",
+        "status": (
+            "failure reproduced"
+            if reproduced_error is not None
+            else ("blocked" if blocking_reason else "failure did not reproduce")
+        ),
+        "summary": [
+            f"Trace file: {trace_file}",
+            (
+                f"Steps replayed: {len(trace.steps)}"
+                if trace is not None
+                else "Steps replayed: 0"
+            ),
+        ],
+        "details": details,
+        "suggested_commands": suggested_commands,
+    }
+    recommended = "Inspect the current code or regenerate the trace."
+    if reproduced_error is not None:
+        if shrunk_trace is None:
+            recommended = "Shrink the trace to a minimal reproducer."
+        elif ablation is None:
+            recommended = "Ablate fault toggles to isolate which ones are necessary."
+        else:
+            recommended = "Turn the reproducing trace into a regression test."
+    elif blocking_reason:
+        recommended = "Regenerate or fix the trace file before replaying again."
+    return _build_agent_envelope_from_report(
+        {**report, "recommended_action": recommended},
+        status=(
+            "reproduced"
+            if reproduced_error is not None
+            else ("blocked" if blocking_reason else "not_reproduced")
+        ),
+        confidence=(1.0 if trace is not None else None),
+        confidence_basis=(
+            (
+                f"{len(trace.steps)} recorded step(s) replayed"
+                if trace is not None
+                else "trace could not be loaded"
+            ),
+        ),
+        blocking_reason=blocking_reason,
+        artifacts=artifacts,
+        raw_details={
+            "trace_file": trace_file,
+            "trace": trace.to_dict() if trace is not None else None,
+            "test_class": getattr(trace, "test_class", None),
+            "run_id": getattr(trace, "run_id", None),
+            "step_count": len(trace.steps) if trace is not None else 0,
+            "shrunk_trace": shrunk_trace.to_dict() if shrunk_trace is not None else None,
+            "shrunk_steps": len(shrunk_trace.steps) if shrunk_trace is not None else None,
+            "ablation": dict(ablation) if ablation is not None else None,
+        },
+    )
+
+
+def _build_blocked_agent_envelope(
+    *,
+    tool: str,
+    target: str,
+    summary: str,
+    blocking_reason: str,
+    suggested_commands: Sequence[str] = (),
+    suggested_test_file: str | None = None,
+    raw_details: Mapping[str, Any] | None = None,
+) -> Any:
+    """Build a minimal blocked/error envelope for early CLI exits."""
+    from ordeal.agent_schema import build_agent_envelope
+
+    return build_agent_envelope(
+        tool=tool,
+        target=target,
+        status="blocked",
+        summary=summary,
+        recommended_action=(
+            f"Unblock `{tool}` by fixing the input or running `{suggested_commands[0]}`."
+            if suggested_commands
+            else f"Unblock `{tool}` by fixing the input or environment."
+        ),
+        suggested_commands=suggested_commands,
+        suggested_test_file=suggested_test_file,
+        confidence=None,
+        confidence_basis=("command did not reach a measured execution path",),
+        blocking_reason=blocking_reason,
+        findings=(),
+        artifacts=(),
+        raw_details=dict(raw_details or {}),
+    )
+
+
 def _write_scan_report(state: Any, path_str: str) -> Path:
     """Write a Markdown report for `ordeal scan`."""
     path = Path(path_str)
@@ -2353,7 +3856,7 @@ def _write_mine_regressions(
     skipped: list[tuple[str, str]],
     path_str: str,
     suspicious_count: int,
-) -> None:
+) -> Path | None:
     """Write runnable pytest regressions for concrete mine findings."""
     stubs, skipped_findings = _mine_regression_stubs(
         target=target,
@@ -2368,7 +3871,7 @@ def _write_mine_regressions(
             _stderr(
                 f"Skipped {len(skipped_findings)} finding(s) without replayable concrete inputs.\n"
             )
-        return
+        return None
     path, added, deduped = _write_regression_file(
         path_str=path_str,
         header=[
@@ -2392,6 +3895,7 @@ def _write_mine_regressions(
         )
     if deduped:
         _stderr(f"Skipped {deduped} existing regression(s) already present in {path.name}.\n")
+    return path
 
 
 def _write_mine_report(
@@ -2403,7 +3907,7 @@ def _write_mine_report(
     path_str: str,
     include_scan_hint: bool,
     suspicious_count: int,
-) -> None:
+) -> Path:
     """Write a Markdown report for `ordeal mine`."""
     path = Path(path_str)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2417,6 +3921,7 @@ def _write_mine_report(
     )
     path.write_text(_render_findings_report_markdown(report), encoding="utf-8")
     _stderr(f"Mine report saved: {path}\n")
+    return path
 
 
 def _write_json_report(
@@ -2630,6 +4135,7 @@ def main(argv: list[str] | None = None) -> int:
         "--ablate", action="store_true", help="Ablate faults to find necessary ones"
     )
     replay_p.add_argument("--output", "-o", help="Save shrunk trace to this path")
+    replay_p.add_argument("--json", action="store_true", help="Output agent-facing JSON")
 
     # -- ordeal seeds --
     seeds_p = sub.add_parser("seeds", help="List or manage the persistent seed corpus")
@@ -2682,6 +4188,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Save generated test file to this path",
     )
+    audit_p.add_argument("--json", action="store_true", help="Output agent-facing JSON")
 
     # -- ordeal mine --
     mine_p = sub.add_parser(
@@ -2726,6 +4233,7 @@ def main(argv: list[str] | None = None) -> int:
             f" (default: {_DEFAULT_REGRESSION_PATH})"
         ),
     )
+    mine_p.add_argument("--json", action="store_true", help="Output agent-facing JSON")
 
     # -- ordeal mine-pair --
     mp_p = sub.add_parser("mine-pair", help="Discover relational properties between two functions")
@@ -2770,6 +4278,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         metavar="PATH",
         help="Write perf/quality contract results as JSON to PATH",
+    )
+    bench_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print perf/quality contract results as JSON to stdout",
     )
     bench_p.add_argument(
         "--tier",
@@ -2940,6 +4453,7 @@ def main(argv: list[str] | None = None) -> int:
         metavar="PATH",
         help="Write test stubs for surviving mutants to PATH",
     )
+    mutate_p.add_argument("--json", action="store_true", help="Output agent-facing JSON")
 
     args = parser.parse_args(argv)
 

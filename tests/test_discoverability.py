@@ -223,6 +223,18 @@ def test_catalog_docs_are_not_empty():
     )
 
 
+def test_benchmark_help_exposes_output_json():
+    """Benchmark help must advertise the agent-facing JSON output mode."""
+    proc = subprocess.run(
+        [sys.executable, "-m", "ordeal.cli", "benchmark", "--help"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "--output-json PATH" in proc.stdout
+    assert "perf/quality contract results as JSON" in proc.stdout
+
+
 # ============================================================================
 # Exploration discoverability: the most important features for AI assistants
 # ============================================================================

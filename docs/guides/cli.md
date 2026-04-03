@@ -215,7 +215,7 @@ Scaling Analysis (Universal Scaling Law)
     Coherence (kappa):  0.005578 cross-worker sync cost.
 ```
 
-For checked-in benchmark contracts, `--perf-contract` enforces both latency and audit-quality drift in CI:
+For checked-in benchmark contracts, `--perf-contract` enforces both latency and audit-quality drift in CI. Add `--output-json perf.json` when an agent or CI job needs machine-readable results:
 
 ```toml
 [[cases]]
@@ -229,6 +229,8 @@ max_score_gap = 0.10
 
 That case fails if fast audit validation falls more than 10 percentage points behind deep validation on mutation score.
 Use `--output-json perf.json` when you want a trendable artifact for CI or nightly runs.
+
+The JSON artifact includes the contract path, per-case pass/fail state, timing medians, and the exact score-gap data for `audit_compare` cases.
 
 | Flag | Default | Description |
 |---|---|---|

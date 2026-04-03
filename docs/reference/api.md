@@ -1295,6 +1295,8 @@ print(suite.summary())
 
 Run a checked-in perf/quality contract. Supports import latency, audit latency, mutation latency, and `audit_compare` cases that fail when one audit validation mode falls too far behind another on mutation score.
 
+When used from the CLI, `--output-json PATH` writes a stable artifact with `passed`, `cases`, `failures`, and per-case timing/score details so agents can consume the result without parsing text.
+
 ### scales_linearly
 
 ```python

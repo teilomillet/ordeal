@@ -58,6 +58,7 @@ class TestCLI:
             main(["benchmark", "--help"])
         out = capsys.readouterr().out
         assert "--perf-contract PERF_CONTRACT" in out
+        assert "--json" in out
         assert "--output-json PATH" in out
         assert "score-gap budget" in out
 
@@ -97,6 +98,53 @@ class TestCLI:
     def test_replay_missing_file(self):
         assert main(["replay", "/nonexistent/trace.json"]) == 1
 
+    def test_replay_json_missing_file(self, capsys):
+        rc = main(["replay", "/nonexistent/trace.json", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 1
+        assert payload["tool"] == "replay"
+        assert payload["status"] == "blocked"
+        assert payload["blocking_reason"]
+
+    def test_scan_json_outputs_agent_envelope(self, monkeypatch, capsys):
+        state = ordeal_state.ExplorationState("pkg.mod")
+        fn = state.function("normalize")
+        fn.mined = True
+        fn.properties = [{"name": "idempotent", "universal": False}]
+        fn.property_violations = ["idempotent (87%)"]
+        fn.property_violation_details = [
+            {
+                "name": "idempotent",
+                "summary": "idempotent (87%)",
+                "confidence": 0.87,
+                "holds": 26,
+                "total": 30,
+                "counterexample": {
+                    "input": {"xs": [9, 8, 7, 6]},
+                    "output": [1.0, 0.5, 0.0],
+                    "replayed": [0.66, 0.33, 0.0],
+                },
+            }
+        ]
+        fn.scanned = True
+        fn.crash_free = True
+        fn.mutated = True
+        fn.mutation_score = 0.8
+        state.supervisor_info = {"seed": 42, "trajectory_steps": 5}
+
+        monkeypatch.setattr(ordeal_state, "explore", lambda *args, **kwargs: state)
+
+        rc = main(["scan", "pkg.mod", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 1
+        assert payload["tool"] == "scan"
+        assert payload["status"] == "findings"
+        assert payload["confidence"] == pytest.approx(state.confidence)
+        assert payload["findings"][0]["kind"] == "property"
+        assert payload["raw_details"]["state"]["supervisor_info"]["seed"] == 42
+
     # -- ordeal mine --
 
     def test_mine_single_function(self, capsys):
@@ -114,6 +162,82 @@ class TestCLI:
 
     def test_mine_bad_dotted_path(self):
         assert main(["mine", "nodot"]) == 1
+
+    def test_mine_json_outputs_agent_envelope(self, monkeypatch, capsys):
+        result = MineResult(
+            function="normalize",
+            examples=20,
+            properties=[
+                MinedProperty(
+                    "idempotent",
+                    18,
+                    20,
+                    {
+                        "input": {"xs": [9, 8, 7, 6]},
+                        "output": [1.0, 0.5, 0.0],
+                        "replayed": [0.66, 0.33, 0.0],
+                    },
+                )
+            ],
+            not_checked=["state mutation and side effects"],
+        )
+
+        import ordeal.mine as ordeal_mine
+
+        monkeypatch.setattr(ordeal_mine, "mine", lambda *args, **kwargs: result)
+
+        rc = main(["mine", "ordeal.demo.normalize", "--json", "-n", "10"])
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 0
+        assert payload["tool"] == "mine"
+        assert payload["status"] == "findings"
+        assert payload["suggested_test_file"] == "tests/test_ordeal_regressions.py"
+        assert payload["findings"][0]["summary"] == "idempotent (90%)"
+        assert payload["raw_details"]["results"][0]["function"] == "normalize"
+
+    def test_audit_json_outputs_agent_envelope(self, monkeypatch, capsys):
+        import ordeal.audit as audit_mod
+        from ordeal.audit import CoverageMeasurement, CoverageResult, ModuleAudit, Status
+
+        result = ModuleAudit(
+            module="pkg.mod",
+            mutation_score="3/4 (75%)",
+            suggestions=["L10 in normalize(): test when x < 0"],
+        )
+        result.current_coverage = CoverageMeasurement(
+            Status.VERIFIED,
+            CoverageResult(
+                percent=90.0,
+                total_statements=10,
+                missing_count=1,
+                missing_lines=frozenset({10}),
+                source="coverage.py API",
+            ),
+        )
+        result.migrated_coverage = CoverageMeasurement(
+            Status.VERIFIED,
+            CoverageResult(
+                percent=92.0,
+                total_statements=10,
+                missing_count=0,
+                missing_lines=frozenset(),
+                source="coverage.py API",
+            ),
+        )
+
+        monkeypatch.setattr(audit_mod, "audit", lambda *args, **kwargs: result)
+
+        rc = main(["audit", "pkg.mod", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 0
+        assert payload["tool"] == "audit"
+        assert payload["status"] == "findings"
+        assert payload["confidence"] == pytest.approx(1.0)
+        kinds = {item["kind"] for item in payload["findings"]}
+        assert {"coverage_gap", "mutation_gap"} <= kinds
+        assert payload["raw_details"]["modules"][0]["module"] == "pkg.mod"
 
     def test_mine_default_examples(self, capsys):
         """Default -n is 500 — just verify the flag is wired correctly."""
@@ -954,6 +1078,59 @@ verbose = false
         assert rc == 2
         err = capsys.readouterr().err
         assert "--output-json requires --perf-contract" in err
+
+    def test_mutate_json_outputs_agent_envelope(self, monkeypatch, capsys):
+        from ordeal.mutations import Mutant, MutationResult
+        import ordeal.mutations as mutations_mod
+
+        result = MutationResult(target="pkg.mod.normalize")
+        result.mutants.append(
+            Mutant(
+                operator="comparison",
+                description="== -> !=",
+                line=10,
+                col=4,
+                source_line="if x == y:",
+            )
+        )
+
+        monkeypatch.setattr(mutations_mod, "mutate", lambda *args, **kwargs: result)
+
+        rc = main(["mutate", "pkg.mod.normalize", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 0
+        assert payload["tool"] == "mutate"
+        assert payload["status"] == "findings"
+        assert payload["findings"][0]["kind"] == "mutation"
+        assert payload["raw_details"]["targets"][0]["target"] == "pkg.mod.normalize"
+
+    def test_mutate_json_blocked_when_no_tests_found(self, monkeypatch, capsys):
+        import ordeal.mutations as mutations_mod
+        from ordeal.mutations import NoTestsFoundError
+
+        def fake_mutate(*args, **kwargs):
+            raise NoTestsFoundError(
+                "no tests",
+                target="pkg.mod.normalize",
+                suggested_file="tests/test_pkg_mod.py",
+            )
+
+        monkeypatch.setattr(mutations_mod, "mutate", fake_mutate)
+        monkeypatch.setattr(
+            mutations_mod,
+            "generate_starter_tests",
+            lambda target: "def test_pkg_mod() -> None:\n    pass\n",
+        )
+
+        rc = main(["mutate", "pkg.mod.normalize", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 1
+        assert payload["tool"] == "mutate"
+        assert payload["status"] == "blocked"
+        assert payload["suggested_test_file"] == "tests/test_pkg_mod.py"
+        assert payload["raw_details"]["blockers"][0]["starter_tests"].startswith("def test_pkg_mod")
 
 
 # ============================================================================

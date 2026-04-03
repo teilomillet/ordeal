@@ -303,14 +303,18 @@ class ExplorationState:
         return "\n".join(lines)
 
     def to_json(self) -> str:
-        """Serialize to JSON for persistence.
+        """Serialize to JSON for persistence."""
+        return json.dumps(self.to_dict(), indent=2)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-friendly dict for persistence and agents.
 
         The state tree's snapshots are excluded (not JSON-serializable).
         The tree structure is preserved via ``tree.to_json()``.
         """
         from ordeal.suggest import suggest
 
-        data: dict[str, Any] = {
+        return {
             "module": self.module,
             "confidence": round(self.confidence, 4),
             "functions": {name: asdict(fs) for name, fs in self.functions.items()},
@@ -321,8 +325,8 @@ class ExplorationState:
             "skipped": self.skipped,
             "exploration_time": round(self.exploration_time, 2),
             "seed": self.supervisor_info.get("seed"),
+            "supervisor_info": self.supervisor_info,
         }
-        return json.dumps(data, indent=2)
 
     @classmethod
     def from_json(cls, data: str) -> ExplorationState:

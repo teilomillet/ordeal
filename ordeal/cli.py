@@ -750,12 +750,20 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     if explorer_cls is None:
         from ordeal.explore import Explorer as explorer_cls
 
+    if args.output_json and not args.perf_contract:
+        _stderr("--output-json requires --perf-contract\n")
+        return 2
+
     if args.perf_contract:
         suite = _benchmark_perf_contract(
             args.perf_contract,
             cwd=os.getcwd(),
             tier=getattr(args, "tier", None),
         )
+        if getattr(args, "output_json", None):
+            out_path = Path(args.output_json)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(suite.to_json() + "\n", encoding="utf-8")
         if getattr(args, "json", False):
             print(suite.to_json())
         else:
@@ -2525,6 +2533,12 @@ def main(argv: list[str] | None = None) -> int:
         "--check",
         action="store_true",
         help="Return exit code 1 when a perf-contract case exceeds a time or score-gap budget",
+    )
+    bench_p.add_argument(
+        "--output-json",
+        default=None,
+        metavar="PATH",
+        help="Write perf/quality contract results as JSON to PATH",
     )
     bench_p.add_argument(
         "--tier",

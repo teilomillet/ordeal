@@ -228,6 +228,7 @@ max_score_gap = 0.10
 ```
 
 That case fails if fast audit validation falls more than 10 percentage points behind deep validation on mutation score.
+Use `--output-json perf.json` when you want a trendable artifact for CI or nightly runs.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -237,6 +238,7 @@ That case fails if fast audit validation falls more than 10 percentage points be
 | `--metric` | `runs` | `"runs"` (runs/sec) or `"edges"` (edges/sec) |
 | `--perf-contract` | — | Run a checked-in perf/quality contract instead of scaling analysis |
 | `--check` | off | Exit with code 1 if any contract case exceeds its budget |
+| `--output-json` | — | Save perf/quality contract results as JSON |
 
 ### `ordeal explore`
 

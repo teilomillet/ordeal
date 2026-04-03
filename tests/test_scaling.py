@@ -458,6 +458,34 @@ max_score_gap = 0.10
         assert suite.failures == [case]
         assert "Performance Contract [FAIL]" in suite.summary()
 
+    def test_perf_contract_suite_json_contains_case_status_and_failures(self):
+        case = scaling.PerfContractCase(
+            spec=scaling.PerfContractSpec(
+                name="audit_demo_compare",
+                kind="audit_compare",
+                module="ordeal.demo",
+                validation_mode="fast",
+                compare_validation_mode="deep",
+                max_score_gap=0.05,
+            ),
+            seconds=[0.80, 0.85],
+            details={
+                "primary_score": 0.70,
+                "reference_score": 0.85,
+                "score_gap": 0.15,
+            },
+        )
+        suite = scaling.PerfContractSuite(cases=[case], contract_path="ordeal.perf.toml")
+
+        payload = json.loads(suite.to_json())
+
+        assert payload["passed"] is False
+        assert payload["failure_count"] == 1
+        assert payload["failures"] == ["audit_demo_compare"]
+        assert payload["cases"][0]["passed"] is False
+        assert payload["cases"][0]["score_gap"] == pytest.approx(0.15)
+        assert payload["cases"][0]["spec"]["validation_mode"] == "fast"
+
     def test_perf_contract_fails_on_audit_score_gap(self):
         case = scaling.PerfContractCase(
             spec=scaling.PerfContractSpec(

@@ -57,6 +57,7 @@ class TestCLI:
             main(["benchmark", "--help"])
         out = capsys.readouterr().out
         assert "--perf-contract PERF_CONTRACT" in out
+        assert "--output-json PATH" in out
         assert "score-gap budget" in out
 
     def test_audit_forwards_validation_mode(self, monkeypatch, capsys):
@@ -693,6 +694,9 @@ verbose = false
             def summary(self) -> str:
                 return "Performance Contract [PASS]"
 
+            def to_json(self) -> str:
+                return '{"passed": true}'
+
         def fake_benchmark_perf_contract(path, **kwargs):
             calls["path"] = path
             calls.update(kwargs)
@@ -707,12 +711,47 @@ verbose = false
         assert "Performance Contract [PASS]" in out
         assert calls["path"] == "ordeal.perf.toml"
 
+    def test_benchmark_perf_contract_writes_json(self, monkeypatch, tmp_path, capsys):
+        class _FakeSuite:
+            passed = True
+
+            def summary(self) -> str:
+                return "Performance Contract [PASS]"
+
+            def to_json(self) -> str:
+                return '{"passed": true, "case_count": 1}'
+
+        monkeypatch.setattr(
+            scaling,
+            "benchmark_perf_contract",
+            lambda *args, **kwargs: _FakeSuite(),
+        )
+
+        out_path = tmp_path / "perf.json"
+        rc = main(
+            [
+                "benchmark",
+                "--perf-contract",
+                "ordeal.perf.toml",
+                "--output-json",
+                str(out_path),
+            ]
+        )
+
+        assert rc == 0
+        assert out_path.read_text(encoding="utf-8").strip() == '{"passed": true, "case_count": 1}'
+        out = capsys.readouterr().out
+        assert "Performance Contract [PASS]" in out
+
     def test_benchmark_perf_contract_check_fails(self, monkeypatch, capsys):
         class _FakeSuite:
             passed = False
 
             def summary(self) -> str:
                 return "Performance Contract [FAIL]"
+
+            def to_json(self) -> str:
+                return '{"passed": false}'
 
         def fake(*args, **kwargs):
             return _FakeSuite()
@@ -724,6 +763,13 @@ verbose = false
         assert rc == 1
         out = capsys.readouterr().out
         assert "Performance Contract [FAIL]" in out
+
+    def test_benchmark_output_json_requires_perf_contract(self, capsys):
+        rc = main(["benchmark", "--output-json", "perf.json", "--mutate", "pkg.mod.compute"])
+
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "--output-json requires --perf-contract" in err
 
 
 # ============================================================================

@@ -1,0 +1,57 @@
+name: Nightly Perf
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-perf-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  perf-quality:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: astral-sh/setup-uv@v7
+
+      - run: uv python install ${{ matrix.python-version }}
+
+      - run: uv sync --extra dev
+
+      - name: Run broad perf and audit-quality contract
+        id: perf
+        run: |
+          mkdir -p .artifacts
+          json_path=".artifacts/perf-contract-py${{ matrix.python-version }}.json"
+          set +e
+          uv run ordeal benchmark \
+            --perf-contract ordeal.perf.toml \
+            --check \
+            --output-json "$json_path"
+          status=$?
+          if [ ! -f "$json_path" ]; then
+            printf '{\n  "passed": false,\n  "error": "nightly perf contract did not produce JSON",\n  "exit_code": %s,\n  "python_version": "%s"\n}\n' "$status" "${{ matrix.python-version }}" > "$json_path"
+          fi
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-nightly-py${{ matrix.python-version }}
+          path: .artifacts/perf-contract-py${{ matrix.python-version }}.json
+          retention-days: 30
+
+      - name: Fail if nightly perf contract failed
+        if: steps.perf.outputs.status != '0'
+        run: exit 1

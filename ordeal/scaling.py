@@ -333,6 +333,28 @@ class PerfContractSpec:
     max_examples: int = 20
     max_score_gap: float | None = None
 
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-friendly view of the contract case specification."""
+        return {
+            "name": self.name,
+            "kind": self.kind,
+            "tier": self.tier,
+            "repeats": self.repeats,
+            "max_seconds": self.max_seconds,
+            "module": self.module,
+            "target": self.target,
+            "mode": self.mode,
+            "validation_mode": self.validation_mode,
+            "compare_validation_mode": self.compare_validation_mode,
+            "workers": self.workers,
+            "preset": self.preset,
+            "test_filter": self.test_filter,
+            "filter_equivalent": self.filter_equivalent,
+            "test_dir": self.test_dir,
+            "max_examples": self.max_examples,
+            "max_score_gap": self.max_score_gap,
+        }
+
 
 @dataclass
 class PerfContractCase:
@@ -401,6 +423,21 @@ class PerfContractCase:
             f"over {len(self.seconds)} run(s), {budget}{extra_text}"
         )
 
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-friendly view of one observed contract case."""
+        return {
+            "name": self.spec.name,
+            "kind": self.spec.kind,
+            "passed": self.passed,
+            "seconds": [float(second) for second in self.seconds],
+            "median_seconds": self.median_seconds,
+            "budget_seconds": self.max_seconds,
+            "score_gap": self.score_gap,
+            "details": dict(self.details),
+            "spec": self.spec.to_dict(),
+            "summary": self.summary(),
+        }
+
 
 @dataclass
 class PerfContractSuite:
@@ -427,32 +464,21 @@ class PerfContractSuite:
             lines.append(f"  {case.summary()}")
         return "\n".join(lines)
 
-    def to_json(self) -> str:
-        """JSON-serializable results for nightly storage and regression diffing."""
-        import json
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-friendly view of the whole contract run."""
+        return {
+            "contract_path": self.contract_path,
+            "passed": self.passed,
+            "case_count": len(self.cases),
+            "failure_count": len(self.failures),
+            "failures": [case.spec.name for case in self.failures],
+            "cases": [case.to_dict() for case in self.cases],
+            "summary": self.summary(),
+        }
 
-        return json.dumps(
-            {
-                "contract_path": self.contract_path,
-                "passed": self.passed,
-                "cases": [
-                    {
-                        "name": c.spec.name,
-                        "kind": c.spec.kind,
-                        "tier": c.spec.tier,
-                        "passed": c.passed,
-                        "median_seconds": round(c.median_seconds, 4),
-                        "max_seconds": c.max_seconds,
-                        "score_gap": c.score_gap,
-                        "max_score_gap": c.spec.max_score_gap,
-                        "details": c.details,
-                        "runs": [round(s, 4) for s in c.seconds],
-                    }
-                    for c in self.cases
-                ],
-            },
-            indent=2,
-        )
+    def to_json(self) -> str:
+        """Stable JSON encoding for artifact and trend storage."""
+        return json.dumps(self.to_dict(), indent=2, sort_keys=True, default=str)
 
 
 def analyze(measurements: list[tuple[int | float, float]]) -> ScalingAnalysis:

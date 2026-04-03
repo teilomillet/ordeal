@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import hypothesis.strategies as st
+
 import tests._auto_target as target
 from ordeal.auto import _test_one_function, chaos_for, fuzz, scan_module
-from ordeal.mine import MinedProperty
 from ordeal.invariants import finite
+from ordeal.mine import MinedProperty
 
 
 class TestScanModule:

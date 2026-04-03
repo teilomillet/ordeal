@@ -18,8 +18,8 @@ from ordeal.mutations import (
     _load_cache,
     _module_source_hash,
     _save_cache,
-    validate_mined_properties,
     mutate,
+    validate_mined_properties,
 )
 
 # ============================================================================
@@ -336,8 +336,8 @@ class TestResumeInvariant:
 
     def test_validate_mined_properties_uses_precomputed_mine_result(self, monkeypatch):
         """A supplied mine result should bypass the initial mine() call."""
-        import ordeal.mutations as mutations_mod
         import ordeal.mine as mine_mod
+        import ordeal.mutations as mutations_mod
 
         fake_mine_result = SimpleNamespace(
             universal=[SimpleNamespace(name="deterministic")],

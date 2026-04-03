@@ -82,7 +82,10 @@ import types
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Literal
+from typing import TYPE_CHECKING, Callable, Literal
+
+if TYPE_CHECKING:
+    from ordeal.mine import MineResult
 
 from ordeal.faults import PatchFault
 
@@ -4756,7 +4759,7 @@ def validate_mined_properties(
             those properties (for example, inside ``ordeal.audit``).
     """
     operators = _resolve_operators(operators, preset)
-    from ordeal.mine import MineResult, mine
+    from ordeal.mine import mine
 
     module_path, func_name = target.rsplit(".", 1)
     module = importlib.import_module(module_path)

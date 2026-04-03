@@ -1584,7 +1584,8 @@ def _generate_migrated_test(
         mine_result = None if mine_results is None else mine_results.get(name)
         if mine_result is None:
             try:
-                mine_result = mine(func, max_examples=min(max_examples, MINE_EXAMPLES_FOR_GENERATED_TEST))
+                cap = min(max_examples, MINE_EXAMPLES_FOR_GENERATED_TEST)
+                mine_result = mine(func, max_examples=cap)
             except Exception as exc:
                 warnings.append(f"mining failed for {name}: {type(exc).__name__}: {exc}")
                 continue

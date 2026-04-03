@@ -541,7 +541,12 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     if args.show_generated or args.save_generated:
         # Single-module mode with generated test output
         for mod in args.modules:
-            result = audit(mod, test_dir=args.test_dir, max_examples=args.max_examples)
+            result = audit(
+                mod,
+                test_dir=args.test_dir,
+                max_examples=args.max_examples,
+                workers=args.workers,
+            )
             print(result.summary())
             if args.show_generated and result.generated_test:
                 print(f"\n  --- generated test for {mod} ---")
@@ -556,6 +561,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             args.modules,
             test_dir=args.test_dir,
             max_examples=args.max_examples,
+            workers=args.workers,
         )
         print(report)
     return 0
@@ -2041,6 +2047,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     audit_p.add_argument(
         "--max-examples", type=int, default=20, help="Examples per function (default: 20)"
+    )
+    audit_p.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Parallel workers for mutation validation (default: 1)",
     )
     audit_p.add_argument(
         "--show-generated",

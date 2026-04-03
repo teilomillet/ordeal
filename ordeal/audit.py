@@ -55,6 +55,7 @@ import math
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
@@ -1688,6 +1689,16 @@ def _verify_consistency(
         )
 
 
+def _should_validate_mined_properties(mine_result: MineResult) -> bool:
+    """Return whether mutation validation is likely to be useful.
+
+    Validation is expensive because it runs mutation tests. We only run it
+    when mining found at least one high-confidence universal property that
+    can become a concrete assertion.
+    """
+    return any(p.universal and p.total >= 5 for p in mine_result.properties)
+
+
 # ============================================================================
 # Main audit function
 # ============================================================================
@@ -1698,6 +1709,7 @@ def audit(
     *,
     test_dir: str = "tests",
     max_examples: int = 20,
+    workers: int = 1,
 ) -> ModuleAudit:
     """Audit a module: measure current tests vs ordeal-migrated tests.
 
@@ -1712,6 +1724,8 @@ def audit(
         module: Dotted module path (e.g., ``"myapp.scoring"``).
         test_dir: Directory containing existing tests.
         max_examples: Hypothesis examples per function.
+        workers: Parallel workers for mutation validation.
+            ``1`` keeps the current sequential behavior.
 
     Returns:
         A ``ModuleAudit`` with verified or explicitly-failed measurements.
@@ -1785,23 +1799,48 @@ def audit(
     # Validate mined properties against mutations using standard preset
     from ordeal.mutations import validate_mined_properties
 
-    total_killed = total_mutants = 0
+    targets: list[tuple[str, MineResult]] = []
     for name, _func in scannable:
         mine_result = mine_results.get(name)
-        if mine_result is None:
-            continue
-        target_path = f"{module}.{name}"
-        try:
-            mr = validate_mined_properties(
-                target_path,
-                max_examples=min(max_examples, 20),
-                preset="standard",
-                mine_result=mine_result,
-            )
-            total_killed += mr.killed
-            total_mutants += mr.total
-        except Exception:
-            pass
+        if mine_result is not None and _should_validate_mined_properties(mine_result):
+            targets.append((f"{module}.{name}", mine_result))
+
+    total_killed = total_mutants = 0
+    max_validation_examples = min(max_examples, 20)
+    worker_count = max(1, workers)
+
+    if worker_count == 1 or len(targets) <= 1:
+        for target_path, mine_result in targets:
+            try:
+                mr = validate_mined_properties(
+                    target_path,
+                    max_examples=max_validation_examples,
+                    preset="standard",
+                    mine_result=mine_result,
+                )
+                total_killed += mr.killed
+                total_mutants += mr.total
+            except Exception:
+                pass
+    else:
+        with ThreadPoolExecutor(max_workers=min(worker_count, len(targets))) as executor:
+            futures = [
+                executor.submit(
+                    validate_mined_properties,
+                    target_path,
+                    max_examples=max_validation_examples,
+                    preset="standard",
+                    mine_result=mine_result,
+                )
+                for target_path, mine_result in targets
+            ]
+            for future in as_completed(futures):
+                try:
+                    mr = future.result()
+                except Exception:
+                    continue
+                total_killed += mr.killed
+                total_mutants += mr.total
     if total_mutants > 0:
         pct = total_killed / total_mutants
         result.mutation_score = f"{total_killed}/{total_mutants} ({pct:.0%})"
@@ -1849,6 +1888,7 @@ def audit_report(
     *,
     test_dir: str = "tests",
     max_examples: int = 20,
+    workers: int = 1,
 ) -> str:
     """Audit multiple modules and produce a summary report.
 
@@ -1871,10 +1911,18 @@ def audit_report(
         modules: Dotted module paths to audit (e.g. ``["myapp.scoring"]``).
         test_dir: Directory containing test files (default ``"tests"``).
         max_examples: Hypothesis examples for property mining per function.
+        workers: Parallel workers for mutation validation in each module audit.
     """
     results = []
     for mod in modules:
-        results.append(audit(mod, test_dir=test_dir, max_examples=max_examples))
+        results.append(
+            audit(
+                mod,
+                test_dir=test_dir,
+                max_examples=max_examples,
+                workers=workers,
+            )
+        )
 
     lines = ["ordeal audit"]
     total_cur_tests = 0

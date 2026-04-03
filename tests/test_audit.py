@@ -516,3 +516,54 @@ class TestAuditIntegration:
 
         assert result.current_coverage.status == Status.FAILED
         assert "no test files" in (result.current_coverage.error or "")
+
+
+class TestAuditReportWorkers:
+    def test_forwards_workers_to_module_audits(self, monkeypatch):
+        calls: list[tuple[str, int]] = []
+
+        def fake_audit(
+            module: str,
+            *,
+            test_dir: str = "tests",
+            max_examples: int = 20,
+            workers: int = 1,
+        ) -> ModuleAudit:
+            calls.append((module, workers))
+            return ModuleAudit(module=module)
+
+        monkeypatch.setattr(audit_mod, "audit", fake_audit)
+
+        report = audit_mod.audit_report(
+            ["tests._auto_target", "tests._auto_target"],
+            workers=3,
+        )
+
+        assert "ordeal audit" in report
+        assert calls == [
+            ("tests._auto_target", 3),
+            ("tests._auto_target", 3),
+        ]
+
+
+class TestMutationValidationSelection:
+    def test_skips_validation_without_confident_universal_properties(self):
+        mine_result = audit_mod.MineResult(
+            function="demo.func",
+            examples=5,
+            properties=[
+                audit_mod.MinedProperty("non_universal", holds=4, total=5),
+                audit_mod.MinedProperty("tiny_sample", holds=3, total=3),
+            ],
+        )
+        assert not audit_mod._should_validate_mined_properties(mine_result)
+
+    def test_runs_validation_with_confident_universal_property(self):
+        mine_result = audit_mod.MineResult(
+            function="demo.func",
+            examples=10,
+            properties=[
+                audit_mod.MinedProperty("universal", holds=10, total=10),
+            ],
+        )
+        assert audit_mod._should_validate_mined_properties(mine_result)

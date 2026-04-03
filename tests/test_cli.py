@@ -627,11 +627,11 @@ class TestCLI:
         assert "bundle: .ordeal/findings/pkg/mod.json" in captured.out
         assert "regression: tests/test_ordeal_regressions.py" in captured.out
         assert "index: .ordeal/findings/index.json" in captured.out
-        assert "next:" in captured.out
+        assert "available:" in captured.out
         fid = bundle["findings"][0]["finding_id"]
         assert f"verify: uv run ordeal verify {fid}" in captured.out
-        assert "run: uv run pytest tests/test_ordeal_regressions.py -q" in captured.out
-        assert "after fix: uv run ordeal scan pkg.mod --save-artifacts" in captured.out
+        assert "pytest: uv run pytest tests/test_ordeal_regressions.py -q" in captured.out
+        assert "rescan: uv run ordeal scan pkg.mod --save-artifacts" in captured.out
         assert "Scan report saved:" in captured.err
         assert "Scan bundle saved:" in captured.err
         assert "Regression tests written:" in captured.err
@@ -719,7 +719,7 @@ class TestCLI:
         assert "bundle: .ordeal/findings/pkg/mod.json" in captured.out
         assert "verify:" not in captured.out
         assert "regression: not generated from current findings" in captured.out
-        assert "after fix: uv run ordeal scan pkg.mod --save-artifacts" in captured.out
+        assert "rescan: uv run ordeal scan pkg.mod --save-artifacts" in captured.out
 
     def test_scan_save_artifacts_appends_index_history(self, monkeypatch, tmp_path, capsys):
         monkeypatch.chdir(tmp_path)

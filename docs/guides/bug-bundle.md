@@ -30,10 +30,10 @@ artifacts:
   bundle: .ordeal/findings/ordeal/demo.json
   regression: tests/test_ordeal_regressions.py
   index: .ordeal/findings/index.json
-next:
-  review: .ordeal/findings/ordeal/demo.md
-  run: uv run pytest tests/test_ordeal_regressions.py -q
-  after fix: uv run ordeal scan ordeal.demo --save-artifacts
+available:
+  verify: uv run ordeal verify fnd_dcb0fc0808d3
+  pytest: uv run pytest tests/test_ordeal_regressions.py -q
+  rescan: uv run ordeal scan ordeal.demo --save-artifacts
 ```
 
 ## What each artifact is for

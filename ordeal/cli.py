@@ -3239,7 +3239,7 @@ def _print_scan_artifact_workflow(
     regression_path: Path | None,
     index_path: Path,
 ) -> None:
-    """Print the closed-loop next steps after saving scan artifacts."""
+    """Print available artifacts and commands after saving scan artifacts."""
     print("")
     print("artifacts:")
     print(f"  report: {_display_path(report_path)}")
@@ -3249,16 +3249,15 @@ def _print_scan_artifact_workflow(
     else:
         print("  regression: not generated from current findings")
     print(f"  index: {_display_path(index_path)}")
-    print("next:")
-    print(f"  review: {_display_path(report_path)}")
+    print("available:")
     if len(finding_ids) == 1 and regression_path is not None:
         verify_cmd = _shell_command("uv", "run", "ordeal", "verify", finding_ids[0])
         print(f"  verify: {verify_cmd}")
     if regression_path is not None:
         run_cmd = _shell_command("uv", "run", "pytest", _display_path(regression_path), "-q")
-        print(f"  run: {run_cmd}")
+        print(f"  pytest: {run_cmd}")
     rescan = _shell_command("uv", "run", "ordeal", "scan", module, "--save-artifacts")
-    print(f"  after fix: {rescan}")
+    print(f"  rescan: {rescan}")
 
 
 def _append_index_entry(index_path: Path, entry: dict[str, Any]) -> None:

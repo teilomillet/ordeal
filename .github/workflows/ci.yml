@@ -38,7 +38,8 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
           git commit -m "style: auto-fix lint and format with ruff"
-          git push
+          git pull --rebase origin main || true
+          git push || true
 
   test:
     runs-on: ${{ matrix.os }}

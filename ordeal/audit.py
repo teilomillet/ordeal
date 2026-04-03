@@ -549,7 +549,7 @@ class ModuleAudit:
     def _format_validation_mode(self) -> str:
         """Describe how mutation validation was performed."""
         if self.validation_mode == "deep":
-            return "deep re-mine"
+            return "deep replay + re-mine"
         return "fast replay"
 
     @property
@@ -897,49 +897,13 @@ def _is_generated_test_file(path: Path) -> bool:
 # ============================================================================
 
 
-def _measure_coverage(
+def _coverage_runtime_context(
     test_files: list[Path],
-    module_name: str,
-) -> CoverageMeasurement:
-    """Run tests and measure coverage via coverage.py or an internal tracer.
-
-    **Preferred path:** When ``coverage.py`` is available, ordeal runs
-    pytest under its tracer and reads a structured JSON report. The JSON
-    schema is stable and easy to cross-check.
-
-    **Fallback path:** When ``coverage.py`` is not installed, ordeal traces
-    the target module directly in a subprocess and computes executed/missing
-    lines itself. This keeps ``ordeal audit`` usable in a fresh environment.
-
-    **How it works:**
-
-    1. Run the preferred backend (coverage.py JSON) or fallback tracer
-    2. Parse the structured output
-    3. Cross-check: verify ``percent ≈ (stmts - missing) / stmts * 100``
-    4. On ANY failure: return ``CoverageMeasurement(status=FAILED)``
-
-    **What can go wrong (all handled explicitly):**
-
-    - pytest not installed → FAILED: "pytest not found"
-    - subprocess timeout → FAILED: "timed out after Ns"
-    - JSON file not created → FAILED: "coverage report not generated"
-    - JSON parse error → FAILED: "invalid JSON"
-    - Module not in report → FAILED: "module not found in report"
-    - Cross-check fails → FAILED: "coverage data inconsistent"
-    """
-    if not test_files:
-        return CoverageMeasurement(Status.FAILED, error="no test files provided")
-
+) -> tuple[str, dict[str, str], list[str], bool]:
+    """Build subprocess coverage context for a set of test files."""
     cwd = str(Path.cwd())
-
-    # Detect if test files are inside the project (need conftest)
-    # or outside (e.g., .ordeal/ generated files — no conftest).
-    #
-    # Why: conftest.py in the project's test/ directory may import
-    # project-specific modules that fail when run from a different context.
-    # For generated files, we bypass conftest with --override-ini.
+    generated_only = all(_is_generated_test_file(f) for f in test_files)
     in_project = any(str(f).startswith(cwd) and "/.ordeal/" not in str(f) for f in test_files)
-
     env = dict(__import__("os").environ)
     env["PYTHONPATH"] = cwd
     pytest_args = [
@@ -956,16 +920,257 @@ def _measure_coverage(
     if not in_project:
         pytest_args.extend(["--override-ini", f"confcutdir={test_files[0].parent}"])
 
+    return cwd, env, pytest_args, generated_only
+
+
+def _measure_coverage(
+    test_files: list[Path],
+    module_name: str,
+) -> CoverageMeasurement:
+    """Run tests and measure coverage via coverage.py or an internal tracer.
+
+    **Preferred path:** When ``coverage.py`` is available, ordeal runs
+    pytest under its tracer and reads a structured JSON report. The JSON
+    schema is stable and easy to cross-check.
+
+    **Fallback path:** When ``coverage.py`` is not installed, ordeal traces
+    the target module directly in a subprocess and computes executed/missing
+    lines itself. This keeps ``ordeal audit`` usable in a fresh environment.
+    """
+    if not test_files:
+        return CoverageMeasurement(Status.FAILED, error="no test files provided")
+
+    cwd, env, pytest_args, generated_only = _coverage_runtime_context(test_files)
+
+    if generated_only:
+        if importlib.util.find_spec("coverage") is not None:
+            return _measure_generated_coverage_with_coverage_py(module_name, test_files, cwd, env)
+        return _measure_generated_coverage_with_trace(module_name, test_files, cwd, env)
+
     if importlib.util.find_spec("coverage") is not None:
         return _measure_coverage_with_coverage_py(module_name, pytest_args, cwd, env)
 
     if importlib.util.find_spec("pytest_cov") is not None:
         return _measure_coverage_with_pytest_cov(module_name, pytest_args, cwd, env)
 
-    if all(_is_generated_test_file(f) for f in test_files):
-        return _measure_coverage_with_trace(module_name, pytest_args, cwd, env)
-
     return _measure_coverage_with_trace(module_name, pytest_args, cwd, env)
+
+
+def _measure_audit_coverages_with_coverage_py(
+    module_name: str,
+    current_test_files: list[Path],
+    generated_test_files: list[Path],
+) -> tuple[CoverageMeasurement, CoverageMeasurement]:
+    """Measure current and migrated coverage in one coverage.py subprocess."""
+    cwd, env, current_pytest_args, _generated_only = _coverage_runtime_context(current_test_files)
+
+    with tempfile.NamedTemporaryFile(
+        suffix=".json",
+        prefix="ordeal_dual_cov_",
+        delete=False,
+    ) as tmp:
+        json_path = Path(tmp.name)
+
+    script = """
+import importlib.util
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+import coverage
+import pytest
+
+module_name = sys.argv[1]
+json_path = sys.argv[2]
+current_count = int(sys.argv[3])
+current_args = sys.argv[4 : 4 + current_count]
+generated_files = sys.argv[4 + current_count :]
+
+def run_pytest_suite(pytest_args):
+    payload = {"return_code": 0, "coverage": None, "error": None}
+    cov_json = Path(tempfile.mkstemp(prefix="ordeal_cov_raw_", suffix=".json")[1])
+    cov = coverage.Coverage(source=[module_name], config_file=False, data_file=None)
+    try:
+        cov.start()
+        payload["return_code"] = int(pytest.main(pytest_args))
+    except Exception as exc:
+        payload["return_code"] = 2
+        payload["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        try:
+            cov.stop()
+        except Exception:
+            pass
+
+    try:
+        cov.json_report(outfile=str(cov_json))
+        payload["coverage"] = json.loads(cov_json.read_text(encoding="utf-8"))
+    except Exception as exc:
+        payload["error"] = payload["error"] or f"coverage JSON failed: {type(exc).__name__}: {exc}"
+    finally:
+        cov_json.unlink(missing_ok=True)
+    return payload
+
+def run_generated_suite(test_files):
+    payload = {"return_code": 0, "coverage": None, "error": None}
+    cov_json = Path(tempfile.mkstemp(prefix="ordeal_cov_raw_", suffix=".json")[1])
+    cov = coverage.Coverage(source=[module_name], config_file=False, data_file=None)
+    try:
+        cov.start()
+        for index, test_path in enumerate(test_files):
+            spec = importlib.util.spec_from_file_location(f"_ordeal_generated_{index}", test_path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"cannot import generated test file: {test_path}")
+            test_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(test_module)
+            for name in sorted(dir(test_module)):
+                if not name.startswith("test_"):
+                    continue
+                test_fn = getattr(test_module, name)
+                if callable(test_fn):
+                    test_fn()
+    except Exception as exc:
+        payload["return_code"] = 1
+        payload["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        try:
+            cov.stop()
+        except Exception:
+            pass
+
+    try:
+        cov.json_report(outfile=str(cov_json))
+        payload["coverage"] = json.loads(cov_json.read_text(encoding="utf-8"))
+    except Exception as exc:
+        payload["error"] = payload["error"] or f"coverage JSON failed: {type(exc).__name__}: {exc}"
+    finally:
+        cov_json.unlink(missing_ok=True)
+    return payload
+
+payload = {
+    "current": run_pytest_suite(current_args),
+    "generated": run_generated_suite(generated_files),
+}
+Path(json_path).write_text(json.dumps(payload), encoding="utf-8")
+"""
+
+    with tempfile.NamedTemporaryFile(
+        suffix=".py",
+        prefix="ordeal_dual_cov_",
+        delete=False,
+        mode="w",
+        encoding="utf-8",
+    ) as script_file:
+        script_file.write(script)
+        script_path = Path(script_file.name)
+
+    cmd = [
+        sys.executable,
+        str(script_path),
+        module_name,
+        str(json_path),
+        str(len(current_pytest_args)),
+        *current_pytest_args,
+        *[str(f) for f in generated_test_files],
+    ]
+
+    def _failed(error: str) -> tuple[CoverageMeasurement, CoverageMeasurement]:
+        failed = CoverageMeasurement(Status.FAILED, error=error)
+        return failed, failed
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+            cwd=cwd,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        json_path.unlink(missing_ok=True)
+        script_path.unlink(missing_ok=True)
+        return _failed(f"timed out after {SUBPROCESS_TIMEOUT_SECONDS}s")
+    except FileNotFoundError:
+        json_path.unlink(missing_ok=True)
+        script_path.unlink(missing_ok=True)
+        return _failed("python not found")
+
+    try:
+        raw = json.loads(json_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        stderr_hint = (result.stderr or "")[:200]
+        return _failed(f"coverage report not generated. stderr: {stderr_hint}")
+    except json.JSONDecodeError as exc:
+        stderr_hint = (result.stderr or "")[:200]
+        return _failed(
+            f"invalid JSON: {exc}"
+            + (f" (subprocess stderr: {stderr_hint})" if stderr_hint else "")
+        )
+    finally:
+        json_path.unlink(missing_ok=True)
+        script_path.unlink(missing_ok=True)
+
+    def _measurement_from_payload(
+        payload: object,
+        *,
+        source: str,
+        error_prefix: str,
+    ) -> CoverageMeasurement:
+        if not isinstance(payload, dict):
+            return CoverageMeasurement(Status.FAILED, error=f"{error_prefix}: missing payload")
+        if payload.get("error"):
+            return CoverageMeasurement(Status.FAILED, error=str(payload["error"]))
+        return_code = int(payload.get("return_code", 0))
+        if return_code not in (0, 1):
+            return CoverageMeasurement(
+                Status.FAILED,
+                error=f"{error_prefix}: runner exited with code {return_code}",
+            )
+        coverage_json = payload.get("coverage")
+        if not isinstance(coverage_json, dict):
+            return CoverageMeasurement(Status.FAILED, error=f"{error_prefix}: coverage missing")
+        return _coverage_measurement_from_json(coverage_json, module_name, source=source)
+
+    current = _measurement_from_payload(
+        raw.get("current"),
+        source="coverage.py API",
+        error_prefix="current coverage",
+    )
+    migrated = _measurement_from_payload(
+        raw.get("generated"),
+        source="coverage.py API direct",
+        error_prefix="generated coverage",
+    )
+    return current, migrated
+
+
+def _measure_audit_coverages(
+    current_test_files: list[Path],
+    generated_test_files: list[Path],
+    module_name: str,
+) -> tuple[CoverageMeasurement, CoverageMeasurement]:
+    """Measure current and migrated audit coverage with shared fast paths."""
+    if (
+        current_test_files
+        and generated_test_files
+        and importlib.util.find_spec("coverage") is not None
+        and all(_is_generated_test_file(f) for f in generated_test_files)
+    ):
+        return _measure_audit_coverages_with_coverage_py(
+            module_name,
+            current_test_files,
+            generated_test_files,
+        )
+
+    current = (
+        _measure_coverage(current_test_files, module_name)
+        if current_test_files
+        else CoverageMeasurement(Status.FAILED, error="no test files found")
+    )
+    migrated = _measure_coverage(generated_test_files, module_name)
+    return current, migrated
 
 
 def _measure_coverage_with_coverage_py(
@@ -1489,6 +1694,149 @@ Path(json_path).write_text(json.dumps(payload), encoding="utf-8")
     return _coverage_measurement_from_trace_payload(raw)
 
 
+def _measure_generated_coverage_with_coverage_py(
+    module_name: str,
+    test_files: list[Path],
+    cwd: str,
+    env: dict[str, str],
+) -> CoverageMeasurement:
+    """Measure generated ordeal tests directly under the ``coverage.py`` API."""
+    with tempfile.NamedTemporaryFile(
+        suffix=".json",
+        prefix="ordeal_direct_cov_",
+        delete=False,
+    ) as tmp:
+        json_path = Path(tmp.name)
+
+    script = """
+import importlib
+import importlib.util
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+import coverage
+
+module_name = sys.argv[1]
+json_path = sys.argv[2]
+test_files = sys.argv[3:]
+
+payload = {"return_code": 0, "coverage": None, "error": None}
+cov_json = Path(tempfile.mkstemp(prefix="ordeal_cov_raw_", suffix=".json")[1])
+cov = coverage.Coverage(source=[module_name], config_file=False, data_file=None)
+
+try:
+    cov.start()
+    for index, test_path in enumerate(test_files):
+        spec = importlib.util.spec_from_file_location(f"_ordeal_generated_{index}", test_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot import generated test file: {test_path}")
+        test_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(test_module)
+        for name in sorted(dir(test_module)):
+            if not name.startswith("test_"):
+                continue
+            test_fn = getattr(test_module, name)
+            if callable(test_fn):
+                test_fn()
+except Exception as exc:
+    payload["return_code"] = 1
+    payload["error"] = f"{type(exc).__name__}: {exc}"
+finally:
+    try:
+        cov.stop()
+    except Exception:
+        pass
+
+try:
+    cov.json_report(outfile=str(cov_json))
+    payload["coverage"] = json.loads(cov_json.read_text(encoding="utf-8"))
+except Exception as exc:
+    payload["error"] = payload["error"] or f"coverage JSON failed: {type(exc).__name__}: {exc}"
+finally:
+    cov_json.unlink(missing_ok=True)
+
+Path(json_path).write_text(json.dumps(payload), encoding="utf-8")
+"""
+
+    with tempfile.NamedTemporaryFile(
+        suffix=".py",
+        prefix="ordeal_direct_cov_",
+        delete=False,
+        mode="w",
+        encoding="utf-8",
+    ) as script_file:
+        script_file.write(script)
+        script_path = Path(script_file.name)
+
+    cmd = [
+        sys.executable,
+        str(script_path),
+        module_name,
+        str(json_path),
+        *[str(f) for f in test_files],
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+            cwd=cwd,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        json_path.unlink(missing_ok=True)
+        script_path.unlink(missing_ok=True)
+        return CoverageMeasurement(
+            Status.FAILED,
+            error=f"timed out after {SUBPROCESS_TIMEOUT_SECONDS}s",
+        )
+    except FileNotFoundError:
+        json_path.unlink(missing_ok=True)
+        script_path.unlink(missing_ok=True)
+        return CoverageMeasurement(Status.FAILED, error="python not found")
+
+    try:
+        raw = json.loads(json_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        stderr_hint = (result.stderr or "")[:200]
+        return CoverageMeasurement(
+            Status.FAILED,
+            error=f"coverage report not generated. stderr: {stderr_hint}",
+        )
+    except json.JSONDecodeError as exc:
+        stderr_hint = (result.stderr or "")[:200]
+        return CoverageMeasurement(
+            Status.FAILED,
+            error=f"invalid JSON: {exc}"
+            + (f" (subprocess stderr: {stderr_hint})" if stderr_hint else ""),
+        )
+    finally:
+        json_path.unlink(missing_ok=True)
+        script_path.unlink(missing_ok=True)
+
+    if raw.get("error"):
+        return CoverageMeasurement(Status.FAILED, error=str(raw["error"]))
+    return_code = int(raw.get("return_code", 0))
+    if return_code not in (0, 1):
+        return CoverageMeasurement(
+            Status.FAILED,
+            error=f"generated coverage runner exited with code {return_code}",
+        )
+    coverage_json = raw.get("coverage")
+    if not isinstance(coverage_json, dict):
+        return CoverageMeasurement(Status.FAILED, error="coverage report missing payload")
+
+    return _coverage_measurement_from_json(
+        coverage_json,
+        module_name,
+        source="coverage.py API direct",
+    )
+
+
 def _coverage_measurement_from_json(
     raw: dict[str, object],
     module_name: str,
@@ -1987,7 +2335,7 @@ def audit(
         workers: Parallel workers for mutation validation.
             ``1`` keeps the current sequential behavior.
         validation_mode: ``"fast"`` replays mined inputs against mutants.
-            ``"deep"`` re-mines each mutant for maximum search depth.
+            ``"deep"`` replays mined inputs, then re-mines each mutant.
 
     Returns:
         A ``ModuleAudit`` with verified or explicitly-failed measurements.
@@ -2027,18 +2375,17 @@ def audit(
         if err:
             result.warnings.append(err)
 
-    if test_files:
-        result.current_coverage = _measure_coverage(test_files, module)
-    else:
-        result.current_coverage = CoverageMeasurement(
-            Status.FAILED,
-            error="no test files found",
-        )
-
     # -- 2. Generate migrated test --
     try:
         mod = _resolve_module(module)
     except ImportError as exc:
+        if test_files:
+            result.current_coverage = _measure_coverage(test_files, module)
+        else:
+            result.current_coverage = CoverageMeasurement(
+                Status.FAILED,
+                error="no test files found",
+            )
         result.warnings.append(f"cannot import {module}: {exc}")
         return result
 
@@ -2133,7 +2480,11 @@ def audit(
     out_path.parent.mkdir(exist_ok=True)
     out_path.write_text(generated, encoding="utf-8")
 
-    result.migrated_coverage = _measure_coverage([out_path], module)
+    result.current_coverage, result.migrated_coverage = _measure_audit_coverages(
+        test_files,
+        [out_path],
+        module,
+    )
 
     # -- 4. Suggest tests to close the gap --
     result.suggestions = _suggest_tests(
@@ -2200,7 +2551,7 @@ def audit_report(
         test_dir: Directory containing test files (default ``"tests"``).
         max_examples: Hypothesis examples for property mining per function.
         workers: Parallel workers for mutation validation in each module audit.
-        validation_mode: ``"fast"`` replay or ``"deep"`` re-mining.
+        validation_mode: ``"fast"`` replay or ``"deep"`` replay + re-mining.
     """
     validation_mode = _normalize_validation_mode(validation_mode)
     results = []

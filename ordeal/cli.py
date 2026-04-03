@@ -2403,7 +2403,7 @@ def main(argv: list[str] | None = None) -> int:
             "Compare your current tests with ordeal-generated tests.\n\n"
             "Validation modes:\n"
             "  fast  replay mined inputs against mutants (default, faster)\n"
-            "  deep  re-mine each mutant for maximum search depth"
+            "  deep  replay mined inputs, then re-mine mutants for extra search depth"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -2424,7 +2424,7 @@ def main(argv: list[str] | None = None) -> int:
         "--validation-mode",
         choices=("fast", "deep"),
         default="fast",
-        help="Mutation validation mode: fast replay (default) or deep re-mine",
+        help="Mutation validation mode: fast replay (default) or deep replay + re-mine",
     )
     audit_p.add_argument(
         "--show-generated",

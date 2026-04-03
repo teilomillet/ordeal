@@ -108,7 +108,7 @@ ordeal audit
 
 Every number is `[verified]` (measured and cross-checked for consistency) or `FAILED: reason`. When `pytest-cov` is installed, ordeal uses its JSON report; otherwise it falls back to an internal tracer. Mined properties are grouped by kind. The mutation score shows how many code mutations the mined properties catch — if it's below 100%, the surviving mutants reveal property gaps.
 
-`--validation-mode fast` replays mined inputs against each mutant and is the default because it is much faster. `--validation-mode deep` re-runs `mine()` on each mutant, which is slower but keeps the broader exploratory search.
+`--validation-mode fast` replays mined inputs against each mutant and is the default because it is much faster. `--validation-mode deep` keeps that replay check and then re-runs `mine()` on each mutant, which is slower but keeps the broader exploratory search.
 
 The "migrated" column shows what a real ordeal test file looks like: `fuzz()` for crash safety plus explicitly mined properties (bounds, determinism, type checks). It generates the test file a developer would write after adopting ordeal.
 
@@ -124,7 +124,7 @@ ordeal audit myapp.scoring --save-generated test_migrated.py  # save to file
 | `modules` | required | Module paths to audit (positional, one or more) |
 | `--test-dir`, `-t` | `tests` | Directory containing existing tests |
 | `--max-examples` | `20` | Hypothesis examples per function |
-| `--validation-mode` | `fast` | `fast` replay or `deep` re-mine for mutation validation |
+| `--validation-mode` | `fast` | `fast` replay or `deep` replay + re-mine for mutation validation |
 | `--show-generated` | off | Print the generated test file |
 | `--save-generated` | — | Save generated test to this path |
 

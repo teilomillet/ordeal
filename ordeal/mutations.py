@@ -85,7 +85,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Literal
 
 if TYPE_CHECKING:
-    from ordeal.mine import MineResult
+    from ordeal.mine import MineResult, MinedProperty
 
 from ordeal.faults import PatchFault
 
@@ -4772,7 +4772,7 @@ def validate_mined_properties(
             function. Reusing it avoids re-mining when a caller already has
             those properties (for example, inside ``ordeal.audit``).
         validation_mode: ``"fast"`` replays mined inputs against mutants.
-            ``"deep"`` re-runs ``mine()`` on each mutant for maximum search depth.
+            ``"deep"`` replays mined inputs, then re-runs ``mine()`` on each mutant.
     """
     operators = _resolve_operators(operators, preset)
     validation_mode = _normalize_validation_mode(validation_mode)
@@ -4825,7 +4825,7 @@ def validate_mined_properties(
     def _evaluate_properties_on_samples(
         current_func: Callable,
         sample_inputs: list[dict[str, object]],
-    ) -> list:
+    ) -> list["MinedProperty"]:
         from ordeal.mine import (
             _check_associative,
             _check_bijective,
@@ -4888,21 +4888,36 @@ def validate_mined_properties(
         all_props.extend(_check_linear_relationship(replayed_inputs, outputs))
         return [prop for prop in all_props if prop.total > 0]
 
-    # Build a test function from the mined properties
-    def mined_test() -> None:
-        current_func = getattr(importlib.import_module(module_path), func_name)
-        if validation_mode == "deep":
-            props = mine(current_func, max_examples=max(20, max_examples // 5)).properties
-        else:
-            sample_inputs = _sample_inputs_for_validation(current_func, original_mine)
-            if sample_inputs:
-                props = _evaluate_properties_on_samples(current_func, sample_inputs)
-            else:
-                props = mine(current_func, max_examples=max(20, max_examples // 5)).properties
+    def _assert_original_properties_hold(props: list["MinedProperty"]) -> None:
         for original_prop in universal:
             match = next((p for p in props if p.name == original_prop.name), None)
             if match is None or not match.universal:
                 raise AssertionError(f"Property {original_prop.name!r} no longer holds on mutant")
+
+    # Build a test function from the mined properties
+    def mined_test() -> None:
+        current_func = getattr(importlib.import_module(module_path), func_name)
+        sample_inputs = _sample_inputs_for_validation(current_func, original_mine)
+        if sample_inputs:
+            _assert_original_properties_hold(
+                _evaluate_properties_on_samples(current_func, sample_inputs)
+            )
+        elif validation_mode == "fast":
+            _assert_original_properties_hold(
+                mine(current_func, max_examples=max(max_examples, 20)).properties
+            )
+
+        if validation_mode == "deep":
+            original_examples = getattr(original_mine, "examples", 0)
+            deep_examples = max(
+                max_examples,
+                original_examples,
+                len(sample_inputs),
+                20,
+            )
+            _assert_original_properties_hold(
+                mine(current_func, max_examples=deep_examples).properties
+            )
 
     return mutate_function_and_test(target, mined_test, operators)
 

@@ -37,6 +37,28 @@ compare_validation_mode = "deep"
 max_score_gap = 0.10
 
 [[cases]]
+name = "audit_suggest_fast_vs_deep"
+kind = "audit_compare"
+module = "ordeal.suggest"
+repeats = 1
+max_examples = 10
+workers = 1
+validation_mode = "fast"
+compare_validation_mode = "deep"
+max_score_gap = 0.05
+
+[[cases]]
+name = "audit_quickcheck_fast_vs_deep"
+kind = "audit_compare"
+module = "ordeal.quickcheck"
+repeats = 1
+max_examples = 10
+workers = 1
+validation_mode = "fast"
+compare_validation_mode = "deep"
+max_score_gap = 0.10
+
+[[cases]]
 name = "mutate_tiny_add"
 kind = "mutate"
 target = "tests._mutation_bench_target.tiny_add"

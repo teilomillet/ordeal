@@ -409,14 +409,17 @@ class TestResumeInvariant:
             collected_inputs=[{"a": 1, "b": 2}],
         )
 
-        calls: dict[str, int] = {"mine": 0, "test_fn": 0}
+        calls: dict[str, object] = {"mine": 0, "test_fn": 0, "budgets": []}
 
         def fake_mine(*args, **kwargs):
-            calls["mine"] += 1
+            calls["mine"] = int(calls["mine"]) + 1
+            budgets = calls["budgets"]
+            assert isinstance(budgets, list)
+            budgets.append(kwargs["max_examples"])
             return fake_mine_result
 
         def fake_mutate(target, test_fn, operators):
-            calls["test_fn"] += 1
+            calls["test_fn"] = int(calls["test_fn"]) + 1
             test_fn()
             return MutationResult(target=target, operators_used=operators)
 
@@ -425,12 +428,18 @@ class TestResumeInvariant:
 
         result = validate_mined_properties(
             "tests._mutation_target.add",
+            max_examples=50,
             operators=["arithmetic"],
             mine_result=fake_mine_result,
             validation_mode="deep",
         )
 
-        assert calls == {"mine": 1, "test_fn": 1}
+        assert calls["mine"] == 1
+        assert calls["test_fn"] == 1
+        budgets = calls["budgets"]
+        assert isinstance(budgets, list)
+        assert len(budgets) == 1
+        assert budgets[0] >= 50
         assert result.target == "tests._mutation_target.add"
 
 

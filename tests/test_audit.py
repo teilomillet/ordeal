@@ -211,18 +211,94 @@ class TestCoverageBackendSelection:
         result = audit_mod._measure_coverage([Path("tests/test_demo.py")], "ordeal.demo")
         assert result is sentinel
 
+    def test_generated_files_use_direct_coverage_runner_when_available(self, monkeypatch):
+        sentinel = CoverageMeasurement(Status.FAILED, error="direct coverage backend used")
+
+        def fake_find_spec(name: str):
+            if name == "coverage":
+                return object()
+            return None
+
+        monkeypatch.setattr(audit_mod.importlib.util, "find_spec", fake_find_spec)
+        monkeypatch.setattr(
+            audit_mod,
+            "_measure_generated_coverage_with_coverage_py",
+            lambda *args: sentinel,
+        )
+        monkeypatch.setattr(
+            audit_mod,
+            "_measure_coverage_with_coverage_py",
+            lambda *args: pytest.fail("generated coverage should bypass pytest coverage runner"),
+        )
+
+        result = audit_mod._measure_coverage([Path(".ordeal/test_generated.py")], "ordeal.demo")
+        assert result is sentinel
+
     def test_generated_relative_path_uses_trace_fallback_without_coverage(self, monkeypatch):
-        sentinel = CoverageMeasurement(Status.FAILED, error="trace backend used")
+        sentinel = CoverageMeasurement(Status.FAILED, error="direct trace backend used")
 
         monkeypatch.setattr(audit_mod.importlib.util, "find_spec", lambda _name: None)
         monkeypatch.setattr(
             audit_mod,
-            "_measure_coverage_with_trace",
+            "_measure_generated_coverage_with_trace",
             lambda *args: sentinel,
         )
 
         result = audit_mod._measure_coverage([Path(".ordeal/test_generated.py")], "ordeal.demo")
         assert result is sentinel
+
+    def test_audit_coverages_share_single_coverage_runner_when_available(self, monkeypatch):
+        current = CoverageMeasurement(Status.VERIFIED)
+        migrated = CoverageMeasurement(Status.FAILED, error="generated")
+
+        def fake_find_spec(name: str):
+            if name == "coverage":
+                return object()
+            return None
+
+        monkeypatch.setattr(audit_mod.importlib.util, "find_spec", fake_find_spec)
+        monkeypatch.setattr(
+            audit_mod,
+            "_measure_audit_coverages_with_coverage_py",
+            lambda *args: (current, migrated),
+        )
+        monkeypatch.setattr(
+            audit_mod,
+            "_measure_coverage",
+            lambda *args: pytest.fail("shared audit coverage runner should be used"),
+        )
+
+        result = audit_mod._measure_audit_coverages(
+            [Path("tests/test_demo.py")],
+            [Path(".ordeal/test_demo_migrated.py")],
+            "ordeal.demo",
+        )
+
+        assert result == (current, migrated)
+
+    def test_audit_coverages_fall_back_to_individual_measurements(self, monkeypatch):
+        calls: list[tuple[list[Path], str]] = []
+
+        monkeypatch.setattr(audit_mod.importlib.util, "find_spec", lambda _name: None)
+
+        def fake_measure(test_files: list[Path], module: str) -> CoverageMeasurement:
+            calls.append((test_files, module))
+            return CoverageMeasurement(Status.FAILED, error=str(test_files[0]))
+
+        monkeypatch.setattr(audit_mod, "_measure_coverage", fake_measure)
+
+        current, migrated = audit_mod._measure_audit_coverages(
+            [Path("tests/test_demo.py")],
+            [Path(".ordeal/test_demo_migrated.py")],
+            "ordeal.demo",
+        )
+
+        assert calls == [
+            ([Path("tests/test_demo.py")], "ordeal.demo"),
+            ([Path(".ordeal/test_demo_migrated.py")], "ordeal.demo"),
+        ]
+        assert "tests/test_demo.py" in (current.error or "")
+        assert ".ordeal/test_demo_migrated.py" in (migrated.error or "")
 
 
 # ============================================================================
@@ -546,7 +622,7 @@ class TestModuleAuditSummaryValidation:
 
         summary = result.summary()
 
-        assert "validation: deep re-mine" in summary
+        assert "validation: deep replay + re-mine" in summary
 
 
 class TestAuditReportWorkers:

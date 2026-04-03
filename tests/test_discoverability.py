@@ -156,6 +156,7 @@ def test_accessing_lazy_exports_loads_modules_on_demand():
 # ============================================================================
 
 _EXPECTED_CATALOG_SECTIONS = [
+    "cli",
     "faults",
     "invariants",
     "assertions",

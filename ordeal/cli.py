@@ -189,12 +189,11 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
         print(f"  {key} ({len(entries)}) — {first_doc}")
         print(f"    {names}")
 
-    parser = _build_parser()
-    command_summaries = _iter_command_summaries(parser)
-    if command_summaries:
+    command_entries = c.get("cli", [])
+    if command_entries:
         print("\nCLI commands:")
-        for command, help_text in command_summaries:
-            print(f"  {command:<10} {help_text}")
+        for entry in command_entries:
+            print(f"  {entry['name']:<10} {entry.get('doc', '')}")
     print("\nRun 'ordeal --help' for the full live CLI surface.")
     print("Run 'ordeal <command> --help' for command-specific options.")
     print("Run 'ordeal catalog --detail' for signatures and docs.")
@@ -1134,6 +1133,8 @@ def _cmd_init(args: argparse.Namespace) -> int:
     dry_run: bool = args.dry_run
     ci: bool = args.ci
     ci_name: str = args.ci_name
+    install_skill: bool = args.install_skill
+    close_gaps: bool = args.close_gaps
 
     results = init_project(target=target, output_dir=output_dir, dry_run=dry_run)
 
@@ -1159,7 +1160,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         ci_content = _generate_ci_workflow(pkg)
 
     # --- Install AI skill ---
-    skill_path = _install_skill(dry_run=dry_run)
+    skill_path = _install_skill(dry_run=dry_run) if install_skill else None
 
     if dry_run:
         _stderr(f"\nordeal init — DRY RUN for {pkg}\n\n")
@@ -1234,13 +1235,16 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
     mutation_score = ""
     for round_num in range(3):
-        mp = _run_ordeal(
-            ["mutate", *mut_targets, "-p", "essential", "--generate-stubs", ".ordeal_stubs_tmp.py"]
-        )
+        mutate_argv = ["mutate", *mut_targets, "-p", "essential"]
+        if close_gaps:
+            mutate_argv.extend(["--generate-stubs", ".ordeal_stubs_tmp.py"])
+        mp = _run_ordeal(mutate_argv)
         for line in mp.stdout.splitlines():
             if line.startswith("Score:"):
                 mutation_score = line.strip()
                 break
+        if not close_gaps:
+            break
         stubs_path = Path(".ordeal_stubs_tmp.py")
         if "(100%)" in mutation_score or not stubs_path.exists():
             stubs_path.unlink(missing_ok=True)
@@ -1364,6 +1368,8 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
     if mutation_score and "0/0" not in mutation_score:
         _stderr(f"  Mutations:  {mutation_score.removeprefix('Score: ')}\n")
+        if not close_gaps:
+            _stderr("  Gaps:       report-only (use --close-gaps to append suggested stubs)\n")
 
     if explore_summary:
         _stderr(f"  Explored:   {explore_summary}\n")
@@ -1397,7 +1403,9 @@ def _cmd_init(args: argparse.Namespace) -> int:
         "properties_discovered": unique_props,
         "tests_pass": tests_pass,
         "mutation_score": mutation_score.removeprefix("Score: ") if mutation_score else None,
+        "close_gaps": close_gaps,
         "ci_workflow": ci_path,
+        "install_skill": install_skill,
         "skill": skill_path,
         "files": [r["path"] for r in generated]
         + (["ordeal.toml"] if Path("ordeal.toml").exists() else [])
@@ -3942,6 +3950,16 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help="Workflow filename (default: ordeal → .github/workflows/ordeal.yml)",
     )
+    init_p.add_argument(
+        "--install-skill",
+        action="store_true",
+        help="Also install the bundled AI-agent skill into .claude/skills/ordeal/",
+    )
+    init_p.add_argument(
+        "--close-gaps",
+        action="store_true",
+        help="Append suggested mutation-gap stubs into a generated test file",
+    )
 
     # -- ordeal mutate --
     mutate_p = sub.add_parser(
@@ -4033,17 +4051,72 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _iter_command_summaries(parser: argparse.ArgumentParser) -> list[tuple[str, str]]:
-    """Return ``(command, help)`` pairs from the live parser."""
+def _catalog_argument(action: argparse.Action) -> dict[str, Any]:
+    """Convert one argparse action into a structured CLI-argument entry."""
+    positional = not bool(action.option_strings)
+    nargs = action.nargs
+    required = bool(getattr(action, "required", False))
+    if positional:
+        required = nargs not in ("?", "*")
+
+    kind = "positional" if positional else "option"
+    if isinstance(
+        action,
+        (
+            argparse._StoreTrueAction,
+            argparse._StoreFalseAction,
+            argparse._CountAction,
+        ),
+    ):
+        kind = "flag"
+
+    entry: dict[str, Any] = {
+        "name": action.dest,
+        "kind": kind,
+        "required": required,
+        "help": action.help or "",
+    }
+    if action.option_strings:
+        entry["flags"] = list(action.option_strings)
+    if nargs is not None:
+        entry["nargs"] = nargs
+    if action.metavar is not None:
+        entry["metavar"] = action.metavar
+    if action.default not in (None, argparse.SUPPRESS):
+        entry["default"] = action.default
+    if action.choices is not None and not isinstance(action.choices, dict):
+        entry["choices"] = list(action.choices)
+    return entry
+
+
+def command_catalog() -> list[dict[str, Any]]:
+    """Return a structured catalog of CLI commands derived from argparse."""
+    parser = _build_parser()
     for action in parser._actions:
-        if isinstance(action, argparse._SubParsersAction):
-            return sorted(
-                (
-                    choice.dest,
-                    choice.help or "",
-                )
-                for choice in action._choices_actions
+        if not isinstance(action, argparse._SubParsersAction):
+            continue
+        choice_help = {choice.dest: choice.help or "" for choice in action._choices_actions}
+        entries: list[dict[str, Any]] = []
+        for name, subparser in sorted(action.choices.items()):
+            arguments = [
+                _catalog_argument(sub_action)
+                for sub_action in subparser._actions
+                if not isinstance(sub_action, (argparse._HelpAction, argparse._SubParsersAction))
+            ]
+            usage = subparser.format_usage().strip()
+            if usage.startswith("usage: "):
+                usage = usage.removeprefix("usage: ")
+            entries.append(
+                {
+                    "name": name,
+                    "qualname": f"ordeal.cli.{name}",
+                    "doc": choice_help.get(name, ""),
+                    "usage": usage,
+                    "description": subparser.description or "",
+                    "arguments": arguments,
+                }
             )
+        return entries
     return []
 
 

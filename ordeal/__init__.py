@@ -140,7 +140,7 @@ def catalog() -> dict[str, list]:
     """Discover all ordeal capabilities via runtime introspection.
 
     Returns a dict with one key per subsystem — each value is a list of
-    dicts describing the available items.  Keys: ``chaos``, ``faults``,
+    dicts describing the available items.  Keys: ``cli``, ``chaos``, ``faults``,
     ``invariants``, ``assertions``, ``strategies``, ``mutations``,
     ``integrations``, ``mining``, ``audit``, ``auto``, ``metamorphic``,
     ``diff``, ``scaling``, ``exploration``, ``trace``, ``supervisor``,
@@ -159,12 +159,14 @@ def catalog() -> dict[str, list]:
                 print(f"  {item['qualname']}  -- {item['doc']}")
     """
     from ordeal.assertions import catalog as _assertions_catalog
+    from ordeal.cli import command_catalog as _cli_catalog
     from ordeal.faults import catalog as _faults_catalog
     from ordeal.invariants import catalog as _invariants_catalog
     from ordeal.mutations import catalog as _mutations_catalog
     from ordeal.strategies import catalog as _strategies_catalog
 
     result = {
+        "cli": _cli_catalog(),
         "faults": _faults_catalog(),
         "invariants": _invariants_catalog(),
         "assertions": _assertions_catalog(),

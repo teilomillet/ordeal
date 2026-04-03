@@ -14,6 +14,7 @@ class TestTopLevelCatalog:
     def test_all_categories_present(self):
         c = catalog()
         expected = {
+            "cli",
             "chaos",
             "faults",
             "invariants",
@@ -51,6 +52,19 @@ class TestTopLevelCatalog:
             names == {"ChaosTest", "RuleTimeoutError", "chaos_test"},
             "chaos catalog is derived from live runtime entries",
         )
+
+    def test_cli_category_is_runtime_discoverable(self):
+        c = catalog()
+        names = {entry["name"] for entry in c["cli"]}
+        always("scan" in names, "cli catalog includes scan")
+        always("mutate" in names, "cli catalog includes mutate")
+
+    def test_cli_entries_include_structured_arguments(self):
+        c = catalog()
+        scan = next(entry for entry in c["cli"] if entry["name"] == "scan")
+        arg_names = {arg["name"] for arg in scan["arguments"]}
+        always("target" in arg_names, "scan catalog includes target positional")
+        always("seed" in arg_names, "scan catalog includes seed option")
 
 
 class TestFaultsCatalog:

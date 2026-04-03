@@ -176,9 +176,9 @@ class TestCLI:
         out = capsys.readouterr().out
         assert "Run 'ordeal --help' for the full live CLI surface." in out
         assert "Run 'ordeal <command> --help' for command-specific options." in out
-        for command, help_text in cli._iter_command_summaries(cli._build_parser()):
-            assert command in out
-            assert help_text in out
+        for entry in cli.command_catalog():
+            assert entry["name"] in out
+            assert entry["doc"] in out
 
     def test_explore_missing_config(self):
         assert main(["explore", "--config", "/nonexistent.toml"]) == 1
@@ -390,6 +390,13 @@ class TestCLI:
         assert "stable `finding_id`" in out
         assert "--index PATH" in out
         assert ".ordeal/findings/index.json" in out
+
+    def test_init_help_mentions_opt_in_flags(self, capsys):
+        with pytest.raises(SystemExit):
+            main(["init", "--help"])
+        out = capsys.readouterr().out
+        assert "--install-skill" in out
+        assert "--close-gaps" in out
 
     def test_scan_suppresses_inner_noise_and_formats_summary(self, monkeypatch, capsys):
         class _FakeTree:
@@ -876,6 +883,143 @@ class TestCLI:
         artifact_index = json.loads(index_path.read_text())
         assert len(artifact_index["entries"]) == 1
         assert "No runnable regression is recorded" in captured.err
+
+    def test_init_default_is_minimal(self, monkeypatch, tmp_path, capsys):
+        import ordeal.mutations as mutations
+
+        monkeypatch.chdir(tmp_path)
+        test_file = tmp_path / "tests" / "test_pkg.py"
+        test_file.parent.mkdir(parents=True, exist_ok=True)
+        original = "def test_pkg_value_pinned() -> None:\n    assert 1 == 1\n"
+        test_file.write_text(original, encoding="utf-8")
+
+        monkeypatch.setattr(
+            mutations,
+            "init_project",
+            lambda target=None, output_dir="tests", dry_run=False: [
+                {
+                    "module": "pkg",
+                    "status": "generated",
+                    "path": str(test_file),
+                    "content": original,
+                }
+            ],
+        )
+
+        skill_called = False
+
+        def fake_install_skill(*, dry_run=False):
+            nonlocal skill_called
+            skill_called = True
+            return ".claude/skills/ordeal/SKILL.md"
+
+        monkeypatch.setattr(cli, "_install_skill", fake_install_skill)
+
+        mutate_scripts: list[str] = []
+
+        def fake_run(cmd, capture_output=None, text=None, env=None, cwd=None, check=False):
+            if cmd[:3] == [sys.executable, "-m", "pytest"]:
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            if cmd[:2] == [sys.executable, "-c"]:
+                script = cmd[2]
+                if "'mutate'" in script:
+                    mutate_scripts.append(script)
+                    assert "--generate-stubs" not in script
+                    return SimpleNamespace(returncode=0, stdout="Score: 1/2 (50%)\n", stderr="")
+                if "'explore'" in script:
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+            raise AssertionError(f"Unexpected subprocess call: {cmd}")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        rc = main(["init", "pkg"])
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert not skill_called
+        assert mutate_scripts
+        assert test_file.read_text(encoding="utf-8") == original
+        assert not (tmp_path / ".claude").exists()
+        assert "Gaps:       report-only" in captured.err
+
+        report = json.loads(captured.out)
+        assert report["install_skill"] is False
+        assert report["close_gaps"] is False
+        assert report["skill"] is None
+        assert ".claude/skills/ordeal/SKILL.md" not in report["files"]
+
+    def test_init_opt_in_installs_skill_and_appends_gap_stubs(self, monkeypatch, tmp_path, capsys):
+        import ordeal.mutations as mutations
+
+        monkeypatch.chdir(tmp_path)
+        test_file = tmp_path / "tests" / "test_pkg.py"
+        test_file.parent.mkdir(parents=True, exist_ok=True)
+        original = "def test_pkg_value_pinned() -> None:\n    assert 1 == 1\n"
+        test_file.write_text(original, encoding="utf-8")
+
+        monkeypatch.setattr(
+            mutations,
+            "init_project",
+            lambda target=None, output_dir="tests", dry_run=False: [
+                {
+                    "module": "pkg",
+                    "status": "generated",
+                    "path": str(test_file),
+                    "content": original,
+                }
+            ],
+        )
+
+        def fake_install_skill(*, dry_run=False):
+            skill_path = tmp_path / ".claude" / "skills" / "ordeal" / "SKILL.md"
+            skill_path.parent.mkdir(parents=True, exist_ok=True)
+            skill_path.write_text("skill", encoding="utf-8")
+            return ".claude/skills/ordeal/SKILL.md"
+
+        monkeypatch.setattr(cli, "_install_skill", fake_install_skill)
+
+        mutate_calls = 0
+
+        def fake_run(cmd, capture_output=None, text=None, env=None, cwd=None, check=False):
+            nonlocal mutate_calls
+            if cmd[:3] == [sys.executable, "-m", "pytest"]:
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            if cmd[:2] == [sys.executable, "-c"]:
+                script = cmd[2]
+                if "'mutate'" in script:
+                    mutate_calls += 1
+                    if mutate_calls == 1:
+                        assert "--generate-stubs" in script
+                        (tmp_path / ".ordeal_stubs_tmp.py").write_text(
+                            "def test_gap_stub() -> None:\n    assert True\n",
+                            encoding="utf-8",
+                        )
+                        return SimpleNamespace(
+                            returncode=0, stdout="Score: 1/2 (50%)\n", stderr=""
+                        )
+                    return SimpleNamespace(returncode=0, stdout="Score: 2/2 (100%)\n", stderr="")
+                if "'explore'" in script:
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+            raise AssertionError(f"Unexpected subprocess call: {cmd}")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        rc = main(["init", "pkg", "--install-skill", "--close-gaps"])
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert mutate_calls == 2
+        updated = test_file.read_text(encoding="utf-8")
+        assert "def test_gap_stub() -> None:" in updated
+        assert (tmp_path / ".claude" / "skills" / "ordeal" / "SKILL.md").exists()
+        assert not (tmp_path / ".ordeal_stubs_tmp.py").exists()
+        assert "Gaps:       report-only" not in captured.err
+
+        report = json.loads(captured.out)
+        assert report["install_skill"] is True
+        assert report["close_gaps"] is True
+        assert report["skill"] == ".claude/skills/ordeal/SKILL.md"
+        assert ".claude/skills/ordeal/SKILL.md" in report["files"]
 
     def test_scan_write_regression_defaults_and_dedupes(self, monkeypatch, tmp_path, capsys):
         monkeypatch.chdir(tmp_path)

@@ -2237,8 +2237,10 @@ def _print_scan_artifact_workflow(
     print("next:")
     print(f"  review: {_display_path(report_path)}")
     if regression_path is not None:
-        print(f"  run: {_shell_command('uv', 'run', 'pytest', _display_path(regression_path), '-q')}")
-    print(f"  after fix: {_shell_command('uv', 'run', 'ordeal', 'scan', module, '--save-artifacts')}")
+        run_cmd = _shell_command("uv", "run", "pytest", _display_path(regression_path), "-q")
+        print(f"  run: {run_cmd}")
+    rescan = _shell_command("uv", "run", "ordeal", "scan", module, "--save-artifacts")
+    print(f"  after fix: {rescan}")
 
 
 def _write_mine_regressions(

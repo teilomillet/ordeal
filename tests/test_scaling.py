@@ -579,5 +579,5 @@ max_score_gap = 0.10
         assert data["passed"] is True
         assert len(data["cases"]) == 1
         assert data["cases"][0]["name"] == "test_case"
-        assert data["cases"][0]["tier"] == "pr"
-        assert "runs" in data["cases"][0]
+        assert data["cases"][0]["spec"]["tier"] == "pr"
+        assert "seconds" in data["cases"][0]

@@ -117,16 +117,14 @@ class TestCLI:
     def test_no_command_returns_0(self):
         assert main([]) == 0
 
-    def test_top_level_help_mentions_report_examples(self, capsys):
+    def test_top_level_help_points_to_live_help(self, capsys):
         with pytest.raises(SystemExit):
             main(["--help"])
         out = capsys.readouterr().out
-        assert "ordeal scan mymod --save-artifacts" in out
-        assert "ordeal scan mymod --report-file report.md" in out
-        assert "shareable bug report" in out
-        assert "ordeal scan mymod --write-regression" in out
-        assert "ordeal verify fnd_123456789abc" in out
-        assert "ordeal mine mymod.func --write-regression" in out
+        assert "ordeal scan <module>" in out
+        assert "ordeal <command> --help" in out
+        assert "ordeal catalog" in out
+        assert "catalog()" in out
 
     def test_python_module_entrypoint_runs(self):
         proc = subprocess.run(
@@ -173,17 +171,14 @@ class TestCLI:
         assert calls["validation_mode"] == "deep"
         assert "ordeal audit" in capsys.readouterr().out
 
-    def test_catalog_mentions_report_file(self, capsys):
+    def test_catalog_lists_live_cli_commands(self, capsys):
         assert main(["catalog"]) == 0
         out = capsys.readouterr().out
-        assert "--report-file report.md" in out
-        assert "--write-regression" in out
-        assert "tests/test_ordeal_regressions.py" in out
-        assert "--save-artifacts" in out
-        assert ".ordeal/findings/mymod.md" in out
-        assert ".ordeal/findings/mymod.json" in out
-        assert ".ordeal/findings/index.json" in out
-        assert "ordeal verify <finding-id>" in out
+        assert "Run 'ordeal --help' for the full live CLI surface." in out
+        assert "Run 'ordeal <command> --help' for command-specific options." in out
+        for command, help_text in cli._iter_command_summaries(cli._build_parser()):
+            assert command in out
+            assert help_text in out
 
     def test_explore_missing_config(self):
         assert main(["explore", "--config", "/nonexistent.toml"]) == 1

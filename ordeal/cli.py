@@ -189,19 +189,14 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
         print(f"  {key} ({len(entries)}) — {first_doc}")
         print(f"    {names}")
 
-    print("\nRun 'ordeal scan <module>' to explore a module fully.")
-    print("Add '--report-file report.md' to scan or mine for a shareable Markdown report.")
-    print(
-        "Add '--write-regression' to scan or mine for runnable pytest regressions"
-        f" (default: {_DEFAULT_REGRESSION_PATH})."
-    )
-    print(
-        "Add '--save-artifacts' to scan for the full bug bundle:"
-        f" {_default_scan_report_path('mymod')} + {_default_scan_bundle_path('mymod')}"
-        f" + {_DEFAULT_REGRESSION_PATH}"
-        f" + {_default_artifact_index_path()}."
-    )
-    print("Run 'ordeal verify <finding-id>' to re-run a saved regression by finding ID.")
+    parser = _build_parser()
+    command_summaries = _iter_command_summaries(parser)
+    if command_summaries:
+        print("\nCLI commands:")
+        for command, help_text in command_summaries:
+            print(f"  {command:<10} {help_text}")
+    print("\nRun 'ordeal --help' for the full live CLI surface.")
+    print("Run 'ordeal <command> --help' for command-specific options.")
     print("Run 'ordeal catalog --detail' for signatures and docs.")
     print("Python: from ordeal import catalog; catalog()")
 
@@ -3537,32 +3532,16 @@ def _write_json_report(
 # ============================================================================
 
 
-def main(argv: list[str] | None = None) -> int:
-    """CLI entry point for ``ordeal``."""
-    # Add CWD to sys.path so imports resolve the same way as pytest/python -m.
-    cwd = os.getcwd()
-    if cwd not in sys.path:
-        sys.path.insert(0, cwd)
-
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the top-level argparse parser for ``ordeal``."""
     parser = argparse.ArgumentParser(
         prog="ordeal",
         description=(
             "Ordeal — discovers what's true about your code.\n\n"
-            "Start here:\n"
-            "  ordeal scan mymod --save-artifacts\n"
-            "                              Save report + JSON bundle + regressions + history\n"
-            "  ordeal scan mymod --report-file report.md\n"
-            "                              Save a shareable bug report\n"
-            "  ordeal scan mymod --write-regression\n"
-            "                              Save pytest regressions\n"
-            "  ordeal verify fnd_123456789abc\n"
-            "                              Re-run one saved regression by finding ID\n"
-            "  ordeal mine mymod.func --report-file finding.md\n"
-            "                              Save a finding report\n"
-            "  ordeal mine mymod.func --write-regression\n"
-            "                              Save pytest regressions\n"
-            "  ordeal catalog              See every capability\n"
-            "  catalog() in Python         Full API reference"
+            "Use `ordeal scan <module>` for the fastest end-to-end path.\n"
+            "Run `ordeal <command> --help` for command-specific options.\n"
+            "Use `ordeal catalog` or `from ordeal import catalog; catalog()`"
+            " for runtime discovery."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -4051,6 +4030,31 @@ def main(argv: list[str] | None = None) -> int:
     )
     mutate_p.add_argument("--json", action="store_true", help="Output agent-facing JSON")
 
+    return parser
+
+
+def _iter_command_summaries(parser: argparse.ArgumentParser) -> list[tuple[str, str]]:
+    """Return ``(command, help)`` pairs from the live parser."""
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return sorted(
+                (
+                    choice.dest,
+                    choice.help or "",
+                )
+                for choice in action._choices_actions
+            )
+    return []
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point for ``ordeal``."""
+    # Add CWD to sys.path so imports resolve the same way as pytest/python -m.
+    cwd = os.getcwd()
+    if cwd not in sys.path:
+        sys.path.insert(0, cwd)
+
+    parser = _build_parser()
     args = parser.parse_args(argv)
 
     if args.command == "catalog":

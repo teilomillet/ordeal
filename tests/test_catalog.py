@@ -44,6 +44,14 @@ class TestTopLevelCatalog:
         for cat, entries in c.items():
             always(len(entries) > 0, f"catalog[{cat}] is non-empty")
 
+    def test_chaos_category_is_runtime_discoverable(self):
+        c = catalog()
+        names = {entry["name"] for entry in c["chaos"]}
+        always(
+            names == {"ChaosTest", "RuleTimeoutError", "chaos_test"},
+            "chaos catalog is derived from live runtime entries",
+        )
+
 
 class TestFaultsCatalog:
     def test_all_modules_represented(self):

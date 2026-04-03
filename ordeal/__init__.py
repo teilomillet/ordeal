@@ -191,31 +191,10 @@ def catalog() -> dict[str, list]:
         "scaling": _introspect_module(
             __import__("ordeal.scaling", fromlist=["scaling"]),
         ),
-        "chaos": [
-            {
-                "name": "ChaosTest",
-                "qualname": "ordeal.chaos.ChaosTest",
-                "doc": (
-                    "Stateful chaos testing base class. "
-                    "Class attrs: faults (list[Fault]), swarm (bool), "
-                    "rule_timeout (float, default 30s — per-rule SIGALRM guard "
-                    "against buggify/fault-induced hangs; 0 to disable)"
-                ),
-            },
-            {
-                "name": "RuleTimeoutError",
-                "qualname": "ordeal.chaos.RuleTimeoutError",
-                "doc": (
-                    "Raised when a ChaosTest rule exceeds rule_timeout seconds. "
-                    "Indicates fault-induced hang — a real resilience finding."
-                ),
-            },
-            {
-                "name": "chaos_test",
-                "qualname": "ordeal.chaos.chaos_test",
-                "doc": "Decorator: turns ChaosTest subclass into pytest-discoverable TestCase",
-            },
-        ],
+        "chaos": _introspect_module(
+            __import__("ordeal.chaos", fromlist=["chaos"]),
+            include={"ChaosTest", "RuleTimeoutError", "chaos_test"},
+        ),
         "exploration": _introspect_module(
             __import__("ordeal.state", fromlist=["state"]),
         )

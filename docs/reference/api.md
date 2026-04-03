@@ -1602,12 +1602,19 @@ Individual steps (`explore_mine`, `explore_scan`, `explore_mutate`, `explore_cha
 |---|---|---|
 | `module` | `str` | Module being explored |
 | `functions` | `dict[str, FunctionState]` | Per-function exploration state |
+| `skipped` | `list[tuple[str, str]]` | Functions skipped during mining with reasons |
+| `refreshed` | `list[str]` | Functions invalidated because source changed |
 | `confidence` | `float` | Aggregate confidence [0, 1] across all functions |
 | `frontier` | `dict[str, list[str]]` | Per-function gaps — what's unexplored |
 | `findings` | `list[str]` | Bugs and anomalies found |
+| `finding_details` | `list[dict]` | Structured findings for reports and agent handoff |
+| `exploration_time` | `float` | Wall-clock time accumulated across runs |
+| `supervisor_info` | `dict[str, Any]` | Reproduction info: seed, transitions, states, scheduler/subprocess data |
 | `summary()` | `str` | Human-readable exploration report |
+| `to_dict()` | `dict` | JSON-friendly state payload for persistence and agents |
 | `to_json()` | `str` | Serialize for persistence across sessions |
 | `from_json(data)` | `ExplorationState` | Deserialize |
+| `refresh()` | `list[str]` | Invalidate stale function results after source changes |
 
 ### FunctionState
 
@@ -1615,13 +1622,104 @@ Individual steps (`explore_mine`, `explore_scan`, `explore_mutate`, `explore_cha
 |---|---|---|
 | `mined` | `bool` | Whether mine() has been run |
 | `properties` | `list[dict]` | Discovered properties with confidence |
+| `property_violations` | `list[str]` | Suspicious discovered properties summarized as findings |
+| `property_violation_details` | `list[dict]` | Structured property-finding details |
 | `mutation_score` | `float | None` | Kill ratio from mutation testing |
+| `survived_mutants` | `int` | Mutants that survived the current test suite |
+| `killed_mutants` | `int` | Mutants killed by the current test suite |
+| `hardened` | `bool` | Whether extra tests have been verified against survivors |
+| `hardened_kills` | `int` | Additional survivors closed by hardening |
 | `crash_free` | `bool | None` | Whether random inputs crashed |
+| `scan_error` | `str | None` | Crash/error text from scan_module() |
+| `failing_args` | `dict[str, Any] | None` | Shrunk failing arguments from scan/fuzz |
 | `chaos_tested` | `bool` | Whether chaos testing has been run |
+| `faults_tested` | `list[str]` | Fault names exercised during chaos testing |
 | `edges_discovered` | `int` | Unique code paths reached |
 | `saturated` | `bool` | True when more mining won't find new paths |
 | `confidence` | `float` | Per-function confidence [0, 1] |
 | `frontier` | `list[str]` | What's unexplored for this function |
+
+---
+
+## Agent Schema
+
+```python
+from ordeal.agent_schema import (
+    AgentArtifact,
+    AgentEnvelope,
+    AgentFinding,
+    build_agent_envelope,
+)
+```
+
+Stable JSON envelope used by CLI `--json` output and other machine consumers.
+
+### AgentFinding
+
+| Attribute | Type | Description |
+|---|---|---|
+| `kind` | `str` | Finding class such as `crash`, `mutation`, `property`, or `blocked` |
+| `summary` | `str` | One-line human-readable statement |
+| `confidence` | `float | None` | Optional confidence score |
+| `target` | `str | None` | Dotted path or module the finding applies to |
+| `location` | `str | None` | Optional file/line or symbolic location |
+| `details` | `dict[str, Any]` | Machine-readable structured payload |
+| `to_dict()` | `dict` | JSON-friendly representation |
+
+### AgentArtifact
+
+| Attribute | Type | Description |
+|---|---|---|
+| `kind` | `str` | Artifact type such as `report`, `regression`, `trace`, or `index` |
+| `uri` | `str` | Path or URI to the artifact |
+| `description` | `str | None` | Short human-readable explanation |
+| `metadata` | `dict[str, Any]` | Extra machine-readable metadata |
+| `to_dict()` | `dict` | JSON-friendly representation |
+
+### AgentEnvelope
+
+| Attribute | Type | Description |
+|---|---|---|
+| `schema_version` | `str` | Stable envelope schema version |
+| `tool` | `str` | Producing command or subsystem (`scan`, `mine`, `mutate`, ...) |
+| `target` | `str` | Primary module/function/trace target |
+| `status` | `str` | Overall status such as `ok`, `issue_found`, or `blocked` |
+| `summary` | `str` | High-signal one-line summary |
+| `recommended_action` | `str` | Best next action for the consumer |
+| `suggested_commands` | `list[str]` | Follow-up shell commands |
+| `suggested_test_file` | `str | None` | Suggested regression test path |
+| `confidence` | `float | None` | Optional confidence score |
+| `confidence_basis` | `list[str]` | Short reasons behind the confidence value |
+| `blocking_reason` | `str | None` | Why execution was blocked, if applicable |
+| `findings` | `list[AgentFinding]` | Structured findings |
+| `artifacts` | `list[AgentArtifact]` | Produced or referenced artifacts |
+| `raw_details` | `dict[str, Any]` | Tool-specific payload not normalized into top-level fields |
+| `to_dict()` | `dict` | Stable machine-readable dict |
+| `to_json()` | `str` | Deterministically sorted JSON |
+
+### build_agent_envelope
+
+```python
+build_agent_envelope(
+    *,
+    tool: str,
+    target: str,
+    status: str,
+    summary: str,
+    recommended_action: str = "",
+    suggested_commands: Sequence[str] = (),
+    suggested_test_file: str | None = None,
+    confidence: float | None = None,
+    confidence_basis: Sequence[str] = (),
+    blocking_reason: str | None = None,
+    findings: Sequence[AgentFinding | Mapping[str, Any]] = (),
+    artifacts: Sequence[AgentArtifact | Mapping[str, Any]] = (),
+    raw_details: Mapping[str, Any] | None = None,
+    schema_version: str = "1.0",
+) -> AgentEnvelope
+```
+
+Normalize mixed finding/artifact inputs into a stable `AgentEnvelope`.
 
 ---
 

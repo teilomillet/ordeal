@@ -1,15 +1,16 @@
 ---
 title: Bug Bundle
-description: Save a shareable finding report, a pytest regression, and scan history from one command.
+description: Save a shareable finding report, a JSON bundle, a pytest regression, and scan history from one command.
 ---
 
 # Bug Bundle
 
 `ordeal scan --save-artifacts` is the shortest path from "interesting bug" to "fixed and locked in".
 
-It does three things when `scan` finds something:
+It does four things when `scan` finds something:
 
 - Writes a Markdown dossier under `.ordeal/findings/`
+- Writes a machine-readable JSON bundle with stable finding IDs under `.ordeal/findings/`
 - Writes or updates `tests/test_ordeal_regressions.py`
 - Appends a history entry to `.ordeal/findings/index.json`
 
@@ -26,6 +27,7 @@ You should see a short summary, then an artifact block like:
 ```text
 artifacts:
   report: .ordeal/findings/ordeal/demo.md
+  bundle: .ordeal/findings/ordeal/demo.json
   regression: tests/test_ordeal_regressions.py
   index: .ordeal/findings/index.json
 next:
@@ -37,6 +39,7 @@ next:
 ## What each artifact is for
 
 - `.ordeal/findings/ordeal/demo.md` is the human-readable bug dossier. Share it in a PR, issue, or LLM handoff.
+- `.ordeal/findings/ordeal/demo.json` is the machine-readable bundle. It carries stable `finding_id` and `fingerprint` fields so agents can correlate the same issue across runs.
 - `tests/test_ordeal_regressions.py` is the runnable pytest file generated from concrete findings. It should fail before the fix and pass after.
 - `.ordeal/findings/index.json` is the append-only local history for saved scan runs. It records the module, findings, paths, and suggested commands.
 

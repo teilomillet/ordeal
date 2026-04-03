@@ -201,6 +201,7 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
         f" + {_DEFAULT_REGRESSION_PATH}"
         f" + {_default_artifact_index_path()}."
     )
+    print("Run 'ordeal verify <finding-id>' to re-run a saved regression by finding ID.")
     print("Run 'ordeal catalog --detail' for signatures and docs.")
     print("Python: from ordeal import catalog; catalog()")
 
@@ -1725,129 +1726,6 @@ def _format_scan_summary(state: Any) -> str:
     return "\n".join(lines)
 
 
-def _agent_summary_text(items: list[str] | tuple[str, ...] | str | None) -> str:
-    """Collapse summary lines into one stable agent-facing sentence."""
-    if items is None:
-        return ""
-    if isinstance(items, str):
-        return items
-    cleaned = [str(item).strip() for item in items if str(item).strip()]
-    return "; ".join(cleaned)
-
-
-def _detail_target(detail: dict[str, Any]) -> str | None:
-    """Resolve the most specific target identifier for a report detail."""
-    if detail.get("target") is not None:
-        return str(detail["target"])
-    if detail.get("qualname") is not None:
-        return str(detail["qualname"])
-    module = detail.get("module")
-    function = detail.get("function")
-    if module is not None and function is not None:
-        return f"{module}.{function}"
-    if function is not None:
-        return str(function)
-    return None
-
-
-def _detail_location(detail: dict[str, Any]) -> str | None:
-    """Resolve a stable location string for a report detail."""
-    if detail.get("location") is not None:
-        return str(detail["location"])
-    line = detail.get("line")
-    if line is None:
-        return None
-    col = detail.get("col")
-    return f"L{line}:{col}" if col is not None else f"L{line}"
-
-
-def _detail_to_agent_finding(detail: dict[str, Any]) -> object:
-    """Convert a normalized finding detail into an ``AgentFinding``."""
-    from ordeal.agent_schema import AgentFinding
-
-    summary = str(detail.get("summary") or detail.get("name") or detail.get("kind", "finding"))
-    confidence = detail.get("confidence")
-    numeric_confidence = float(confidence) if confidence is not None else None
-    extra = {
-        key: value
-        for key, value in detail.items()
-        if key
-        not in {
-            "kind",
-            "summary",
-            "confidence",
-            "target",
-            "qualname",
-            "module",
-            "function",
-            "location",
-        }
-    }
-    return AgentFinding(
-        kind=str(detail.get("kind", "finding")),
-        summary=summary,
-        confidence=numeric_confidence,
-        target=_detail_target(detail),
-        location=_detail_location(detail),
-        details=extra,
-    )
-
-
-def _build_blocked_agent_envelope(
-    *,
-    tool: str,
-    target: str,
-    summary: str,
-    recommended_action: str,
-    blocking_reason: str,
-    suggested_commands: tuple[str, ...] | list[str] = (),
-    raw_details: dict[str, Any] | None = None,
-) -> object:
-    """Build a blocked agent envelope for command-level failures."""
-    from ordeal.agent_schema import build_agent_envelope
-
-    return build_agent_envelope(
-        tool=tool,
-        target=target,
-        status="blocked",
-        summary=summary,
-        recommended_action=recommended_action,
-        suggested_commands=tuple(suggested_commands),
-        confidence=None,
-        blocking_reason=blocking_reason,
-        findings=(),
-        artifacts=(),
-        raw_details=raw_details or {},
-    )
-
-
-def _build_agent_envelope_from_report(
-    report: dict[str, Any],
-    *,
-    recommended_action: str,
-    confidence: float | None = None,
-    blocking_reason: str | None = None,
-    artifacts: list[object] | tuple[object, ...] = (),
-    raw_details: dict[str, Any] | None = None,
-) -> object:
-    """Convert a normalized command report into an ``AgentEnvelope``."""
-    from ordeal.agent_schema import build_agent_envelope
-
-    return build_agent_envelope(
-        tool=str(report["tool"]),
-        target=str(report["target"]),
-        status=str(report["status"]),
-        summary=_agent_summary_text(report.get("summary")) or str(report["status"]),
-        recommended_action=recommended_action,
-        suggested_commands=tuple(str(command) for command in report.get("suggested_commands", [])),
-        confidence=confidence,
-        blocking_reason=blocking_reason,
-        findings=[_detail_to_agent_finding(detail) for detail in report.get("details", [])],
-        artifacts=tuple(artifacts),
-        raw_details=raw_details or report,
-    )
-
-
 def _scan_report_details(state: Any) -> list[dict[str, Any]]:
     """Return structured finding details for scan report generation."""
     details = getattr(state, "finding_details", None)
@@ -1988,12 +1866,37 @@ def _finding_fingerprint(detail: dict[str, Any]) -> str:
 def _annotate_finding(detail: dict[str, Any]) -> dict[str, Any]:
     """Attach stable IDs to a normalized finding detail record."""
     fingerprint = _finding_fingerprint(detail)
+    module = detail.get("module")
+    stub = _render_regression_stub(module, detail, trim=False) if module else None
     return {
         **detail,
         "finding_id": f"fnd_{fingerprint[:12]}",
         "fingerprint": fingerprint,
         "status": "open",
+        "regression_test": _regression_test_name(stub) if stub else None,
     }
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    """Load a JSON artifact from disk."""
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
+    """Write a JSON artifact with stable formatting."""
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _resolve_artifact_path(path_str: str | None, *, workspace: str | None = None) -> Path | None:
+    """Resolve an artifact path against the recorded workspace when needed."""
+    if not path_str:
+        return None
+    path = Path(path_str)
+    if path.is_absolute():
+        return path
+    if workspace:
+        return Path(workspace) / path
+    return path
 
 
 def _python_literal(value: Any, *, trim: bool = True) -> str:
@@ -2362,6 +2265,7 @@ def _build_scan_bundle(
         "saved_at": saved_at,
         "tool": "scan",
         "target": report["target"],
+        "workspace": os.getcwd(),
         "status": "findings found" if findings else "no findings yet",
         "confidence": round(state.confidence, 4),
         "seed": report.get("seed"),
@@ -3791,8 +3695,10 @@ def _write_scan_artifact_index(
 
     payload["entries"].append(
         {
+            "kind": "scan",
             "created_at": bundle["saved_at"],
             "module": bundle["target"],
+            "workspace": bundle.get("workspace"),
             "status": bundle["status"],
             "confidence": bundle["confidence"],
             "seed": bundle.get("seed"),
@@ -3846,6 +3752,166 @@ def _print_scan_artifact_workflow(
         print(f"  run: {run_cmd}")
     rescan = _shell_command("uv", "run", "ordeal", "scan", module, "--save-artifacts")
     print(f"  after fix: {rescan}")
+
+
+def _append_index_entry(index_path: Path, entry: dict[str, Any]) -> None:
+    """Append one event entry to the artifact index."""
+    payload: dict[str, Any] = {"version": 1, "entries": []}
+    if index_path.exists():
+        try:
+            loaded = _read_json_file(index_path)
+        except json.JSONDecodeError:
+            loaded = {}
+        if isinstance(loaded, dict) and isinstance(loaded.get("entries"), list):
+            payload = {
+                "version": int(loaded.get("version", 1)),
+                "entries": list(loaded["entries"]),
+            }
+    payload["entries"].append(entry)
+    _write_json_file(index_path, payload)
+
+
+def _locate_saved_finding(
+    finding_id: str,
+    *,
+    index_path: Path,
+) -> tuple[Path, dict[str, Any], dict[str, Any]] | None:
+    """Return the latest bundle and finding record for a saved finding ID."""
+    if not index_path.exists():
+        return None
+    payload = _read_json_file(index_path)
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        return None
+    fallback_workspace = str(index_path.parent.parent.parent)
+
+    for entry in reversed(entries):
+        artifacts = entry.get("artifacts") or {}
+        bundle_path = _resolve_artifact_path(
+            artifacts.get("bundle"),
+            workspace=entry.get("workspace") or fallback_workspace,
+        )
+        if bundle_path is None or not bundle_path.exists():
+            continue
+        bundle = _read_json_file(bundle_path)
+        for finding in bundle.get("findings", []):
+            if finding.get("finding_id") == finding_id:
+                return bundle_path, bundle, finding
+    return None
+
+
+def _verification_command(
+    bundle: dict[str, Any],
+    finding: dict[str, Any],
+) -> tuple[list[str], str] | None:
+    """Build the exact pytest command for verifying one finding."""
+    regression_path = bundle.get("artifacts", {}).get("regression")
+    if not regression_path:
+        return None
+
+    regression_test = finding.get("regression_test")
+    if regression_test:
+        nodeid = f"{regression_path}::{regression_test}"
+        return (
+            [sys.executable, "-m", "pytest", nodeid, "-q"],
+            _shell_command("uv", "run", "pytest", nodeid, "-q"),
+        )
+
+    if bundle.get("finding_count") == 1:
+        return (
+            [sys.executable, "-m", "pytest", regression_path, "-q"],
+            _shell_command("uv", "run", "pytest", regression_path, "-q"),
+        )
+
+    return None
+
+
+def _cmd_verify(args: argparse.Namespace) -> int:
+    """Re-run the saved regression for one finding ID."""
+    import subprocess
+
+    index_path = Path(args.index)
+    try:
+        located = _locate_saved_finding(args.finding_id, index_path=index_path)
+    except json.JSONDecodeError as exc:
+        _stderr(f"Artifact data is not valid JSON: {exc}\n")
+        return 2
+    if located is None:
+        _stderr(f"Finding not found in artifact index: {args.finding_id}\n")
+        return 2
+
+    bundle_path, bundle, finding = located
+    command = _verification_command(bundle, finding)
+    if command is None:
+        _stderr(
+            f"No runnable regression is recorded for {args.finding_id}. "
+            "Re-run `ordeal scan --save-artifacts` first.\n"
+        )
+        return 2
+
+    run_args, display_command = command
+    workspace = bundle.get("workspace")
+    proc = subprocess.run(
+        run_args,
+        cwd=workspace,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    checked_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    if proc.returncode == 0:
+        verification_status = "verified"
+        finding["status"] = "verified"
+        rc = 0
+    elif proc.returncode == 1:
+        verification_status = "reproduced"
+        finding["status"] = "reproduced"
+        rc = 1
+    else:
+        verification_status = "error"
+        rc = 2
+
+    bundle["verification"] = {
+        "checked_at": checked_at,
+        "finding_id": args.finding_id,
+        "status": verification_status,
+        "command": display_command,
+        "exit_code": proc.returncode,
+    }
+    _write_json_file(bundle_path, bundle)
+
+    _append_index_entry(
+        index_path,
+        {
+            "kind": "verification",
+            "created_at": checked_at,
+            "module": bundle.get("target"),
+            "workspace": workspace,
+            "finding_id": args.finding_id,
+            "status": verification_status,
+            "qualname": finding.get("qualname"),
+            "exit_code": proc.returncode,
+            "artifacts": dict(bundle.get("artifacts", {})),
+            "commands": {
+                "verify": display_command,
+            },
+        },
+    )
+
+    print(f"verify: {args.finding_id}")
+    print(f"  target: {finding.get('qualname', bundle.get('target', '?'))}")
+    print(f"  status: {verification_status}")
+    print(f"  command: {display_command}")
+    print(f"  bundle: {_display_path(bundle_path)}")
+    print(f"  index: {_display_path(index_path)}")
+
+    if verification_status == "error":
+        if proc.stderr.strip():
+            _stderr(proc.stderr)
+        elif proc.stdout.strip():
+            _stderr(proc.stdout)
+    return rc
 
 
 def _write_mine_regressions(
@@ -3983,6 +4049,8 @@ def main(argv: list[str] | None = None) -> int:
             "                              Save a shareable bug report\n"
             "  ordeal scan mymod --write-regression\n"
             "                              Save pytest regressions\n"
+            "  ordeal verify fnd_123456789abc\n"
+            "                              Re-run one saved regression by finding ID\n"
             "  ordeal mine mymod.func --report-file finding.md\n"
             "                              Save a finding report\n"
             "  ordeal mine mymod.func --write-regression\n"
@@ -4087,6 +4155,26 @@ def main(argv: list[str] | None = None) -> int:
         "--include-private",
         action="store_true",
         help="Include _private functions (many codebases have logic there)",
+    )
+
+    # -- ordeal verify --
+    verify_p = sub.add_parser(
+        "verify",
+        help="Re-run the saved regression for one finding ID",
+        description=(
+            "Re-run a saved regression from `.ordeal/findings/index.json`.\n\n"
+            "Use the stable `finding_id` from a JSON bug bundle or index entry.\n"
+            "Verification updates the bundle status and appends a verification event"
+            " to the artifact index."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    verify_p.add_argument("finding_id", help="Stable finding ID (e.g. fnd_dcb0fc0808d3)")
+    verify_p.add_argument(
+        "--index",
+        default=_default_artifact_index_path(),
+        metavar="PATH",
+        help=f"Artifact index path (default: {_default_artifact_index_path()})",
     )
 
     # -- ordeal explore --
@@ -4463,6 +4551,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_check(args)
     elif args.command == "scan":
         return _cmd_scan(args)
+    elif args.command == "verify":
+        return _cmd_verify(args)
     elif args.command == "explore":
         return _cmd_explore(args)
     elif args.command == "replay":

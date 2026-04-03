@@ -20,6 +20,36 @@ uv run ordeal explore      # inside project venv
 
 ## Commands
 
+### `ordeal scan`
+
+!!! quote "Why start here"
+    `scan` is the fastest end-to-end command for turning exploration results into something you can act on. It runs the unified exploration pipeline on one module, then can emit a shareable Markdown report, runnable pytest regressions, and a machine-readable JSON bundle with stable finding IDs.
+
+Explore one module and optionally save reports, regressions, or the full bug bundle:
+
+```bash
+ordeal scan myapp.scoring
+ordeal scan myapp.scoring --json
+ordeal scan myapp.scoring --report-file findings/scoring.md
+ordeal scan myapp.scoring --write-regression
+ordeal scan myapp.scoring --save-artifacts
+```
+
+Use `--save-artifacts` when you want the full handoff package: `.ordeal/findings/<module>.md`, `.ordeal/findings/<module>.json`, `tests/test_ordeal_regressions.py`, and `.ordeal/findings/index.json`. See [Bug Bundle](bug-bundle.md) for the artifact layout.
+
+| Flag | Default | Description |
+|---|---|---|
+| `target` | required | Module path (for example `myapp.scoring`) |
+| `--seed` | `42` | RNG seed for reproducibility |
+| `--max-examples`, `-n` | `50` | Examples per function |
+| `--workers`, `-w` | `1` | Parallel workers for mutation testing |
+| `--time-limit`, `-t` | — | Time budget in seconds |
+| `--json` | off | Print the stable agent-facing JSON envelope |
+| `--report-file` | — | Save a Markdown finding report |
+| `--write-regression [PATH]` | `tests/test_ordeal_regressions.py` | Save runnable pytest regressions |
+| `--save-artifacts` | off | Write the report, JSON bundle, regressions, and update the artifact index |
+| `--include-private` | off | Include `_private` functions |
+
 ### `ordeal mutate`
 
 Run mutation testing from the command line. Auto-discovers tests via pytest, runs them with `--chaos` enabled so ChaosTest assertions count toward the mutation score.
@@ -160,32 +190,6 @@ Use this to understand a function before writing tests. The `ALWAYS` properties 
 | `target` | required | Dotted path: `mymod.func` or `mymod` (positional) |
 | `--max-examples`, `-n` | `500` | Examples to sample |
 
-### `ordeal mine-pair`
-
-Discover relational properties between two functions: roundtrip (`g(f(x)) == x`), reverse roundtrip (`f(g(x)) == x`), and commutative composition (`f(g(x)) == g(f(x))`).
-
-```bash
-ordeal mine-pair myapp.encode myapp.decode           # roundtrip?
-ordeal mine-pair myapp.serialize myapp.parse -n 500  # more examples
-```
-
-Output:
-
-```
-mine(encode <-> decode): 200 examples
-  ALWAYS  roundtrip decode(encode(x)) == x (48/48)
-  ALWAYS  roundtrip encode(decode(x)) == x (45/45)
-     52%  commutative composition (26/50)
-```
-
-Use this when you have function pairs that should be inverses (encode/decode, serialize/parse, compress/decompress) or that should commute.
-
-| Flag | Default | Description |
-|---|---|---|
-| `f` | required | First function (positional) |
-| `g` | required | Second function (positional) |
-| `--max-examples`, `-n` | `200` | Examples to sample |
-
 ### `ordeal benchmark`
 
 !!! quote "What you can do with this"
@@ -200,6 +204,7 @@ ordeal benchmark --max-workers 16         # test up to 16 workers
 ordeal benchmark --time 30                # 30s per trial (default: 10s)
 ordeal benchmark --metric edges           # fit on edges/sec instead of runs/sec
 ordeal benchmark --perf-contract ordeal.perf.toml --check
+ordeal benchmark --mutate myapp.scoring.compute --repeat 5 --workers 2
 ```
 
 ```
@@ -232,6 +237,14 @@ Use `--output-json perf.json` when you want a trendable artifact for CI or night
 
 The JSON artifact includes the contract path, per-case pass/fail state, timing medians, and the exact score-gap data for `audit_compare` cases.
 
+You can also benchmark mutation latency instead of scaling by passing one or more `--mutate` targets. That mode runs fresh subprocess trials and reports median wall time plus per-phase timings:
+
+```bash
+ordeal benchmark --mutate tests._mutation_bench_target.tiny_add --repeat 5
+ordeal benchmark --mutate myapp.scoring.compute --workers 4 --preset essential
+ordeal benchmark --mutate myapp.scoring.compute --test-filter test_compute
+```
+
 | Flag | Default | Description |
 |---|---|---|
 | `--config`, `-c` | `ordeal.toml` | Config file |
@@ -241,6 +254,14 @@ The JSON artifact includes the contract path, per-case pass/fail state, timing m
 | `--perf-contract` | — | Run a checked-in perf/quality contract instead of scaling analysis |
 | `--check` | off | Exit with code 1 if any contract case exceeds its budget |
 | `--output-json` | — | Save perf/quality contract results as JSON |
+| `--json` | off | Print perf/quality contract JSON to stdout |
+| `--tier` | all | Filter perf-contract cases by tier (`pr` or `nightly`) |
+| `--mutate` | — | Benchmark mutation latency for this target (repeatable) |
+| `--repeat` | `5` | Fresh subprocess runs per mutation target |
+| `--workers` | `1` | Worker count for mutation benchmarks |
+| `--preset` | `standard` | Mutation preset for mutation benchmarks |
+| `--test-filter` | — | Pytest `-k` filter for mutation benchmarks |
+| `--no-filter-equivalent` | off | Disable equivalence filtering during mutation benchmarks |
 
 ### `ordeal explore`
 
@@ -280,6 +301,34 @@ ordeal replay --shrink trace.json -o minimal.json      # save minimized
 ```
 
 The `--shrink` flag runs delta-debugging to remove unnecessary steps from the trace. Use it when: the trace is too long to understand, or you want the minimal sequence of operations that reproduces the failure. The shrunk trace is often 5-10x shorter than the original.
+
+### `ordeal verify`
+
+Re-run one saved regression from the bug-bundle index and record the result back into the bundle history:
+
+```bash
+ordeal verify fnd_dcb0fc0808d3
+ordeal verify fnd_dcb0fc0808d3 --index .ordeal/findings/index.json
+```
+
+Use this after fixing a bug found by `ordeal scan --save-artifacts`. `verify` looks up the stable `finding_id`, re-runs the saved regression command, and updates the bundle status plus verification history.
+
+| Flag | Default | Description |
+|---|---|---|
+| `finding_id` | required | Stable finding ID from the JSON bundle or index |
+| `--index` | `.ordeal/findings/index.json` | Artifact index to read and update |
+
+### Agent-facing JSON
+
+`scan`, `mine`, `audit`, `mutate`, `replay`, and `benchmark --perf-contract` can emit machine-readable JSON for tooling and coding agents. Use `--json` to print to stdout.
+
+```bash
+ordeal scan myapp.scoring --json
+ordeal mutate myapp.scoring.compute --json
+ordeal audit myapp.scoring --json
+```
+
+The payload is a stable envelope with top-level keys like `schema_version`, `tool`, `target`, `status`, `summary`, `recommended_action`, `findings`, `artifacts`, and `raw_details`. For `scan`, `--save-artifacts` complements this with a persistent JSON bug bundle under `.ordeal/findings/`.
 
 ## Workflows
 

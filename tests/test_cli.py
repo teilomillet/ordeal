@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -22,6 +23,95 @@ from ordeal.mine import MinedProperty, MineResult
 from ordeal.quickcheck import quickcheck
 
 
+def _write_verify_fixture(
+    tmp_path: Path,
+    *,
+    finding_id: str = "fnd_testverify01",
+    regression_path: str | None = "tests/test_ordeal_regressions.py",
+    regression_test: str | None = "test_normalize_idempotent_regression",
+) -> tuple[Path, Path, str]:
+    report_path = tmp_path / ".ordeal" / "findings" / "pkg" / "mod.md"
+    bundle_path = tmp_path / ".ordeal" / "findings" / "pkg" / "mod.json"
+    index_path = tmp_path / ".ordeal" / "findings" / "index.json"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("# report\n", encoding="utf-8")
+    if regression_path is not None:
+        regression_file = tmp_path / regression_path
+        regression_file.parent.mkdir(parents=True, exist_ok=True)
+        regression_file.write_text("def test_normalize_idempotent_regression() -> None:\n    pass\n")
+
+    bundle = {
+        "version": 1,
+        "saved_at": "2026-04-04T00:00:00Z",
+        "tool": "scan",
+        "target": "pkg.mod",
+        "workspace": str(tmp_path),
+        "status": "findings found",
+        "confidence": 0.63,
+        "seed": 42,
+        "summary": ["Checked: 1 function"],
+        "gaps": ["`pkg.mod.normalize`: property: idempotent (87%)"],
+        "finding_count": 1,
+        "findings": [
+            {
+                "finding_id": finding_id,
+                "fingerprint": "a" * 64,
+                "qualname": "pkg.mod.normalize",
+                "kind": "property",
+                "function": "normalize",
+                "name": "idempotent",
+                "summary": "idempotent (87%)",
+                "status": "open",
+                "regression_test": regression_test,
+            }
+        ],
+        "artifacts": {
+            "report": ".ordeal/findings/pkg/mod.md",
+            "bundle": ".ordeal/findings/pkg/mod.json",
+            "regression": regression_path,
+            "index": ".ordeal/findings/index.json",
+        },
+        "commands": {
+            "pytest": "uv run pytest tests/test_ordeal_regressions.py -q"
+            if regression_path
+            else None,
+            "rescan": "uv run ordeal scan pkg.mod --save-artifacts",
+        },
+    }
+    index = {
+        "version": 1,
+        "entries": [
+            {
+                "kind": "scan",
+                "created_at": bundle["saved_at"],
+                "module": "pkg.mod",
+                "workspace": str(tmp_path),
+                "status": "findings found",
+                "confidence": 0.63,
+                "seed": 42,
+                "finding_count": 1,
+                "finding_ids": [finding_id],
+                "findings": [
+                    {
+                        "finding_id": finding_id,
+                        "fingerprint": "a" * 64,
+                        "qualname": "pkg.mod.normalize",
+                        "kind": "property",
+                        "name": "idempotent",
+                        "summary": "idempotent (87%)",
+                    }
+                ],
+                "artifacts": dict(bundle["artifacts"]),
+                "commands": dict(bundle["commands"]),
+            }
+        ],
+    }
+
+    bundle_path.write_text(json.dumps(bundle, indent=2) + "\n", encoding="utf-8")
+    index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+    return index_path, bundle_path, finding_id
+
+
 class TestCLI:
     def test_no_command_returns_0(self):
         assert main([]) == 0
@@ -34,6 +124,7 @@ class TestCLI:
         assert "ordeal scan mymod --report-file report.md" in out
         assert "shareable bug report" in out
         assert "ordeal scan mymod --write-regression" in out
+        assert "ordeal verify fnd_123456789abc" in out
         assert "ordeal mine mymod.func --write-regression" in out
 
     def test_python_module_entrypoint_runs(self):
@@ -91,6 +182,7 @@ class TestCLI:
         assert ".ordeal/findings/mymod.md" in out
         assert ".ordeal/findings/mymod.json" in out
         assert ".ordeal/findings/index.json" in out
+        assert "ordeal verify <finding-id>" in out
 
     def test_explore_missing_config(self):
         assert main(["explore", "--config", "/nonexistent.toml"]) == 1
@@ -294,6 +386,14 @@ class TestCLI:
         assert "--write-regression" in out
         assert "default: tests/test_ordeal_regressions.py" in out
 
+    def test_verify_help_mentions_finding_id(self, capsys):
+        with pytest.raises(SystemExit):
+            main(["verify", "--help"])
+        out = capsys.readouterr().out
+        assert "stable `finding_id`" in out
+        assert "--index PATH" in out
+        assert ".ordeal/findings/index.json" in out
+
     def test_scan_suppresses_inner_noise_and_formats_summary(self, monkeypatch, capsys):
         class _FakeTree:
             size = 3
@@ -486,6 +586,7 @@ class TestCLI:
         assert bundle["tool"] == "scan"
         assert bundle["target"] == "pkg.mod"
         assert bundle["saved_at"]
+        assert bundle["workspace"] == str(tmp_path)
         assert bundle["artifacts"]["report"] == ".ordeal/findings/pkg/mod.md"
         assert bundle["artifacts"]["bundle"] == ".ordeal/findings/pkg/mod.json"
         assert bundle["artifacts"]["regression"] == "tests/test_ordeal_regressions.py"
@@ -493,10 +594,13 @@ class TestCLI:
         assert bundle["findings"][0]["finding_id"].startswith("fnd_")
         assert len(bundle["findings"][0]["fingerprint"]) == 64
         assert bundle["findings"][0]["status"] == "open"
+        assert bundle["findings"][0]["regression_test"] == "test_normalize_idempotent_regression"
         artifact_index = json.loads(index_path.read_text())
         assert artifact_index["version"] == 1
         assert len(artifact_index["entries"]) == 1
+        assert artifact_index["entries"][0]["kind"] == "scan"
         assert artifact_index["entries"][0]["module"] == "pkg.mod"
+        assert artifact_index["entries"][0]["workspace"] == str(tmp_path)
         assert artifact_index["entries"][0]["created_at"] == bundle["saved_at"]
         assert artifact_index["entries"][0]["artifacts"]["report"] == ".ordeal/findings/pkg/mod.md"
         assert (
@@ -596,7 +700,9 @@ class TestCLI:
         assert bundle["artifacts"]["index"] == ".ordeal/findings/index.json"
         assert bundle["commands"]["pytest"] is None
         assert bundle["findings"][0]["finding_id"].startswith("fnd_")
+        assert bundle["findings"][0]["regression_test"] is None
         artifact_index = json.loads(index_path.read_text())
+        assert artifact_index["entries"][0]["kind"] == "scan"
         assert (
             artifact_index["entries"][0]["artifacts"]["bundle"] == ".ordeal/findings/pkg/mod.json"
         )
@@ -684,6 +790,91 @@ class TestCLI:
             artifact_index["entries"][0]["findings"][0]["fingerprint"]
             == artifact_index["entries"][1]["findings"][0]["fingerprint"]
         )
+
+    def test_verify_marks_finding_verified(self, monkeypatch, tmp_path, capsys):
+        index_path, bundle_path, finding_id = _write_verify_fixture(tmp_path)
+        calls: dict[str, object] = {}
+
+        def fake_run(cmd, cwd=None, text=None, capture_output=None, check=None):
+            calls["cmd"] = cmd
+            calls["cwd"] = cwd
+            return SimpleNamespace(returncode=0, stdout="1 passed\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        rc = main(["verify", finding_id, "--index", str(index_path)])
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert calls["cmd"] == [
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/test_ordeal_regressions.py::test_normalize_idempotent_regression",
+            "-q",
+        ]
+        assert calls["cwd"] == str(tmp_path)
+        bundle = json.loads(bundle_path.read_text())
+        assert bundle["findings"][0]["status"] == "verified"
+        assert bundle["verification"]["finding_id"] == finding_id
+        assert bundle["verification"]["status"] == "verified"
+        assert bundle["verification"]["exit_code"] == 0
+        artifact_index = json.loads(index_path.read_text())
+        assert len(artifact_index["entries"]) == 2
+        assert artifact_index["entries"][1]["kind"] == "verification"
+        assert artifact_index["entries"][1]["finding_id"] == finding_id
+        assert artifact_index["entries"][1]["status"] == "verified"
+        assert "verify:" in captured.out
+        assert "status: verified" in captured.out
+        assert "tests/test_ordeal_regressions.py::test_normalize_idempotent_regression" in captured.out
+
+    def test_verify_marks_finding_reproduced(self, monkeypatch, tmp_path, capsys):
+        index_path, bundle_path, finding_id = _write_verify_fixture(tmp_path)
+
+        def fake_run(cmd, cwd=None, text=None, capture_output=None, check=None):
+            return SimpleNamespace(returncode=1, stdout="F\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        rc = main(["verify", finding_id, "--index", str(index_path)])
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        bundle = json.loads(bundle_path.read_text())
+        assert bundle["findings"][0]["status"] == "reproduced"
+        assert bundle["verification"]["status"] == "reproduced"
+        assert bundle["verification"]["exit_code"] == 1
+        artifact_index = json.loads(index_path.read_text())
+        assert artifact_index["entries"][1]["kind"] == "verification"
+        assert artifact_index["entries"][1]["status"] == "reproduced"
+        assert "status: reproduced" in captured.out
+
+    def test_verify_requires_runnable_regression(self, monkeypatch, tmp_path, capsys):
+        index_path, bundle_path, finding_id = _write_verify_fixture(
+            tmp_path,
+            regression_path=None,
+            regression_test=None,
+        )
+
+        called = False
+
+        def fake_run(cmd, cwd=None, text=None, capture_output=None, check=None):
+            nonlocal called
+            called = True
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        rc = main(["verify", finding_id, "--index", str(index_path)])
+        captured = capsys.readouterr()
+
+        assert rc == 2
+        assert not called
+        bundle = json.loads(bundle_path.read_text())
+        assert "verification" not in bundle
+        artifact_index = json.loads(index_path.read_text())
+        assert len(artifact_index["entries"]) == 1
+        assert "No runnable regression is recorded" in captured.err
 
     def test_scan_write_regression_defaults_and_dedupes(self, monkeypatch, tmp_path, capsys):
         monkeypatch.chdir(tmp_path)

@@ -75,8 +75,8 @@ jobs:
 
       - run: uv sync --extra dev
 
-      - name: Enforce perf and audit-quality contract
-        run: uv run ordeal benchmark --perf-contract ordeal.perf.toml --check
+      - name: Enforce perf and audit-quality contract (PR gate)
+        run: uv run ordeal benchmark --perf-contract ordeal.perf.toml --tier pr --check
 
   bump-and-publish:
     if: github.event_name == 'push'

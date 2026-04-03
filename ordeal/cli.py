@@ -754,8 +754,12 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
         suite = _benchmark_perf_contract(
             args.perf_contract,
             cwd=os.getcwd(),
+            tier=getattr(args, "tier", None),
         )
-        print(suite.summary())
+        if getattr(args, "json", False):
+            print(suite.to_json())
+        else:
+            print(suite.summary())
         if args.check and not suite.passed:
             return 1
         return 0
@@ -2521,6 +2525,12 @@ def main(argv: list[str] | None = None) -> int:
         "--check",
         action="store_true",
         help="Return exit code 1 when a perf-contract case exceeds a time or score-gap budget",
+    )
+    bench_p.add_argument(
+        "--tier",
+        default=None,
+        choices=["pr", "nightly"],
+        help="Only run perf-contract cases matching this tier (default: all)",
     )
     bench_p.add_argument(
         "--mutate",

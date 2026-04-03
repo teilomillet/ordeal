@@ -28,6 +28,7 @@ max_seconds = 0.30
 [[cases]]
 name = "audit_demo_fast_vs_deep"
 kind = "audit_compare"
+tier = "nightly"
 module = "ordeal.demo"
 repeats = 2
 max_examples = 20
@@ -39,6 +40,7 @@ max_score_gap = 0.10
 [[cases]]
 name = "audit_suggest_fast_vs_deep"
 kind = "audit_compare"
+tier = "nightly"
 module = "ordeal.suggest"
 repeats = 1
 max_examples = 10
@@ -50,6 +52,7 @@ max_score_gap = 0.05
 [[cases]]
 name = "audit_quickcheck_fast_vs_deep"
 kind = "audit_compare"
+tier = "nightly"
 module = "ordeal.quickcheck"
 repeats = 1
 max_examples = 10

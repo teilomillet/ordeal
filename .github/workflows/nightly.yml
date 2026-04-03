@@ -1,0 +1,42 @@
+name: Nightly perf contract
+
+on:
+  schedule:
+    - cron: "0 4 * * *"  # 04:00 UTC daily
+  workflow_dispatch:       # manual trigger
+
+permissions:
+  contents: read
+
+jobs:
+  perf-nightly:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: astral-sh/setup-uv@v7
+
+      - run: uv python install 3.12
+
+      - run: uv sync --extra dev
+
+      - name: Run full perf contract (all tiers)
+        run: |
+          uv run ordeal benchmark --perf-contract ordeal.perf.toml --check \
+            2>&1 | tee perf-summary.txt
+
+      - name: Save JSON results
+        if: always()
+        run: |
+          uv run ordeal benchmark --perf-contract ordeal.perf.toml --json \
+            > perf-results.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results-${{ github.run_id }}
+          path: |
+            perf-results.json
+            perf-summary.txt
+          retention-days: 90

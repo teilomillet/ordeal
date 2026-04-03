@@ -479,3 +479,77 @@ max_score_gap = 0.10
         assert not case.passed
         assert "gap=15%" in case.summary()
         assert "gap_budget=5%" in case.summary()
+
+    def test_parse_perf_contract_tier_field(self, tmp_path: Path):
+        contract = tmp_path / "perf.toml"
+        contract.write_text(
+            """
+[[cases]]
+name = "fast_check"
+kind = "import"
+module = "ordeal.cli"
+max_seconds = 0.1
+
+[[cases]]
+name = "slow_compare"
+kind = "audit_compare"
+tier = "nightly"
+module = "ordeal.demo"
+repeats = 1
+max_score_gap = 0.10
+"""
+        )
+
+        specs = scaling._parse_perf_contract(str(contract))
+        assert specs[0].tier == "pr"
+        assert specs[1].tier == "nightly"
+
+    def test_benchmark_perf_contract_tier_filter(self, monkeypatch, tmp_path: Path):
+        contract = tmp_path / "perf.toml"
+        contract.write_text(
+            """
+[[cases]]
+name = "pr_import"
+kind = "import"
+module = "ordeal.cli"
+max_seconds = 1.0
+
+[[cases]]
+name = "nightly_compare"
+kind = "audit_compare"
+tier = "nightly"
+module = "ordeal.demo"
+repeats = 1
+max_score_gap = 0.10
+"""
+        )
+
+        monkeypatch.setattr(
+            scaling,
+            "_run_import_benchmark_trial",
+            lambda *args, **kwargs: 0.01,
+        )
+
+        suite = scaling.benchmark_perf_contract(str(contract), tier="pr")
+        assert len(suite.cases) == 1
+        assert suite.cases[0].spec.name == "pr_import"
+
+    def test_suite_to_json(self):
+        import json
+
+        case = scaling.PerfContractCase(
+            spec=scaling.PerfContractSpec(
+                name="test_case",
+                kind="import",
+                module="ordeal.cli",
+                max_seconds=0.1,
+            ),
+            seconds=[0.05, 0.06],
+        )
+        suite = scaling.PerfContractSuite(cases=[case], contract_path="test.toml")
+        data = json.loads(suite.to_json())
+        assert data["passed"] is True
+        assert len(data["cases"]) == 1
+        assert data["cases"][0]["name"] == "test_case"
+        assert data["cases"][0]["tier"] == "pr"
+        assert "runs" in data["cases"][0]

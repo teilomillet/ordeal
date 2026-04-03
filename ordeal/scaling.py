@@ -317,6 +317,7 @@ class PerfContractSpec:
 
     name: str
     kind: str
+    tier: str = "pr"
     repeats: int = 3
     max_seconds: float | None = None
     module: str | None = None
@@ -425,6 +426,33 @@ class PerfContractSuite:
         for case in self.cases:
             lines.append(f"  {case.summary()}")
         return "\n".join(lines)
+
+    def to_json(self) -> str:
+        """JSON-serializable results for nightly storage and regression diffing."""
+        import json
+
+        return json.dumps(
+            {
+                "contract_path": self.contract_path,
+                "passed": self.passed,
+                "cases": [
+                    {
+                        "name": c.spec.name,
+                        "kind": c.spec.kind,
+                        "tier": c.spec.tier,
+                        "passed": c.passed,
+                        "median_seconds": round(c.median_seconds, 4),
+                        "max_seconds": c.max_seconds,
+                        "score_gap": c.score_gap,
+                        "max_score_gap": c.spec.max_score_gap,
+                        "details": c.details,
+                        "runs": [round(s, 4) for s in c.seconds],
+                    }
+                    for c in self.cases
+                ],
+            },
+            indent=2,
+        )
 
 
 def analyze(measurements: list[tuple[int | float, float]]) -> ScalingAnalysis:
@@ -780,9 +808,16 @@ def _parse_perf_contract(path: str) -> list[PerfContractSpec]:
         if kind not in {"import", "audit", "audit_compare", "mutate"}:
             raise ValueError(f"Case {name!r} has unsupported kind {kind!r}")
 
+        tier = str(raw_case.get("tier", "pr")).strip()
+        if tier not in {"pr", "nightly"}:
+            raise ValueError(
+                f"Case {name!r} has unsupported tier {tier!r} (must be 'pr' or 'nightly')"
+            )
+
         spec = PerfContractSpec(
             name=name,
             kind=kind,
+            tier=tier,
             repeats=int(raw_case.get("repeats", 3)),
             max_seconds=(
                 float(raw_case["max_seconds"]) if raw_case.get("max_seconds") is not None else None
@@ -848,13 +883,25 @@ def benchmark_perf_contract(
     *,
     python_executable: str | None = None,
     cwd: str | None = None,
+    tier: str | None = None,
 ) -> PerfContractSuite:
-    """Run a checked-in perf/quality contract and return the observed medians."""
+    """Run a checked-in perf/quality contract and return the observed medians.
+
+    Parameters
+    ----------
+    tier:
+        When set, only run cases whose ``tier`` matches.  ``"pr"`` for the
+        lean PR gate, ``"nightly"`` for the full matrix.  ``None`` runs all.
+    """
     executable = python_executable or sys.executable
     workdir = cwd or os.getcwd()
     cases: list[PerfContractCase] = []
 
-    for spec in _parse_perf_contract(contract_path):
+    all_specs = _parse_perf_contract(contract_path)
+    if tier is not None:
+        all_specs = [s for s in all_specs if s.tier == tier]
+
+    for spec in all_specs:
         seconds: list[float] = []
         details: dict[str, Any] = {}
         if spec.kind == "import":

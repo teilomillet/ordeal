@@ -69,4 +69,4 @@ repeats = 5
 workers = 1
 preset = "standard"
 filter_equivalent = true
-max_seconds = 0.25
+max_seconds = 0.40

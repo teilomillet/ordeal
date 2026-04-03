@@ -297,8 +297,8 @@ class TestCoverageBackendSelection:
             ([Path("tests/test_demo.py")], "ordeal.demo"),
             ([Path(".ordeal/test_demo_migrated.py")], "ordeal.demo"),
         ]
-        assert "tests/test_demo.py" in (current.error or "")
-        assert ".ordeal/test_demo_migrated.py" in (migrated.error or "")
+        assert "test_demo.py" in (current.error or "")
+        assert "test_demo_migrated.py" in (migrated.error or "")
 
 
 # ============================================================================

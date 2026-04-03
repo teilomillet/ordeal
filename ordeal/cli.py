@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -196,7 +197,8 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
     )
     print(
         "Add '--save-artifacts' to scan for the full bug bundle:"
-        f" {_default_scan_report_path('mymod')} + {_DEFAULT_REGRESSION_PATH}"
+        f" {_default_scan_report_path('mymod')} + {_default_scan_bundle_path('mymod')}"
+        f" + {_DEFAULT_REGRESSION_PATH}"
         f" + {_default_artifact_index_path()}."
     )
     print("Run 'ordeal catalog --detail' for signatures and docs.")
@@ -356,15 +358,21 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     if save_artifacts and not state.findings:
         _stderr("No findings yet; no artifacts written.\n")
     if save_artifacts and state.findings and written_report_path is not None:
-        index_path = _write_scan_artifact_index(
-            state=state,
+        bundle_path, bundle = _write_scan_bundle(
+            state,
+            path_str=_artifact_bundle_path(str(written_report_path)),
             report_path=written_report_path,
             regression_path=written_regression_path,
+        )
+        index_path = _write_scan_artifact_index(
+            bundle=bundle,
+            bundle_path=bundle_path,
         )
         if not args.json:
             _print_scan_artifact_workflow(
                 module=state.module,
                 report_path=written_report_path,
+                bundle_path=bundle_path,
                 regression_path=written_regression_path,
                 index_path=index_path,
             )
@@ -1585,7 +1593,13 @@ def _regression_test_name(stub: str) -> str | None:
 def _default_scan_report_path(module: str) -> str:
     """Return the default Markdown artifact path for a scanned module."""
     parts = module.split(".")
-    return str(Path(_DEFAULT_FINDINGS_DIR).joinpath(*parts).with_suffix(".md"))
+    return "/".join([_DEFAULT_FINDINGS_DIR, *parts[:-1], parts[-1] + ".md"])
+
+
+def _default_scan_bundle_path(module: str) -> str:
+    """Return the default JSON artifact path for a scanned module."""
+    parts = module.split(".")
+    return "/".join([_DEFAULT_FINDINGS_DIR, *parts[:-1], parts[-1] + ".json"])
 
 
 def _default_artifact_index_path() -> str:
@@ -1601,6 +1615,38 @@ def _display_path(path: Path) -> str:
 def _shell_command(*parts: str) -> str:
     """Join shell arguments into a displayable command string."""
     return shlex.join(parts)
+
+
+def _artifact_bundle_path(report_path: str) -> str:
+    """Derive the JSON bundle path from a Markdown report path."""
+    return str(Path(report_path).with_suffix(".json"))
+
+
+def _finding_identity(detail: dict[str, Any]) -> dict[str, Any]:
+    """Return the stable identity fields for one finding."""
+    return {
+        "module": detail.get("module"),
+        "function": detail.get("function"),
+        "kind": detail.get("kind"),
+        "name": detail.get("name"),
+    }
+
+
+def _finding_fingerprint(detail: dict[str, Any]) -> str:
+    """Return a stable fingerprint for correlating the same finding across runs."""
+    payload = json.dumps(_finding_identity(detail), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _annotate_finding(detail: dict[str, Any]) -> dict[str, Any]:
+    """Attach stable IDs to a normalized finding detail record."""
+    fingerprint = _finding_fingerprint(detail)
+    return {
+        **detail,
+        "finding_id": f"fnd_{fingerprint[:12]}",
+        "fingerprint": fingerprint,
+        "status": "open",
+    }
 
 
 def _python_literal(value: Any, *, trim: bool = True) -> str:
@@ -1876,6 +1922,52 @@ def _render_scan_report_markdown(state: Any) -> str:
     return _render_findings_report_markdown(_build_scan_report(state))
 
 
+def _build_scan_bundle(
+    state: Any,
+    *,
+    report_path: Path,
+    regression_path: Path | None,
+) -> dict[str, Any]:
+    """Build the machine-readable scan artifact bundle."""
+    report = _build_scan_report(state)
+    findings = [_annotate_finding(detail) for detail in report["details"]]
+    saved_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    return {
+        "version": 1,
+        "saved_at": saved_at,
+        "tool": "scan",
+        "target": report["target"],
+        "status": "findings found" if findings else "no findings yet",
+        "confidence": round(state.confidence, 4),
+        "seed": report.get("seed"),
+        "summary": report["summary"],
+        "gaps": report["gaps"],
+        "finding_count": len(findings),
+        "findings": findings,
+        "artifacts": {
+            "report": _display_path(report_path),
+            "bundle": None,
+            "regression": _display_path(regression_path) if regression_path else None,
+            "index": _display_path(Path(_default_artifact_index_path())),
+        },
+        "commands": {
+            "pytest": (
+                _shell_command("uv", "run", "pytest", _display_path(regression_path), "-q")
+                if regression_path
+                else None
+            ),
+            "rescan": _shell_command(
+                "uv",
+                "run",
+                "ordeal",
+                "scan",
+                state.module,
+                "--save-artifacts",
+            ),
+        },
+    }
+
+
 def _split_regression_stub(stub: str) -> tuple[str | None, str, str | None]:
     """Split a stub into import line, function body, and test name."""
     lines = stub.rstrip().splitlines()
@@ -2120,6 +2212,27 @@ def _write_scan_report(state: Any, path_str: str) -> Path:
     return path
 
 
+def _write_scan_bundle(
+    state: Any,
+    *,
+    path_str: str,
+    report_path: Path,
+    regression_path: Path | None,
+) -> tuple[Path, dict[str, Any]]:
+    """Write a machine-readable JSON finding bundle for `ordeal scan`."""
+    path = Path(path_str)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    bundle = _build_scan_bundle(
+        state,
+        report_path=report_path,
+        regression_path=regression_path,
+    )
+    bundle["artifacts"]["bundle"] = _display_path(path)
+    path.write_text(json.dumps(bundle, indent=2) + "\n", encoding="utf-8")
+    _stderr(f"Scan bundle saved: {path}\n")
+    return path, bundle
+
+
 def _write_scan_regressions(state: Any, path_str: str) -> Path | None:
     """Write runnable pytest regressions for concrete scan findings."""
     stubs, skipped = _scan_regression_stubs(state)
@@ -2154,9 +2267,8 @@ def _write_scan_regressions(state: Any, path_str: str) -> Path | None:
 
 def _write_scan_artifact_index(
     *,
-    state: Any,
-    report_path: Path,
-    regression_path: Path | None,
+    bundle: dict[str, Any],
+    bundle_path: Path,
 ) -> Path:
     """Append a `scan --save-artifacts` record to the artifact index."""
     path = Path(_default_artifact_index_path())
@@ -2174,43 +2286,31 @@ def _write_scan_artifact_index(
                 "entries": list(loaded["entries"]),
             }
 
-    report = _build_scan_report(state)
     payload["entries"].append(
         {
-            "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-            "module": state.module,
-            "status": report["status"],
-            "confidence": round(state.confidence, 4),
-            "seed": report.get("seed"),
-            "finding_count": len(report["details"]),
+            "created_at": bundle["saved_at"],
+            "module": bundle["target"],
+            "status": bundle["status"],
+            "confidence": bundle["confidence"],
+            "seed": bundle.get("seed"),
+            "finding_count": bundle["finding_count"],
+            "finding_ids": [finding["finding_id"] for finding in bundle["findings"]],
             "findings": [
                 {
+                    "finding_id": detail.get("finding_id"),
+                    "fingerprint": detail.get("fingerprint"),
                     "qualname": detail.get("qualname"),
                     "kind": detail.get("kind"),
                     "name": detail.get("name"),
                     "summary": detail.get("summary"),
                 }
-                for detail in report["details"]
+                for detail in bundle["findings"]
             ],
             "artifacts": {
-                "report": _display_path(report_path),
-                "regression": _display_path(regression_path) if regression_path else None,
+                **bundle["artifacts"],
+                "bundle": bundle["artifacts"]["bundle"] or _display_path(bundle_path),
             },
-            "commands": {
-                "pytest": (
-                    _shell_command("uv", "run", "pytest", _display_path(regression_path), "-q")
-                    if regression_path
-                    else None
-                ),
-                "rescan": _shell_command(
-                    "uv",
-                    "run",
-                    "ordeal",
-                    "scan",
-                    state.module,
-                    "--save-artifacts",
-                ),
-            },
+            "commands": dict(bundle["commands"]),
         }
     )
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -2222,6 +2322,7 @@ def _print_scan_artifact_workflow(
     *,
     module: str,
     report_path: Path,
+    bundle_path: Path,
     regression_path: Path | None,
     index_path: Path,
 ) -> None:
@@ -2229,6 +2330,7 @@ def _print_scan_artifact_workflow(
     print("")
     print("artifacts:")
     print(f"  report: {_display_path(report_path)}")
+    print(f"  bundle: {_display_path(bundle_path)}")
     if regression_path is not None:
         print(f"  regression: {_display_path(regression_path)}")
     else:
@@ -2371,7 +2473,7 @@ def main(argv: list[str] | None = None) -> int:
             "Ordeal — discovers what's true about your code.\n\n"
             "Start here:\n"
             "  ordeal scan mymod --save-artifacts\n"
-            "                              Save report + regressions + history\n"
+            "                              Save report + JSON bundle + regressions + history\n"
             "  ordeal scan mymod --report-file report.md\n"
             "                              Save a shareable bug report\n"
             "  ordeal scan mymod --write-regression\n"
@@ -2425,7 +2527,8 @@ def main(argv: list[str] | None = None) -> int:
         description=(
             f"{scan_desc}\n\n"
             f"Use --save-artifacts to save both {_default_scan_report_path('mymod')} and"
-            f" {_DEFAULT_REGRESSION_PATH}, then update {_default_artifact_index_path()}.\n"
+            f" {_default_scan_bundle_path('mymod')} + {_DEFAULT_REGRESSION_PATH},"
+            f" then update {_default_artifact_index_path()}.\n"
             "Use --report-file report.md to save a shareable Markdown bug report.\n"
             f"Use --write-regression or --write-regression PATH to save runnable pytest"
             f" regressions (default: {_DEFAULT_REGRESSION_PATH})."
@@ -2450,8 +2553,9 @@ def main(argv: list[str] | None = None) -> int:
         "--save-artifacts",
         action="store_true",
         help=(
-            "When findings exist, write both the default Markdown dossier and"
-            f" regression file ({_default_scan_report_path('mymod')}, {_DEFAULT_REGRESSION_PATH})"
+            "When findings exist, write the default Markdown dossier, JSON bundle,"
+            f" and regression file ({_default_scan_report_path('mymod')},"
+            f" {_default_scan_bundle_path('mymod')}, {_DEFAULT_REGRESSION_PATH})"
             f" and update {_default_artifact_index_path()}"
         ),
     )

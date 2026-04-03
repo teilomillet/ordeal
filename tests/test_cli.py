@@ -88,6 +88,7 @@ class TestCLI:
         assert "tests/test_ordeal_regressions.py" in out
         assert "--save-artifacts" in out
         assert ".ordeal/findings/mymod.md" in out
+        assert ".ordeal/findings/mymod.json" in out
         assert ".ordeal/findings/index.json" in out
 
     def test_explore_missing_config(self):
@@ -164,6 +165,7 @@ class TestCLI:
         assert "runnable pytest regressions" in out
         assert "--save-artifacts" in out
         assert ".ordeal/findings/mymod.md" in out
+        assert ".ordeal/findings/mymod.json" in out
         assert "--report-file PATH" in out
         assert "--write-regression" in out
         assert "default: tests/test_ordeal_regressions.py" in out
@@ -346,23 +348,42 @@ class TestCLI:
         captured = capsys.readouterr()
 
         report_path = tmp_path / ".ordeal" / "findings" / "pkg" / "mod.md"
+        bundle_path = tmp_path / ".ordeal" / "findings" / "pkg" / "mod.json"
         index_path = tmp_path / ".ordeal" / "findings" / "index.json"
         regression_path = tmp_path / "tests" / "test_ordeal_regressions.py"
         assert rc == 1
         assert report_path.exists()
+        assert bundle_path.exists()
         assert index_path.exists()
         assert regression_path.exists()
         assert "Target: `pkg.mod`" in report_path.read_text()
         assert "def test_normalize_idempotent_regression() -> None:" in regression_path.read_text()
+        bundle = json.loads(bundle_path.read_text())
+        assert bundle["tool"] == "scan"
+        assert bundle["target"] == "pkg.mod"
+        assert bundle["saved_at"]
+        assert bundle["artifacts"]["report"] == ".ordeal/findings/pkg/mod.md"
+        assert bundle["artifacts"]["bundle"] == ".ordeal/findings/pkg/mod.json"
+        assert bundle["artifacts"]["regression"] == "tests/test_ordeal_regressions.py"
+        assert bundle["artifacts"]["index"] == ".ordeal/findings/index.json"
+        assert bundle["findings"][0]["finding_id"].startswith("fnd_")
+        assert len(bundle["findings"][0]["fingerprint"]) == 64
+        assert bundle["findings"][0]["status"] == "open"
         artifact_index = json.loads(index_path.read_text())
         assert artifact_index["version"] == 1
         assert len(artifact_index["entries"]) == 1
         assert artifact_index["entries"][0]["module"] == "pkg.mod"
+        assert artifact_index["entries"][0]["created_at"] == bundle["saved_at"]
         assert artifact_index["entries"][0]["artifacts"]["report"] == ".ordeal/findings/pkg/mod.md"
+        assert (
+            artifact_index["entries"][0]["artifacts"]["bundle"] == ".ordeal/findings/pkg/mod.json"
+        )
         assert (
             artifact_index["entries"][0]["artifacts"]["regression"]
             == "tests/test_ordeal_regressions.py"
         )
+        assert artifact_index["entries"][0]["artifacts"]["index"] == ".ordeal/findings/index.json"
+        assert artifact_index["entries"][0]["finding_ids"] == [bundle["findings"][0]["finding_id"]]
         assert (
             artifact_index["entries"][0]["commands"]["pytest"]
             == "uv run pytest tests/test_ordeal_regressions.py -q"
@@ -373,12 +394,14 @@ class TestCLI:
         )
         assert "artifacts:" in captured.out
         assert "report: .ordeal/findings/pkg/mod.md" in captured.out
+        assert "bundle: .ordeal/findings/pkg/mod.json" in captured.out
         assert "regression: tests/test_ordeal_regressions.py" in captured.out
         assert "index: .ordeal/findings/index.json" in captured.out
         assert "next:" in captured.out
         assert "run: uv run pytest tests/test_ordeal_regressions.py -q" in captured.out
         assert "after fix: uv run ordeal scan pkg.mod --save-artifacts" in captured.out
         assert "Scan report saved:" in captured.err
+        assert "Scan bundle saved:" in captured.err
         assert "Regression tests written:" in captured.err
         assert "Artifact index updated:" in captured.err
 
@@ -436,23 +459,36 @@ class TestCLI:
         captured = capsys.readouterr()
 
         report_path = tmp_path / ".ordeal" / "findings" / "pkg" / "mod.md"
+        bundle_path = tmp_path / ".ordeal" / "findings" / "pkg" / "mod.json"
         index_path = tmp_path / ".ordeal" / "findings" / "index.json"
         regression_path = tmp_path / "tests" / "test_ordeal_regressions.py"
         assert rc == 1
         assert report_path.exists()
+        assert bundle_path.exists()
         assert index_path.exists()
         assert not regression_path.exists()
+        bundle = json.loads(bundle_path.read_text())
+        assert bundle["artifacts"]["regression"] is None
+        assert bundle["artifacts"]["index"] == ".ordeal/findings/index.json"
+        assert bundle["commands"]["pytest"] is None
+        assert bundle["findings"][0]["finding_id"].startswith("fnd_")
         artifact_index = json.loads(index_path.read_text())
+        assert (
+            artifact_index["entries"][0]["artifacts"]["bundle"] == ".ordeal/findings/pkg/mod.json"
+        )
         assert artifact_index["entries"][0]["artifacts"]["regression"] is None
+        assert artifact_index["entries"][0]["artifacts"]["index"] == ".ordeal/findings/index.json"
         assert artifact_index["entries"][0]["commands"]["pytest"] is None
         assert "No concrete regression tests could be generated" in captured.err
+        assert "Scan bundle saved:" in captured.err
         assert "Artifact index updated:" in captured.err
+        assert "bundle: .ordeal/findings/pkg/mod.json" in captured.out
         assert "regression: not generated from current findings" in captured.out
         assert "after fix: uv run ordeal scan pkg.mod --save-artifacts" in captured.out
 
     def test_scan_save_artifacts_appends_index_history(self, monkeypatch, tmp_path, capsys):
         monkeypatch.chdir(tmp_path)
-        state = SimpleNamespace(
+        first_state = SimpleNamespace(
             module="pkg.mod",
             confidence=0.63,
             functions={"normalize": object()},
@@ -478,7 +514,34 @@ class TestCLI:
             ],
         )
 
-        monkeypatch.setattr(ordeal_state, "explore", lambda *args, **kwargs: state)
+        second_state = SimpleNamespace(
+            module="pkg.mod",
+            confidence=0.61,
+            functions={"normalize": object()},
+            supervisor_info={"seed": 42, "trajectory_steps": 7},
+            tree=SimpleNamespace(size=4),
+            findings=["normalize: idempotent (83%)"],
+            frontier={"normalize": ["property: idempotent (83%)"]},
+            finding_details=[
+                {
+                    "kind": "property",
+                    "function": "normalize",
+                    "name": "idempotent",
+                    "summary": "idempotent (83%)",
+                    "confidence": 0.83,
+                    "holds": 25,
+                    "total": 30,
+                    "counterexample": {
+                        "input": {"xs": [1, 2, 3]},
+                        "output": [0.5, 0.25, 0.25],
+                        "replayed": [0.4, 0.3, 0.3],
+                    },
+                }
+            ],
+        )
+
+        states = iter([first_state, second_state])
+        monkeypatch.setattr(ordeal_state, "explore", lambda *args, **kwargs: next(states))
 
         assert main(["scan", "pkg.mod", "--save-artifacts", "-n", "10"]) == 1
         capsys.readouterr()
@@ -487,6 +550,16 @@ class TestCLI:
 
         artifact_index = json.loads((tmp_path / ".ordeal" / "findings" / "index.json").read_text())
         assert len(artifact_index["entries"]) == 2
+        assert artifact_index["entries"][0]["findings"][0]["summary"] == "idempotent (87%)"
+        assert artifact_index["entries"][1]["findings"][0]["summary"] == "idempotent (83%)"
+        assert (
+            artifact_index["entries"][0]["findings"][0]["finding_id"]
+            == artifact_index["entries"][1]["findings"][0]["finding_id"]
+        )
+        assert (
+            artifact_index["entries"][0]["findings"][0]["fingerprint"]
+            == artifact_index["entries"][1]["findings"][0]["fingerprint"]
+        )
 
     def test_scan_write_regression_defaults_and_dedupes(self, monkeypatch, tmp_path, capsys):
         monkeypatch.chdir(tmp_path)

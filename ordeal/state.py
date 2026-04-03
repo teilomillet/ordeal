@@ -316,7 +316,7 @@ def explore_mine(
     """Mine all functions in the module and update state."""
 
     from ordeal.auto import _get_public_functions, _infer_strategies, _resolve_module
-    from ordeal.mine import mine
+    from ordeal.mine import _is_suspicious_property, mine
 
     mod = _resolve_module(state.module)
     funcs = _get_public_functions(mod, include_private=include_private)
@@ -352,7 +352,7 @@ def explore_mine(
         fs.property_violations = [
             f"{p.name} ({p.confidence:.0%})"
             for p in result.properties
-            if p.total >= 10 and 0.90 <= p.confidence < 1.0
+            if _is_suspicious_property(p)
         ]
     return state
 

@@ -88,7 +88,7 @@ def _show_in_summary(name: str) -> bool:
 
 def _is_suspicious_property(prop: "MinedProperty") -> bool:
     """Return True for partial properties worth surfacing by default."""
-    if prop.universal or prop.total == 0 or prop.confidence < _SUSPICIOUS_CONFIDENCE:
+    if prop.universal or prop.total < 10 or prop.confidence < _SUSPICIOUS_CONFIDENCE:
         return False
     if not _show_in_summary(prop.name):
         return False

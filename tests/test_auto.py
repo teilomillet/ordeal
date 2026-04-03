@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hypothesis.strategies as st
 import tests._auto_target as target
-from ordeal.auto import chaos_for, fuzz, scan_module
+from ordeal.auto import _test_one_function, chaos_for, fuzz, scan_module
+from ordeal.mine import MinedProperty
 from ordeal.invariants import finite
 
 
@@ -45,6 +47,35 @@ class TestScanModule:
     def test_with_module_object(self):
         result = scan_module(target, max_examples=10)
         assert result.total > 0
+
+    def test_filters_low_signal_property_warnings(self, monkeypatch):
+        import ordeal.mine as mine_mod
+
+        def fake_mine(fn, max_examples):
+            return type(
+                "_FakeMineResult",
+                (),
+                {
+                    "properties": [
+                        MinedProperty("monotonically non-decreasing in lo", 19, 20),
+                        MinedProperty("idempotent", 17, 20),
+                    ]
+                },
+            )()
+
+        monkeypatch.setattr(mine_mod, "mine", fake_mine)
+
+        result = _test_one_function(
+            "identity",
+            lambda x: x,
+            {"x": st.integers()},
+            None,
+            max_examples=1,
+            check_return_type=False,
+        )
+
+        assert "idempotent (85%)" in result.property_violations
+        assert not any("monotonically" in v for v in result.property_violations)
 
 
 class TestFuzz:

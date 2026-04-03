@@ -508,19 +508,12 @@ def _test_one_function(
     # Mine properties to detect semantic anomalies (not just crashes)
     violations: list[str] = []
     try:
-        from ordeal.mine import mine
+        from ordeal.mine import _is_suspicious_property, mine
 
         mine_result = mine(func, max_examples=min(max_examples, 30))
         for prop in mine_result.properties:
-            # Only report properties that held often enough to seem real
-            # but failed enough to be suspicious (95-99% = likely bug)
-            if prop.total >= 10 and 0.50 < prop.confidence < 1.0:
-                if prop.name in ("deterministic",):
-                    # Non-determinism is always worth reporting
-                    violations.append(f"{prop.name} ({prop.confidence:.0%})")
-                elif prop.confidence >= 0.90:
-                    # High-confidence properties that aren't universal = suspicious
-                    violations.append(f"{prop.name} ({prop.confidence:.0%})")
+            if _is_suspicious_property(prop):
+                violations.append(f"{prop.name} ({prop.confidence:.0%})")
     except Exception:
         pass  # mining failed — still report crash-safety pass
 

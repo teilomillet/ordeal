@@ -12,6 +12,8 @@ $ ordeal mine mymod.func -n 1000    # more examples
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import sys
@@ -293,19 +295,20 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 
     inc_private = getattr(args, "include_private", False)
     _stderr(f"Scanning {args.target} (seed={args.seed})...\n")
-    state = explore(
-        args.target,
-        seed=args.seed,
-        max_examples=args.max_examples,
-        workers=args.workers,
-        time_limit=args.time_limit,
-        include_private=inc_private,
-    )
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        state = explore(
+            args.target,
+            seed=args.seed,
+            max_examples=args.max_examples,
+            workers=args.workers,
+            time_limit=args.time_limit,
+            include_private=inc_private,
+        )
 
     if args.json:
         print(state.to_json())
     else:
-        print(state.summary())
+        print(_format_scan_summary(state))
 
     return 1 if state.findings else 0
 
@@ -1320,6 +1323,46 @@ def _print_report(
         else:
             print("    No failures.")
         print()
+
+
+def _format_scan_summary(state: Any) -> str:
+    """Render a concise, action-oriented summary for ``ordeal scan``."""
+    lines = [f"ordeal scan: {state.module}"]
+    status = "findings found" if state.findings else "no findings yet"
+    lines.append(f"  status: {status}")
+    lines.append(f"  confidence: {state.confidence:.0%}")
+
+    checked = [f"{len(state.functions)} functions"]
+    if getattr(state, "supervisor_info", None):
+        checked.append(f"{state.supervisor_info.get('trajectory_steps', 0)} transitions")
+    tree = getattr(state, "tree", None)
+    if tree is not None and getattr(tree, "size", 0) > 0:
+        checked.append(f"{tree.size} checkpoints")
+    lines.append(f"  checked: {', '.join(checked)}")
+
+    if state.findings:
+        lines.append("  findings:")
+        for finding in state.findings[:5]:
+            lines.append(f"    - {finding}")
+    else:
+        lines.append("  findings: none")
+
+    frontier = state.frontier
+    if frontier:
+        lines.append("  gaps to close:")
+        shown = 0
+        for name, gaps in frontier.items():
+            if shown >= 5:
+                break
+            lines.append(f"    - {name}: {', '.join(gaps)}")
+            shown += 1
+
+    from ordeal.suggest import format_suggestions
+
+    avail = format_suggestions(state)
+    if avail:
+        lines.append(avail)
+    return "\n".join(lines)
 
 
 def _write_json_report(

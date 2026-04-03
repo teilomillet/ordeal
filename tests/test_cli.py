@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 
 import hypothesis.strategies as st
@@ -9,6 +10,7 @@ from hypothesis import settings as hsettings
 
 import ordeal.cli as cli
 import ordeal.scaling as scaling
+import ordeal.state as ordeal_state
 from ordeal import ChaosTest, always, invariant, rule
 from ordeal.assertions import tracker
 from ordeal.cli import main
@@ -49,6 +51,57 @@ class TestCLI:
         assert main(["mine", "ordeal.invariants.bounded", "-n", "10"]) == 0
         out = capsys.readouterr().out
         assert "mine(bounded)" in out
+
+    def test_scan_suppresses_inner_noise_and_formats_summary(self, monkeypatch, capsys):
+        class _FakeTree:
+            size = 3
+
+        state = SimpleNamespace(
+            module="pkg.mod",
+            confidence=0.63,
+            functions={"a": object(), "b": object()},
+            supervisor_info={"trajectory_steps": 5},
+            tree=_FakeTree(),
+            findings=["normalize: idempotent (92%)"],
+            frontier={"score": ["mutation score 67%", "1 unhardened survivor(s)"]},
+        )
+
+        def fake_explore(*args, **kwargs):
+            print("INNER STDOUT NOISE")
+            sys.stderr.write("INNER STDERR NOISE\n")
+            return state
+
+        monkeypatch.setattr(ordeal_state, "explore", fake_explore)
+
+        rc = main(["scan", "pkg.mod", "-n", "10"])
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        assert "INNER STDOUT NOISE" not in captured.out
+        assert "INNER STDERR NOISE" not in captured.err
+        assert "ordeal scan: pkg.mod" in captured.out
+        assert "status: findings found" in captured.out
+        assert "gaps to close:" in captured.out
+
+    def test_scan_no_findings_returns_zero(self, monkeypatch, capsys):
+        state = SimpleNamespace(
+            module="pkg.clean",
+            confidence=0.91,
+            functions={"a": object()},
+            supervisor_info={},
+            tree=SimpleNamespace(size=0),
+            findings=[],
+            frontier={},
+        )
+
+        monkeypatch.setattr(ordeal_state, "explore", lambda *args, **kwargs: state)
+
+        rc = main(["scan", "pkg.clean", "-n", "10"])
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        assert "status: no findings yet" in out
+        assert "findings: none" in out
 
     # -- ordeal mine-pair --
 

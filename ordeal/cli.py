@@ -1505,13 +1505,19 @@ def _property_impact(detail: dict[str, Any]) -> str:
         "involution": "running the function twice failed to recover the original value.",
         "never None": "a generated input returned None where callers likely expect a real value.",
         "no NaN": "a generated input produced NaN, which can silently poison downstream math.",
-        "commutative": "swapping the operands changed the result, so behavior depends on argument order.",
-        "associative": "grouping equivalent operations changed the result, which hints at an algebraic edge case.",
+        "commutative": (
+            "swapping the operands changed the result, so behavior depends on argument order."
+        ),
+        "associative": (
+            "grouping equivalent operations changed the result,"
+            " which hints at an algebraic edge case."
+        ),
         "bijective": "distinct inputs collapsed to the same output, so information is being lost.",
     }
     return messages.get(
         name,
-        "this property held for most examples but not all, which suggests a boundary or consistency bug.",
+        "this property held for most examples but not all,"
+        " which suggests a boundary or consistency bug.",
     )
 
 
@@ -1521,13 +1527,15 @@ def _render_regression_stub(module: str, detail: dict[str, Any]) -> str | None:
     if not function:
         return None
 
-    test_name = f"test_{function}_{_slugify_report_name(detail.get('name') or detail.get('kind', 'finding'))}_regression"
+    slug = _slugify_report_name(detail.get("name") or detail.get("kind", "finding"))
+    test_name = f"test_{function}_{slug}_regression"
     lines = [f"from {module} import {function}", "", "", f"def {test_name}() -> None:"]
 
     kind = detail.get("kind")
     counterexample = detail.get("counterexample") or {}
     failing_args = detail.get("failing_args")
-    input_args = counterexample.get("input") if isinstance(counterexample.get("input"), dict) else None
+    raw_input = counterexample.get("input")
+    input_args = raw_input if isinstance(raw_input, dict) else None
 
     if kind == "crash" and isinstance(failing_args, dict):
         lines.append(f"    args = {_python_literal(failing_args)}")
@@ -1605,7 +1613,7 @@ def _render_finding_section(detail: dict[str, Any]) -> list[str]:
             [
                 "",
                 "Next steps:",
-                f"- `ordeal check {qualname} -p \"{detail.get('name', '')}\" -n 200`",
+                f'- `ordeal check {qualname} -p "{detail.get("name", "")}" -n 200`',
                 f"- `ordeal mutate {qualname}`",
             ]
         )
@@ -1614,7 +1622,10 @@ def _render_finding_section(detail: dict[str, Any]) -> list[str]:
     if kind == "crash":
         error = detail.get("error") or "unknown error"
         lines.append(f"- Evidence: `{error}`")
-        lines.append("- Why this matters: the function crashes under generated inputs, so basic robustness is not yet established.")
+        lines.append(
+            "- Why this matters: the function crashes under generated inputs,"
+            " so basic robustness is not yet established."
+        )
         if detail.get("failing_args"):
             lines.extend(["", "Failing input:"])
             lines.extend(_json_block(detail["failing_args"]))
@@ -1639,7 +1650,9 @@ def _render_finding_section(detail: dict[str, Any]) -> list[str]:
             lines.append(f"- Evidence: mutation score `{score:.0%}`")
         if survived is not None:
             lines.append(f"- Surviving mutants: `{survived}`")
-        lines.append("- Why this matters: existing tests still miss at least one meaningful code change.")
+        lines.append(
+            "- Why this matters: existing tests still miss at least one meaningful code change."
+        )
         lines.extend(
             [
                 "",
@@ -1933,8 +1946,7 @@ def main(argv: list[str] | None = None) -> int:
         "scan",
         help="Explore a module and optionally write a shareable Markdown bug report",
         description=(
-            f"{scan_desc}\n\n"
-            "Use --report-file report.md to save a shareable Markdown bug report."
+            f"{scan_desc}\n\nUse --report-file report.md to save a shareable Markdown bug report."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

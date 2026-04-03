@@ -16,7 +16,7 @@ from ordeal import ChaosTest, always, invariant, rule
 from ordeal.assertions import tracker
 from ordeal.cli import main
 from ordeal.explore import ProgressSnapshot
-from ordeal.mine import MineResult, MinedProperty
+from ordeal.mine import MinedProperty, MineResult
 from ordeal.quickcheck import quickcheck
 
 
@@ -197,7 +197,7 @@ class TestCLI:
         assert "# Ordeal Finding Report" in report
         assert "Target: `pkg.mod`" in report
         assert "### 1. `pkg.mod.normalize`" in report
-        assert "`ordeal check pkg.mod.normalize -p \"idempotent\" -n 200`" in report
+        assert '`ordeal check pkg.mod.normalize -p "idempotent" -n 200`' in report
         assert "Counterexample:" in report
         assert '"... +2 more item(s)"' in report
         assert "Regression test stub:" in report

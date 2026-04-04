@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.9
+
+**Features:**
+
+- deepen audit directness and fixture builders
+- add audit write-gaps flow
+- surface audit function evidence
+- deepen audit and scan evidence
+
+**Other:**
+
+- test: stabilize windows audit and path output
+- perf: skip unnecessary audit node collection
+- perf: speed up cached audit discovery
+
+
 ## 0.2.104
 
 **Features:**

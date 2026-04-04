@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from pathlib import Path
 from types import SimpleNamespace
 
 import ordeal.audit as audit_mod
+import ordeal.auto as ordeal_auto
 import ordeal.mine as mine_mod
 import ordeal.mutations as mutations_mod
 import ordeal.state as ordeal_state
@@ -16,6 +19,30 @@ from ordeal.cli import main
 from ordeal.mine import MinedProperty, MineResult
 from ordeal.mutations import Mutant, MutationResult, NoTestsFoundError
 from ordeal.trace import Trace, TraceStep
+
+
+def _make_target_listing_module(name: str = "tests._cli_targets") -> types.ModuleType:
+    """Create a small module with callable-surface variety for JSON listing tests."""
+    mod = types.ModuleType(name)
+    exec(
+        "class Env:\n"
+        "    def __init__(self):\n"
+        "        self.prefix = 'env'\n"
+        "\n"
+        "    def build_env_vars(self, path: str) -> str:\n"
+        "        return f'{self.prefix}:{path}'\n"
+        "\n"
+        "    async def post_sandbox_setup(self) -> str:\n"
+        "        return 'ready'\n"
+        "\n"
+        "def direct(x: int) -> int:\n"
+        "    return x\n"
+        "\n"
+        "def no_hints(x):\n"
+        "    return x\n",
+        mod.__dict__,
+    )
+    return mod
 
 
 class TestCLIAgentJson:
@@ -204,6 +231,73 @@ class TestCLIAgentJson:
         }
         assert (
             payload["raw_details"]["report"]["extra_sections"][0][0] == "Function-Level Evidence"
+        )
+
+    def test_scan_json_list_targets_outputs_callable_metadata(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        mod = _make_target_listing_module()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setitem(sys.modules, mod.__name__, mod)
+        monkeypatch.setitem(
+            ordeal_auto._REGISTERED_OBJECT_FACTORIES,
+            "tests._cli_targets:Env",
+            lambda: mod.Env(),
+        )
+
+        rc = main(["scan", mod.__name__, "--json", "--list-targets"])
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["tool"] == "scan"
+        assert payload["status"] == "exploratory"
+        rows = payload["raw_details"]["targets"]
+        env_row = next(row for row in rows if row["name"] == "Env.build_env_vars")
+        assert env_row["kind"] == "instance"
+        assert env_row["factory_required"] is True
+        assert env_row["factory_configured"] is True
+        assert env_row["selected"] is True
+
+    def test_audit_json_list_targets_outputs_callable_metadata(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        mod = _make_target_listing_module()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setitem(sys.modules, mod.__name__, mod)
+        monkeypatch.setitem(
+            ordeal_auto._REGISTERED_OBJECT_FACTORIES,
+            "tests._cli_targets:Env",
+            lambda: mod.Env(),
+        )
+        monkeypatch.setitem(
+            ordeal_auto._REGISTERED_OBJECT_SETUPS,
+            "tests._cli_targets:Env",
+            lambda instance: instance,
+        )
+        monkeypatch.setitem(
+            ordeal_auto._REGISTERED_OBJECT_SCENARIOS,
+            "tests._cli_targets:Env",
+            lambda instance: instance,
+        )
+
+        rc = main(["audit", mod.__name__, "--json", "--list-targets"])
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["tool"] == "audit"
+        assert payload["status"] == "exploratory"
+        assert payload["raw_details"]["target_groups"][0]["module"] == mod.__name__
+        rows = payload["raw_details"]["targets"]
+        env_row = next(row for row in rows if row["name"] == "Env.build_env_vars")
+        assert env_row["kind"] == "instance"
+        assert env_row["factory_required"] is True
+        assert env_row["factory_configured"] is True
+        assert env_row["setup_configured"] is True
+        assert env_row["scenario_count"] == 1
+        assert env_row["runnable"] is True
+        assert any(
+            row["name"] == "no_hints" and row["skip_reason"] == "missing inferable strategies"
+            for row in rows
         )
 
     def test_audit_json_preserves_method_level_function_names(self, monkeypatch, capsys):

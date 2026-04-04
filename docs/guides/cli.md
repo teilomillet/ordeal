@@ -8,7 +8,7 @@ description: >-
 # CLI
 
 !!! quote "In plain English"
-    The CLI is how you run ordeal outside of pytest. Use `scan` for exploratory signals, `replay` to reproduce them, and `audit` or `mutate` when you want stronger test-quality evidence. The typical workflow is: explore, replay the concrete failure, then validate with audit or mutation testing.
+    The CLI is how you run ordeal outside of pytest. Use the command that matches the capability you want: `scan` for exploratory signals, `replay` to reproduce them, `audit` for coverage and mutation comparison, `mutate` for direct scoring, and `--list-targets` to inspect callable surfaces.
 
 If you want an AI coding agent to discover the CLI surface inside a repo, run `ordeal skill` or `ordeal init --install-skill` to install the bundled local guide.
 
@@ -74,6 +74,8 @@ Use `--save-artifacts` when you want the full handoff package: `.ordeal/findings
 
 `scan` promotes replayable crashes as likely bugs and keeps the rest of the evidence exploratory. That includes unreplayed crashes, weaker mined properties, and expected precondition failures. If you need stronger validation for a mature codebase, prefer `ordeal audit` for coverage and mutation comparison, and `ordeal mutate` for direct mutation scoring.
 
+Use `--list-targets` when you want to inspect how ordeal sees functions and methods before choosing a target. The listing shows the callable kind, whether it is async or sync, whether a factory is required or configured, and any skip reason if ordeal cannot run it yet.
+
 Most of the tuning knobs for `scan` live in `[[scan]]` inside `ordeal.toml`. Use `[fixtures].registries` for project-wide fixture registrations, `fixture_registries` for scan-specific registry imports, `ignore_properties` and `ignore_relations` to suppress noisy laws, and `property_overrides` or `relation_overrides` when one function needs a narrower set of checks. `expected_failures` keeps known preconditions from being promoted as bugs. For stateful OO code, `[[objects]]` supplies bound-instance factories and `[[contracts]]` adds explicit shell/path/env probes.
 
 | Flag | Default | Description |
@@ -88,6 +90,7 @@ Most of the tuning knobs for `scan` live in `[[scan]]` inside `ordeal.toml`. Use
 | `--write-regression [PATH]` | `tests/test_ordeal_regressions.py` | Save runnable pytest regressions |
 | `--save-artifacts` | off | Write the report, JSON bundle, regressions, and update the artifact index |
 | `--include-private` | off | Include `_private` functions |
+| `--list-targets` | off | List callable targets and metadata, then exit |
 
 ### `ordeal init`
 
@@ -209,6 +212,8 @@ Every number is `[verified]` (measured and cross-checked for consistency) or `FA
 
 `audit` is the primary command when you want to judge test quality. It keeps replayable crash evidence separate from exploratory findings, and it returns `weakest_tests` plus `mutation_gap_stubs` so tooling like `init --close-gaps` can write draft follow-up tests without guessing.
 
+Use `--list-targets` to inspect the callable surface that audit can see, including bound methods and whether their factories are configured.
+
 `--validation-mode fast` replays mined inputs against each mutant and is the default because it is much faster. `--validation-mode deep` keeps that replay check and then re-runs `mine()` on each mutant, which is slower but keeps the broader exploratory search.
 
 `audit` now reads `[audit]` from `ordeal.toml` too. That means module lists, direct-test gates, validation depth, and gap-writing defaults can live in config and be reused by both humans and agents. Shared `[[objects]]` entries are expanded automatically, and `[[audit.targets]]` lets you override a factory or limit audit to selected methods.
@@ -232,6 +237,7 @@ ordeal audit myapp.scoring --save-generated test_migrated.py  # save to file
 | `--write-gaps` | — | Write draft gap stubs to this path |
 | `--include-exploratory-function-gaps` | off | Include indirect-only function gaps in reports and draft stubs |
 | `--require-direct-tests` | off | Exit 1 when any function still lacks direct tests |
+| `--list-targets` | off | List callable targets and metadata, then exit |
 | `--show-generated` | off | Print the generated test file |
 | `--save-generated` | — | Save generated test to this path |
 

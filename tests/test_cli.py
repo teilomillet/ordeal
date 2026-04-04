@@ -6,6 +6,7 @@ import argparse
 import json
 import subprocess
 import sys
+import types
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -113,6 +114,30 @@ def _write_verify_fixture(
     bundle_path.write_text(json.dumps(bundle, indent=2) + "\n", encoding="utf-8")
     index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
     return index_path, bundle_path, finding_id
+
+
+def _make_target_listing_module(name: str = "tests._cli_targets") -> types.ModuleType:
+    """Create a small module with callable-surface variety for CLI listing tests."""
+    mod = types.ModuleType(name)
+    exec(
+        "class Env:\n"
+        "    def __init__(self):\n"
+        "        self.prefix = 'env'\n"
+        "\n"
+        "    def build_env_vars(self, path: str) -> str:\n"
+        "        return f'{self.prefix}:{path}'\n"
+        "\n"
+        "    async def post_sandbox_setup(self) -> str:\n"
+        "        return 'ready'\n"
+        "\n"
+        "def direct(x: int) -> int:\n"
+        "    return x\n"
+        "\n"
+        "def no_hints(x):\n"
+        "    return x\n",
+        mod.__dict__,
+    )
+    return mod
 
 
 class TestCLI:
@@ -941,7 +966,10 @@ scan_max_examples = 12
             "    return Env()\n"
             "\n"
             "def prime_env(instance):\n"
-            "    instance.ready = True\n",
+            "    instance.ready = True\n"
+            "\n"
+            "def scenario_env(instance):\n"
+            "    instance.mode = 'scenario'\n",
             encoding="utf-8",
         )
         (tmp_path / "ordeal.toml").write_text(
@@ -954,6 +982,7 @@ scan_max_examples = 12
             'target = "pkg.mod:Env"\n'
             'factory = "scan_support:make_env"\n'
             'setup = "scan_support:prime_env"\n'
+            'scenarios = ["scan_support:scenario_env"]\n'
             "\n"
             "[[contracts]]\n"
             'target = "pkg.mod:Env.build_command"\n'
@@ -989,12 +1018,77 @@ scan_max_examples = 12
         assert calls["scan_targets"] == ["pkg.mod:Env.build_command"]
         assert callable(calls["scan_object_factories"]["pkg.mod:Env"])
         assert callable(calls["scan_object_setups"]["pkg.mod:Env"])
+        assert callable(calls["scan_object_scenarios"]["pkg.mod:Env"])
         checks = calls["scan_contract_checks"]["Env.build_command"]
         assert [check.name for check in checks] == [
             "shell_safe",
             "quoted_paths",
             "command_arg_stability",
         ]
+
+    def test_scan_list_targets_reports_callable_metadata(self, monkeypatch, tmp_path, capsys):
+        mod = _make_target_listing_module()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setitem(sys.modules, mod.__name__, mod)
+        monkeypatch.setitem(
+            ordeal_auto._REGISTERED_OBJECT_FACTORIES,
+            "tests._cli_targets:Env",
+            lambda: mod.Env(),
+        )
+        monkeypatch.setitem(
+            ordeal_auto._REGISTERED_OBJECT_SETUPS,
+            "tests._cli_targets:Env",
+            lambda instance: instance,
+        )
+        monkeypatch.setitem(
+            ordeal_auto._REGISTERED_OBJECT_SCENARIOS,
+            "tests._cli_targets:Env",
+            lambda instance: instance,
+        )
+
+        rc = main(["scan", mod.__name__, "--list-targets"])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert f"Callable targets for {mod.__name__}" in out
+        assert "direct" in out
+        assert "Env.build_env_vars" in out
+        assert "kind=instance" in out
+        assert "factory=required, configured=yes" in out
+        assert "setup=yes" in out
+        assert "scenarios=1" in out
+        assert "async=async" in out
+        assert "skip=missing inferable strategies" in out
+
+    def test_scan_list_targets_shows_unselected_rows_when_toml_limits_targets(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        mod = _make_target_listing_module()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setitem(sys.modules, mod.__name__, mod)
+        (tmp_path / "ordeal.toml").write_text(
+            "[[scan]]\n"
+            f'module = "{mod.__name__}"\n'
+            f'targets = ["{mod.__name__}:Env.build_env_vars"]\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setitem(
+            ordeal_auto._REGISTERED_OBJECT_FACTORIES,
+            f"{mod.__name__}:Env",
+            lambda: mod.Env(),
+        )
+
+        rc = main(["scan", mod.__name__, "--list-targets"])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Env.build_env_vars" in out
+        assert "selected=yes" in out
+        assert "direct" in out
+        assert "selected=no" in out
 
     def test_replay_missing_file(self):
         assert main(["replay", "/nonexistent/trace.json"]) == 1

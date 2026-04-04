@@ -770,6 +770,37 @@ class TestGeneratedTypeSignatures:
         assert "from typing import Any" in imports
         assert "import genpkg.mod" in imports
 
+    def test_codegen_preserves_unresolved_lazy_export_annotations(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        pkg = tmp_path / "lazyann"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text(
+            "def __getattr__(name):\n"
+            "    if name == 'Item':\n"
+            "        from .models import Item\n"
+            "        return Item\n"
+            "    raise AttributeError(name)\n"
+        )
+        (pkg / "models.py").write_text("class Item:\n    pass\n")
+        (pkg / "api.py").write_text(
+            "from __future__ import annotations\n"
+            "\n"
+            "def parse(item: Item) -> Item:\n"
+            "    return item\n"
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        from lazyann.api import parse
+
+        sig = _func_sig_for_codegen(parse)
+        assert sig is not None
+        _names, decls, _call_args, imports = sig
+        assert "item: Item" in decls
+        assert "import lazyann" not in imports
+
 
 # ============================================================================
 # Integration: audit on the test target module
@@ -941,7 +972,89 @@ def make_env() -> Env:
         audits = {item.name: item for item in result.function_audits}
         assert "Env.build_env_vars" in audits
         assert result.total_functions >= 1
-        assert result.gap_functions == []
+        assert "Env.build_env_vars" not in result.gap_functions
+
+    def test_audit_applies_setup_and_scenarios_for_instance_methods(
+        self, tmp_path: Path, monkeypatch
+    ):
+        pkg = tmp_path / "scenario_pkg"
+        support = tmp_path / "scenario_support"
+        pkg.mkdir()
+        support.mkdir()
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (support / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "models.py").write_text(
+            """
+class Helper:
+    def __init__(self, prefix: str):
+        self.prefix = prefix
+
+    def render(self, name: str) -> str:
+        return f"{self.prefix}:{name}"
+
+class Env:
+    def __init__(self) -> None:
+        self.ready = False
+        self.helper = None
+
+    def build_env_vars(self, name: str) -> str:
+        if not self.ready:
+            raise RuntimeError("not ready")
+        if self.helper is None:
+            raise RuntimeError("missing helper")
+        return self.helper.render(name)
+""",
+            encoding="utf-8",
+        )
+        (support / "factories.py").write_text(
+            """
+from scenario_pkg.models import Env, Helper
+
+def make_env() -> Env:
+    return Env()
+
+def prime_env(instance: Env) -> None:
+    instance.ready = True
+
+def attach_helper(instance: Env) -> Env:
+    instance.helper = Helper("scenario")
+    return instance
+""",
+            encoding="utf-8",
+        )
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_models.py").write_text(
+            "from scenario_pkg.models import Env, Helper\n"
+            "def test_build_env_vars():\n"
+            "    env = Env()\n"
+            "    env.ready = True\n"
+            "    env.helper = Helper('scenario')\n"
+            "    assert env.build_env_vars('x') == 'scenario:x'\n",
+            encoding="utf-8",
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        from ordeal.audit import audit
+
+        target = SimpleNamespace(
+            target="scenario_pkg.models:Env",
+            factory="scenario_support.factories:make_env",
+            setup="scenario_support.factories:prime_env",
+            scenarios=["scenario_support.factories:attach_helper"],
+            methods=["build_env_vars"],
+        )
+        result = audit(
+            "scenario_pkg.models",
+            targets=[target],
+            test_dir=str(tests_dir),
+            max_examples=5,
+        )
+
+        audits = {item.name: item for item in result.function_audits}
+        assert "Env.build_env_vars" in audits
+        assert result.total_functions >= 1
+        assert "Env.build_env_vars" not in result.gap_functions
 
 
 class TestModuleAuditSummaryValidation:

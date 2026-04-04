@@ -119,11 +119,15 @@ class TestExplorationStateSerialization:
         def setup(instance: object) -> None:
             return None
 
+        def scenario(instance: object) -> None:
+            return None
+
         explored = explore_scan(
             state,
             targets=["pkg.mod:Env.build_command"],
             object_factories={"pkg.mod:Env": factory},
             object_setups={"pkg.mod:Env": setup},
+            object_scenarios={"pkg.mod:Env": scenario},
             contract_checks={},
         )
 
@@ -132,3 +136,49 @@ class TestExplorationStateSerialization:
         assert calls["targets"] == ["pkg.mod:Env.build_command"]
         assert calls["object_factories"] == {"pkg.mod:Env": factory}
         assert calls["object_setups"] == {"pkg.mod:Env": setup}
+        assert calls["object_scenarios"] == {"pkg.mod:Env": scenario}
+
+    def test_explore_forwards_scenarios_through_runtime_paths(self, monkeypatch):
+        import ordeal.state as state_mod
+        from ordeal.state import ExplorationState, explore
+
+        calls: dict[str, dict[str, object]] = {}
+
+        def fake_mine(state, **kwargs):
+            calls["mine"] = kwargs
+            return state
+
+        def fake_scan(state, **kwargs):
+            calls["scan"] = kwargs
+            return state
+
+        def fake_chaos(state, **kwargs):
+            calls["chaos"] = kwargs
+            return state
+
+        monkeypatch.setattr(state_mod, "explore_mine", fake_mine)
+        monkeypatch.setattr(state_mod, "explore_scan", fake_scan)
+        monkeypatch.setattr(state_mod, "explore_chaos", fake_chaos)
+
+        def factory() -> object:
+            return object()
+
+        def setup(instance: object) -> None:
+            return None
+
+        def scenario(instance: object) -> None:
+            return None
+
+        explored = explore(
+            "pkg.mod",
+            state=ExplorationState("pkg.mod"),
+            scan_targets=["pkg.mod:Env.build_command"],
+            scan_object_factories={"pkg.mod:Env": factory},
+            scan_object_setups={"pkg.mod:Env": setup},
+            scan_object_scenarios={"pkg.mod:Env": scenario},
+        )
+
+        assert explored.module == "pkg.mod"
+        assert calls["mine"]["object_scenarios"] == {"pkg.mod:Env": scenario}
+        assert calls["scan"]["object_scenarios"] == {"pkg.mod:Env": scenario}
+        assert calls["chaos"]["object_scenarios"] == {"pkg.mod:Env": scenario}

@@ -90,11 +90,11 @@ from typing import (
     Union,
     get_args,
     get_origin,
-    get_type_hints,
 )
 
 from ordeal.faults import PatchFault
 from ordeal.faults import _resolve_target as _resolve_fault_target
+from ordeal.introspection import annotation_is_none, safe_get_annotations
 
 if TYPE_CHECKING:
     from ordeal.mine import MinedProperty, MineResult
@@ -240,6 +240,20 @@ def _resolved_target_callable(target_spec: _ResolvedMutationTarget) -> Any:
     if target_spec.leaf_name is None:
         return target_spec.module
     return getattr(target_spec.owner, target_spec.leaf_name)
+
+
+def _mutation_target_display(target: str) -> tuple[str, bool]:
+    """Render a mutation target with method/class context when available."""
+    try:
+        target_spec = _resolve_mutation_target(target)
+    except Exception:
+        return target, False
+
+    if target_spec.leaf_name is None:
+        return target_spec.module_name, False
+
+    qualified = ".".join([*target_spec.qualname_parts, target_spec.leaf_name])
+    return f"{target_spec.module_name}.{qualified}", bool(target_spec.qualname_parts)
 
 
 def _resolve_dotted_attr(obj: Any, dotted: str) -> Any | None:
@@ -502,13 +516,7 @@ def _build_kwargs(func: object, value_set: int = 0) -> dict[str, object]:
     distinct inputs.  Parameter index also offsets so a != b.
     """
     sig = inspect.signature(func)  # type: ignore[arg-type]
-    hints: dict[str, type] = {}
-    try:
-        from typing import get_type_hints
-
-        hints = get_type_hints(func)  # type: ignore[arg-type]
-    except Exception:
-        pass
+    hints = safe_get_annotations(func)
 
     kwargs: dict[str, object] = {}
     param_idx = 0
@@ -663,6 +671,7 @@ class MutationResult:
             remediation: If True (default), include per-gap fix guidance
                 explaining what test to write.
         """
+        target_label, is_method = _mutation_target_display(self.target)
         parts = [f"target: {self.target}"]
         if self.preset_used:
             parts.append(f"preset: {self.preset_used}")
@@ -675,6 +684,8 @@ class MutationResult:
         # When no mutants survived filtering, explain why instead of "100%"
         if self.total == 0:
             lines = [f"Mutation score: 0/0 (no mutants to test)  [{meta}]"]
+            if is_method:
+                lines.append(f"  method target: {target_label}")
             report = self.filter_report()
             if report:
                 lines.append(f"  {report}")
@@ -701,6 +712,8 @@ class MutationResult:
             return "\n".join(lines)
 
         lines = [f"Mutation score: {self.killed}/{self.total} ({self.score:.0%})  [{meta}]"]
+        if is_method:
+            lines.append(f"  method target: {target_label}")
         if self.survived:
             lines.append(
                 f"  {len(self.survived)} test gap(s) — "
@@ -768,6 +781,9 @@ class MutationResult:
             f"import {module_path} as _ordeal_target",
             "",
         ]
+        if target_spec.qualname_parts:
+            lines.append(f"# Method target: {module_path}.{call_target}")
+            lines.append("")
 
         for i, m in enumerate(self.survived, 1):
             test_name = f"test_{safe_target}_kill_{m.operator}_{i}"
@@ -1269,7 +1285,7 @@ def _suggest_invariant(target: str, func_name: str) -> str:
         if target_spec.leaf_name is None:
             return ""
         func = _resolved_target_callable(target_spec)
-        hints = inspect.get_annotations(func)
+        hints = safe_get_annotations(func)
         ret = hints.get("return")
     except Exception:
         ret = None
@@ -1296,6 +1312,8 @@ def _suggest_invariant(target: str, func_name: str) -> str:
 
 def _review_annotation_expr(tp: object, *, current_module: str) -> str | None:
     """Render an annotation for review, keeping module names explicit."""
+    if isinstance(tp, str):
+        return tp
     if tp is type(None):
         return "None"
     if tp is Any:
@@ -1376,7 +1394,7 @@ def _review_signature(target: str) -> str:
             return "(...)"
         func = _resolved_target_callable(target_spec)
         sig = inspect.signature(func)
-        hints = get_type_hints(func)
+        hints = safe_get_annotations(func)
     except Exception:
         return "(...)"
 
@@ -1409,7 +1427,11 @@ def _review_signature(target: str) -> str:
         ann = _review_annotation_expr(ret, current_module=current_module)
         if ann is not None:
             sig_str += f" -> {ann}"
-    return f"{target_spec.leaf_name}{sig_str}"
+    qual_parts: list[str] = []
+    if target_spec.qualname_parts:
+        qual_parts.append(target_spec.module_name)
+    qualname = ".".join([*qual_parts, *target_spec.qualname_parts, target_spec.leaf_name])
+    return f"{qualname}{sig_str}"
 
 
 def _comment_lines(text: str, *, indent: str = "    # ") -> list[str]:
@@ -1511,8 +1533,8 @@ def _run_mine(target: str, safe_name: str, func_name: str) -> _MineFindings | No
 
         from ordeal.mine import mine
 
-        hints = inspect.get_annotations(func)
-        is_void = hints.get("return") is None
+        hints = safe_get_annotations(func)
+        is_void = annotation_is_none(hints.get("return"))
 
         result = mine(func, max_examples=50)
 
@@ -1632,6 +1654,8 @@ def _annotation_expr(
     imports: set[str],
 ) -> str | None:
     """Render a type annotation and collect the imports it needs."""
+    if isinstance(tp, str):
+        return tp
     if tp is type(None):
         return "None"
     if tp is Any:
@@ -1715,7 +1739,7 @@ def _param_sig(target: str) -> tuple[str, list[str]]:
             return "...", []
         func = _resolved_target_callable(target_spec)
         sig = inspect.signature(func)
-        annotations = inspect.get_annotations(func, eval_str=True)
+        annotations = safe_get_annotations(func)
         imports: set[str] = set()
         params = []
         for name, p in sig.parameters.items():
@@ -1802,9 +1826,9 @@ def _returns_none(target: str) -> bool:
         if target_spec.leaf_name is None:
             return False
         func = _resolved_target_callable(target_spec)
-        hints = inspect.get_annotations(func)
+        hints = safe_get_annotations(func)
         ret = hints.get("return", _SENTINEL)
-        return ret is None or ret is type(None)
+        return annotation_is_none(ret)
     except Exception:
         return False
 
@@ -2123,7 +2147,7 @@ def _starter_for_module(target: str) -> str:
         obj = getattr(mod, name, None)
         if obj:
             try:
-                ann = inspect.get_annotations(obj)
+                ann = safe_get_annotations(obj)
                 if len(ann) > 1:  # at least one param + return
                     has_typed = True
                     break
@@ -5391,11 +5415,9 @@ def _equivalence_sample_plan(
         return _EquivalenceSamplePlan(samples=((),))
 
     try:
-        from typing import get_type_hints
-
         from ordeal.quickcheck import strategy_for_type
 
-        hints = get_type_hints(original)
+        hints = safe_get_annotations(original)
     except Exception:
         return None
 

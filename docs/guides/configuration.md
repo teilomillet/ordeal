@@ -123,6 +123,7 @@ Reusable object factories for bound instance methods. `scan` and `audit` use the
 | `target` | `str` | required | Class target such as `pkg.mod:Env` |
 | `factory` | `str?` | `null` | Import path to a sync or async factory |
 | `setup` | `str?` | `null` | Optional sync or async hook run after factory creation |
+| `scenarios` | `list[str]` | `[]` | Repeatable sync or async collaborator hooks applied after setup |
 | `methods` | `list[str]` | `[]` | Optional method subset for audit-target expansion |
 | `include_private` | `bool` | `false` | Include single-underscore methods when expanded |
 
@@ -131,7 +132,11 @@ Reusable object factories for bound instance methods. `scan` and `audit` use the
 target = "myapp.envs:ComposableEnv"
 factory = "tests.support.factories:make_composable_env"
 setup = "tests.support.factories:prime_composable_env"
+scenarios = ["tests.support.scenarios:disable_network"]
+methods = ["build_env_vars"]
 ```
+
+Use `factory` for construction, `setup` for one-time preparation, and `scenarios` for collaborator behavior that should be layered on top of the object before the listed methods are exercised.
 
 ### `[[contracts]]`
 
@@ -187,6 +192,8 @@ Use `[[audit.targets]]` when one class needs an audit-specific factory or a narr
 [[audit.targets]]
 target = "myapp.envs:ComposableEnv"
 factory = "tests.support.factories:make_composable_env"
+setup = "tests.support.factories:prime_composable_env"
+scenarios = ["tests.support.scenarios:disable_network"]
 methods = ["build_env_vars", "post_sandbox_setup"]
 ```
 

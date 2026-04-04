@@ -5,6 +5,7 @@ from __future__ import annotations
 import shlex
 import sys
 import types
+from pathlib import Path
 
 import hypothesis.strategies as st
 
@@ -47,6 +48,41 @@ def _install_method_target_module(module_name: str):
         "\n"
         "async def async_add(a: int, b: int) -> int:\n"
         "    return a + b\n",
+        mod.__dict__,
+    )
+    return mod
+
+
+def _install_scenario_target_module(module_name: str):
+    mod = types.ModuleType(module_name)
+    sys.modules[module_name] = mod
+    exec(
+        "class Helper:\n"
+        "    def __init__(self, prefix: str = 'scenario:') -> None:\n"
+        "        self.prefix = prefix\n"
+        "\n"
+        "    def render(self, name: str) -> str:\n"
+        "        return f'{self.prefix}{name}'\n"
+        "\n"
+        "class Env:\n"
+        "    def __init__(self) -> None:\n"
+        "        self.ready = False\n"
+        "        self.prefix = 'factory:'\n"
+        "        self.helper = None\n"
+        "\n"
+        "    def render(self, name: str) -> str:\n"
+        "        if not self.ready:\n"
+        "            raise RuntimeError('not ready')\n"
+        "        if self.helper is None:\n"
+        "            raise RuntimeError('missing helper')\n"
+        "        return f'{self.prefix}{self.helper.render(name)}'\n"
+        "\n"
+        "    async def async_render(self, name: str) -> str:\n"
+        "        if not self.ready:\n"
+        "            raise RuntimeError('not ready')\n"
+        "        if self.helper is None:\n"
+        "            raise RuntimeError('missing helper')\n"
+        "        return f'{self.prefix}{self.helper.render(name)}'\n",
         mod.__dict__,
     )
     return mod
@@ -197,6 +233,58 @@ class TestScanModule:
         finally:
             del sys.modules[module_name]
 
+    def test_method_scenarios_apply_after_setup_for_scan_fuzz_and_chaos(self):
+        import sys
+
+        module_name = "_test_method_targets_scenario"
+        mod = _install_scenario_target_module(module_name)
+        key = f"{module_name}:Env"
+
+        def factory() -> object:
+            return mod.Env()
+
+        def setup(instance: object) -> None:
+            instance.ready = True
+            instance.prefix = "setup:"
+
+        async def scenario(instance: object) -> object:
+            instance.helper = mod.Helper(prefix="scenario:")
+            return instance
+
+        try:
+            result = scan_module(
+                mod,
+                max_examples=20,
+                object_factories={key: factory},
+                object_setups={key: setup},
+                object_scenarios={key: scenario},
+            )
+            names = [f.name for f in result.functions]
+            assert "Env.render" in names
+            assert "Env.async_render" in names
+            assert result.passed
+
+            fuzz_result = fuzz(
+                f"{module_name}:Env.render",
+                max_examples=20,
+                object_factories={key: factory},
+                object_setups={key: setup},
+                object_scenarios={key: scenario},
+            )
+            assert fuzz_result.passed
+
+            test_case = chaos_for(
+                mod,
+                max_examples=5,
+                stateful_step_count=5,
+                object_factories={key: factory},
+                object_setups={key: setup},
+                object_scenarios={key: scenario},
+            )
+            test_case("runTest").runTest()
+        finally:
+            del sys.modules[module_name]
+
     def test_scan_module_can_limit_to_explicit_method_targets(self):
         import sys
 
@@ -261,6 +349,14 @@ class TestScanModule:
             assert result.failed == 0
         finally:
             del sys.modules["_test_preconditions"]
+
+    def test_pathlike_arguments_are_tracked_by_contract_helpers(self):
+        contract = auto_mod.quoted_paths_contract(
+            kwargs={"path": Path("demo files/input.txt")},
+        )
+
+        assert contract.predicate(["cp", "demo files/input.txt", "/tmp"])
+        assert not contract.predicate(["cp", "demo", "files/input.txt", "/tmp"])
 
     def test_explicit_contract_checks_are_reported_without_failing_scan(self):
         mod = types.ModuleType("_test_contracts")

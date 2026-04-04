@@ -151,11 +151,16 @@ verbose = true
 # registries = ["tests.support.shared_fixtures"]
 #
 # # Shared object factories for bound instance methods. Scan and audit reuse
-# # these automatically.
+# # these automatically. Hooks run in order: factory -> setup -> scenarios.
 # [[objects]]
 # target = "myapp.envs:ComposableEnv"
 # factory = "tests.support.factories:make_composable_env"
 # setup = "tests.support.factories:prime_composable_env"
+# scenarios = [
+#   "tests.support.scenarios:disable_network",
+#   "tests.support.scenarios:protect_env_keys",
+# ]
+# methods = ["build_env_vars"]
 #
 # # Optional semantic probes for shell/path/env helpers during scan.
 # [[contracts]]
@@ -188,6 +193,7 @@ verbose = true
 # target = "myapp.envs:ComposableEnv"
 # factory = "tests.support.factories:make_composable_env"
 # setup = "tests.support.factories:prime_composable_env"
+# scenarios = ["tests.support.scenarios:disable_network"]
 # methods = ["build_env_vars", "post_sandbox_setup"]
 #
 # # Optional outputs / gates.

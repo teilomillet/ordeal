@@ -24,6 +24,7 @@ import functools
 import importlib
 import importlib.util
 import inspect
+import os
 import re
 import shlex
 import sys
@@ -31,7 +32,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Callable, Literal, Union, get_args, get_origin, get_type_hints
+from typing import Any, Callable, Literal, Union, get_args, get_origin
 
 import hypothesis.strategies as st
 from hypothesis import given, settings
@@ -39,6 +40,7 @@ from hypothesis.stateful import rule
 
 from ordeal.chaos import ChaosTest
 from ordeal.faults import Fault
+from ordeal.introspection import safe_get_annotations
 from ordeal.invariants import Invariant
 from ordeal.quickcheck import strategy_for_type
 
@@ -245,6 +247,7 @@ _SUFFIX_STRATEGIES: dict[str, st.SearchStrategy[Any]] = {
 _REGISTERED_STRATEGIES: dict[str, st.SearchStrategy[Any]] = {}
 _REGISTERED_OBJECT_FACTORIES: dict[str, Any] = {}
 _REGISTERED_OBJECT_SETUPS: dict[str, Any] = {}
+_REGISTERED_OBJECT_SCENARIOS: dict[str, Any] = {}
 _BOUNDARY_SMOKE_VALUES: dict[object, tuple[object, ...]] = {
     bool: (False, True),
     int: (0, 1, -1),
@@ -285,6 +288,11 @@ def register_object_factory(name: str, factory: Any) -> None:
 def register_object_setup(name: str, setup: Any) -> None:
     """Register a per-instance setup hook for class-method targets."""
     _REGISTERED_OBJECT_SETUPS[name] = setup
+
+
+def register_object_scenario(name: str, scenario: Any) -> None:
+    """Register a collaborator scenario hook for class-method targets."""
+    _REGISTERED_OBJECT_SCENARIOS[name] = scenario
 
 
 def _strategy_for_name(name: str) -> st.SearchStrategy[Any] | None:
@@ -387,6 +395,14 @@ def _resolve_object_hook(owner: type, hooks: dict[str, Any] | None) -> Any | Non
     return None
 
 
+def _apply_instance_hook(instance: Any, hook: Any | None) -> Any:
+    """Apply a setup or scenario hook and keep any replacement instance."""
+    if hook is None:
+        return instance
+    result = _call_sync(hook, instance)
+    return instance if result is None else result
+
+
 def _make_sync_callable(
     func: Any,
     *,
@@ -417,6 +433,7 @@ def _resolve_method_callable(
     *,
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
+    object_scenarios: dict[str, Any] | None = None,
 ) -> tuple[str, Any]:
     """Resolve a class attribute into a sync-capable callable."""
     qualname = f"{owner.__qualname__}.{method_name}"
@@ -432,6 +449,7 @@ def _resolve_method_callable(
 
     factory = _resolve_object_hook(owner, object_factories)
     setup = _resolve_object_hook(owner, object_setups)
+    scenario = _resolve_object_hook(owner, object_scenarios)
     if inspect.isfunction(raw_attr):
         if factory is None:
             return qualname, _make_unbound_method_placeholder(owner, method_name, raw_attr)
@@ -443,6 +461,7 @@ def _resolve_method_callable(
                 raw_attr,
                 factory=factory,
                 setup=setup,
+                scenario=scenario,
             ),
         )
 
@@ -456,6 +475,7 @@ def _make_bound_method_callable(
     *,
     factory: Any,
     setup: Any | None = None,
+    scenario: Any | None = None,
 ) -> Any:
     """Build a sync wrapper that creates a fresh object per invocation."""
     target = _unwrap(method)
@@ -463,8 +483,8 @@ def _make_bound_method_callable(
     @functools.wraps(target)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
         instance = _call_sync(factory)
-        if setup is not None:
-            _call_sync(setup, instance)
+        instance = _apply_instance_hook(instance, setup)
+        instance = _apply_instance_hook(instance, scenario)
         bound = getattr(instance, method_name)
         return _call_sync(bound, *args, **kwargs)
 
@@ -515,6 +535,7 @@ def _resolve_explicit_target(
     *,
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
+    object_scenarios: dict[str, Any] | None = None,
 ) -> tuple[str, Any]:
     """Resolve ``module:callable`` or ``module:Class.method`` targets."""
     module_name, sep, attr_path = target.partition(":")
@@ -540,6 +561,7 @@ def _resolve_explicit_target(
             static_attr,
             object_factories=object_factories,
             object_setups=object_setups,
+            object_scenarios=object_scenarios,
         )
 
     resolved = getattr(obj, final_name)
@@ -563,6 +585,7 @@ def _selected_public_functions(
     include_private: bool = False,
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
+    object_scenarios: dict[str, Any] | None = None,
 ) -> list[tuple[str, Any]]:
     """Return discovered callables filtered to *targets* when provided."""
     discovered = _get_public_functions(
@@ -570,6 +593,7 @@ def _selected_public_functions(
         include_private=include_private,
         object_factories=object_factories,
         object_setups=object_setups,
+        object_scenarios=object_scenarios,
     )
     if not targets:
         return discovered
@@ -597,6 +621,7 @@ def _selected_public_functions(
                 target,
                 object_factories=object_factories,
                 object_setups=object_setups,
+                object_scenarios=object_scenarios,
             )
         else:
             raise ValueError(f"target {target!r} was not discovered in module {mod.__name__!r}")
@@ -610,6 +635,8 @@ def _selected_public_functions(
 
 def _command_tokens(value: Any) -> list[str] | None:
     """Return command tokens for shell-like return values."""
+    if isinstance(value, os.PathLike):
+        return [os.fspath(value)]
     if isinstance(value, str):
         try:
             return shlex.split(value)
@@ -617,6 +644,10 @@ def _command_tokens(value: Any) -> list[str] | None:
             return None
     if isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value):
         return list(value)
+    if isinstance(value, (list, tuple)) and all(
+        isinstance(item, (str, os.PathLike)) for item in value
+    ):
+        return [os.fspath(item) for item in value]
     return None
 
 
@@ -626,13 +657,20 @@ def _tracked_string_args(
 ) -> list[str]:
     """Return the string argument values tracked by a semantic contract."""
     names = list(
-        tracked_params or [name for name, value in kwargs.items() if isinstance(value, str)]
+        tracked_params
+        or [
+            name
+            for name, value in kwargs.items()
+            if isinstance(value, (str, os.PathLike))
+        ]
     )
     tracked: list[str] = []
     for name in names:
         value = kwargs.get(name)
         if isinstance(value, str):
             tracked.append(value)
+        elif isinstance(value, os.PathLike):
+            tracked.append(os.fspath(value))
     return tracked
 
 
@@ -770,6 +808,7 @@ def _get_public_functions(
     include_private: bool = False,
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
+    object_scenarios: dict[str, Any] | None = None,
 ) -> list[tuple[str, Any]]:
     """Return (name, callable) pairs for testable callables.
 
@@ -792,6 +831,9 @@ def _get_public_functions(
     merged_setups = dict(_REGISTERED_OBJECT_SETUPS)
     if object_setups:
         merged_setups.update(object_setups)
+    merged_scenarios = dict(_REGISTERED_OBJECT_SCENARIOS)
+    if object_scenarios:
+        merged_scenarios.update(object_scenarios)
 
     results: list[tuple[str, Any]] = []
     for name, obj in sorted(vars(mod).items()):
@@ -836,6 +878,7 @@ def _get_public_functions(
                     static_attr,
                     object_factories=merged_factories,
                     object_setups=merged_setups,
+                    object_scenarios=merged_scenarios,
                 )
             )
     return results
@@ -931,10 +974,7 @@ def _infer_strategies(
     for candidate in (target, getattr(target, "__func__", None)):
         if candidate is None:
             continue
-        try:
-            hints = get_type_hints(candidate)
-        except Exception:
-            continue
+        hints = safe_get_annotations(candidate)
         if hints:
             break
 
@@ -1034,10 +1074,10 @@ def _boundary_smoke_inputs(
         return []
 
     try:
-        hints = get_type_hints(func)
         sig = inspect.signature(func)
     except Exception:
         return []
+    hints = safe_get_annotations(func)
 
     params = [param for name, param in sig.parameters.items() if name not in {"self", "cls"}]
     if not params:
@@ -1221,6 +1261,7 @@ def scan_module(
     fixtures: dict[str, st.SearchStrategy] | None = None,
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
+    object_scenarios: dict[str, Any] | None = None,
     expected_failures: list[str] | None = None,
     ignore_properties: list[str] | None = None,
     ignore_relations: list[str] | None = None,
@@ -1269,6 +1310,7 @@ def scan_module(
         fixtures: Strategy overrides for specific parameter names.
         object_factories: Factory overrides for class targets.
         object_setups: Optional per-class setup hooks run after factory creation.
+        object_scenarios: Optional per-class collaborator scenarios run after setup.
         expected_failures: Function names that are expected to fail.
             Failures from these functions are tracked separately and
             do not cause ``result.passed`` to be ``False``.
@@ -1301,6 +1343,7 @@ def scan_module(
         include_private=include_private,
         object_factories=object_factories,
         object_setups=object_setups,
+        object_scenarios=object_scenarios,
     ):
         strategies = _infer_strategies(func, fixtures)
         if strategies is None:
@@ -1308,11 +1351,7 @@ def scan_module(
             result.skipped.append((name, reason))
             continue
 
-        try:
-            hints = get_type_hints(func)
-        except Exception:
-            hints = {}
-        return_type = hints.get("return")
+        return_type = safe_get_annotations(func).get("return")
 
         func_examples = examples_map.get(name, default_examples)
         func_result = _test_one_function(
@@ -1481,6 +1520,7 @@ def fuzz(
     check_return_type: bool = False,
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
+    object_scenarios: dict[str, Any] | None = None,
     **fixtures: st.SearchStrategy[Any] | Any,
 ) -> FuzzResult:
     """Deep-fuzz a single function with auto-inferred strategies.
@@ -1501,6 +1541,7 @@ def fuzz(
         check_return_type: Verify return type annotation.
         object_factories: Factory overrides for class targets.
         object_setups: Optional per-class setup hooks run after factory creation.
+        object_scenarios: Optional per-class collaborator scenarios run after setup.
         **fixtures: Strategy overrides or plain values (auto-wrapped in st.just).
     """
     fn_name = getattr(fn, "__qualname__", getattr(fn, "__name__", repr(fn)))
@@ -1509,6 +1550,7 @@ def fuzz(
             fn,
             object_factories=object_factories,
             object_setups=object_setups,
+            object_scenarios=object_scenarios,
         )
 
     # Auto-wrap plain values in st.just()
@@ -1529,11 +1571,7 @@ def fuzz(
             f"Cannot infer strategies for {fn_name}. Provide fixtures for untyped parameters."
         )
 
-    try:
-        hints = get_type_hints(fn)
-    except Exception:
-        hints = {}
-    return_type = hints.get("return")
+    return_type = safe_get_annotations(fn).get("return")
 
     failures: list[Exception] = []
     last_kwargs: dict[str, Any] = {}
@@ -1600,6 +1638,7 @@ def _infer_faults(
     *,
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
+    object_scenarios: dict[str, Any] | None = None,
 ) -> list[Fault]:
     """Auto-discover faults by scanning function ASTs for risky calls.
 
@@ -1616,6 +1655,7 @@ def _infer_faults(
         mod,
         object_factories=object_factories,
         object_setups=object_setups,
+        object_scenarios=object_scenarios,
     ):
         try:
             source = textwrap.dedent(inspect.getsource(inspect.unwrap(func)))
@@ -1685,6 +1725,7 @@ def _infer_invariants(
     *,
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
+    object_scenarios: dict[str, Any] | None = None,
 ) -> tuple[dict[str, list[Invariant]], list[Invariant]]:
     """Auto-discover invariants by mining function properties.
 
@@ -1707,6 +1748,7 @@ def _infer_invariants(
         mod,
         object_factories=object_factories,
         object_setups=object_setups,
+        object_scenarios=object_scenarios,
     ):
         strats = _infer_strategies(func, fixtures)
         if strats is None:
@@ -1742,6 +1784,7 @@ def chaos_for(
     fixtures: dict[str, st.SearchStrategy] | None = None,
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
+    object_scenarios: dict[str, Any] | None = None,
     invariants: list[Invariant] | dict[str, Invariant] | None = None,
     faults: list[Fault] | None = None,
     max_examples: int = 50,
@@ -1793,6 +1836,7 @@ def chaos_for(
             mod_name,
             object_factories=object_factories,
             object_setups=object_setups,
+            object_scenarios=object_scenarios,
         )
     else:
         fault_list = list(faults)
@@ -1804,6 +1848,7 @@ def chaos_for(
             fixtures,
             object_factories=object_factories,
             object_setups=object_setups,
+            object_scenarios=object_scenarios,
         )
     elif isinstance(invariants, dict):
         invariant_map: dict[str, list[Invariant]] = {
@@ -1820,6 +1865,7 @@ def chaos_for(
         mod,
         object_factories=object_factories,
         object_setups=object_setups,
+        object_scenarios=object_scenarios,
     ):
         strategies = _infer_strategies(func, fixtures)
         if strategies is None:

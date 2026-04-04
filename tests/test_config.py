@@ -132,6 +132,7 @@ relation_overrides = { normalize = ["equivalent"] }
 target = "myapp.envs:ComposableEnv"
 factory = "tests.support.factories:make_composable_env"
 setup = "tests.support.factories:prime_composable_env"
+scenarios = ["tests.support.scenarios:disable_network", "tests.support.scenarios:enable_fast_path"]
 methods = ["build_env_vars", "post_sandbox_setup"]
 
 [[contracts]]
@@ -148,6 +149,10 @@ env_param = "env_vars"
         assert cfg.objects[0].target == "myapp.envs:ComposableEnv"
         assert cfg.objects[0].factory == "tests.support.factories:make_composable_env"
         assert cfg.objects[0].setup == "tests.support.factories:prime_composable_env"
+        assert cfg.objects[0].scenarios == [
+            "tests.support.scenarios:disable_network",
+            "tests.support.scenarios:enable_fast_path",
+        ]
         assert cfg.objects[0].methods == ["build_env_vars", "post_sandbox_setup"]
         assert cfg.contracts[0].target == "myapp.envs:ComposableEnv.build_env_vars"
         assert cfg.contracts[0].checks == [
@@ -158,6 +163,33 @@ env_param = "env_vars"
         assert cfg.contracts[0].tracked_params == ["path"]
         assert cfg.contracts[0].protected_keys == ["PATH", "HOME"]
         assert cfg.contracts[0].env_param == "env_vars"
+
+    def test_audit_target_config_supports_scenarios(self, tmp_toml):
+        cfg = load_config(
+            tmp_toml(
+                """
+[audit]
+modules = ["myapp.scoring"]
+
+[[audit.targets]]
+target = "verifiers.envs.experimental.cli_agent_env:CliAgentEnv"
+factory = "tests.support.factories:make_cli_agent_env"
+setup = "tests.support.factories:prime_cli_agent_env"
+scenarios = [
+  "tests.support.scenarios:disable_network",
+  "tests.support.scenarios:protect_env_keys",
+]
+methods = ["build_env_vars", "post_sandbox_setup"]
+include_private = true
+"""
+            )
+        )
+
+        target = cfg.audit.targets[0]
+        assert target.scenarios == [
+            "tests.support.scenarios:disable_network",
+            "tests.support.scenarios:protect_env_keys",
+        ]
 
     def test_shared_fixture_registries_section(self, tmp_toml):
         cfg = load_config(

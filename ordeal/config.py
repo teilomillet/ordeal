@@ -167,11 +167,12 @@ class MutationConfig:
 
 @dataclass
 class ObjectConfig:
-    """One ``[[objects]]`` entry — reusable factory/setup for object targets."""
+    """One ``[[objects]]`` entry — reusable factory/setup/scenario hooks."""
 
     target: str
     factory: str | None = None
     setup: str | None = None
+    scenarios: list[str] = field(default_factory=list)
     methods: list[str] = field(default_factory=list)
     include_private: bool = False
 
@@ -190,11 +191,12 @@ class ContractConfig:
 
 @dataclass
 class AuditTargetConfig:
-    """One ``[[audit.targets]]`` entry — a module/class/method target."""
+    """One ``[[audit.targets]]`` entry — a module/class/method target with hooks."""
 
     target: str
     factory: str | None = None
     setup: str | None = None
+    scenarios: list[str] = field(default_factory=list)
     methods: list[str] = field(default_factory=list)
     include_private: bool = False
 
@@ -432,6 +434,7 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
                 target=str(obj_raw["target"]),
                 factory=obj_raw.get("factory"),
                 setup=obj_raw.get("setup"),
+                scenarios=list(obj_raw.get("scenarios", [])),
                 methods=list(obj_raw.get("methods", [])),
                 include_private=bool(obj_raw.get("include_private", False)),
             )
@@ -543,6 +546,7 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
                 target=str(target_raw["target"]),
                 factory=target_raw.get("factory"),
                 setup=target_raw.get("setup"),
+                scenarios=list(target_raw.get("scenarios", [])),
                 methods=list(target_raw.get("methods", [])),
                 include_private=bool(target_raw.get("include_private", False)),
             )

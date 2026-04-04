@@ -54,3 +54,28 @@ def test_function_mutated_on_disk_replaces_exact_class_method(tmp_path: Path, mo
     restored = importlib.reload(mod)
     assert restored.First().render() == "first"
     assert restored.Second().render() == "second"
+
+
+def test_review_signature_and_summary_keep_method_targets_explicit(
+    tmp_path: Path,
+    monkeypatch,
+):
+    pkg = tmp_path / "reviewpkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "mod.py").write_text(
+        "from __future__ import annotations\n"
+        "\n"
+        "class Service:\n"
+        "    def build(self, config: Config) -> Config:\n"
+        "        return config\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    signature = mutations._review_signature("reviewpkg.mod.Service.build")
+    assert signature == "reviewpkg.mod.Service.build(config: Config) -> Config"
+
+    result = mutations.MutationResult(target="reviewpkg.mod.Service.build")
+    summary = result.summary()
+    assert "method target: reviewpkg.mod.Service.build" in summary

@@ -421,6 +421,7 @@ def explore_mine(
     targets: list[str] | None = None,
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
+    object_scenarios: dict[str, Any] | None = None,
     ignore_properties: list[str] | None = None,
     ignore_relations: list[str] | None = None,
     property_overrides: dict[str, list[str]] | None = None,
@@ -438,6 +439,7 @@ def explore_mine(
         include_private=include_private,
         object_factories=object_factories,
         object_setups=object_setups,
+        object_scenarios=object_scenarios,
     )
 
     # Track skipped functions with reasons
@@ -512,6 +514,7 @@ def explore_scan(
     fixtures: dict[str, Any] | None = None,
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
+    object_scenarios: dict[str, Any] | None = None,
     expected_failures: list[str] | None = None,
     ignore_properties: list[str] | None = None,
     ignore_relations: list[str] | None = None,
@@ -529,6 +532,7 @@ def explore_scan(
         fixtures=fixtures,
         object_factories=object_factories,
         object_setups=object_setups,
+        object_scenarios=object_scenarios,
         expected_failures=expected_failures,
         ignore_properties=ignore_properties,
         ignore_relations=ignore_relations,
@@ -652,12 +656,26 @@ def explore_harden(
     return state
 
 
-def explore_chaos(state: ExplorationState, *, max_examples: int = 10) -> ExplorationState:
+def explore_chaos(
+    state: ExplorationState,
+    *,
+    max_examples: int = 10,
+    object_factories: dict[str, Any] | None = None,
+    object_setups: dict[str, Any] | None = None,
+    object_scenarios: dict[str, Any] | None = None,
+) -> ExplorationState:
     """Auto-generate and run chaos tests, update state."""
     from ordeal.auto import chaos_for
 
     try:
-        TestCase = chaos_for(state.module, max_examples=max_examples, stateful_step_count=10)
+        TestCase = chaos_for(
+            state.module,
+            max_examples=max_examples,
+            stateful_step_count=10,
+            object_factories=object_factories,
+            object_setups=object_setups,
+            object_scenarios=object_scenarios,
+        )
         test = TestCase("runTest")
         test.runTest()
     except Exception:
@@ -683,6 +701,7 @@ def explore(
     scan_fixtures: dict[str, Any] | None = None,
     scan_object_factories: dict[str, Any] | None = None,
     scan_object_setups: dict[str, Any] | None = None,
+    scan_object_scenarios: dict[str, Any] | None = None,
     scan_expected_failures: list[str] | None = None,
     scan_ignore_properties: list[str] | None = None,
     scan_ignore_relations: list[str] | None = None,
@@ -760,6 +779,7 @@ def explore(
             targets=scan_targets,
             object_factories=scan_object_factories,
             object_setups=scan_object_setups,
+            object_scenarios=scan_object_scenarios,
             ignore_properties=scan_ignore_properties,
             ignore_relations=scan_ignore_relations,
             property_overrides=scan_property_overrides,
@@ -786,6 +806,7 @@ def explore(
                 fixtures=scan_fixtures,
                 object_factories=scan_object_factories,
                 object_setups=scan_object_setups,
+                object_scenarios=scan_object_scenarios,
                 expected_failures=scan_expected_failures,
                 ignore_properties=scan_ignore_properties,
                 ignore_relations=scan_ignore_relations,
@@ -818,7 +839,13 @@ def explore(
 
         # Step 4: Chaos testing
         if time_limit is None or (_time.monotonic() - start) < time_limit:
-            state = explore_chaos(state, max_examples=max_examples)
+            state = explore_chaos(
+                state,
+                max_examples=max_examples,
+                object_factories=scan_object_factories,
+                object_setups=scan_object_setups,
+                object_scenarios=scan_object_scenarios,
+            )
             chaos_hash = hash(("chaos", state.confidence))
             state.tree.checkpoint(
                 chaos_hash,

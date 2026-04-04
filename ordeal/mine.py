@@ -24,12 +24,13 @@ import random as _random
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from types import ModuleType
-from typing import Any, get_args, get_origin, get_type_hints
+from typing import Any, get_args, get_origin
 
 import hypothesis.strategies as st
 from hypothesis import given, settings
 
 from ordeal.auto import _get_public_functions, _infer_strategies
+from ordeal.introspection import safe_get_annotations
 
 _REL_TOL = 1e-9
 _ABS_TOL = 1e-12
@@ -712,10 +713,7 @@ def _operands_look_interchangeable(fn: Callable[..., Any]) -> bool:
     """Return True when a 2-arg function looks symmetric enough to mine laws."""
     import inspect
 
-    try:
-        hints = get_type_hints(fn)
-    except Exception:
-        hints = {}
+    hints = safe_get_annotations(fn)
 
     sig = inspect.signature(fn)
     params = [name for name in sig.parameters if name not in ("self", "cls")]
@@ -1470,19 +1468,13 @@ def mine_pair(
 
 def _return_type(fn: Callable[..., Any]) -> type | None:
     """Extract the return type annotation from a function, or None if absent."""
-    try:
-        hints = get_type_hints(fn)
-    except Exception:
-        return None
+    hints = safe_get_annotations(fn)
     return hints.get("return")
 
 
 def _first_param_type(fn: Callable[..., Any]) -> tuple[str | None, type | None]:
     """Return (name, type) of the first non-self/cls parameter, or (None, None)."""
-    try:
-        hints = get_type_hints(fn)
-    except Exception:
-        hints = {}
+    hints = safe_get_annotations(fn)
     sig = inspect.signature(fn)
     for name, _param in sig.parameters.items():
         if name in ("self", "cls"):

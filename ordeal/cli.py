@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import inspect
 import io
 import json
 import os
@@ -124,6 +125,7 @@ class ScanRuntimeDefaults:
     include_private: bool = False
     object_factories: dict[str, Any] | None = None
     object_setups: dict[str, Any] | None = None
+    object_scenarios: dict[str, Any] | None = None
     contract_checks: dict[str, list[Any]] = field(default_factory=dict)
     expected_failures: list[str] = field(default_factory=list)
     registry_warnings: list[str] = field(default_factory=list)
@@ -176,6 +178,251 @@ def _resolve_symbol_path(path: str) -> Any:
     for part in attr_path.split("."):
         obj = getattr(obj, part)
     return obj
+
+
+def _callable_listing_owner(module_name: str, target_name: str) -> tuple[Any | None, Any | None]:
+    """Return the class owner and descriptor for ``Class.method`` targets."""
+    from ordeal.auto import _resolve_module
+
+    parts = [part for part in target_name.split(".") if part]
+    if len(parts) < 2:
+        return None, None
+
+    owner: Any = _resolve_module(module_name)
+    for part in parts[:-1]:
+        try:
+            owner = getattr(owner, part)
+        except AttributeError:
+            return None, None
+
+    if not inspect.isclass(owner):
+        return None, None
+
+    try:
+        descriptor = inspect.getattr_static(owner, parts[-1])
+    except AttributeError:
+        return None, None
+    return owner, descriptor
+
+
+def _callable_listing_kind(func: Any, owner: Any | None, descriptor: Any | None) -> str:
+    """Return the callable kind for a discovered target."""
+    kind = getattr(func, "__ordeal_kind__", None)
+    if kind in {"function", "instance", "class", "static"}:
+        return str(kind)
+    if owner is not None:
+        if isinstance(descriptor, staticmethod):
+            return "static"
+        if isinstance(descriptor, classmethod):
+            return "class"
+        if inspect.isfunction(descriptor):
+            return "instance"
+    if inspect.ismethod(func) and inspect.isclass(getattr(func, "__self__", None)):
+        return "class"
+    return "function"
+
+
+def _callable_listing_async_state(func: Any) -> str:
+    """Return ``async`` for coroutine targets, including wrapped callables."""
+    candidate = func
+    seen: set[int] = set()
+    while candidate is not None and id(candidate) not in seen:
+        if inspect.iscoroutinefunction(candidate):
+            return "async"
+        seen.add(id(candidate))
+        candidate = getattr(candidate, "__wrapped__", None)
+    return "sync"
+
+
+def _callable_listing_rows(
+    module_name: str,
+    *,
+    targets: Sequence[str] | None = None,
+    selected_targets: Sequence[str] | None = None,
+    include_private: bool = False,
+    object_factories: dict[str, Any] | None = None,
+    object_setups: dict[str, Any] | None = None,
+    object_scenarios: dict[str, Any] | None = None,
+    contract_checks: Mapping[str, Sequence[Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Return stable discovery rows for callable targets in *module_name*."""
+    from ordeal.auto import (
+        _REGISTERED_OBJECT_FACTORIES,
+        _REGISTERED_OBJECT_SCENARIOS,
+        _REGISTERED_OBJECT_SETUPS,
+        _infer_strategies,
+        _resolve_module,
+        _resolve_object_hook,
+        _selected_public_functions,
+        _unwrap,
+    )
+
+    mod = _resolve_module(module_name)
+    merged_factories = dict(_REGISTERED_OBJECT_FACTORIES)
+    if object_factories:
+        merged_factories.update(object_factories)
+    merged_setups = dict(_REGISTERED_OBJECT_SETUPS)
+    if object_setups:
+        merged_setups.update(object_setups)
+    merged_scenarios = dict(_REGISTERED_OBJECT_SCENARIOS)
+    if object_scenarios:
+        merged_scenarios.update(object_scenarios)
+    discovered = _selected_public_functions(
+        mod,
+        targets=targets,
+        include_private=include_private,
+        object_factories=merged_factories,
+        object_setups=merged_setups,
+        object_scenarios=merged_scenarios,
+    )
+    selected_names: set[str] = set()
+    for raw_target in selected_targets or ():
+        raw = str(raw_target)
+        if ":" in raw:
+            base_module, explicit = raw.split(":", 1)
+            if base_module == module_name:
+                selected_names.add(explicit)
+            continue
+        dotted_prefix = f"{module_name}."
+        if raw.startswith(dotted_prefix):
+            selected_names.add(raw[len(dotted_prefix) :])
+        else:
+            selected_names.add(raw)
+
+    rows: list[dict[str, Any]] = []
+    for name, func in discovered:
+        owner, descriptor = _callable_listing_owner(module_name, name)
+        kind = _callable_listing_kind(func, owner, descriptor)
+        factory_required = kind == "instance"
+        factory_configured = bool(
+            factory_required
+            and owner is not None
+            and _resolve_object_hook(owner, merged_factories)
+        )
+        setup_configured = bool(
+            owner is not None and _resolve_object_hook(owner, merged_setups)
+        )
+        resolved_scenario = (
+            _resolve_object_hook(owner, merged_scenarios) if owner is not None else None
+        )
+        scenario_count = int(getattr(resolved_scenario, "__ordeal_scenario_count__", 0))
+        if resolved_scenario is not None and scenario_count == 0:
+            scenario_count = 1
+        skip_reason = getattr(func, "__ordeal_skip_reason__", None)
+        if factory_required and not factory_configured and not skip_reason:
+            skip_reason = "missing object factory"
+        if _infer_strategies(_unwrap(func)) is None and not skip_reason:
+            skip_reason = "missing inferable strategies"
+        checks = list(contract_checks.get(name, [])) if contract_checks is not None else []
+
+        rows.append(
+            {
+                "module": module_name,
+                "name": name,
+                "target": f"{module_name}.{name}",
+                "kind": kind,
+                "async": _callable_listing_async_state(func),
+                "selected": not selected_names or name in selected_names,
+                "factory_required": factory_required,
+                "factory_configured": factory_configured,
+                "setup_configured": setup_configured,
+                "scenario_count": scenario_count,
+                "contract_checks": [str(getattr(check, "name", check)) for check in checks],
+                "runnable": skip_reason is None,
+                "skip_reason": skip_reason,
+            }
+        )
+
+    return rows
+
+
+def _render_target_listing_text(
+    title: str,
+    groups: Sequence[Mapping[str, Any]],
+    *,
+    warnings: Sequence[str] = (),
+) -> str:
+    """Render callable discovery rows for human-readable CLI output."""
+    lines = [title]
+    for warning in warnings:
+        lines.append(f"warning: {warning}")
+    for group in groups:
+        module = str(group.get("module", ""))
+        targets = list(group.get("targets", []))
+        lines.append(f"\n{module}")
+        if not targets:
+            lines.append("  (no callable targets found)")
+            continue
+        for row in targets:
+            factory_text = (
+                "not-needed"
+                if not row.get("factory_required")
+                else f"required, configured={'yes' if row.get('factory_configured') else 'no'}"
+            )
+            parts = [
+                f"kind={row.get('kind')}",
+                f"async={row.get('async')}",
+                f"selected={'yes' if row.get('selected', True) else 'no'}",
+                f"factory={factory_text}",
+                f"setup={'yes' if row.get('setup_configured') else 'no'}",
+                f"scenarios={row.get('scenario_count', 0)}",
+                f"runnable={'yes' if row.get('runnable') else 'no'}",
+            ]
+            contract_checks = list(row.get("contract_checks", []))
+            if contract_checks:
+                parts.append(f"contracts={','.join(contract_checks)}")
+            skip_reason = row.get("skip_reason")
+            if skip_reason:
+                parts.append(f"skip={skip_reason}")
+            lines.append(f"  {row.get('name', ''):<38} " + "  ".join(parts))
+    return "\n".join(lines)
+
+
+def _build_target_listing_envelope(
+    *,
+    tool: str,
+    target: str,
+    groups: Sequence[Mapping[str, Any]],
+    warnings: Sequence[str] = (),
+) -> Any:
+    """Build the agent envelope for callable discovery output."""
+    from ordeal.agent_schema import build_agent_envelope
+
+    flat_targets = [
+        row
+        for group in groups
+        for row in list(group.get("targets", []))
+    ]
+    runnable_count = sum(1 for row in flat_targets if row.get("runnable"))
+    skip_count = len(flat_targets) - runnable_count
+    status = "exploratory" if skip_count else "ok"
+    summary = [
+        f"Listed {len(flat_targets)} callable target(s) across {len(groups)} module(s)",
+        f"Runnable: {runnable_count}",
+        f"Skipped: {skip_count}",
+    ]
+    if warnings:
+        summary.append(f"Warnings: {len(warnings)}")
+    return build_agent_envelope(
+        tool=tool,
+        target=target,
+        status=status,
+        summary=" | ".join(summary),
+        recommended_action=(
+            "Use these callable names and metadata directly in `scan`, `audit`, or `mutate`."
+        ),
+        confidence=None,
+        confidence_basis=("target discovery only",),
+        findings=(),
+        artifacts=(),
+        raw_details={
+            "target_groups": [dict(group) for group in groups],
+            "targets": flat_targets,
+            "warnings": list(warnings),
+            "runnable_count": runnable_count,
+            "skip_count": skip_count,
+        },
+    )
 
 
 def _arg(*tokens: str, **kwargs: Any) -> ArgumentSpec:
@@ -793,19 +1040,41 @@ def _config_object_specs_for_module(cfg: OrdealConfig, module_name: str) -> list
     return [spec for spec in cfg.objects if _scan_base_module(spec.target) == module_name]
 
 
-def _object_runtime_maps(object_specs: Sequence[Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Resolve configured object factories and setup hooks."""
+def _object_runtime_maps(
+    object_specs: Sequence[Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Resolve configured object factories, setup hooks, and scenarios."""
     factories: dict[str, Any] = {}
     setups: dict[str, Any] = {}
+    scenarios: dict[str, Any] = {}
     for spec in object_specs:
         target = str(getattr(spec, "target"))
         factory_path = getattr(spec, "factory", None)
         setup_path = getattr(spec, "setup", None)
+        scenario_paths = list(getattr(spec, "scenarios", []) or [])
         if factory_path:
             factories[target] = _resolve_symbol_path(str(factory_path))
         if setup_path:
             setups[target] = _resolve_symbol_path(str(setup_path))
-    return factories, setups
+        if scenario_paths:
+            resolved_hooks = [_resolve_symbol_path(str(path)) for path in scenario_paths]
+            if len(resolved_hooks) == 1:
+                hook = resolved_hooks[0]
+            else:
+                from ordeal.auto import _call_sync
+
+                def hook(instance: Any, *, __hooks: Sequence[Any] = tuple(resolved_hooks)) -> Any:
+                    current = instance
+                    for item in __hooks:
+                        result = _call_sync(item, current)
+                        if result is not None:
+                            current = result
+                    return current
+
+            with contextlib.suppress(Exception):
+                setattr(hook, "__ordeal_scenario_count__", len(resolved_hooks))
+            scenarios[target] = hook
+    return factories, setups, scenarios
 
 
 def _config_contract_checks_for_module(
@@ -850,6 +1119,7 @@ def _resolve_scan_runtime_defaults(
     fixtures = None
     object_factories: dict[str, Any] | None = None
     object_setups: dict[str, Any] | None = None
+    object_scenarios: dict[str, Any] | None = None
     contract_checks: dict[str, list[Any]] = {}
     expected_failures: list[str] = []
     ignore_properties: list[str] = []
@@ -866,6 +1136,7 @@ def _resolve_scan_runtime_defaults(
             fixtures=fixtures,
             object_factories=object_factories,
             object_setups=object_setups,
+            object_scenarios=object_scenarios,
             contract_checks=contract_checks,
             expected_failures=expected_failures,
             registry_warnings=warnings,
@@ -882,6 +1153,7 @@ def _resolve_scan_runtime_defaults(
             fixtures=fixtures,
             object_factories=object_factories,
             object_setups=object_setups,
+            object_scenarios=object_scenarios,
             contract_checks=contract_checks,
             expected_failures=expected_failures,
             registry_warnings=warnings,
@@ -890,10 +1162,14 @@ def _resolve_scan_runtime_defaults(
     warnings.extend(_load_fixture_registry_warnings(shared_modules=cfg.fixtures.registries))
     shared_object_specs = _config_object_specs_for_module(cfg, module_name)
     try:
-        object_factories, object_setups = _object_runtime_maps(shared_object_specs)
+        (
+            object_factories,
+            object_setups,
+            object_scenarios,
+        ) = _object_runtime_maps(shared_object_specs)
     except Exception as exc:
         warnings.append(f"object factory config failed for {module_name}: {exc}")
-        object_factories, object_setups = {}, {}
+        object_factories, object_setups, object_scenarios = {}, {}, {}
     try:
         contract_checks = _config_contract_checks_for_module(cfg, module_name)
     except Exception as exc:
@@ -909,6 +1185,7 @@ def _resolve_scan_runtime_defaults(
             fixtures=fixtures,
             object_factories=object_factories,
             object_setups=object_setups,
+            object_scenarios=object_scenarios,
             contract_checks=contract_checks,
             expected_failures=expected_failures,
             registry_warnings=warnings,
@@ -936,6 +1213,7 @@ def _resolve_scan_runtime_defaults(
         fixtures=fixtures,
         object_factories=object_factories,
         object_setups=object_setups,
+        object_scenarios=object_scenarios,
         contract_checks=contract_checks,
         expected_failures=expected_failures,
         registry_warnings=warnings,
@@ -968,10 +1246,11 @@ def _run_configured_scans(
             _stderr(f"Scanning {scan_cfg.module} from [[scan]]...\n")
         object_factories: dict[str, Any] = {}
         object_setups: dict[str, Any] = {}
+        object_scenarios: dict[str, Any] = {}
         contract_checks: dict[str, list[Any]] = {}
         if cfg is not None:
             try:
-                object_factories, object_setups = _object_runtime_maps(
+                object_factories, object_setups, object_scenarios = _object_runtime_maps(
                     _config_object_specs_for_module(cfg, scan_cfg.module)
                 )
             except Exception as exc:
@@ -987,6 +1266,7 @@ def _run_configured_scans(
             "fixtures": fixtures,
             "object_factories": object_factories,
             "object_setups": object_setups,
+            "object_scenarios": object_scenarios,
             "expected_failures": scan_cfg.expected_failures,
             "ignore_properties": scan_cfg.ignore_properties,
             "ignore_relations": scan_cfg.ignore_relations,
@@ -1002,13 +1282,7 @@ def _run_configured_scans(
 
 
 def _cmd_scan(args: argparse.Namespace) -> int:
-    """Run unified exploration: mine + scan + mutate + chaos in one pass.
-
-    This is the recommended entry point for AI assistants.  Point it
-    at a module and it does everything: discovers properties, checks
-    for crashes, mutation-tests, and chaos-tests.  Returns confidence,
-    findings, and frontier.
-    """
+    """Run unified exploratory analysis over one module or explicit callable target."""
     from ordeal.state import explore
 
     scan_target = args.target
@@ -1038,6 +1312,36 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         runtime_defaults.relation_overrides,
         _named_override_specs_to_map(getattr(args, "cli_relation_overrides", None)),
     )
+    if getattr(args, "list_targets", False):
+        scan_target_rows = _callable_listing_rows(
+            module_name,
+            targets=[scan_target] if explicit_target else None,
+            selected_targets=scan_targets,
+            include_private=inc_private,
+            object_factories=runtime_defaults.object_factories,
+            object_setups=runtime_defaults.object_setups,
+            object_scenarios=runtime_defaults.object_scenarios,
+            contract_checks=runtime_defaults.contract_checks,
+        )
+        groups = [{"module": module_name, "targets": scan_target_rows}]
+        if args.json:
+            print(
+                _build_target_listing_envelope(
+                    tool="scan",
+                    target=scan_target,
+                    groups=groups,
+                    warnings=runtime_defaults.registry_warnings,
+                ).to_json()
+            )
+        else:
+            print(
+                _render_target_listing_text(
+                    f"Callable targets for {scan_target}",
+                    groups,
+                    warnings=runtime_defaults.registry_warnings,
+                )
+            )
+        return 0
     if not args.json:
         _stderr(f"Scanning {scan_target} (seed={args.seed})...\n")
         for warning in runtime_defaults.registry_warnings:
@@ -1054,6 +1358,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             scan_fixtures=runtime_defaults.fixtures,
             scan_object_factories=runtime_defaults.object_factories,
             scan_object_setups=runtime_defaults.object_setups,
+            scan_object_scenarios=runtime_defaults.object_scenarios,
             scan_expected_failures=runtime_defaults.expected_failures,
             scan_ignore_properties=scan_ignore_properties,
             scan_ignore_relations=scan_ignore_relations,
@@ -1413,6 +1718,14 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             target=target,
             factory=getattr(spec, "factory", None) or getattr(existing, "factory", None),
             setup=getattr(spec, "setup", None) or getattr(existing, "setup", None),
+            scenarios=list(
+                dict.fromkeys(
+                    [
+                        *list(getattr(existing, "scenarios", []) or []),
+                        *list(getattr(spec, "scenarios", []) or []),
+                    ]
+                )
+            ),
             methods=list(getattr(spec, "methods", None) or getattr(existing, "methods", []) or []),
             include_private=bool(
                 getattr(spec, "include_private", False)
@@ -1488,6 +1801,69 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             audit_cfg.require_direct_tests if audit_cfg else False,
         )
     )
+
+    object_specs: list[Any] = []
+    if cfg is not None:
+        object_specs.extend(cfg.objects)
+    if audit_cfg is not None:
+        object_specs.extend(audit_cfg.targets)
+
+    if getattr(args, "list_targets", False):
+        try:
+            object_factories, object_setups, object_scenarios = _object_runtime_maps(
+                object_specs
+            )
+        except Exception as exc:
+            if args.json:
+                print(
+                    _build_blocked_agent_envelope(
+                        tool="audit",
+                        target=", ".join(target_names),
+                        summary="cannot resolve callable target metadata",
+                        blocking_reason=f"target metadata resolution failed: {exc}",
+                        raw_details={
+                            "target_names": target_names,
+                            "error": str(exc),
+                        },
+                    ).to_json()
+                )
+                return 1
+            _stderr(f"Target metadata resolution failed: {exc}\n")
+            return 1
+
+        target_groups: list[dict[str, Any]] = []
+        for target in target_names:
+            module_name = _scan_base_module(target)
+            module_specs = normalized_target_specs_by_module.get(module_name, [])
+            module_include_private = bool(
+                getattr(args, "include_private", False)
+                or any(bool(getattr(spec, "include_private", False)) for spec in module_specs)
+            )
+            rows = _callable_listing_rows(
+                module_name,
+                include_private=module_include_private,
+                object_factories=object_factories,
+                object_setups=object_setups,
+                object_scenarios=object_scenarios,
+            )
+            target_groups.append({"module": module_name, "targets": rows})
+
+        if args.json:
+            print(
+                _build_target_listing_envelope(
+                    tool="audit",
+                    target=", ".join(target_names),
+                    groups=target_groups,
+                ).to_json()
+            )
+        else:
+            print(
+                _render_target_listing_text(
+                    f"Callable targets for {', '.join(target_names)}",
+                    target_groups,
+                )
+            )
+        return 0
 
     def _collect_results() -> list[Any]:
         collected: list[Any] = []
@@ -2031,6 +2407,14 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
                 "fixtures": runtime_defaults.fixtures,
                 "expected_failures": runtime_defaults.expected_failures,
             }
+            if runtime_defaults.object_factories:
+                scan_kwargs["object_factories"] = runtime_defaults.object_factories
+            if runtime_defaults.object_setups:
+                scan_kwargs["object_setups"] = runtime_defaults.object_setups
+            if runtime_defaults.object_scenarios:
+                scan_kwargs["object_scenarios"] = runtime_defaults.object_scenarios
+            if runtime_defaults.contract_checks:
+                scan_kwargs["contract_checks"] = runtime_defaults.contract_checks
             if runtime_defaults.ignore_properties:
                 scan_kwargs["ignore_properties"] = runtime_defaults.ignore_properties
             if runtime_defaults.ignore_relations:
@@ -5192,6 +5576,8 @@ def _scan_command_description() -> str:
         f"{scan_desc}\n\n"
         "Scan is exploratory first: prioritize replayable, semantically plausible findings.\n"
         "For stronger signals on a mature codebase, prefer `ordeal audit` and `ordeal mutate`.\n"
+        "Use `--list-targets` to inspect how ordeal sees functions, methods, async callables,\n"
+        " and whether object factories are configured.\n"
         "Use `--ignore-property`, `--ignore-relation`, `--property-override`, and\n"
         " `--relation-override` to suppress noisy mined signals without changing code.\n"
         "Use explicit targets like `pkg.mod:Env.build_env_vars`, shared `[[objects]]`,\n"
@@ -5224,6 +5610,8 @@ def _audit_command_description() -> str:
         "Validation modes:\n"
         "  fast  replay mined inputs against mutants (default, faster)\n"
         "  deep  replay mined inputs, then re-mine mutants for extra search depth\n\n"
+        "Use --list-targets to inspect the callable surface that audit can see, including\n"
+        " methods that need configured factories.\n"
         "Use [audit] in ordeal.toml to persist module lists, validation depth, "
         "and direct-test policy, and reuse shared `[[objects]]` for bound methods.\n"
         "Use --write-gaps PATH to emit draft review stubs for surviving mutants "
@@ -5386,6 +5774,11 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     "--include-private",
                     action="store_true",
                     help="Include _private functions (many codebases have logic there)",
+                ),
+                _arg(
+                    "--list-targets",
+                    action="store_true",
+                    help="List callable targets and metadata, then exit",
                 ),
             ),
         ),
@@ -5560,6 +5953,11 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     action=argparse.BooleanOptionalAction,
                     default=None,
                     help=("Return exit code 1 when exploratory function coverage is all indirect"),
+                ),
+                _arg(
+                    "--list-targets",
+                    action="store_true",
+                    help="List callable targets and metadata, then exit",
                 ),
                 _arg("--json", action="store_true", help="Output agent-facing JSON"),
             ),

@@ -94,3 +94,24 @@ verbose = true
         cfg = load_config(tmp_toml('[[tests]]\nclass = "tests.test_chaos:CounterChaos"\n'))
         cls = cfg.tests[0].resolve()
         assert cls.__name__ == "CounterChaos"
+
+    def test_scan_config_supports_suppressions_and_registries(self, tmp_toml):
+        cfg = load_config(
+            tmp_toml(
+                """
+[[scan]]
+module = "myapp.scoring"
+fixture_registries = ["tests.support.fixtures"]
+ignore_properties = ["commutative"]
+ignore_relations = ["commutative_composition"]
+property_overrides = { score = ["idempotent"] }
+relation_overrides = { normalize = ["equivalent"] }
+"""
+            )
+        )
+        scan = cfg.scan[0]
+        assert scan.fixture_registries == ["tests.support.fixtures"]
+        assert scan.ignore_properties == ["commutative"]
+        assert scan.ignore_relations == ["commutative_composition"]
+        assert scan.property_overrides == {"score": ["idempotent"]}
+        assert scan.relation_overrides == {"normalize": ["equivalent"]}

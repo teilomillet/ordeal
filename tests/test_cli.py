@@ -226,6 +226,102 @@ class TestCLI:
     def test_explore_missing_config(self):
         assert main(["explore", "--config", "/nonexistent.toml"]) == 1
 
+    def test_explore_runs_scan_entries_when_config_has_no_tests(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        config = tmp_path / "ordeal.toml"
+        config.write_text('[[scan]]\nmodule = "pkg.mod"\nmax_examples = 7\n', encoding="utf-8")
+
+        import ordeal.auto as auto_mod
+
+        calls: dict[str, object] = {}
+
+        class _FakeScanResult:
+            passed = True
+
+            def summary(self) -> str:
+                return "scan_module('pkg.mod'): 1 functions, 0 failed"
+
+        def fake_scan_module(module: str, **kwargs):
+            calls["module"] = module
+            calls.update(kwargs)
+            return _FakeScanResult()
+
+        monkeypatch.setattr(auto_mod, "scan_module", fake_scan_module)
+
+        rc = main(["explore", "--config", str(config)])
+
+        assert rc == 0
+        assert calls["module"] == "pkg.mod"
+        assert calls["max_examples"] == 7
+        assert "scan_module('pkg.mod')" in capsys.readouterr().out
+
+    def test_scan_uses_fixture_registries_and_scan_config(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "conftest.py").write_text(
+            "import hypothesis.strategies as st\n"
+            "from ordeal.auto import register_fixture\n"
+            "register_fixture('model', st.just('fixture-model'))\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "ordeal.toml").write_text(
+            "[[scan]]\n"
+            'module = "pkg.mod"\n'
+            "max_examples = 7\n"
+            'expected_failures = ["known_bad"]\n'
+            'fixture_registries = ["custom_registry"]\n'
+            'ignore_properties = ["commutative"]\n'
+            'property_overrides = { normalize = ["idempotent"] }\n'
+            'fixtures = { mode = "fast,slow" }\n',
+            encoding="utf-8",
+        )
+
+        original_strategies = dict(ordeal_auto._REGISTERED_STRATEGIES)
+        original_modules = set(ordeal_auto._FIXTURE_REGISTRY_MODULES)
+        ordeal_auto._REGISTERED_STRATEGIES.clear()
+        ordeal_auto._FIXTURE_REGISTRY_MODULES.clear()
+
+        calls: dict[str, object] = {}
+
+        def fake_explore(module: str, **kwargs):
+            calls["module"] = module
+            calls.update(kwargs)
+            return SimpleNamespace(
+                module=module,
+                confidence=0.9,
+                functions={"ok": object()},
+                supervisor_info={},
+                tree=SimpleNamespace(size=0),
+                findings=[],
+                frontier={},
+                skipped=[],
+            )
+
+        monkeypatch.setattr(ordeal_state, "explore", fake_explore)
+
+        try:
+            rc = main(["scan", "pkg.mod"])
+            loaded_fixture_names = set(ordeal_auto._REGISTERED_STRATEGIES)
+        finally:
+            ordeal_auto._REGISTERED_STRATEGIES.clear()
+            ordeal_auto._REGISTERED_STRATEGIES.update(original_strategies)
+            ordeal_auto._FIXTURE_REGISTRY_MODULES.clear()
+            ordeal_auto._FIXTURE_REGISTRY_MODULES.update(original_modules)
+
+        assert rc == 0
+        assert calls["module"] == "pkg.mod"
+        assert calls["max_examples"] == 7
+        assert calls["scan_expected_failures"] == ["known_bad"]
+        assert calls["scan_ignore_properties"] == ["commutative"]
+        assert calls["scan_property_overrides"] == {"normalize": ["idempotent"]}
+        assert "mode" in calls["scan_fixtures"]
+        assert "model" in loaded_fixture_names
+        assert "status: no findings yet" in capsys.readouterr().out
+
     def test_replay_missing_file(self):
         assert main(["replay", "/nonexistent/trace.json"]) == 1
 
@@ -269,11 +365,13 @@ class TestCLI:
         rc = main(["scan", "pkg.mod", "--json"])
         payload = json.loads(capsys.readouterr().out)
 
-        assert rc == 1
+        assert rc == 0
         assert payload["tool"] == "scan"
-        assert payload["status"] == "findings"
+        assert payload["status"] == "exploratory"
         assert payload["confidence"] == pytest.approx(state.confidence)
         assert payload["findings"][0]["kind"] == "property"
+        assert payload["findings"][0]["details"]["category"] == "speculative_property"
+        assert "evidence_dimensions" in payload["raw_details"]
         assert payload["raw_details"]["state"]["supervisor_info"]["seed"] == 42
 
     # -- ordeal mine --
@@ -368,6 +466,8 @@ class TestCLI:
         assert payload["confidence"] == pytest.approx(1.0)
         kinds = {item["kind"] for item in payload["findings"]}
         assert {"coverage_gap", "mutation_gap"} <= kinds
+        assert payload["findings"][0]["details"]["category"] == "test_strength_gap"
+        assert "evidence_dimensions" in payload["raw_details"]
         assert payload["raw_details"]["modules"][0]["module"] == "pkg.mod"
 
     def test_mine_default_examples(self, capsys):
@@ -1191,7 +1291,7 @@ class TestCLI:
         assert "pkg.score: crash safety failed" in captured.err
 
         report = json.loads(captured.out)
-        assert report["initial_scan"]["status"] == "findings found"
+        assert report["initial_scan"]["status"] == "exploratory findings"
         finding = report["initial_scan"]["findings"][0]["summary"]
         assert finding == "pkg.normalize: idempotent (92%)"
         assert report["initial_scan"]["findings"][1]["error"] == "boom"

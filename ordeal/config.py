@@ -98,6 +98,11 @@ class ScanConfig:
     # fixture values are sampled_from specs like "violence,cyber,sexual"
     expected_failures: list[str] = field(default_factory=list)
     # function names where failure is correct behavior (e.g. input validation)
+    fixture_registries: list[str] = field(default_factory=list)
+    ignore_properties: list[str] = field(default_factory=list)
+    ignore_relations: list[str] = field(default_factory=list)
+    property_overrides: dict[str, list[str]] = field(default_factory=dict)
+    relation_overrides: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -198,6 +203,7 @@ def _fields_of(cls: type) -> set[str]:
 _KNOWN_EXPLORER_KEYS = _fields_of(ExplorerConfig)
 _KNOWN_REPORT_KEYS = _fields_of(ReportConfig)
 _KNOWN_MUTATIONS_KEYS = _fields_of(MutationConfig)
+_KNOWN_SCAN_KEYS = _fields_of(ScanConfig)
 # API and Test configs have extra TOML-only keys not in the dataclass
 _KNOWN_API_KEYS = _fields_of(APIConfig) | {"stateful", "mutation_targets", "auto_discover"}
 _KNOWN_TEST_KEYS = (_fields_of(TestConfig) - {"class_path"}) | {"class"}
@@ -297,6 +303,7 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
     # -- Scan --
     scans: list[ScanConfig] = []
     for i, s in enumerate(raw.get("scan", [])):
+        _warn_unknown_keys(f"scan.{i}", s, _KNOWN_SCAN_KEYS)
         if "module" not in s:
             raise ConfigError(f"[[scan]] entry {i} is missing required 'module' key")
         scans.append(
@@ -305,6 +312,11 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
                 max_examples=int(s.get("max_examples", 50)),
                 fixtures=s.get("fixtures", {}),
                 expected_failures=s.get("expected_failures", []),
+                fixture_registries=list(s.get("fixture_registries", [])),
+                ignore_properties=list(s.get("ignore_properties", [])),
+                ignore_relations=list(s.get("ignore_relations", [])),
+                property_overrides=dict(s.get("property_overrides", {})),
+                relation_overrides=dict(s.get("relation_overrides", {})),
             )
         )
 

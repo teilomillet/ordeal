@@ -86,6 +86,18 @@ def _show_in_summary(name: str) -> bool:
     return not name.startswith(_SUMMARY_OMIT_PREFIXES)
 
 
+def _normalize_property_token(name: str) -> str:
+    """Normalize property/relation names for config-driven suppression."""
+    import re
+
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
+
+def _suppressed_names(names: list[str] | tuple[str, ...] | None) -> set[str]:
+    """Normalize suppression names into a lookup set."""
+    return {_normalize_property_token(name) for name in (names or []) if name}
+
+
 def _is_suspicious_property(prop: "MinedProperty") -> bool:
     """Return True for partial properties worth surfacing by default."""
     if prop.universal or prop.total < 10 or prop.confidence < _SUSPICIOUS_CONFIDENCE:
@@ -682,6 +694,43 @@ def _check_length_relationship(
     return results
 
 
+_GENERIC_OPERAND_NAMES = {
+    "a",
+    "b",
+    "left",
+    "right",
+    "lhs",
+    "rhs",
+    "x",
+    "y",
+    "first",
+    "second",
+}
+
+
+def _operands_look_interchangeable(fn: Callable[..., Any]) -> bool:
+    """Return True when a 2-arg function looks symmetric enough to mine laws."""
+    import inspect
+
+    try:
+        hints = get_type_hints(fn)
+    except Exception:
+        hints = {}
+
+    sig = inspect.signature(fn)
+    params = [name for name in sig.parameters if name not in ("self", "cls")]
+    if len(params) != 2:
+        return False
+
+    normalized = [name.lower().rstrip("0123456789_") for name in params]
+    if all(name in _GENERIC_OPERAND_NAMES for name in normalized):
+        first_type = hints.get(params[0])
+        second_type = hints.get(params[1])
+        return first_type is None or second_type is None or first_type == second_type
+
+    return normalized[0] == normalized[1]
+
+
 def _check_commutative(
     fn: Callable[..., Any],
     inputs: list[dict[str, Any]],
@@ -692,7 +741,7 @@ def _check_commutative(
 
     sig = inspect.signature(fn)
     params = [n for n in sig.parameters if n not in ("self", "cls")]
-    if len(params) != 2:
+    if len(params) != 2 or not _operands_look_interchangeable(fn):
         return MinedProperty("commutative", 0, 0)
 
     a_name, b_name = params
@@ -729,7 +778,7 @@ def _check_associative(
 
     sig = inspect.signature(fn)
     params = [n for n in sig.parameters if n not in ("self", "cls")]
-    if len(params) != 2:
+    if len(params) != 2 or not _operands_look_interchangeable(fn):
         return MinedProperty("associative", 0, 0)
 
     a_name, b_name = params
@@ -1048,6 +1097,7 @@ def mine(
     fn: Callable[..., Any],
     *,
     max_examples: int = 500,
+    ignore_properties: list[str] | tuple[str, ...] = (),
     **fixtures: st.SearchStrategy[Any] | Any,
 ) -> MineResult:
     """Discover likely properties of a function by running it many times.
@@ -1065,6 +1115,7 @@ def mine(
     Args:
         fn: The function to mine properties from.
         max_examples: Number of random inputs to try.
+        ignore_properties: Property names to suppress from the result.
         **fixtures: Strategy overrides or plain values.
     """
     # Unwrap decorated functions (@ray.remote, @functools.wraps, etc.)
@@ -1226,8 +1277,17 @@ def mine(
     all_props.append(_check_associative(fn, inputs))
 
     # Separate applicable (total > 0) from not-applicable (total == 0)
-    props = [p for p in all_props if p.total > 0]
-    not_applicable = [p.name for p in all_props if p.total == 0]
+    suppressed = _suppressed_names(list(ignore_properties))
+    props = [
+        p
+        for p in all_props
+        if p.total > 0 and _normalize_property_token(p.name) not in suppressed
+    ]
+    not_applicable = [
+        p.name
+        for p in all_props
+        if p.total == 0 and _normalize_property_token(p.name) not in suppressed
+    ]
 
     # Enrich counterexamples with actual input/output values.
     # Many checkers only record the index — we have the actual data.
@@ -1717,6 +1777,10 @@ def mine_module(
     max_examples: int = 200,
     cross_max_examples: int = 30,
     mine_per_function: bool = True,
+    ignore_properties: list[str] | tuple[str, ...] = (),
+    ignore_relations: list[str] | tuple[str, ...] = (),
+    property_overrides: dict[str, list[str]] | None = None,
+    relation_overrides: dict[str, list[str]] | None = None,
     **fixtures: st.SearchStrategy[Any] | Any,
 ) -> MineModuleResult:
     """Discover properties across an entire module — both per-function and cross-function.
@@ -1757,6 +1821,10 @@ def mine_module(
         mine_per_function: If ``True`` (default), also run ``mine()`` on each
             function individually.  Set to ``False`` to only discover
             cross-function relationships.
+        ignore_properties: Property names to suppress for every function.
+        ignore_relations: Cross-function relation names to suppress.
+        property_overrides: Per-function property suppressions.
+        relation_overrides: Per-function relation suppressions.
         **fixtures: Strategy overrides or plain values passed through to
             ``mine()`` and ``_infer_strategies()``.
 
@@ -1793,7 +1861,17 @@ def mine_module(
     if mine_per_function:
         for name, fn in funcs:
             try:
-                per_function[name] = mine(fn, max_examples=max_examples, **fixtures)
+                per_function[name] = mine(
+                    fn,
+                    max_examples=max_examples,
+                    ignore_properties=sorted(
+                        {
+                            *ignore_properties,
+                            *(property_overrides or {}).get(name, []),
+                        }
+                    ),
+                    **fixtures,
+                )
             except (ValueError, TypeError):
                 pass  # can't infer strategies — skip
 
@@ -1807,21 +1885,36 @@ def mine_module(
             typed_funcs.append((name, fn))
 
     cross_function: list[CrossFunctionProperty] = []
+    ignored_relations = _suppressed_names(list(ignore_relations))
 
     for i, (fname, f) in enumerate(typed_funcs):
         for j, (gname, g) in enumerate(typed_funcs):
             if i == j:
                 continue
+            pair_ignored_relations = ignored_relations | _suppressed_names(
+                [
+                    *(relation_overrides or {}).get(fname, []),
+                    *(relation_overrides or {}).get(gname, []),
+                ]
+            )
 
             # Roundtrip: g(f(x)) == x — directed, so check both (i,j) and (j,i)
             # Only check (i,j) direction here; (j,i) is checked when i/j swap
             if i < j:
                 prop = _check_roundtrip(f, g, fname, gname, max_examples=cross_max_examples)
-                if prop is not None and prop.total > 0:
+                if (
+                    prop is not None
+                    and prop.total > 0
+                    and _normalize_property_token(prop.relation) not in pair_ignored_relations
+                ):
                     cross_function.append(prop)
 
                 prop = _check_roundtrip(g, f, gname, fname, max_examples=cross_max_examples)
-                if prop is not None and prop.total > 0:
+                if (
+                    prop is not None
+                    and prop.total > 0
+                    and _normalize_property_token(prop.relation) not in pair_ignored_relations
+                ):
                     cross_function.append(prop)
 
             # Commutative composition: f(g(x)) == g(f(x)) — symmetric, check once
@@ -1829,7 +1922,11 @@ def mine_module(
                 prop = _check_composition_commutativity(
                     f, g, fname, gname, max_examples=cross_max_examples
                 )
-                if prop is not None and prop.total > 0:
+                if (
+                    prop is not None
+                    and prop.total > 0
+                    and _normalize_property_token(prop.relation) not in pair_ignored_relations
+                ):
                     cross_function.append(prop)
 
             # Output equivalence: f(x) == g(x) — symmetric, check once
@@ -1837,7 +1934,11 @@ def mine_module(
                 prop = _check_output_equivalence(
                     f, g, fname, gname, max_examples=cross_max_examples
                 )
-                if prop is not None and prop.total > 0:
+                if (
+                    prop is not None
+                    and prop.total > 0
+                    and _normalize_property_token(prop.relation) not in pair_ignored_relations
+                ):
                     cross_function.append(prop)
 
     return MineModuleResult(

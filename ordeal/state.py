@@ -75,7 +75,12 @@ class FunctionState:
     crash_free: bool | None = None
     scan_error: str | None = None
     failing_args: dict[str, Any] | None = None
+    scan_replayable: bool | None = None
+    scan_replay_attempts: int = 0
+    scan_replay_matches: int = 0
     fuzz_examples: int = 0
+    contract_violations: list[str] = field(default_factory=list)
+    contract_violation_details: list[dict[str, Any]] = field(default_factory=list)
 
     # chaos testing
     chaos_tested: bool = False
@@ -127,7 +132,12 @@ class FunctionState:
         self.crash_free = None
         self.scan_error = None
         self.failing_args = None
+        self.scan_replayable = None
+        self.scan_replay_attempts = 0
+        self.scan_replay_matches = 0
         self.fuzz_examples = 0
+        self.contract_violations = []
+        self.contract_violation_details = []
         self.chaos_tested = False
         self.faults_tested = []
 
@@ -148,6 +158,10 @@ class FunctionState:
                 gaps.append(f"{unhardened} unhardened survivor(s)")
         if not self.scanned:
             gaps.append("not scanned")
+        elif self.crash_free is False and not self.scan_replayable:
+            gaps.append("crash not replayed")
+        for note in self.contract_violations:
+            gaps.append(note)
         if not self.chaos_tested:
             gaps.append("no chaos testing")
         for v in self.property_violations:
@@ -228,15 +242,26 @@ class ExplorationState:
 
     @property
     def findings(self) -> list[str]:
-        """All bugs and anomalies found."""
+        """Promoted findings worth treating as primary scan output."""
         results: list[str] = []
         for name, fs in self.functions.items():
-            if fs.crash_free is False:
+            if fs.crash_free is False and fs.scan_replayable:
                 results.append(f"{name}: crashes on random inputs")
-            for v in fs.property_violations:
-                results.append(f"{name}: {v}")
             if fs.mutation_score is not None and fs.mutation_score < 0.5:
                 results.append(f"{name}: mutation score {fs.mutation_score:.0%}")
+        return results
+
+    @property
+    def exploratory_findings(self) -> list[str]:
+        """Exploratory scan output that should not fail the run by default."""
+        results: list[str] = []
+        for name, fs in self.functions.items():
+            if fs.crash_free is False and not fs.scan_replayable:
+                results.append(f"{name}: unreplayed crash on random inputs")
+            for v in fs.property_violations:
+                results.append(f"{name}: {v}")
+            for note in fs.contract_violations:
+                results.append(f"{name}: {note}")
         return results
 
     @property
@@ -248,18 +273,39 @@ class ExplorationState:
                 details.append(
                     {
                         "kind": "crash",
+                        "category": (
+                            "likely_bug" if fs.scan_replayable else "speculative_property"
+                        ),
                         "function": name,
                         "summary": f"{name}: crashes on random inputs",
                         "error": fs.scan_error,
                         "failing_args": fs.failing_args,
+                        "replayable": fs.scan_replayable,
+                        "replay_attempts": fs.scan_replay_attempts,
+                        "replay_matches": fs.scan_replay_matches,
+                    }
+                )
+            for item in fs.contract_violation_details:
+                details.append(
+                    {
+                        "function": name,
+                        **item,
                     }
                 )
             for item in fs.property_violation_details:
-                details.append({"kind": "property", "function": name, **item})
+                details.append(
+                    {
+                        "kind": "property",
+                        "category": "speculative_property",
+                        "function": name,
+                        **item,
+                    }
+                )
             if fs.mutation_score is not None and fs.mutation_score < 0.5:
                 details.append(
                     {
                         "kind": "mutation",
+                        "category": "test_strength_gap",
                         "function": name,
                         "summary": f"{name}: mutation score {fs.mutation_score:.0%}",
                         "mutation_score": fs.mutation_score,
@@ -290,6 +336,10 @@ class ExplorationState:
             lines.append(f"  findings:   {len(self.findings)}")
             for f in self.findings:
                 lines.append(f"    - {f}")
+        if self.exploratory_findings:
+            lines.append(f"  exploratory:{len(self.exploratory_findings):>4}")
+            for finding in self.exploratory_findings:
+                lines.append(f"    - {finding}")
         frontier = self.frontier
         if frontier:
             lines.append(f"  frontier:   {sum(len(v) for v in frontier.values())} gaps")
@@ -319,6 +369,7 @@ class ExplorationState:
             "confidence": round(self.confidence, 4),
             "functions": {name: asdict(fs) for name, fs in self.functions.items()},
             "findings": self.findings,
+            "exploratory_findings": self.exploratory_findings,
             "finding_details": self.finding_details,
             "frontier": self.frontier,
             "suggestions": suggest(self),
@@ -352,6 +403,8 @@ def explore_mine(
     *,
     max_examples: int = 50,
     include_private: bool = False,
+    ignore_properties: list[str] | None = None,
+    property_overrides: dict[str, list[str]] | None = None,
 ) -> ExplorationState:
     """Mine all functions in the module and update state."""
 
@@ -369,7 +422,16 @@ def explore_mine(
 
     for name, func in funcs:
         try:
-            result = mine(func, max_examples=max_examples)
+            result = mine(
+                func,
+                max_examples=max_examples,
+                ignore_properties=sorted(
+                    {
+                        *(ignore_properties or []),
+                        *(property_overrides or {}).get(name, []),
+                    }
+                ),
+            )
         except Exception:
             continue
         fs = state.function(name)
@@ -408,23 +470,53 @@ def explore_mine(
     return state
 
 
-def explore_scan(state: ExplorationState, *, max_examples: int = 30) -> ExplorationState:
+def explore_scan(
+    state: ExplorationState,
+    *,
+    max_examples: int = 30,
+    fixtures: dict[str, Any] | None = None,
+    expected_failures: list[str] | None = None,
+    ignore_properties: list[str] | None = None,
+    property_overrides: dict[str, list[str]] | None = None,
+) -> ExplorationState:
     """Scan module for crashes and update state."""
     from ordeal.auto import scan_module
 
-    result = scan_module(state.module, max_examples=max_examples)
+    result = scan_module(
+        state.module,
+        max_examples=max_examples,
+        fixtures=fixtures,
+        expected_failures=expected_failures,
+        ignore_properties=ignore_properties,
+        property_overrides=property_overrides,
+    )
     for fr in result.functions:
         fs = state.function(fr.name)
         fs.scanned = True
         fs.crash_free = fr.passed
         fs.scan_error = fr.error
         fs.failing_args = fr.failing_args
+        fs.scan_replayable = fr.replayable
+        fs.scan_replay_attempts = fr.replay_attempts
+        fs.scan_replay_matches = fr.replay_matches
+        if fr.contract_violations:
+            fs.contract_violations = list(fr.contract_violations)
+            fs.contract_violation_details = list(fr.contract_violation_details)
+            fs.crash_free = True
+            fs.scan_error = None
         if fr.property_violations:
             # Merge, don't duplicate
             existing = set(fs.property_violations)
             for v in fr.property_violations:
                 if v not in existing:
                     fs.property_violations.append(v)
+            existing_details = {
+                detail.get("summary") for detail in fs.property_violation_details
+            }
+            for detail in fr.property_violation_details:
+                if detail.get("summary") not in existing_details:
+                    fs.property_violation_details.append(detail)
+                    existing_details.add(detail.get("summary"))
     return state
 
 
@@ -542,6 +634,10 @@ def explore(
     seed: int = 42,
     patch_io: bool = False,
     include_private: bool = False,
+    scan_fixtures: dict[str, Any] | None = None,
+    scan_expected_failures: list[str] | None = None,
+    scan_ignore_properties: list[str] | None = None,
+    scan_property_overrides: dict[str, list[str]] | None = None,
 ) -> ExplorationState:
     """Run all exploration strategies on a module.
 
@@ -606,7 +702,13 @@ def explore(
         sup.log_transition("explore_start", state_hash=state_hash)
 
         # Step 1: Mine properties
-        state = explore_mine(state, max_examples=max_examples, include_private=include_private)
+        state = explore_mine(
+            state,
+            max_examples=max_examples,
+            include_private=include_private,
+            ignore_properties=scan_ignore_properties,
+            property_overrides=scan_property_overrides,
+        )
         mine_hash = hash(("mined", len(state.functions), state.confidence))
         state.tree.checkpoint(
             mine_hash,
@@ -621,7 +723,14 @@ def explore(
 
         # Step 2: Crash safety
         if time_limit is None or (_time.monotonic() - start) < time_limit:
-            state = explore_scan(state, max_examples=max_examples)
+            state = explore_scan(
+                state,
+                max_examples=max_examples,
+                fixtures=scan_fixtures,
+                expected_failures=scan_expected_failures,
+                ignore_properties=scan_ignore_properties,
+                property_overrides=scan_property_overrides,
+            )
             scan_hash = hash(("scanned", state.confidence))
             state.tree.checkpoint(
                 scan_hash,

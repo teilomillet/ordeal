@@ -255,6 +255,34 @@ class TestGenerateStarterTests:
         assert "def test_" in dry
         assert "def test_" in normal
 
+    def test_starter_tests_import_module_types_in_property_checks(self, tmp_path, monkeypatch):
+        from ordeal.mutations import generate_starter_tests
+
+        pkg = tmp_path / "genstarter"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "mod.py").write_text(
+            "from __future__ import annotations\n"
+            "from dataclasses import dataclass\n"
+            "from typing import Any\n"
+            "\n"
+            "TomlDict = dict[str, Any]\n"
+            "\n"
+            "@dataclass\n"
+            "class PolicyConfig:\n"
+            "    enabled: bool\n"
+            "\n"
+            "def parse(config: PolicyConfig, data: TomlDict) -> int:\n"
+            "    return len(data)\n"
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        content = generate_starter_tests("genstarter.mod.parse")
+
+        assert "import genstarter.mod" in content
+        assert "config: genstarter.mod.PolicyConfig" in content
+        assert "data: dict[str, Any]" in content
+
 
 # ============================================================================
 # _truncate helper

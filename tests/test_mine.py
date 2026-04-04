@@ -14,6 +14,7 @@ from ordeal.mine import (
     _check_monotonic,
     _check_observed_bounds,
     mine,
+    mine_module,
     mine_pair,
 )
 from ordeal.quickcheck import quickcheck
@@ -86,6 +87,10 @@ def encode(x: int) -> str:
 
 def decode(s: str) -> int:
     return int(s)
+
+
+def role_sensitive(prompt: str, response: str) -> str:
+    return prompt + response
 
 
 class TestMine:
@@ -236,6 +241,12 @@ class TestMine:
         if assoc is not None:
             assert not assoc.universal
 
+    def test_ignore_properties_suppresses_named_laws(self):
+        result = mine(add, max_examples=100, ignore_properties=["commutative", "associative"])
+        names = {p.name for p in result.properties}
+        assert "commutative" not in names
+        assert "associative" not in names
+
     def test_discovers_involution(self):
         result = mine(negate_int, max_examples=100)
         inv = next((p for p in result.properties if p.name == "involution"), None)
@@ -261,6 +272,36 @@ class TestMine:
         inv = next((p for p in result.properties if p.name == "involution"), None)
         assert inv is not None
         assert inv.universal  # -(-x) ≈ x for floats
+
+    def test_skips_commutativity_for_role_sensitive_params(self):
+        result = mine(role_sensitive, max_examples=50)
+        comm = next((p for p in result.properties if p.name == "commutative"), None)
+        assert comm is None
+
+    def test_mine_module_allows_relation_suppression(self):
+        import sys
+        import types
+
+        mod = types.ModuleType("_test_mine_module_relations")
+        exec(
+            "def encode(x: int) -> str:\n"
+            "    return str(x)\n"
+            "\n"
+            "def decode(s: str) -> int:\n"
+            "    return int(s)\n",
+            mod.__dict__,
+        )
+        sys.modules[mod.__name__] = mod
+        try:
+            result = mine_module(
+                mod.__name__,
+                max_examples=20,
+                cross_max_examples=10,
+                ignore_relations=["roundtrip"],
+            )
+            assert all(prop.relation != "roundtrip" for prop in result.cross_function)
+        finally:
+            del sys.modules[mod.__name__]
 
     def test_discovers_non_involution(self):
         result = mine(always_positive, max_examples=100)

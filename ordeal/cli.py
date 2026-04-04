@@ -114,6 +114,20 @@ class CommandSpec:
     defaults: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ScanRuntimeDefaults:
+    """Resolved scan runtime config for one target module."""
+
+    max_examples: int
+    fixtures: dict[str, Any] | None
+    expected_failures: list[str]
+    registry_warnings: list[str]
+    ignore_properties: list[str] = field(default_factory=list)
+    ignore_relations: list[str] = field(default_factory=list)
+    property_overrides: dict[str, list[str]] = field(default_factory=dict)
+    relation_overrides: dict[str, list[str]] = field(default_factory=dict)
+
+
 def _arg(*tokens: str, **kwargs: Any) -> ArgumentSpec:
     """Create a declarative CLI argument spec."""
     return ArgumentSpec(tokens=tokens, kwargs=dict(kwargs))
@@ -329,6 +343,125 @@ def _cmd_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_scan_fixture_specs(raw: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Convert TOML scan fixture specs into Hypothesis strategies."""
+    import hypothesis.strategies as st
+
+    if not raw:
+        return None
+
+    fixtures: dict[str, Any] = {}
+    for name, value in raw.items():
+        if isinstance(value, str) and "," in value:
+            fixtures[name] = st.sampled_from(value.split(","))
+        elif isinstance(value, str):
+            fixtures[name] = st.just(value)
+        else:
+            fixtures[name] = st.just(value)
+    return fixtures
+
+
+def _resolve_scan_runtime_defaults(
+    target: str,
+    *,
+    requested_examples: int,
+    allow_config_override: bool = False,
+) -> ScanRuntimeDefaults:
+    """Load fixture registries and optional ``[[scan]]`` defaults for *target*."""
+    from ordeal.auto import load_project_fixture_registries
+
+    warnings = load_project_fixture_registries()
+    effective_examples = requested_examples
+    fixtures = None
+    expected_failures: list[str] = []
+    ignore_properties: list[str] = []
+    ignore_relations: list[str] = []
+    property_overrides: dict[str, list[str]] = {}
+    relation_overrides: dict[str, list[str]] = {}
+
+    config_path = Path("ordeal.toml")
+    if not config_path.exists():
+        return ScanRuntimeDefaults(
+            max_examples=effective_examples,
+            fixtures=fixtures,
+            expected_failures=expected_failures,
+            registry_warnings=warnings,
+        )
+
+    try:
+        cfg = load_config(config_path)
+    except (FileNotFoundError, ConfigError):
+        return ScanRuntimeDefaults(
+            max_examples=effective_examples,
+            fixtures=fixtures,
+            expected_failures=expected_failures,
+            registry_warnings=warnings,
+        )
+
+    match = next((entry for entry in cfg.scan if entry.module == target), None)
+    if match is None:
+        return ScanRuntimeDefaults(
+            max_examples=effective_examples,
+            fixtures=fixtures,
+            expected_failures=expected_failures,
+            registry_warnings=warnings,
+        )
+
+    if allow_config_override:
+        effective_examples = match.max_examples
+    fixtures = _parse_scan_fixture_specs(match.fixtures)
+    expected_failures = list(match.expected_failures)
+    warnings.extend(load_project_fixture_registries(extra_modules=match.fixture_registries))
+    ignore_properties = list(match.ignore_properties)
+    ignore_relations = list(match.ignore_relations)
+    property_overrides = {
+        str(name): list(values) for name, values in match.property_overrides.items()
+    }
+    relation_overrides = {
+        str(name): list(values) for name, values in match.relation_overrides.items()
+    }
+    return ScanRuntimeDefaults(
+        max_examples=effective_examples,
+        fixtures=fixtures,
+        expected_failures=expected_failures,
+        registry_warnings=warnings,
+        ignore_properties=ignore_properties,
+        ignore_relations=ignore_relations,
+        property_overrides=property_overrides,
+        relation_overrides=relation_overrides,
+    )
+
+
+def _run_configured_scans(
+    scan_entries: Sequence[Any],
+    *,
+    verbose: bool = True,
+) -> int:
+    """Execute ``[[scan]]`` entries from config through the library scan API."""
+    from ordeal.auto import load_project_fixture_registries, scan_module
+
+    exit_code = 0
+    for scan_cfg in scan_entries:
+        warnings = load_project_fixture_registries(extra_modules=scan_cfg.fixture_registries)
+        for warning in warnings:
+            _stderr(f"warning: {warning}\n")
+        fixtures = _parse_scan_fixture_specs(scan_cfg.fixtures)
+        if verbose:
+            _stderr(f"Scanning {scan_cfg.module} from [[scan]]...\n")
+        result = scan_module(
+            scan_cfg.module,
+            max_examples=scan_cfg.max_examples,
+            fixtures=fixtures,
+            expected_failures=scan_cfg.expected_failures,
+            ignore_properties=scan_cfg.ignore_properties,
+            property_overrides=scan_cfg.property_overrides,
+        )
+        print(result.summary())
+        if not result.passed:
+            exit_code = 1
+    return exit_code
+
+
 def _cmd_scan(args: argparse.Namespace) -> int:
     """Run unified exploration: mine + scan + mutate + chaos in one pass.
 
@@ -340,22 +473,34 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     from ordeal.state import explore
 
     inc_private = getattr(args, "include_private", False)
+    allow_config_override = args.max_examples == 50
+    runtime_defaults = _resolve_scan_runtime_defaults(
+        args.target,
+        requested_examples=args.max_examples,
+        allow_config_override=allow_config_override,
+    )
     if not args.json:
         _stderr(f"Scanning {args.target} (seed={args.seed})...\n")
+        for warning in runtime_defaults.registry_warnings:
+            _stderr(f"warning: {warning}\n")
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         state = explore(
             args.target,
             seed=args.seed,
-            max_examples=args.max_examples,
+            max_examples=runtime_defaults.max_examples,
             workers=args.workers,
             time_limit=args.time_limit,
             include_private=inc_private,
+            scan_fixtures=runtime_defaults.fixtures,
+            scan_expected_failures=runtime_defaults.expected_failures,
+            scan_ignore_properties=runtime_defaults.ignore_properties,
+            scan_property_overrides=runtime_defaults.property_overrides,
         )
 
     if not args.json:
         print(_format_scan_summary(state))
         if (
-            state.findings
+            (state.findings or _scan_report_details(state))
             and not getattr(args, "save_artifacts", False)
             and not getattr(args, "report_file", None)
             and not getattr(args, "write_regression", None)
@@ -371,16 +516,17 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     written_report_path: Path | None = None
     written_regression_path: Path | None = None
     index_path: Path | None = None
-    if save_artifacts and state.findings:
+    has_details = bool(state.findings or _scan_report_details(state))
+    if save_artifacts and has_details:
         report_path = report_path or _default_scan_report_path(state.module)
         regression_path = regression_path or _DEFAULT_REGRESSION_PATH
     if report_path:
         written_report_path = _write_scan_report(state, report_path)
     if regression_path:
         written_regression_path = _write_scan_regressions(state, regression_path)
-    if save_artifacts and not state.findings:
+    if save_artifacts and not has_details:
         _stderr("No findings yet; no artifacts written.\n")
-    if save_artifacts and state.findings and written_report_path is not None:
+    if save_artifacts and has_details and written_report_path is not None:
         bundle_path, bundle = _write_scan_bundle(
             state,
             path_str=_artifact_bundle_path(str(written_report_path)),
@@ -439,6 +585,8 @@ def _cmd_explore(args: argparse.Namespace) -> int:
     verbose = args.verbose or cfg.report.verbose
 
     if not cfg.tests:
+        if cfg.scan:
+            return _run_configured_scans(cfg.scan, verbose=verbose)
         _stderr("No [[tests]] entries in config.\n")
         return 1
 
@@ -1162,7 +1310,21 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
 
     for module in deduped_modules:
         try:
-            result = scan_module(module, max_examples=max_examples)
+            runtime_defaults = _resolve_scan_runtime_defaults(
+                module,
+                requested_examples=max_examples,
+                allow_config_override=False,
+            )
+            scan_kwargs: dict[str, Any] = {
+                "max_examples": runtime_defaults.max_examples,
+                "fixtures": runtime_defaults.fixtures,
+                "expected_failures": runtime_defaults.expected_failures,
+            }
+            if runtime_defaults.ignore_properties:
+                scan_kwargs["ignore_properties"] = runtime_defaults.ignore_properties
+            if runtime_defaults.property_overrides:
+                scan_kwargs["property_overrides"] = runtime_defaults.property_overrides
+            result = scan_module(module, **scan_kwargs)
         except Exception as exc:
             errors.append({"module": module, "error": str(exc)})
             continue
@@ -1173,10 +1335,24 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
 
         for function in result.functions:
             qualname = f"{module}.{function.name}"
-            if not function.passed:
+            if not function.passed and function.replayable:
                 findings.append(
                     {
                         "kind": "crash",
+                        "category": "likely_bug",
+                        "module": module,
+                        "function": function.name,
+                        "qualname": qualname,
+                        "summary": f"{qualname}: crash safety failed",
+                        "error": function.error,
+                        "failing_args": function.failing_args,
+                    }
+                )
+            elif not function.passed:
+                findings.append(
+                    {
+                        "kind": "crash",
+                        "category": "speculative_property",
                         "module": module,
                         "function": function.name,
                         "qualname": qualname,
@@ -1189,15 +1365,27 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
                 findings.append(
                     {
                         "kind": "property",
+                        "category": "speculative_property",
                         "module": module,
                         "function": function.name,
                         "qualname": qualname,
                         "summary": f"{qualname}: {violation}",
                     }
                 )
+            for note in function.contract_violation_details:
+                findings.append(
+                    {
+                        **note,
+                        "module": module,
+                        "function": function.name,
+                        "qualname": qualname,
+                    }
+                )
 
-    if findings:
+    if any(item.get("category") == "likely_bug" for item in findings):
         status = "findings found"
+    elif findings:
+        status = "exploratory findings"
     elif scanned_modules or not errors:
         status = "no findings yet"
     else:
@@ -1461,7 +1649,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         if not close_gaps:
             _stderr("  Gaps:       report-only (use --close-gaps to append suggested stubs)\n")
 
-    if initial_scan["status"] == "findings found":
+    if initial_scan["status"] in {"findings found", "exploratory findings"}:
         _stderr(
             "  Initial scan:"
             f" {len(initial_scan['findings'])} finding(s)"
@@ -1818,7 +2006,23 @@ def _print_report(
 def _format_scan_summary(state: Any) -> str:
     """Render a concise, action-oriented summary for ``ordeal scan``."""
     lines = [f"ordeal scan: {state.module}"]
-    status = "findings found" if state.findings else "no findings yet"
+    details = _scan_report_details(state)
+    exploratory = [
+        detail for detail in details if detail.get("category") == "speculative_property"
+    ]
+    expected = [
+        detail
+        for detail in details
+        if detail.get("category") == "expected_precondition_failure"
+    ]
+    if state.findings:
+        status = "findings found"
+    elif exploratory:
+        status = "exploratory findings"
+    elif expected:
+        status = "expected preconditions observed"
+    else:
+        status = "no findings yet"
     lines.append(f"  status: {status}")
     lines.append(f"  confidence: {state.confidence:.0%}")
 
@@ -1829,7 +2033,15 @@ def _format_scan_summary(state: Any) -> str:
         for finding in state.findings[:5]:
             lines.append(f"    - {finding}")
     else:
-        lines.append("  findings: none")
+        lines.append("  findings: none promoted")
+        if exploratory:
+            lines.append("  exploratory:")
+            for detail in exploratory[:5]:
+                lines.append(f"    - {detail.get('summary', detail.get('function', '?'))}")
+        if expected:
+            lines.append("  expected preconditions:")
+            for detail in expected[:5]:
+                lines.append(f"    - {detail.get('summary', detail.get('function', '?'))}")
 
     frontier = state.frontier
     if frontier:
@@ -1866,6 +2078,43 @@ def _scan_checked_items(state: Any) -> list[str]:
     if tree is not None and getattr(tree, "size", 0) > 0:
         checked.append(f"{tree.size} checkpoints")
     return checked
+
+
+def _scan_evidence_dimensions(state: Any) -> dict[str, Any]:
+    """Expose scan evidence as interpretable dimensions, not one score."""
+    functions = getattr(state, "functions", {}) or {}
+    skipped = list(getattr(state, "skipped", []))
+    details = _scan_report_details(state)
+    replayable = sum(
+        1
+        for detail in details
+        if detail.get("replayable")
+        or detail.get("counterexample") is not None
+        or detail.get("failing_args") is not None
+    )
+    mutation_scores = [
+        float(getattr(func_state, "mutation_score"))
+        for func_state in functions.values()
+        if getattr(func_state, "mutation_score", None) is not None
+    ]
+    total_functions = len(functions) + len(skipped)
+    return {
+        "search_depth": {
+            "functions": len(functions),
+            "transitions": getattr(state, "supervisor_info", {}).get("trajectory_steps", 0),
+            "checkpoints": getattr(getattr(state, "tree", None), "size", 0),
+        },
+        "replayability": {
+            "replayable_findings": replayable,
+            "total_findings": len(details),
+        },
+        "mutation_strength": (
+            sum(mutation_scores) / len(mutation_scores) if mutation_scores else None
+        ),
+        "fixture_completeness": (
+            len(functions) / total_functions if total_functions > 0 else 1.0
+        ),
+    }
 
 
 def _trim_report_value(
@@ -2129,10 +2378,13 @@ def _render_finding_section(detail: dict[str, Any]) -> list[str]:
     """Render one finding block for a Markdown dossier."""
     qualname = detail.get("qualname") or detail.get("function", "?")
     kind = detail.get("kind", "finding")
+    category = detail.get("category")
     title = detail.get("name") or detail.get("summary") or kind
     module = detail.get("module", "")
 
     lines = [f"### {detail['index']}. `{qualname}`", "", f"- Type: {kind}", f"- Finding: {title}"]
+    if category:
+        lines.append(f"- Category: {category}")
 
     if kind == "property":
         holds = detail.get("holds")
@@ -2162,6 +2414,12 @@ def _render_finding_section(detail: dict[str, Any]) -> list[str]:
     if kind == "crash":
         error = detail.get("error") or "unknown error"
         lines.append(f"- Evidence: `{error}`")
+        if detail.get("replay_attempts"):
+            lines.append(
+                "- Replay:"
+                f" `{detail.get('replay_matches', 0)}/{detail.get('replay_attempts', 0)}`"
+                " matching replays"
+            )
         lines.append(
             "- Why this matters: the function crashes under generated inputs,"
             " so basic robustness is not yet established."
@@ -2178,7 +2436,11 @@ def _render_finding_section(detail: dict[str, Any]) -> list[str]:
                 "",
                 "Next steps:",
                 f"- `ordeal mine {qualname} -n 200`",
-                f"- Reproduce the crash directly in a regression test for `{qualname}`",
+                (
+                    f"- Reproduce the crash directly in a regression test for `{qualname}`"
+                    if detail.get("replayable")
+                    else f"- Re-run `{qualname}` with the recorded input to confirm the failure"
+                ),
             ]
         )
         return lines
@@ -2260,25 +2522,59 @@ def _render_findings_report_markdown(report: dict[str, Any]) -> str:
 
 def _build_scan_report(state: Any) -> dict[str, Any]:
     """Normalize scan output into the shared finding report shape."""
+    evidence = _scan_evidence_dimensions(state)
+    search_depth = evidence["search_depth"]
+    replayability = evidence["replayability"]
+    mutation_strength = evidence["mutation_strength"]
+    fixture_completeness = evidence["fixture_completeness"]
+    details = [
+        {
+            **detail,
+            "module": state.module,
+            "qualname": f"{state.module}.{detail.get('function', '?')}",
+        }
+        for detail in _scan_report_details(state)
+    ]
+    promoted_count = len(getattr(state, "findings", []))
+    exploratory_count = sum(
+        1 for detail in details if detail.get("category") == "speculative_property"
+    )
+    expected_count = sum(
+        1 for detail in details if detail.get("category") == "expected_precondition_failure"
+    )
+    if promoted_count:
+        status = "findings found"
+    elif exploratory_count:
+        status = "exploratory findings"
+    elif expected_count:
+        status = "expected preconditions observed"
+    else:
+        status = "no findings yet"
     return {
         "target": state.module,
         "tool": "scan",
-        "status": "findings found" if state.findings else "no findings yet",
+        "status": status,
         "confidence": f"{state.confidence:.0%}",
         "seed": getattr(state, "supervisor_info", {}).get("seed"),
         "summary": [
             f"Checked: {', '.join(_scan_checked_items(state))}",
-            f"Findings: {len(state.findings)}",
+            f"Promoted findings: {promoted_count}",
+            f"Exploratory findings: {exploratory_count}",
+            f"Expected precondition failures: {expected_count}",
             f"Gaps: {sum(len(v) for v in state.frontier.values()) if state.frontier else 0}",
+            (
+                "Evidence:"
+                f" search depth={search_depth['functions']} functions/"
+                f"{search_depth['transitions']} transitions/"
+                f"{search_depth['checkpoints']} checkpoints,"
+                f" replayability={replayability['replayable_findings']}/"
+                f"{replayability['total_findings']},"
+                f" mutation strength="
+                f"{(f'{mutation_strength:.0%}' if mutation_strength is not None else 'n/a')},"
+                f" fixture completeness={fixture_completeness:.0%}"
+            ),
         ],
-        "details": [
-            {
-                **detail,
-                "module": state.module,
-                "qualname": f"{state.module}.{detail.get('function', '?')}",
-            }
-            for detail in _scan_report_details(state)
-        ],
+        "details": details,
         "gaps": [
             f"`{state.module}.{name}`: {', '.join(gaps)}" for name, gaps in state.frontier.items()
         ],
@@ -2286,6 +2582,33 @@ def _build_scan_report(state: Any) -> dict[str, Any]:
             f"ordeal scan {state.module}",
             f"ordeal mine {state.module} -n 200",
             f"ordeal mutate {state.module}",
+        ],
+        "extra_sections": [
+            (
+                "Evidence Dimensions",
+                [
+                    (
+                        "search depth: "
+                        f"{search_depth['functions']} functions, "
+                        f"{search_depth['transitions']} transitions, "
+                        f"{search_depth['checkpoints']} checkpoints"
+                    ),
+                    (
+                        "replayability: "
+                        f"{replayability['replayable_findings']}/"
+                        f"{replayability['total_findings']} findings have concrete inputs"
+                    ),
+                    (
+                        "mutation strength: "
+                        + (
+                            f"{mutation_strength:.0%}"
+                            if mutation_strength is not None
+                            else "not measured yet"
+                        )
+                    ),
+                    f"fixture completeness: {fixture_completeness:.0%}",
+                ],
+            )
         ],
     }
 
@@ -2311,7 +2634,7 @@ def _build_scan_bundle(
         "tool": "scan",
         "target": report["target"],
         "workspace": os.getcwd(),
-        "status": "findings found" if findings else "no findings yet",
+        "status": report["status"],
         "confidence": round(state.confidence, 4),
         "seed": report.get("seed"),
         "summary": report["summary"],
@@ -2768,6 +3091,8 @@ def _build_scan_agent_envelope(
 ) -> Any:
     """Build the agent-facing JSON envelope for `ordeal scan`."""
     report = _build_scan_report(state)
+    evidence = _scan_evidence_dimensions(state)
+    detail_categories = {detail.get("category") for detail in report.get("details", [])}
     artifacts: list[Any] = []
     if written_report_path is not None:
         artifacts.append(
@@ -2781,9 +3106,34 @@ def _build_scan_agent_envelope(
         artifacts.append(_agent_artifact("index", index_path, "artifact index"))
     return _build_agent_envelope_from_report(
         report,
-        status="findings" if state.findings else "ok",
+        status=(
+            "findings"
+            if state.findings
+            else ("exploratory" if "speculative_property" in detail_categories else "ok")
+        ),
         confidence=float(getattr(state, "confidence", 0.0)),
-        confidence_basis=_scan_checked_items(state),
+        confidence_basis=(
+            (
+                "search depth: "
+                f"{evidence['search_depth']['functions']} functions, "
+                f"{evidence['search_depth']['transitions']} transitions, "
+                f"{evidence['search_depth']['checkpoints']} checkpoints"
+            ),
+            (
+                "replayability: "
+                f"{evidence['replayability']['replayable_findings']}/"
+                f"{evidence['replayability']['total_findings']} findings"
+            ),
+            (
+                "mutation strength: "
+                + (
+                    f"{evidence['mutation_strength']:.0%}"
+                    if evidence["mutation_strength"] is not None
+                    else "not measured"
+                )
+            ),
+            f"fixture completeness: {evidence['fixture_completeness']:.0%}",
+        ),
         artifacts=artifacts,
         raw_details={
             "report": report,
@@ -2791,6 +3141,7 @@ def _build_scan_agent_envelope(
             "seed": getattr(state, "supervisor_info", {}).get("seed"),
             "finding_count": len(report.get("details", [])),
             "gap_count": len(report.get("gaps", [])),
+            "evidence_dimensions": evidence,
         },
         suggested_test_file=(_DEFAULT_REGRESSION_PATH if report.get("details") else None),
     )
@@ -2867,6 +3218,7 @@ def _audit_detail_items(result: Any) -> list[dict[str, Any]]:
         details.append(
             {
                 "kind": "mutation_gap",
+                "category": "test_strength_gap",
                 "summary": f"mutation score {result.mutation_score}",
                 "confidence": score_fraction,
                 "module": result.module,
@@ -2874,20 +3226,46 @@ def _audit_detail_items(result: Any) -> list[dict[str, Any]]:
                 "details": {"validation_mode": result.validation_mode},
             }
         )
+    for gap in result.mutation_gaps:
+        details.append(
+            {
+                "kind": "mutation",
+                "category": "test_strength_gap",
+                "summary": f"{gap['location']} {gap['description']}",
+                "module": result.module,
+                "qualname": gap["target"],
+                "details": {
+                    "source_line": gap.get("source_line"),
+                    "remediation": gap.get("remediation"),
+                },
+            }
+        )
     for function_name in result.gap_functions:
         details.append(
             {
                 "kind": "fixture_gap",
+                "category": "test_strength_gap",
                 "summary": f"{function_name} needs fixtures before ordeal can verify it",
                 "module": result.module,
                 "function": function_name,
                 "qualname": f"{result.module}.{function_name}",
             }
         )
+    for item in result.weakest_tests:
+        details.append(
+            {
+                "kind": "warning",
+                "category": "test_strength_gap",
+                "summary": f"{item['test']} only killed {item['kills']} mutant(s)",
+                "module": result.module,
+                "qualname": result.module,
+            }
+        )
     for suggestion in result.suggestions:
         details.append(
             {
                 "kind": "coverage_gap",
+                "category": "test_strength_gap",
                 "summary": suggestion,
                 "module": result.module,
                 "qualname": result.module,
@@ -2897,6 +3275,7 @@ def _audit_detail_items(result: Any) -> list[dict[str, Any]]:
         details.append(
             {
                 "kind": "warning",
+                "category": "verification_warning",
                 "summary": warning,
                 "module": result.module,
                 "qualname": result.module,
@@ -2948,6 +3327,61 @@ def _build_audit_agent_envelope(
         for result in results
     )
     total_measurements = max(len(results) * 2, 1)
+    mutation_fractions = [
+        result.mutation_score_fraction
+        for result in results
+        if result.mutation_score_fraction is not None
+    ]
+    total_functions = sum(max(result.total_functions, 0) for result in results)
+    covered_functions = sum(
+        max(result.total_functions - len(result.gap_functions), 0) for result in results
+    )
+    evidence = {
+        "search_depth": {"modules": len(results), "coverage_measurements": total_measurements},
+        "replayability": verified_measurements / total_measurements,
+        "mutation_strength": (
+            sum(mutation_fractions) / len(mutation_fractions) if mutation_fractions else None
+        ),
+        "fixture_completeness": (
+            covered_functions / total_functions if total_functions > 0 else 1.0
+        ),
+    }
+    mutation_strength_text = (
+        f"{evidence['mutation_strength']:.0%}"
+        if evidence["mutation_strength"] is not None
+        else "n/a"
+    )
+    report["summary"].append(
+        "Evidence:"
+        f" search depth={evidence['search_depth']['modules']} modules/"
+        f"{evidence['search_depth']['coverage_measurements']} measurements,"
+        f" replayability={evidence['replayability']:.0%},"
+        f" mutation strength={mutation_strength_text},"
+        f" fixture completeness={evidence['fixture_completeness']:.0%}"
+    )
+    report["extra_sections"] = [
+        (
+            "Evidence Dimensions",
+            [
+                (
+                    "search depth: "
+                    f"{evidence['search_depth']['modules']} modules, "
+                    f"{evidence['search_depth']['coverage_measurements']} "
+                    "verified-or-attempted measurements"
+                ),
+                f"replayability: {evidence['replayability']:.0%}",
+                (
+                    "mutation strength: "
+                    + (
+                        mutation_strength_text
+                        if mutation_strength_text != "n/a"
+                        else "not measured yet"
+                    )
+                ),
+                f"fixture completeness: {evidence['fixture_completeness']:.0%}",
+            ],
+        )
+    ]
     artifacts: list[Any] = []
     if saved_generated_path is not None:
         artifacts.append(
@@ -2970,13 +3404,23 @@ def _build_audit_agent_envelope(
         status="findings" if details else "ok",
         confidence=verified_measurements / total_measurements,
         confidence_basis=(
-            f"{verified_measurements}/{total_measurements} coverage measurements verified",
-            "coverage confidence reflects measured verification coverage, not bug absence",
+            (
+                "search depth: "
+                f"{evidence['search_depth']['modules']} modules, "
+                f"{evidence['search_depth']['coverage_measurements']} measurements"
+            ),
+            f"replayability: {evidence['replayability']:.0%}",
+            (
+                "mutation strength: "
+                + (mutation_strength_text if mutation_strength_text != "n/a" else "not measured")
+            ),
+            f"fixture completeness: {evidence['fixture_completeness']:.0%}",
         ),
         artifacts=artifacts,
         raw_details={
             "report": report,
             "modules": [_module_audit_to_dict(result) for result in results],
+            "evidence_dimensions": evidence,
         },
         suggested_test_file=(
             str(saved_generated_path) if saved_generated_path is not None else None
@@ -2988,6 +3432,7 @@ def _mutant_to_detail(target: str, mutant: Any) -> dict[str, Any]:
     """Normalize a surviving mutant into a finding-style detail item."""
     return {
         "kind": "mutation",
+        "category": "test_strength_gap",
         "summary": f"{mutant.location} {mutant.description}",
         "module": target.rsplit(".", 1)[0] if "." in target else target,
         "qualname": target,
@@ -3660,6 +4105,8 @@ def _scan_command_description() -> str:
     scan_desc = (_explore_fn.__doc__ or "").strip().split("\n\n")[0]
     return (
         f"{scan_desc}\n\n"
+        "Scan is exploratory first: prioritize replayable, semantically plausible findings.\n"
+        "For stronger signals on a mature codebase, prefer `ordeal audit` and `ordeal mutate`.\n"
         f"Use --save-artifacts to save both {_default_scan_report_path('mymod')} and"
         f" {_default_scan_bundle_path('mymod')} + {_DEFAULT_REGRESSION_PATH},"
         f" then update {_default_artifact_index_path()}.\n"

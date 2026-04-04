@@ -692,6 +692,7 @@ def test_generate_test_stubs_for_surviving_mutants():
     )
     stubs = result.generate_test_stubs()
     if result.survived:
+        assert "from __future__ import annotations" in stubs
         assert f"from {__name__} import _add" in stubs
         assert "def test_" in stubs
         # Uses real param names from inspect.signature
@@ -699,6 +700,7 @@ def test_generate_test_stubs_for_surviving_mutants():
         assert "b=" in stubs
         # Includes function signature in header
         assert "Function signature:" in stubs
+        assert "Review this case" in stubs
     else:
         assert stubs == ""
 

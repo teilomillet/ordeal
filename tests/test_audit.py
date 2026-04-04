@@ -26,6 +26,7 @@ from ordeal.audit import (
     _count_tests_in_file,
     _find_test_files,
     _format_change_summary,
+    _func_sig_for_codegen,
     _group_mined_properties,
     _suggest_tests,
     _verify_consistency,
@@ -147,6 +148,30 @@ class TestFindTestFiles:
 
     def test_nonexistent_dir(self, tmp_path: Path):
         assert _find_test_files("myapp.scoring", tmp_path / "nope") == []
+
+    def test_finds_suffix_named_tests(self, tmp_path: Path):
+        (tmp_path / "scoring_test.py").write_text("def test_a(): pass")
+        files = _find_test_files("myapp.scoring", tmp_path)
+        assert [file.name for file in files] == ["scoring_test.py"]
+
+    def test_falls_back_to_import_matching(self, tmp_path: Path):
+        (tmp_path / "test_pipeline_behavior.py").write_text(
+            "from myapp.scoring import normalize\n"
+            "def test_normalize(): assert normalize([1]) == [1]\n"
+        )
+        files = _find_test_files("myapp.scoring", tmp_path)
+        assert [file.name for file in files] == ["test_pipeline_behavior.py"]
+
+    def test_uses_pytest_collection_before_globbing(self, monkeypatch, tmp_path: Path):
+        collected = tmp_path / "suite" / "behavior_check.py"
+        collected.parent.mkdir()
+        collected.write_text(
+            "from myapp.scoring import normalize\n"
+            "def test_normalize(): assert normalize([1]) == [1]\n"
+        )
+        monkeypatch.setattr(audit_mod, "_pytest_collected_test_files", lambda _path: [collected])
+        files = _find_test_files("myapp.scoring", tmp_path)
+        assert files == [collected]
 
 
 # ============================================================================
@@ -481,6 +506,30 @@ class TestModuleAuditSummary:
         assert "more code" in s
         assert "coverage -3%" in s
 
+    def test_summary_shows_mutation_gap_details(self):
+        a = ModuleAudit(module="myapp.scoring")
+        a.mutation_gaps = [
+            {
+                "target": "myapp.scoring.normalize",
+                "location": "L10:4",
+                "description": "+ -> -",
+                "source_line": "return a + b",
+                "remediation": "add a regression test",
+            }
+        ]
+        a.weakest_tests = [{"test": "tests/test_scoring.py::test_smoke", "kills": 1}]
+        a.mutation_gap_stubs = [
+            {
+                "target": "myapp.scoring.normalize",
+                "content": "def test_gap(): ...",
+            }
+        ]
+
+        s = a.summary()
+        assert "surviving mutants:" in s
+        assert "weakest killers:" in s
+        assert "gap-closing stub file" in s
+
 
 class TestGroupMinedProperties:
     def test_groups_by_property(self):
@@ -545,6 +594,38 @@ class TestSuggestTests:
         )
         assert len(result) >= 1
         assert "cannot suggest" in result[0]
+
+
+class TestGeneratedTypeSignatures:
+    def test_codegen_qualifies_module_types_and_typing_imports(self, tmp_path: Path, monkeypatch):
+        pkg = tmp_path / "genpkg"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "mod.py").write_text(
+            "from __future__ import annotations\n"
+            "from dataclasses import dataclass\n"
+            "from typing import Any\n"
+            "\n"
+            "TomlDict = dict[str, Any]\n"
+            "\n"
+            "@dataclass\n"
+            "class PolicyConfig:\n"
+            "    enabled: bool\n"
+            "\n"
+            "def parse(config: PolicyConfig, data: TomlDict) -> int:\n"
+            "    return len(data)\n"
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        from genpkg.mod import parse
+
+        sig = _func_sig_for_codegen(parse)
+        assert sig is not None
+        _names, decls, _call_args, imports = sig
+        assert "config: genpkg.mod.PolicyConfig" in decls
+        assert "data: dict[str, Any]" in decls
+        assert "from typing import Any" in imports
+        assert "import genpkg.mod" in imports
 
 
 # ============================================================================

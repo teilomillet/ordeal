@@ -20,8 +20,12 @@ Three primitives:
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import inspect
+import re
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import ModuleType
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
@@ -46,14 +50,24 @@ class FunctionResult:
     name: str
     passed: bool
     error: str | None = None
+    error_type: str | None = None
     failing_args: dict[str, Any] | None = None
     property_violations: list[str] = field(default_factory=list)
+    property_violation_details: list[dict[str, Any]] = field(default_factory=list)
+    contract_violations: list[str] = field(default_factory=list)
+    contract_violation_details: list[dict[str, Any]] = field(default_factory=list)
+    replayable: bool | None = None
+    replay_attempts: int = 0
+    replay_matches: int = 0
 
     def __str__(self) -> str:
-        if self.passed and not self.property_violations:
+        if self.passed and not self.property_violations and not self.contract_violations:
             return f"  PASS  {self.name}"
         if not self.passed:
             return f"  FAIL  {self.name}: {self.error}"
+        if self.contract_violations:
+            viols = "; ".join(self.contract_violations)
+            return f"  NOTE  {self.name}: {viols}"
         viols = "; ".join(self.property_violations)
         return f"  WARN  {self.name}: {viols}"
 
@@ -300,10 +314,79 @@ def _get_public_functions(
         if callable(obj) and not isinstance(obj, type):
             # Skip re-imports from other modules
             obj_mod = getattr(obj, "__module__", None)
-            if include_private and obj_mod and obj_mod != mod.__name__:
+            if obj_mod and obj_mod != mod.__name__:
                 continue
             results.append((name, _unwrap(obj)))
     return results
+
+
+_FIXTURE_REGISTRY_MODULES: set[str] = set()
+
+
+def _load_fixture_registry_path(path: Path) -> str | None:
+    """Import one fixture registry file and return a warning on failure."""
+    resolved = path.resolve()
+    key = str(resolved)
+    if key in _FIXTURE_REGISTRY_MODULES:
+        return None
+    spec = importlib.util.spec_from_file_location(
+        f"_ordeal_fixture_registry_{len(_FIXTURE_REGISTRY_MODULES)}",
+        resolved,
+    )
+    if spec is None or spec.loader is None:
+        return f"could not load fixture registry: {resolved}"
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    _FIXTURE_REGISTRY_MODULES.add(key)
+    return None
+
+
+def load_fixture_registry_modules(modules: list[str]) -> list[str]:
+    """Import explicit registry modules so ``register_fixture()`` takes effect."""
+    warnings: list[str] = []
+    for module_name in modules:
+        if module_name in _FIXTURE_REGISTRY_MODULES:
+            continue
+        try:
+            importlib.import_module(module_name)
+        except Exception as exc:
+            warnings.append(f"fixture registry load failed for {module_name}: {exc}")
+            continue
+        _FIXTURE_REGISTRY_MODULES.add(module_name)
+    return warnings
+
+
+def load_project_fixture_registries(
+    *,
+    root: Path | None = None,
+    extra_modules: list[str] | None = None,
+) -> list[str]:
+    """Import local registries so ``register_fixture()`` takes effect."""
+    base = (root or Path.cwd()).resolve()
+    warnings: list[str] = []
+    candidates = [
+        base / "conftest.py",
+        base / "tests" / "conftest.py",
+        base / "test" / "conftest.py",
+        base / "src" / "tests" / "conftest.py",
+    ]
+
+    seen: set[Path] = set()
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved in seen or not resolved.exists():
+            continue
+        seen.add(resolved)
+        try:
+            warning = _load_fixture_registry_path(resolved)
+            if warning:
+                warnings.append(warning)
+        except Exception as exc:
+            warnings.append(f"fixture registry load failed for {resolved}: {exc}")
+    if extra_modules:
+        warnings.extend(load_fixture_registry_modules(list(extra_modules)))
+    return warnings
 
 
 def _infer_strategies(
@@ -475,6 +558,65 @@ def _type_matches(value: Any, expected: type) -> bool:
         return True  # can't check, assume ok
 
 
+_DOC_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "be",
+    "for",
+    "from",
+    "have",
+    "into",
+    "must",
+    "same",
+    "that",
+    "the",
+    "this",
+    "when",
+    "with",
+}
+
+
+def _documented_precondition_failure(
+    func: Any,
+    exc: Exception,
+    kwargs: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return a detail dict when *exc* matches a documented precondition."""
+    doc = inspect.getdoc(func) or ""
+    lowered_doc = doc.lower()
+    if "raise" not in lowered_doc:
+        return None
+
+    exc_name = type(exc).__name__
+    exc_name_lower = exc_name.lower()
+    if exc_name_lower not in lowered_doc:
+        return None
+
+    message = str(exc)
+    message_tokens = {
+        token
+        for token in re.findall(r"[a-z_]{4,}", message.lower())
+        if token not in _DOC_STOPWORDS
+    }
+    doc_tokens = set(re.findall(r"[a-z_]{4,}", lowered_doc))
+    param_names = {name.lower() for name in kwargs}
+
+    if not (message_tokens & doc_tokens) and not (param_names & doc_tokens):
+        return None
+
+    summary = f"expected precondition failure: {exc_name}: {message}"
+    return {
+        "kind": "precondition",
+        "category": "expected_precondition_failure",
+        "summary": summary[:300],
+        "error": message[:300],
+        "error_type": exc_name,
+        "failing_args": dict(kwargs),
+    }
+
+
 # ============================================================================
 # 1. scan_module
 # ============================================================================
@@ -487,6 +629,8 @@ def scan_module(
     check_return_type: bool = True,
     fixtures: dict[str, st.SearchStrategy] | None = None,
     expected_failures: list[str] | None = None,
+    ignore_properties: list[str] | None = None,
+    property_overrides: dict[str, list[str]] | None = None,
 ) -> ScanResult:
     """Smoke-test every public function in *module*.
 
@@ -526,6 +670,8 @@ def scan_module(
         expected_failures: Function names that are expected to fail.
             Failures from these functions are tracked separately and
             do not cause ``result.passed`` to be ``False``.
+        ignore_properties: Property names to suppress in mined warnings.
+        property_overrides: Per-function property suppressions.
     """
     mod = _resolve_module(module)
     mod_name = module if isinstance(module, str) else mod.__name__
@@ -563,6 +709,12 @@ def scan_module(
             max_examples=func_examples,
             check_return_type=check_return_type,
             fixtures=fixtures,
+            ignore_properties=sorted(
+                {
+                    *(ignore_properties or []),
+                    *(property_overrides or {}).get(name, []),
+                }
+            ),
         )
         result.functions.append(func_result)
 
@@ -578,8 +730,24 @@ def _test_one_function(
     max_examples: int,
     check_return_type: bool,
     fixtures: dict[str, st.SearchStrategy[Any]] | None = None,
+    ignore_properties: list[str] | None = None,
 ) -> FunctionResult:
     """Run no-crash + return-type + mined-property checks on a single function."""
+    def _replay_failure(exc: Exception) -> tuple[bool, int, int]:
+        if not last_kwargs:
+            return False, 0, 0
+        attempts = 2
+        matches = 0
+        expected_type = type(exc)
+        expected_text = str(exc)
+        for _ in range(attempts):
+            try:
+                func(**dict(last_kwargs))
+            except Exception as replay_exc:
+                if type(replay_exc) is expected_type and str(replay_exc) == expected_text:
+                    matches += 1
+        return matches == attempts, attempts, matches
+
     last_kwargs: dict[str, Any] = {}
     try:
         for kwargs in _boundary_smoke_inputs(func, fixtures=fixtures):
@@ -607,26 +775,62 @@ def _test_one_function(
 
         test()
     except Exception as e:
+        precondition = _documented_precondition_failure(func, e, last_kwargs)
+        if precondition is not None:
+            return FunctionResult(
+                name=name,
+                passed=True,
+                error_type=precondition["error_type"],
+                failing_args=last_kwargs or None,
+                contract_violations=[str(precondition["summary"])],
+                contract_violation_details=[precondition],
+            )
+        replayable, replay_attempts, replay_matches = _replay_failure(e)
         return FunctionResult(
             name=name,
             passed=False,
             error=str(e)[:300],
+            error_type=type(e).__name__,
             failing_args=last_kwargs or None,
+            replayable=replayable,
+            replay_attempts=replay_attempts,
+            replay_matches=replay_matches,
         )
 
     # Mine properties to detect semantic anomalies (not just crashes)
     violations: list[str] = []
+    details: list[dict[str, Any]] = []
     try:
         from ordeal.mine import _is_suspicious_property, mine
 
-        mine_result = mine(func, max_examples=min(max_examples, 30))
+        mine_result = mine(
+            func,
+            max_examples=min(max_examples, 30),
+            ignore_properties=ignore_properties or [],
+        )
         for prop in mine_result.properties:
             if _is_suspicious_property(prop):
-                violations.append(f"{prop.name} ({prop.confidence:.0%})")
+                label = f"{prop.name} ({prop.confidence:.0%})"
+                violations.append(label)
+                details.append(
+                    {
+                        "name": prop.name,
+                        "summary": label,
+                        "confidence": round(prop.confidence, 4),
+                        "holds": prop.holds,
+                        "total": prop.total,
+                        "counterexample": prop.counterexample,
+                    }
+                )
     except Exception:
         pass  # mining failed — still report crash-safety pass
 
-    return FunctionResult(name=name, passed=True, property_violations=violations)
+    return FunctionResult(
+        name=name,
+        passed=True,
+        property_violations=violations,
+        property_violation_details=details,
+    )
 
 
 # ============================================================================

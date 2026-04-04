@@ -82,7 +82,7 @@ import types
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal, Union, get_args, get_origin
 
 if TYPE_CHECKING:
     from ordeal.mine import MinedProperty, MineResult
@@ -659,6 +659,8 @@ class MutationResult:
             f"Function signature: {func_name}{sig_str}",
             '"""',
             "",
+            "from __future__ import annotations",
+            "",
             f"from {module_path} import {func_name}",
             "",
         ]
@@ -672,11 +674,20 @@ class MutationResult:
             lines.append(f"    Source: {m.source_line}")
             lines.append(f"    {m.remediation}")
             lines.append('    """')
+            lines.append(
+                "    # Review this case and tighten it to the intended behavior if known."
+            )
             lines.append(f"    result = {func_name}({call_args})")
             inv = _suggest_invariant(self.target, func_name)
             if inv:
+                lines.append(
+                    "    # Mined invariant that already distinguishes this surviving mutant."
+                )
                 lines.append(f"    {inv}")
             else:
+                lines.append(
+                    "    # Replace the placeholder with an exact expected value for this case."
+                )
                 lines.append("    assert result == ...  # expected value")
             lines.append("")
 
@@ -1326,7 +1337,7 @@ def _run_mine(target: str, safe_name: str, func_name: str) -> _MineFindings | No
             return _MineFindings(pinned=pinned, property_lines=[], prop_names=doc_parts)
 
         module_path = parts[0]
-        param_sig = _param_sig(target)
+        param_sig, param_imports = _param_sig(target)
         needs_math = any("math." in a for a in assertions)
 
         lines: list[str] = []
@@ -1336,6 +1347,8 @@ def _run_mine(target: str, safe_name: str, func_name: str) -> _MineFindings | No
         if needs_math:
             lines.append("    import math")
         lines.append("    from ordeal.quickcheck import quickcheck")
+        for import_line in param_imports:
+            lines.append(f"    {import_line}")
         lines.append(f"    from {module_path} import {func_name}")
         lines.append("")
         lines.append("    @quickcheck")
@@ -1389,28 +1402,114 @@ def _pick_diverse(
     return selected[:n]
 
 
-def _param_sig(target: str) -> str:
+def _annotation_expr(
+    tp: object,
+    *,
+    imports: set[str],
+) -> str | None:
+    """Render a type annotation and collect the imports it needs."""
+    if tp is type(None):
+        return "None"
+    if tp is Any:
+        imports.add("from typing import Any")
+        return "Any"
+
+    origin = get_origin(tp)
+    if origin is Literal:
+        imports.add("from typing import Literal")
+        return f"Literal[{', '.join(repr(arg) for arg in get_args(tp))}]"
+
+    if origin is Union or origin is types.UnionType:
+        parts = []
+        for arg in get_args(tp):
+            rendered = _annotation_expr(arg, imports=imports)
+            if rendered is None:
+                return None
+            parts.append(rendered)
+        return " | ".join(parts)
+
+    if origin in {list, set, frozenset}:
+        args = get_args(tp)
+        if len(args) != 1:
+            return origin.__name__
+        inner = _annotation_expr(args[0], imports=imports)
+        if inner is None:
+            return None
+        return f"{origin.__name__}[{inner}]"
+
+    if origin is dict:
+        args = get_args(tp)
+        if len(args) != 2:
+            return "dict"
+        key = _annotation_expr(args[0], imports=imports)
+        value = _annotation_expr(args[1], imports=imports)
+        if key is None or value is None:
+            return None
+        return f"dict[{key}, {value}]"
+
+    if origin is tuple:
+        rendered_parts: list[str] = []
+        for arg in get_args(tp):
+            if arg is Ellipsis:
+                rendered_parts.append("...")
+                continue
+            rendered = _annotation_expr(arg, imports=imports)
+            if rendered is None:
+                return None
+            rendered_parts.append(rendered)
+        return f"tuple[{', '.join(rendered_parts)}]"
+
+    if origin is not None:
+        origin_expr = _annotation_expr(origin, imports=imports)
+        if origin_expr is None:
+            return None
+        rendered_args: list[str] = []
+        for arg in get_args(tp):
+            rendered = _annotation_expr(arg, imports=imports)
+            if rendered is None:
+                return None
+            rendered_args.append(rendered)
+        if not rendered_args:
+            return origin_expr
+        return f"{origin_expr}[{', '.join(rendered_args)}]"
+
+    module = getattr(tp, "__module__", None)
+    qualname = getattr(tp, "__qualname__", None) or getattr(tp, "__name__", None)
+    if qualname is None:
+        return None
+    if module in {None, "builtins"}:
+        return qualname
+    imports.add(f"import {module}")
+    return f"{module}.{qualname}"
+
+
+def _param_sig(target: str) -> tuple[str, list[str]]:
     """Build a parameter signature for a quickcheck function."""
     try:
         parts = target.rsplit(".", 1)
         mod = importlib.import_module(parts[0])
         func = getattr(mod, parts[1])
         sig = inspect.signature(func)
+        annotations = inspect.get_annotations(func, eval_str=True)
+        imports: set[str] = set()
         params = []
         for name, p in sig.parameters.items():
             if name == "self":
                 continue
             if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
                 continue
-            ann = p.annotation
+            ann = annotations.get(name, p.annotation)
             if ann is not inspect.Parameter.empty:
-                ann_name = getattr(ann, "__name__", str(ann))
-                params.append(f"{name}: {ann_name}")
+                ann_name = _annotation_expr(ann, imports=imports)
+                if ann_name is None:
+                    params.append(name)
+                else:
+                    params.append(f"{name}: {ann_name}")
             else:
                 params.append(name)
-        return ", ".join(params)
+        return ", ".join(params), sorted(imports)
     except Exception:
-        return "..."
+        return "...", []
 
 
 def _param_call(target: str) -> str:

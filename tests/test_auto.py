@@ -64,10 +64,55 @@ class TestScanModule:
         result = scan_module(target, max_examples=10)
         assert result.total > 0
 
+    def test_skips_imported_typing_helpers(self):
+        import sys
+        import types
+
+        mod = types.ModuleType("_test_imported_helpers")
+        exec(
+            "from typing import cast\n"
+            "def real(x: int) -> int:\n"
+            "    return x\n",
+            mod.__dict__,
+        )
+        sys.modules["_test_imported_helpers"] = mod
+        try:
+            result = scan_module("_test_imported_helpers", max_examples=5)
+            names = [f.name for f in result.functions]
+            assert names == ["real"]
+        finally:
+            del sys.modules["_test_imported_helpers"]
+
+    def test_documented_precondition_is_not_reported_as_crash(self):
+        import sys
+        import types
+
+        mod = types.ModuleType("_test_preconditions")
+        exec(
+            "def score_responses(prompts: list[str], responses: list[str]) -> list[int]:\n"
+            '    """Raises ValueError when prompts and responses have different lengths."""\n'
+            "    if len(prompts) != len(responses):\n"
+            "        raise ValueError('prompts and responses must have the same length')\n"
+            "    return [\n"
+            "        len(prompt) + len(response)\n"
+            "        for prompt, response in zip(prompts, responses)\n"
+            "    ]\n",
+            mod.__dict__,
+        )
+        sys.modules["_test_preconditions"] = mod
+        try:
+            result = scan_module("_test_preconditions", max_examples=20)
+            scored = next(f for f in result.functions if f.name == "score_responses")
+            assert scored.passed
+            assert scored.contract_violations
+            assert result.failed == 0
+        finally:
+            del sys.modules["_test_preconditions"]
+
     def test_filters_low_signal_property_warnings(self, monkeypatch):
         import ordeal.mine as mine_mod
 
-        def fake_mine(fn, max_examples):
+        def fake_mine(fn, max_examples, ignore_properties=()):
             return type(
                 "_FakeMineResult",
                 (),
@@ -92,6 +137,37 @@ class TestScanModule:
 
         assert "idempotent (85%)" in result.property_violations
         assert not any("monotonically" in v for v in result.property_violations)
+
+    def test_records_replayable_crashes(self):
+        result = scan_module("tests._auto_target", max_examples=10)
+        divide_result = next(f for f in result.functions if f.name == "divide")
+        assert divide_result.replayable is True
+        assert divide_result.replay_attempts == 2
+        assert divide_result.replay_matches == 2
+
+    def test_ignore_properties_suppresses_noisy_scan_warnings(self, monkeypatch):
+        import ordeal.mine as mine_mod
+
+        def fake_mine(fn, max_examples, ignore_properties=()):
+            props = [MinedProperty("commutative", 17, 20), MinedProperty("idempotent", 17, 20)]
+            suppressed = set(ignore_properties)
+            return type(
+                "_FakeMineResult",
+                (),
+                {"properties": [prop for prop in props if prop.name not in suppressed]},
+            )()
+
+        monkeypatch.setattr(mine_mod, "mine", fake_mine)
+
+        result = scan_module(
+            "tests._auto_target",
+            max_examples=5,
+            ignore_properties=["commutative"],
+            property_overrides={"add": ["idempotent"]},
+        )
+
+        add_result = next(f for f in result.functions if f.name == "add")
+        assert add_result.property_violations == []
 
 
 class TestFuzz:

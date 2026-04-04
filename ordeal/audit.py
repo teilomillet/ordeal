@@ -61,7 +61,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
-from typing import Literal
+from typing import Any, Literal, Union, get_args, get_origin
 
 from ordeal.auto import (
     _get_public_functions,
@@ -438,8 +438,12 @@ class ModuleAudit:
     mutation_score: str = ""  # e.g. "8/10 (80%)" or "" if not run
     validation_mode: AuditValidationMode = "fast"
     gap_functions: list[str] = field(default_factory=list)
+    total_functions: int = 0
     suggestions: list[str] = field(default_factory=list)
     suggested_relations: list[dict[str, str]] = field(default_factory=list)
+    mutation_gaps: list[dict[str, str]] = field(default_factory=list)
+    weakest_tests: list[dict[str, int | str]] = field(default_factory=list)
+    mutation_gap_stubs: list[dict[str, str]] = field(default_factory=list)
 
     # Known unknowns — what ordeal structurally cannot verify
     not_checked: list[str] = field(default_factory=list)
@@ -512,6 +516,21 @@ class ModuleAudit:
             lines.append(f"    mutation: {self.mutation_score}")
         if self.mutation_score or self.validation_mode == "deep":
             lines.append(f"    validation: {self._format_validation_mode()}")
+        if self.mutation_gaps:
+            lines.append("    surviving mutants:")
+            for gap in self.mutation_gaps[:DISPLAY_CAP]:
+                lines.append(
+                    "      - "
+                    f"{gap['target']}: {gap['location']} {gap['description']}"
+                )
+        if self.weakest_tests:
+            lines.append("    weakest killers:")
+            for item in self.weakest_tests[:DISPLAY_CAP]:
+                lines.append(f"      - {item['test']}: {item['kills']} kill(s)")
+        if self.mutation_gap_stubs:
+            lines.append(
+                f"    stubs:    {len(self.mutation_gap_stubs)} gap-closing stub file(s)"
+            )
 
         if self.gap_functions:
             lines.append(
@@ -627,8 +646,12 @@ def _module_audit_to_dict(result: ModuleAudit) -> dict[str, object]:
         "mutation_score": result.mutation_score,
         "validation_mode": result.validation_mode,
         "gap_functions": result.gap_functions,
+        "total_functions": result.total_functions,
         "suggestions": result.suggestions,
         "suggested_relations": result.suggested_relations,
+        "mutation_gaps": result.mutation_gaps,
+        "weakest_tests": result.weakest_tests,
+        "mutation_gap_stubs": result.mutation_gap_stubs,
         "not_checked": result.not_checked,
         "warnings": result.warnings,
         "generated_test": result.generated_test,
@@ -649,8 +672,12 @@ def _module_audit_from_dict(data: dict[str, object]) -> ModuleAudit:
         mutation_score=str(data.get("mutation_score", "")),
         validation_mode=_normalize_validation_mode(str(data.get("validation_mode", "fast"))),
         gap_functions=list(data.get("gap_functions", [])),
+        total_functions=int(data.get("total_functions", 0)),
         suggestions=list(data.get("suggestions", [])),
         suggested_relations=list(data.get("suggested_relations", [])),
+        mutation_gaps=list(data.get("mutation_gaps", [])),
+        weakest_tests=list(data.get("weakest_tests", [])),
+        mutation_gap_stubs=list(data.get("mutation_gap_stubs", [])),
         not_checked=list(data.get("not_checked", [])),
         warnings=list(data.get("warnings", [])),
         generated_test=str(data.get("generated_test", "")),
@@ -699,31 +726,104 @@ def _count_lines_in_file(path: Path) -> tuple[int, str | None]:
 # ============================================================================
 
 
+def _pytest_collected_test_files(test_dir: Path) -> list[Path]:
+    """Ask pytest which files it would collect beneath *test_dir*."""
+    if not test_dir.is_dir():
+        return []
+
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-m", "pytest", "--collect-only", "-q", str(test_dir)],
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    if completed.returncode not in (0, 1, 5):
+        return []
+
+    seen: set[Path] = set()
+    results: list[Path] = []
+    for raw_line in completed.stdout.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("=") or "collected " in line:
+            continue
+        path_text = line.split("::", 1)[0]
+        if not path_text.endswith(".py"):
+            continue
+        candidate = Path(path_text)
+        if not candidate.is_absolute():
+            candidate = (Path.cwd() / candidate).resolve()
+        else:
+            candidate = candidate.resolve()
+        if candidate.exists() and candidate not in seen:
+            seen.add(candidate)
+            results.append(candidate)
+    return results
+
+
 def _find_test_files(module_name: str, test_dir: Path) -> list[Path]:
     """Find test files that primarily test the given module.
 
-    Matches by filename convention: ``test_<short>.py`` and
-    ``test_<short>_*.py`` (for variants like ``_props``, ``_unit``).
-
-    **Why filename-only:** Matching by import content overcounts.
-    Many cross-module tests import ``scoring`` but aren't primarily
-    testing it.  Filename convention is the only reliable signal.
-
-    **Limitation:** Misses tests named ``<module>_test.py`` or
-    placed in non-standard locations.
+    First asks pytest which files it would collect beneath *test_dir*.
+    Then uses filename conventions (``test_<short>.py``,
+    ``test_<short>_*.py``, and ``<short>_test.py``). When that finds
+    nothing, falls back to AST import matching so non-standard test names
+    are still discovered.
     """
-    results = []
+    import ast
+
+    results: list[Path] = []
     mod_short = module_name.rsplit(".", 1)[-1]
 
     if not test_dir.is_dir():
         return results
 
-    for test_file in sorted(test_dir.rglob("test_*.py")):
+    candidates = _pytest_collected_test_files(test_dir)
+    if not candidates:
+        candidates = sorted(
+            {
+                *test_dir.rglob("test_*.py"),
+                *test_dir.rglob("*_test.py"),
+            }
+        )
+
+    for test_file in candidates:
         stem = test_file.stem
-        if stem == f"test_{mod_short}" or stem.startswith(f"test_{mod_short}_"):
+        if (
+            stem == f"test_{mod_short}"
+            or stem.startswith(f"test_{mod_short}_")
+            or stem == f"{mod_short}_test"
+        ):
             results.append(test_file)
 
-    return results
+    if results:
+        return results
+
+    def _imports_target(path: Path) -> bool:
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == module_name:
+                        return True
+            elif isinstance(node, ast.ImportFrom):
+                if node.module == module_name:
+                    return True
+                if node.module:
+                    for alias in node.names:
+                        if f"{node.module}.{alias.name}" == module_name:
+                            return True
+        return False
+
+    return [path for path in candidates if _imports_target(path)]
 
 
 def _generated_test_path(module: str) -> Path:
@@ -2033,24 +2133,98 @@ def _suggest_tests(
 # ============================================================================
 
 
-def _type_repr(tp: type) -> str:
-    """Best-effort render of a type annotation for code generation."""
+def _type_expr(
+    tp: object,
+    *,
+    current_module: str,
+    imports: set[str],
+) -> str | None:
+    """Render a type annotation and collect any imports it needs."""
+    import types as pytypes
+
     if tp is type(None):
         return "None"
-    if hasattr(tp, "__name__") and not hasattr(tp, "__args__"):
-        return tp.__name__
-    s = str(tp)
-    for prefix in ("typing.", "collections.abc."):
-        s = s.replace(prefix, "")
-    return s
+    if tp is Any:
+        imports.add("from typing import Any")
+        return "Any"
+
+    origin = get_origin(tp)
+    if origin is Literal:
+        imports.add("from typing import Literal")
+        return f"Literal[{', '.join(repr(arg) for arg in get_args(tp))}]"
+
+    if origin is Union or (
+        hasattr(pytypes, "UnionType") and origin is pytypes.UnionType
+    ):
+        parts = []
+        for arg in get_args(tp):
+            part = _type_expr(arg, current_module=current_module, imports=imports)
+            if part is None:
+                return None
+            parts.append(part)
+        return " | ".join(parts)
+
+    if origin in {list, set, frozenset}:
+        args = get_args(tp)
+        if len(args) != 1:
+            return origin.__name__
+        inner = _type_expr(args[0], current_module=current_module, imports=imports)
+        if inner is None:
+            return None
+        return f"{origin.__name__}[{inner}]"
+
+    if origin is dict:
+        args = get_args(tp)
+        if len(args) != 2:
+            return "dict"
+        key = _type_expr(args[0], current_module=current_module, imports=imports)
+        value = _type_expr(args[1], current_module=current_module, imports=imports)
+        if key is None or value is None:
+            return None
+        return f"dict[{key}, {value}]"
+
+    if origin is tuple:
+        rendered: list[str] = []
+        for arg in get_args(tp):
+            if arg is Ellipsis:
+                rendered.append("...")
+                continue
+            part = _type_expr(arg, current_module=current_module, imports=imports)
+            if part is None:
+                return None
+            rendered.append(part)
+        return f"tuple[{', '.join(rendered)}]"
+
+    if origin is not None:
+        origin_expr = _type_expr(origin, current_module=current_module, imports=imports)
+        if origin_expr is None:
+            return None
+        rendered_args: list[str] = []
+        for arg in get_args(tp):
+            part = _type_expr(arg, current_module=current_module, imports=imports)
+            if part is None:
+                return None
+            rendered_args.append(part)
+        if not rendered_args:
+            return origin_expr
+        return f"{origin_expr}[{', '.join(rendered_args)}]"
+
+    module = getattr(tp, "__module__", None)
+    qualname = getattr(tp, "__qualname__", None) or getattr(tp, "__name__", None)
+    if qualname is None:
+        return None
+    if module in {None, "builtins"}:
+        return qualname
+    imports.add(f"import {module}")
+    return f"{module}.{qualname}"
 
 
 def _func_sig_for_codegen(
     func: object,
-) -> tuple[list[str], list[str], str] | None:
+) -> tuple[list[str], list[str], str, list[str]] | None:
     """Extract param info for generated ``@quickcheck`` test, or *None*.
 
-    Returns ``(param_names, param_decls_with_types, call_args_str)``
+    Returns ``(param_names, param_decls_with_types, call_args_str, imports)``
     only when every required parameter has a renderable type hint.
     """
     import inspect
@@ -2064,6 +2238,8 @@ def _func_sig_for_codegen(
     sig = inspect.signature(func)
     names: list[str] = []
     decls: list[str] = []
+    imports: set[str] = set()
+    current_module = getattr(func, "__module__", "")
     for pname, param in sig.parameters.items():
         if pname in ("self", "cls"):
             continue
@@ -2071,13 +2247,17 @@ def _func_sig_for_codegen(
             continue
         if pname not in hints:
             return None
-        type_str = _type_repr(hints[pname])
-        if "." in type_str:
-            return None  # needs an import we can't safely generate
+        type_str = _type_expr(
+            hints[pname],
+            current_module=current_module,
+            imports=imports,
+        )
+        if type_str is None:
+            return None
         names.append(pname)
         decls.append(f"{pname}: {type_str}")
 
-    return (names, decls, ", ".join(names)) if names else None
+    return (names, decls, ", ".join(names), sorted(imports)) if names else None
 
 
 def _property_to_assertion(
@@ -2209,7 +2389,8 @@ def _generate_migrated_test(
         sig_info = _func_sig_for_codegen(func)
 
         if sig_info:
-            param_names, param_decls, call_args = sig_info
+            param_names, param_decls, call_args, sig_imports = sig_info
+            extra_imports.update(sig_imports)
             assertions = [
                 (p, _property_to_assertion(p.name, module, name, param_names)) for p in strong
             ]
@@ -2306,6 +2487,33 @@ def _should_validate_mined_properties(mine_result: MineResult) -> bool:
     return any(p.universal and p.total >= 5 for p in mine_result.properties)
 
 
+def _record_validation_result(
+    result: ModuleAudit,
+    target_path: str,
+    mutation_result: Any,
+    *,
+    kill_counts: dict[str, int],
+) -> None:
+    """Aggregate one mutation-validation result into the module audit."""
+    for mutant in mutation_result.survived:
+        result.mutation_gaps.append(
+            {
+                "target": target_path,
+                "location": mutant.location,
+                "description": mutant.description,
+                "source_line": mutant.source_line or "",
+                "remediation": mutant.remediation,
+            }
+        )
+
+    for test_name, mutants in mutation_result.kill_attribution().items():
+        kill_counts[test_name] = kill_counts.get(test_name, 0) + len(mutants)
+
+    stub = mutation_result.generate_test_stubs()
+    if stub:
+        result.mutation_gap_stubs.append({"target": target_path, "content": stub})
+
+
 # ============================================================================
 # Main audit function
 # ============================================================================
@@ -2391,6 +2599,7 @@ def audit(
 
     scannable, skipped = _collect_audit_functions(mod)
     result.gap_functions = skipped
+    result.total_functions = len(scannable) + len(skipped)
     mine_examples = min(max_examples, MINE_EXAMPLES_FOR_GENERATED_TEST)
     mine_results = _mine_audit_functions(
         scannable,
@@ -2436,6 +2645,7 @@ def audit(
     total_killed = total_mutants = 0
     max_validation_examples = min(max_examples, 20)
     worker_count = max(1, workers)
+    kill_counts: dict[str, int] = {}
 
     if worker_count == 1 or len(targets) <= 1:
         for target_path, mine_result in targets:
@@ -2449,11 +2659,12 @@ def audit(
                 )
                 total_killed += mr.killed
                 total_mutants += mr.total
+                _record_validation_result(result, target_path, mr, kill_counts=kill_counts)
             except Exception:
                 pass
     else:
         with ThreadPoolExecutor(max_workers=min(worker_count, len(targets))) as executor:
-            futures = [
+            future_targets = {
                 executor.submit(
                     validate_mined_properties,
                     target_path,
@@ -2461,19 +2672,27 @@ def audit(
                     preset="standard",
                     mine_result=mine_result,
                     validation_mode=validation_mode,
-                )
+                ): target_path
                 for target_path, mine_result in targets
-            ]
-            for future in as_completed(futures):
+            }
+            for future in as_completed(future_targets):
                 try:
+                    target_path = future_targets[future]
                     mr = future.result()
                 except Exception:
                     continue
                 total_killed += mr.killed
                 total_mutants += mr.total
+                _record_validation_result(result, target_path, mr, kill_counts=kill_counts)
     if total_mutants > 0:
         pct = total_killed / total_mutants
         result.mutation_score = f"{total_killed}/{total_mutants} ({pct:.0%})"
+    if kill_counts:
+        weakest = sorted(kill_counts.items(), key=lambda item: (item[1], item[0]))
+        result.weakest_tests = [
+            {"test": test_name, "kills": count}
+            for test_name, count in weakest[:DISPLAY_CAP]
+        ]
 
     # -- 3. Measure migrated test coverage --
     out_path = _generated_test_path(module)

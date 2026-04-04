@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.11
+
+**Features:**
+
+- add stateful object targets to scan and audit
+
+
 ## 0.3.10
 
 **Features:**

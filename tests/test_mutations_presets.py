@@ -721,10 +721,7 @@ def test_generate_test_stubs_qualifies_local_types(tmp_path: Path, monkeypatch):
     pkg = tmp_path / "reviewpkg"
     pkg.mkdir()
     (pkg / "__init__.py").write_text("")
-    (pkg / "types.py").write_text(
-        "class PolicyConfig:\n"
-        "    pass\n"
-    )
+    (pkg / "types.py").write_text("class PolicyConfig:\n    pass\n")
     (pkg / "mod.py").write_text(
         "from reviewpkg.types import PolicyConfig\n\n"
         "def process(config: PolicyConfig) -> PolicyConfig:\n"
@@ -743,10 +740,7 @@ def test_generate_test_stubs_qualifies_local_types(tmp_path: Path, monkeypatch):
     stubs = result.generate_test_stubs()
 
     assert "import reviewpkg.mod as _ordeal_target" in stubs
-    assert (
-        "Reviewed signature: process(config: reviewpkg.types.PolicyConfig)"
-        in stubs
-    )
+    assert "Reviewed signature: process(config: reviewpkg.types.PolicyConfig)" in stubs
     assert "# assert result == ..." in stubs
 
 

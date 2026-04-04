@@ -234,9 +234,9 @@ class TestCLI:
     ):
         config = tmp_path / "ordeal.toml"
         config.write_text(
-            '[[scan]]\n'
+            "[[scan]]\n"
             'module = "pkg.mod"\n'
-            'max_examples = 7\n'
+            "max_examples = 7\n"
             'ignore_relations = ["commutative_composition"]\n'
             'relation_overrides = { normalize = ["roundtrip"] }\n',
             encoding="utf-8",
@@ -361,9 +361,7 @@ class TestCLI:
             "commutative_composition",
             "distributive",
         ]
-        assert calls["scan_property_overrides"] == {
-            "normalize": ["idempotent", "bounded"]
-        }
+        assert calls["scan_property_overrides"] == {"normalize": ["idempotent", "bounded"]}
         assert calls["scan_relation_overrides"] == {"normalize": ["roundtrip", "dual"]}
         assert "mode" in calls["scan_fixtures"]
         assert {"model", "shared_mode", "scan_mode"} <= loaded_fixture_names
@@ -372,11 +370,7 @@ class TestCLI:
     def test_scan_warns_when_shared_fixture_registry_missing(self, monkeypatch, tmp_path, capsys):
         monkeypatch.chdir(tmp_path)
         (tmp_path / "ordeal.toml").write_text(
-            "[fixtures]\n"
-            'registries = ["missing_registry"]\n'
-            "\n"
-            "[[scan]]\n"
-            'module = "pkg.mod"\n',
+            '[fixtures]\nregistries = ["missing_registry"]\n\n[[scan]]\nmodule = "pkg.mod"\n',
             encoding="utf-8",
         )
 

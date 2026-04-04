@@ -295,8 +295,10 @@ def _function_body_line_numbers(func: object) -> frozenset[int] | None:
 
     body_lines: set[int] = set()
     for stmt in func_node.body:
-        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and isinstance(
-            stmt.value.value, str
+        if (
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Constant)
+            and isinstance(stmt.value.value, str)
         ):
             continue
         end_line = getattr(stmt, "end_lineno", stmt.lineno)
@@ -629,9 +631,7 @@ class ModuleAudit:
                 lines.append(f"      - {entries[0].summary_label()}: {names}")
                 if entries[0].evidence:
                     first = entries[0].evidence[0]
-                    lines.append(
-                        f"        evidence: {first['kind']} — {first['detail']}"
-                    )
+                    lines.append(f"        evidence: {first['kind']} — {first['detail']}")
 
         if self.gap_functions:
             lines.append(
@@ -1300,8 +1300,7 @@ def _build_function_audits(
                         "kind": "coverage_lines",
                         "epistemic": "verified",
                         "detail": (
-                            f"coverage hits {covered_body_lines}/{total_body_lines}"
-                            " body line(s)"
+                            f"coverage hits {covered_body_lines}/{total_body_lines} body line(s)"
                         ),
                     }
                 )

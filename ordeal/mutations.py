@@ -677,9 +677,7 @@ class MutationResult:
             test_name = f"test_{safe_target}_kill_{m.operator}_{i}"
             lines.append("")
             lines.append(f"def {test_name}():")
-            lines.append(
-                "    # Review this draft before pinning it as a regression."
-            )
+            lines.append("    # Review this draft before pinning it as a regression.")
             lines.append(f"    # Mutant: {m.operator}: {m.description} at {m.location}")
             if m.source_line:
                 lines.extend(_comment_lines(f"Source: {m.source_line}"))

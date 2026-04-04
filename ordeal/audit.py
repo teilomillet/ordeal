@@ -760,14 +760,32 @@ def _pytest_collected_test_files(test_dir: Path) -> list[Path]:
     return results
 
 
+def _looks_like_test_file(path: Path) -> bool:
+    """Return whether *path* appears to define pytest-style tests."""
+    if path.name in {"conftest.py", "__init__.py"}:
+        return False
+
+    stem = path.stem
+    if stem.startswith("test_") or stem.endswith("_test"):
+        return True
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+    return "def test_" in text or "class Test" in text
+
+
 def _find_test_files(module_name: str, test_dir: Path) -> list[Path]:
     """Find test files that primarily test the given module.
 
-    First asks pytest which files it would collect beneath *test_dir*.
-    Then uses filename conventions (``test_<short>.py``,
-    ``test_<short>_*.py``, and ``<short>_test.py``). When that finds
-    nothing, falls back to AST import matching so non-standard test names
-    are still discovered.
+    First uses cheap filesystem/AST checks to find likely test modules.
+    Filename conventions (``test_<short>.py``, ``test_<short>_*.py``,
+    and ``<short>_test.py``) still win when present. When naming does
+    not help, import matching over likely test files handles non-standard
+    names without paying a subprocess cost. Pytest collection remains the
+    last fallback for custom collection setups.
     """
     import ast
 
@@ -777,14 +795,11 @@ def _find_test_files(module_name: str, test_dir: Path) -> list[Path]:
     if not test_dir.is_dir():
         return results
 
-    candidates = _pytest_collected_test_files(test_dir)
-    if not candidates:
-        candidates = sorted(
-            {
-                *test_dir.rglob("test_*.py"),
-                *test_dir.rglob("*_test.py"),
-            }
-        )
+    candidates = sorted(
+        path.resolve()
+        for path in test_dir.rglob("*.py")
+        if path.is_file() and _looks_like_test_file(path)
+    )
 
     for test_file in candidates:
         stem = test_file.stem
@@ -818,7 +833,27 @@ def _find_test_files(module_name: str, test_dir: Path) -> list[Path]:
                             return True
         return False
 
-    return [path for path in candidates if _imports_target(path)]
+    results = [path for path in candidates if _imports_target(path)]
+    if results:
+        return results
+
+    collected = _pytest_collected_test_files(test_dir)
+    if not collected:
+        return []
+
+    for test_file in collected:
+        stem = test_file.stem
+        if (
+            stem == f"test_{mod_short}"
+            or stem.startswith(f"test_{mod_short}_")
+            or stem == f"{mod_short}_test"
+        ):
+            results.append(test_file)
+
+    if results:
+        return results
+
+    return [path for path in collected if _imports_target(path)]
 
 
 def _generated_test_path(module: str) -> Path:

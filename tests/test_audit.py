@@ -155,19 +155,36 @@ class TestFindTestFiles:
         assert [file.name for file in files] == ["scoring_test.py"]
 
     def test_falls_back_to_import_matching(self, tmp_path: Path):
-        (tmp_path / "test_pipeline_behavior.py").write_text(
+        (tmp_path / "pipeline_behavior.py").write_text(
             "from myapp.scoring import normalize\n"
             "def test_normalize(): assert normalize([1]) == [1]\n"
         )
         files = _find_test_files("myapp.scoring", tmp_path)
-        assert [file.name for file in files] == ["test_pipeline_behavior.py"]
+        assert [file.name for file in files] == ["pipeline_behavior.py"]
 
-    def test_uses_pytest_collection_before_globbing(self, monkeypatch, tmp_path: Path):
+    def test_ignores_non_test_helpers_during_import_matching(self, tmp_path: Path):
+        (tmp_path / "_helper.py").write_text(
+            "from myapp.scoring import normalize\n"
+            "VALUE = normalize([1])\n"
+        )
+        (tmp_path / "behavior_check.py").write_text(
+            "from myapp.scoring import normalize\n"
+            "def test_normalize(): assert normalize([1]) == [1]\n"
+        )
+
+        files = _find_test_files("myapp.scoring", tmp_path)
+        assert [file.name for file in files] == ["behavior_check.py"]
+
+    def test_falls_back_to_pytest_collection_for_custom_collectors(
+        self,
+        monkeypatch,
+        tmp_path: Path,
+    ):
         collected = tmp_path / "suite" / "behavior_check.py"
         collected.parent.mkdir()
         collected.write_text(
             "from myapp.scoring import normalize\n"
-            "def test_normalize(): assert normalize([1]) == [1]\n"
+            "VALUE = normalize([1])\n"
         )
         monkeypatch.setattr(audit_mod, "_pytest_collected_test_files", lambda _path: [collected])
         files = _find_test_files("myapp.scoring", tmp_path)

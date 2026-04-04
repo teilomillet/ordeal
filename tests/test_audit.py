@@ -164,8 +164,7 @@ class TestFindTestFiles:
 
     def test_ignores_non_test_helpers_during_import_matching(self, tmp_path: Path):
         (tmp_path / "_helper.py").write_text(
-            "from myapp.scoring import normalize\n"
-            "VALUE = normalize([1])\n"
+            "from myapp.scoring import normalize\nVALUE = normalize([1])\n"
         )
         (tmp_path / "behavior_check.py").write_text(
             "from myapp.scoring import normalize\n"
@@ -182,10 +181,7 @@ class TestFindTestFiles:
     ):
         collected = tmp_path / "suite" / "behavior_check.py"
         collected.parent.mkdir()
-        collected.write_text(
-            "from myapp.scoring import normalize\n"
-            "VALUE = normalize([1])\n"
-        )
+        collected.write_text("from myapp.scoring import normalize\nVALUE = normalize([1])\n")
         monkeypatch.setattr(audit_mod, "_pytest_collected_test_files", lambda _path: [collected])
         files = _find_test_files("myapp.scoring", tmp_path)
         assert files == [collected]

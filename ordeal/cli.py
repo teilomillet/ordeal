@@ -1680,8 +1680,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         _stderr(f"  Mutations:  {mutation_score.removeprefix('Score: ')}\n")
         if not close_gaps:
             _stderr(
-                "  Gaps:       report-only"
-                " (use --close-gaps to write draft audit stub files)\n"
+                "  Gaps:       report-only (use --close-gaps to write draft audit stub files)\n"
             )
     if close_gaps and gap_stub_files:
         _stderr(f"  Gaps:       wrote {len(gap_stub_files)} draft stub file(s) from audit\n")

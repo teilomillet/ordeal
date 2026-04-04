@@ -19,6 +19,7 @@ import ordeal.audit as audit_mod
 from ordeal.audit import (
     CoverageMeasurement,
     CoverageResult,
+    FunctionAudit,
     MineResult,
     ModuleAudit,
     Status,
@@ -541,7 +542,60 @@ class TestModuleAuditSummary:
         s = a.summary()
         assert "surviving mutants:" in s
         assert "weakest killers:" in s
-        assert "gap-closing stub file" in s
+        assert "draft review stub file" in s
+
+    def test_summary_shows_function_audit_breakdown(self):
+        a = ModuleAudit(module="myapp.scoring")
+        a.function_audits = [
+            FunctionAudit(
+                name="normalize",
+                status="exercised",
+                epistemic="verified",
+                covered_body_lines=3,
+                total_body_lines=3,
+                evidence=[
+                    {
+                        "kind": "coverage_lines",
+                        "epistemic": "verified",
+                        "detail": "coverage hits 3/3 body line(s)",
+                    }
+                ],
+            ),
+            FunctionAudit(
+                name="parse",
+                status="exploratory",
+                epistemic="inferred",
+                evidence=[
+                    {
+                        "kind": "import",
+                        "epistemic": "inferred",
+                        "detail": "/tmp/tests/test_parse.py",
+                    }
+                ],
+            ),
+            FunctionAudit(
+                name="render",
+                status="uncovered",
+                epistemic="none",
+                evidence=[
+                    {
+                        "kind": "no_tests",
+                        "epistemic": "none",
+                        "detail": "no matching pytest files or collected nodeids",
+                    }
+                ],
+            ),
+        ]
+
+        s = a.summary()
+        assert (
+            "functions: 1 exercised [verified], 1 exploratory [inferred],"
+            " 1 no effective tests [none]"
+        ) in s
+        assert "- exercised [verified]: normalize" in s
+        assert "evidence: coverage_lines" in s
+        assert "- exploratory [inferred]: parse" in s
+        assert "- uncovered [none]: render" in s
 
 
 class TestGroupMinedProperties:
@@ -694,6 +748,31 @@ class TestAuditIntegration:
 
         assert result.current_coverage.status == Status.FAILED
         assert "no test files" in (result.current_coverage.error or "")
+
+    def test_audit_reports_function_level_epistemic_status(self, tmp_path: Path):
+        test_file = tmp_path / "test__auto_target.py"
+        test_file.write_text(
+            "from tests._auto_target import add, greet\n"
+            "def test_add(): assert add(1, 2) == 3\n"
+            "def test_greet(): assert greet('world') == 'hello world'\n"
+        )
+
+        from ordeal.audit import audit
+
+        result = audit(
+            "tests._auto_target",
+            test_dir=str(tmp_path),
+            max_examples=5,
+        )
+
+        audits = {item.name: item for item in result.function_audits}
+
+        assert audits["add"].status == "exercised"
+        assert audits["add"].epistemic == "verified"
+        assert audits["add"].covered_body_lines >= 1
+        assert audits["divide"].status in {"exploratory", "uncovered"}
+        assert audits["divide"].epistemic in {"inferred", "none"}
+        assert result.function_audit_counts["exercised"] >= 1
 
 
 class TestModuleAuditSummaryValidation:

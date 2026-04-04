@@ -23,7 +23,7 @@ One file, checked into your repo, that anyone (or anything) can read and modify.
 ## Schema
 
 !!! quote "Think of it this way"
-    The config file has four sections. `[explorer]` controls how the engine explores (how long, how deep, how many workers). `[[tests]]` lists which ChaosTest classes to run. `[report]` decides what output you get. `[[scan]]` lets you auto-test modules without writing any test code at all.
+    The config file has five sections. `[explorer]` controls how the engine explores (how long, how deep, how many workers). `[[tests]]` lists which ChaosTest classes to run. `[report]` decides what output you get. `[fixtures]` loads shared fixture registries for the whole project. `[[scan]]` lets you auto-test modules without writing any test code at all, with suppression and fixture-registry knobs for noisy codebases.
 
 ### `[explorer]`
 
@@ -61,10 +61,23 @@ One file, checked into your repo, that anyone (or anything) can read and modify.
 | `verbose` | `bool` | `false` | Live progress to stderr |
 | `corpus_dir` | `str` | `".ordeal/seeds"` | Persistent seed corpus directory |
 
+### `[fixtures]`
+
+Shared fixture registries are imported for their `register_fixture()` side effects before scan commands run. Use this for project-wide registries that should apply to every scan target.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `registries` | `list[str]` | `[]` | Importable modules that call `register_fixture()` |
+
+```toml
+[fixtures]
+registries = ["tests.support.shared_fixtures"]
+```
+
 ### `[[scan]]`
 
 !!! quote "What you can do with this"
-    Auto-scan is the fastest way to get value from ordeal. Point it at a module and it smoke-tests every public function automatically -- no test code needed. Functions with type hints get random inputs generated for free. Add `fixtures` for anything the type system can't describe.
+    Auto-scan is the fastest way to get value from ordeal, but treat it as exploratory output first. Point it at a module and it smoke-tests every public function automatically -- no test code needed. Functions with type hints get random inputs generated for free. Add `fixtures` for anything the type system can't describe, and use suppression knobs when you already know a relation is noisy rather than a bug.
 
 Declare modules for auto-scan testing. The pytest plugin auto-collects these and runs `scan_module()` on each.
 
@@ -72,19 +85,31 @@ Declare modules for auto-scan testing. The pytest plugin auto-collects these and
 |---|---|---|---|
 | `module` | `str` | required | Dotted module path to scan |
 | `max_examples` | `int` | `50` | Hypothesis examples per function |
-| `fixtures` | `dict` | `{}` | Strategy overrides for untyped parameters |
+| `fixtures` | `dict[str, str]` | `{}` | Strategy specs for untyped parameters, such as comma-separated `sampled_from` values |
+| `expected_failures` | `list[str]` | `[]` | Function names whose failure is expected behavior |
+| `fixture_registries` | `list[str]` | `[]` | Importable modules that call `register_fixture()` for project-specific strategies |
+| `ignore_properties` | `list[str]` | `[]` | Property names to suppress from mined warnings |
+| `ignore_relations` | `list[str]` | `[]` | Relation names to suppress from mined relation checks |
+| `property_overrides` | `dict[str, list[str]]` | `{}` | Per-function property suppressions or overrides |
+| `relation_overrides` | `dict[str, list[str]]` | `{}` | Per-function relation suppressions or overrides |
 
 ```toml
 [[scan]]
 module = "myapp.scoring"
 max_examples = 100
+fixture_registries = ["tests.support.fixtures"]
+ignore_properties = ["commutative"]
+ignore_relations = ["commutative_composition"]
+expected_failures = ["validate_input"]
 
 [[scan]]
 module = "myapp.pipeline"
 fixtures = { model = "sampled_from(['gpt-4', 'claude'])" }
+property_overrides = { normalize = ["idempotent"] }
+relation_overrides = { normalize = ["equivalent"] }
 ```
 
-When you run `pytest --chaos`, ordeal auto-discovers these entries and smoke-tests every public function in each module. Functions without type hints are skipped unless fixtures are provided.
+When you run `pytest --chaos`, ordeal auto-discovers these entries and smoke-tests every public function in each module. Functions without type hints are skipped unless fixtures are provided or a registry supplies them. Known preconditions stay separate from likely bugs so the output stays epistemic.
 
 ## Tuning guide
 

@@ -75,6 +75,7 @@ class FunctionState:
     crash_free: bool | None = None
     scan_error: str | None = None
     failing_args: dict[str, Any] | None = None
+    scan_crash_category: str | None = None
     scan_replayable: bool | None = None
     scan_replay_attempts: int = 0
     scan_replay_matches: int = 0
@@ -132,6 +133,7 @@ class FunctionState:
         self.crash_free = None
         self.scan_error = None
         self.failing_args = None
+        self.scan_crash_category = None
         self.scan_replayable = None
         self.scan_replay_attempts = 0
         self.scan_replay_matches = 0
@@ -245,7 +247,10 @@ class ExplorationState:
         """Promoted findings worth treating as primary scan output."""
         results: list[str] = []
         for name, fs in self.functions.items():
-            if fs.crash_free is False and fs.scan_replayable:
+            if fs.crash_free is False and (
+                fs.scan_crash_category == "likely_bug"
+                or (fs.scan_crash_category is None and fs.scan_replayable)
+            ):
                 results.append(f"{name}: crashes on random inputs")
             if fs.mutation_score is not None and fs.mutation_score < 0.5:
                 results.append(f"{name}: mutation score {fs.mutation_score:.0%}")
@@ -256,7 +261,10 @@ class ExplorationState:
         """Exploratory scan output that should not fail the run by default."""
         results: list[str] = []
         for name, fs in self.functions.items():
-            if fs.crash_free is False and not fs.scan_replayable:
+            if fs.crash_free is False and (
+                fs.scan_crash_category == "speculative_crash"
+                or (fs.scan_crash_category is None and not fs.scan_replayable)
+            ):
                 results.append(f"{name}: unreplayed crash on random inputs")
             for v in fs.property_violations:
                 results.append(f"{name}: {v}")
@@ -270,14 +278,21 @@ class ExplorationState:
         details: list[dict[str, Any]] = []
         for name, fs in self.functions.items():
             if fs.crash_free is False:
+                category = (
+                    fs.scan_crash_category
+                    if fs.scan_crash_category is not None
+                    else ("likely_bug" if fs.scan_replayable else "speculative_crash")
+                )
                 details.append(
                     {
                         "kind": "crash",
-                        "category": (
-                            "likely_bug" if fs.scan_replayable else "speculative_property"
-                        ),
+                        "category": category,
                         "function": name,
-                        "summary": f"{name}: crashes on random inputs",
+                        "summary": (
+                            f"{name}: crashes on random inputs"
+                            if category == "likely_bug"
+                            else f"{name}: unreplayed crash on random inputs"
+                        ),
                         "error": fs.scan_error,
                         "failing_args": fs.failing_args,
                         "replayable": fs.scan_replayable,
@@ -404,7 +419,9 @@ def explore_mine(
     max_examples: int = 50,
     include_private: bool = False,
     ignore_properties: list[str] | None = None,
+    ignore_relations: list[str] | None = None,
     property_overrides: dict[str, list[str]] | None = None,
+    relation_overrides: dict[str, list[str]] | None = None,
 ) -> ExplorationState:
     """Mine all functions in the module and update state."""
 
@@ -431,6 +448,14 @@ def explore_mine(
                         *(property_overrides or {}).get(name, []),
                     }
                 ),
+                ignore_relations=sorted(
+                    {
+                        *(ignore_relations or []),
+                        *(relation_overrides or {}).get(name, []),
+                    }
+                ),
+                property_overrides=property_overrides,
+                relation_overrides=relation_overrides,
             )
         except Exception:
             continue
@@ -477,7 +502,9 @@ def explore_scan(
     fixtures: dict[str, Any] | None = None,
     expected_failures: list[str] | None = None,
     ignore_properties: list[str] | None = None,
+    ignore_relations: list[str] | None = None,
     property_overrides: dict[str, list[str]] | None = None,
+    relation_overrides: dict[str, list[str]] | None = None,
 ) -> ExplorationState:
     """Scan module for crashes and update state."""
     from ordeal.auto import scan_module
@@ -488,7 +515,9 @@ def explore_scan(
         fixtures=fixtures,
         expected_failures=expected_failures,
         ignore_properties=ignore_properties,
+        ignore_relations=ignore_relations,
         property_overrides=property_overrides,
+        relation_overrides=relation_overrides,
     )
     for fr in result.functions:
         fs = state.function(fr.name)
@@ -496,6 +525,7 @@ def explore_scan(
         fs.crash_free = fr.passed
         fs.scan_error = fr.error
         fs.failing_args = fr.failing_args
+        fs.scan_crash_category = fr.crash_category
         fs.scan_replayable = fr.replayable
         fs.scan_replay_attempts = fr.replay_attempts
         fs.scan_replay_matches = fr.replay_matches
@@ -635,7 +665,9 @@ def explore(
     scan_fixtures: dict[str, Any] | None = None,
     scan_expected_failures: list[str] | None = None,
     scan_ignore_properties: list[str] | None = None,
+    scan_ignore_relations: list[str] | None = None,
     scan_property_overrides: dict[str, list[str]] | None = None,
+    scan_relation_overrides: dict[str, list[str]] | None = None,
 ) -> ExplorationState:
     """Run all exploration strategies on a module.
 
@@ -705,7 +737,9 @@ def explore(
             max_examples=max_examples,
             include_private=include_private,
             ignore_properties=scan_ignore_properties,
+            ignore_relations=scan_ignore_relations,
             property_overrides=scan_property_overrides,
+            relation_overrides=scan_relation_overrides,
         )
         mine_hash = hash(("mined", len(state.functions), state.confidence))
         state.tree.checkpoint(
@@ -727,7 +761,9 @@ def explore(
                 fixtures=scan_fixtures,
                 expected_failures=scan_expected_failures,
                 ignore_properties=scan_ignore_properties,
+                ignore_relations=scan_ignore_relations,
                 property_overrides=scan_property_overrides,
+                relation_overrides=scan_relation_overrides,
             )
             scan_hash = hash(("scanned", state.confidence))
             state.tree.checkpoint(

@@ -53,6 +53,40 @@ class TestCLIAgentJson:
         assert payload["confidence"] == 0.63
         assert payload["findings"][0]["target"] == "pkg.mod.normalize"
 
+    def test_scan_json_marks_unreplayed_crashes_as_speculative(self, monkeypatch, capsys):
+        state = SimpleNamespace(
+            module="pkg.mod",
+            confidence=0.31,
+            functions={"flaky": object()},
+            supervisor_info={"seed": 42, "trajectory_steps": 1},
+            tree=SimpleNamespace(size=0),
+            findings=[],
+            frontier={"flaky": ["crash not replayed"]},
+            finding_details=[
+                {
+                    "kind": "crash",
+                    "category": "speculative_crash",
+                    "function": "flaky",
+                    "summary": "flaky: unreplayed crash on random inputs",
+                    "error": "boom",
+                    "failing_args": {"x": 0},
+                    "replayable": False,
+                    "replay_attempts": 2,
+                    "replay_matches": 0,
+                }
+            ],
+        )
+        monkeypatch.setattr(ordeal_state, "explore", lambda *args, **kwargs: state)
+
+        rc = main(["scan", "pkg.mod", "--json", "-n", "10"])
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "exploratory"
+        assert payload["findings"][0]["kind"] == "crash"
+        assert payload["findings"][0]["details"]["category"] == "speculative_crash"
+        assert payload["findings"][0]["details"]["replayable"] is False
+
     def test_mine_json_outputs_agent_envelope(self, monkeypatch, capsys):
         result = MineResult(
             function="normalize",

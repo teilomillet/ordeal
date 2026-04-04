@@ -8,7 +8,7 @@ description: >-
 # CLI
 
 !!! quote "In plain English"
-    The CLI is how you run ordeal outside of pytest. It gives you three superpowers: `explore` to find bugs, `replay` to reproduce them, and tools like `mine`, `audit`, and `benchmark` to understand your code and your tests. The typical workflow is: explore, find a failure, replay it, fix the bug.
+    The CLI is how you run ordeal outside of pytest. Use `scan` for exploratory signals, `replay` to reproduce them, and `audit` or `mutate` when you want stronger test-quality evidence. The typical workflow is: explore, replay the concrete failure, then validate with audit or mutation testing.
 
 ## Install
 
@@ -56,7 +56,7 @@ Without `-p`, `check` verifies the standard contracts that catch real bugs quick
 ### `ordeal scan`
 
 !!! quote "Why start here"
-    `scan` is the fastest end-to-end command for turning exploration results into something you can act on. It runs the unified exploration pipeline on one module, then can emit a shareable Markdown report, runnable pytest regressions, and a machine-readable JSON bundle with stable finding IDs.
+    `scan` is the fastest end-to-end command for turning exploration results into something you can act on, but it is exploratory first. It runs the unified exploration pipeline on one module, then can emit a shareable Markdown report, runnable pytest regressions, and a machine-readable JSON bundle with stable finding IDs.
 
 Explore one module and optionally save reports, regressions, or the full bug bundle:
 
@@ -69,6 +69,10 @@ ordeal scan myapp.scoring --save-artifacts
 ```
 
 Use `--save-artifacts` when you want the full handoff package: `.ordeal/findings/<module>.md`, `.ordeal/findings/<module>.json`, `tests/test_ordeal_regressions.py`, and `.ordeal/findings/index.json`. See [Bug Bundle](bug-bundle.md) for the artifact layout.
+
+`scan` promotes replayable crashes as likely bugs and keeps the rest of the evidence exploratory. That includes unreplayed crashes, weaker mined properties, and expected precondition failures. If you need stronger validation for a mature codebase, prefer `ordeal audit` for coverage and mutation comparison, and `ordeal mutate` for direct mutation scoring.
+
+Most of the tuning knobs for `scan` live in `[[scan]]` inside `ordeal.toml`. Use `[fixtures].registries` for project-wide fixture registrations, `fixture_registries` for scan-specific registry imports, `ignore_properties` and `ignore_relations` to suppress noisy laws, and `property_overrides` or `relation_overrides` when one function needs a narrower set of checks. `expected_failures` keeps known preconditions from being promoted as bugs.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -98,7 +102,7 @@ ordeal init myapp --ci
 
 `--dry-run` is the safe preview mode: it discovers modules from the filesystem and signatures from AST only, without importing the target package, executing functions, or writing files.
 
-By default, `init` does not install the bundled skill and does not write draft mutation-gap stub files. Those extra writes are explicit opt-ins.
+By default, `init` does not install the bundled skill and does not write draft audit gap stub files. Those extra writes are explicit opt-ins.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -108,7 +112,7 @@ By default, `init` does not install the bundled skill and does not write draft m
 | `--ci` | off | Generate `.github/workflows/<name>.yml` |
 | `--ci-name` | `ordeal` | Workflow filename stem |
 | `--install-skill` | off | Also install the bundled AI-agent skill into `.claude/skills/ordeal/` |
-| `--close-gaps` | off | Write draft audit stub files for surviving mutation gaps |
+| `--close-gaps` | off | Write draft audit stub files for surviving mutation gaps, one file per target |
 
 ### `ordeal mutate`
 
@@ -170,7 +174,7 @@ mine_pair(encode, decode): 200 examples
 ### `ordeal audit`
 
 !!! quote "Why this matters"
-    Audit answers the question: "are my tests actually good?" It measures your existing tests, generates ordeal-style replacements, and compares them side by side. Every number is verified, not estimated. If ordeal can match your coverage with less code, you know where your tests have unnecessary complexity.
+    Audit answers the question: "are my tests actually good?" It measures your existing tests, generates ordeal-style replacements, and compares them side by side. Every number is verified, not estimated. If ordeal can match your coverage with less code, you know where your tests have unnecessary complexity, and the remaining mutation gaps tell you where the tests are still weak.
 
 Measure your existing tests vs what ordeal auto-scan achieves — verified numbers, not estimates:
 
@@ -197,6 +201,8 @@ ordeal audit
 ```
 
 Every number is `[verified]` (measured and cross-checked for consistency) or `FAILED: reason`. When `pytest-cov` is installed, ordeal uses its JSON report; otherwise it falls back to an internal tracer. Mined properties are grouped by kind. The mutation score shows how many code mutations the mined properties catch — if it's below 100%, the surviving mutants reveal property gaps.
+
+`audit` is the primary command when you want to judge test quality. It keeps replayable crash evidence separate from exploratory findings, and it returns `weakest_tests` plus `mutation_gap_stubs` so tooling like `init --close-gaps` can write draft follow-up tests without guessing.
 
 `--validation-mode fast` replays mined inputs against each mutant and is the default because it is much faster. `--validation-mode deep` keeps that replay check and then re-runs `mine()` on each mutant, which is slower but keeps the broader exploratory search.
 

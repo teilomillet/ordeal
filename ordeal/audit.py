@@ -48,15 +48,18 @@ so the developer can inspect, run, and debug it.
 
 from __future__ import annotations
 
+import ast
 import enum
 import hashlib
 import importlib.util
+import inspect
 import json
 import math
 import re
 import subprocess
 import sys
 import tempfile
+import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -195,6 +198,38 @@ SOURCE_TRUNCATION: int = 60
 AuditValidationMode = Literal["fast", "deep"]
 """How audit validates mined properties against mutants."""
 
+FunctionAuditStatus = Literal["exercised", "exploratory", "uncovered"]
+"""Epistemic function-level audit status."""
+
+EvidenceLabel = Literal["verified", "inferred", "none"]
+"""Epistemic label attached to one audit evidence item."""
+
+
+@dataclass(slots=True)
+class FunctionAudit:
+    """Function-level audit evidence and status."""
+
+    name: str
+    status: FunctionAuditStatus
+    epistemic: EvidenceLabel
+    covered_body_lines: int = 0
+    total_body_lines: int = 0
+    evidence: list[dict[str, str]] = field(default_factory=list)
+
+    def summary_label(self) -> str:
+        """Return a compact label suitable for audit summaries."""
+        return f"{self.status} [{self.epistemic}]"
+
+
+@dataclass(slots=True)
+class TestFileEvidence:
+    """Evidence that a test file belongs to the target module."""
+
+    path: str
+    basis: Literal["filename", "import", "pytest_collection"]
+    epistemic: EvidenceLabel
+    nodeids: list[str] = field(default_factory=list)
+
 
 def _normalize_validation_mode(validation_mode: str) -> AuditValidationMode:
     """Validate the requested audit mutation-validation mode."""
@@ -205,6 +240,24 @@ def _normalize_validation_mode(validation_mode: str) -> AuditValidationMode:
             raise ValueError(
                 f"validation_mode must be 'fast' or 'deep', got {validation_mode!r}",
             )
+
+
+def _normalize_function_audit_status(status: str) -> FunctionAuditStatus:
+    """Validate a cached function audit status."""
+    match status:
+        case "exercised" | "exploratory" | "uncovered":
+            return status
+        case _:
+            raise ValueError(f"unknown function audit status: {status!r}")
+
+
+def _normalize_evidence_label(label: str) -> EvidenceLabel:
+    """Validate a cached epistemic label."""
+    match label:
+        case "verified" | "inferred" | "none":
+            return label
+        case _:
+            raise ValueError(f"unknown evidence label: {label!r}")
 
 
 _MUTATION_SCORE_RE = re.compile(r"^\s*(\d+)\s*/\s*(\d+)\s*\((\d+)%\)\s*$")
@@ -218,6 +271,38 @@ def _parse_mutation_score(score: str) -> tuple[int, int] | None:
     killed = int(match.group(1))
     total = int(match.group(2))
     return killed, total
+
+
+def _function_body_line_numbers(func: object) -> frozenset[int] | None:
+    """Return executable line numbers for *func*'s body when available."""
+    try:
+        source_lines, start_line = inspect.getsourcelines(func)
+    except (OSError, TypeError):
+        return None
+
+    try:
+        tree = ast.parse(textwrap.dedent("".join(source_lines)))
+    except SyntaxError:
+        return None
+
+    func_node = None
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            func_node = node
+            break
+    if func_node is None:
+        return None
+
+    body_lines: set[int] = set()
+    for stmt in func_node.body:
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and isinstance(
+            stmt.value.value, str
+        ):
+            continue
+        end_line = getattr(stmt, "end_lineno", stmt.lineno)
+        for lineno in range(stmt.lineno, end_line + 1):
+            body_lines.add(start_line + lineno - 1)
+    return frozenset(body_lines)
 
 
 # ============================================================================
@@ -439,6 +524,7 @@ class ModuleAudit:
     validation_mode: AuditValidationMode = "fast"
     gap_functions: list[str] = field(default_factory=list)
     total_functions: int = 0
+    function_audits: list[FunctionAudit] = field(default_factory=list)
     suggestions: list[str] = field(default_factory=list)
     suggested_relations: list[dict[str, str]] = field(default_factory=list)
     mutation_gaps: list[dict[str, str]] = field(default_factory=list)
@@ -525,7 +611,27 @@ class ModuleAudit:
             for item in self.weakest_tests[:DISPLAY_CAP]:
                 lines.append(f"      - {item['test']}: {item['kills']} kill(s)")
         if self.mutation_gap_stubs:
-            lines.append(f"    stubs:    {len(self.mutation_gap_stubs)} gap-closing stub file(s)")
+            lines.append(f"    stubs:    {len(self.mutation_gap_stubs)} draft review stub file(s)")
+
+        if self.function_audits:
+            counts = self.function_audit_counts
+            lines.append(
+                "    functions:"
+                f" {counts['exercised']} exercised [verified],"
+                f" {counts['exploratory']} exploratory [inferred],"
+                f" {counts['uncovered']} no effective tests [none]"
+            )
+            for status in ("exercised", "exploratory", "uncovered"):
+                entries = [item for item in self.function_audits if item.status == status]
+                if not entries:
+                    continue
+                names = ", ".join(item.name for item in entries[:DISPLAY_CAP])
+                lines.append(f"      - {entries[0].summary_label()}: {names}")
+                if entries[0].evidence:
+                    first = entries[0].evidence[0]
+                    lines.append(
+                        f"        evidence: {first['kind']} — {first['detail']}"
+                    )
 
         if self.gap_functions:
             lines.append(
@@ -582,6 +688,14 @@ class ModuleAudit:
             return None
         return killed / total
 
+    @property
+    def function_audit_counts(self) -> dict[str, int]:
+        """Count function audits by epistemic status."""
+        counts = {"exercised": 0, "exploratory": 0, "uncovered": 0}
+        for item in self.function_audits:
+            counts[item.status] = counts.get(item.status, 0) + 1
+        return counts
+
 
 def _coverage_result_to_dict(result: CoverageResult | None) -> dict[str, object] | None:
     """Serialize a coverage result for the audit cache."""
@@ -627,6 +741,30 @@ def _coverage_measurement_from_dict(data: dict[str, object]) -> CoverageMeasurem
     )
 
 
+def _function_audit_to_dict(result: FunctionAudit) -> dict[str, object]:
+    """Serialize one function audit result for the on-disk cache."""
+    return {
+        "name": result.name,
+        "status": result.status,
+        "epistemic": result.epistemic,
+        "covered_body_lines": result.covered_body_lines,
+        "total_body_lines": result.total_body_lines,
+        "evidence": result.evidence,
+    }
+
+
+def _function_audit_from_dict(data: dict[str, object]) -> FunctionAudit:
+    """Deserialize one cached function audit result."""
+    return FunctionAudit(
+        name=str(data["name"]),
+        status=_normalize_function_audit_status(str(data["status"])),
+        epistemic=_normalize_evidence_label(str(data["epistemic"])),
+        covered_body_lines=int(data.get("covered_body_lines", 0)),
+        total_body_lines=int(data.get("total_body_lines", 0)),
+        evidence=[dict(item) for item in data.get("evidence", [])],
+    )
+
+
 def _module_audit_to_dict(result: ModuleAudit) -> dict[str, object]:
     """Serialize a module audit result for the on-disk cache."""
     return {
@@ -642,6 +780,7 @@ def _module_audit_to_dict(result: ModuleAudit) -> dict[str, object]:
         "validation_mode": result.validation_mode,
         "gap_functions": result.gap_functions,
         "total_functions": result.total_functions,
+        "function_audits": [_function_audit_to_dict(item) for item in result.function_audits],
         "suggestions": result.suggestions,
         "suggested_relations": result.suggested_relations,
         "mutation_gaps": result.mutation_gaps,
@@ -668,6 +807,9 @@ def _module_audit_from_dict(data: dict[str, object]) -> ModuleAudit:
         validation_mode=_normalize_validation_mode(str(data.get("validation_mode", "fast"))),
         gap_functions=list(data.get("gap_functions", [])),
         total_functions=int(data.get("total_functions", 0)),
+        function_audits=[
+            _function_audit_from_dict(item) for item in data.get("function_audits", [])
+        ],
         suggestions=list(data.get("suggestions", [])),
         suggested_relations=list(data.get("suggested_relations", [])),
         mutation_gaps=list(data.get("mutation_gaps", [])),
@@ -856,6 +998,136 @@ def _find_test_files(module_name: str, test_dir: Path) -> list[Path]:
     return [path for path in collected if _imports_target(path)]
 
 
+def _find_test_file_evidence(module_name: str, test_dir: Path) -> list[TestFileEvidence]:
+    """Return test-file evidence with an explicit epistemic basis."""
+    import ast
+
+    mod_short = module_name.rsplit(".", 1)[-1]
+
+    if not test_dir.is_dir():
+        return []
+
+    candidates = sorted(
+        path.resolve()
+        for path in test_dir.rglob("*.py")
+        if path.is_file() and _looks_like_test_file(path)
+    )
+
+    def _imports_target(path: Path) -> bool:
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == module_name:
+                        return True
+            elif isinstance(node, ast.ImportFrom):
+                if node.module == module_name:
+                    return True
+                if node.module:
+                    for alias in node.names:
+                        if f"{node.module}.{alias.name}" == module_name:
+                            return True
+        return False
+
+    def _wrap(
+        paths: list[Path],
+        basis: Literal["filename", "import", "pytest_collection"],
+    ) -> list[TestFileEvidence]:
+        return [
+            TestFileEvidence(
+                path=str(path),
+                basis=basis,
+                epistemic="verified" if basis == "pytest_collection" else "inferred",
+            )
+            for path in paths
+        ]
+
+    filename_matches = [
+        path
+        for path in candidates
+        if (
+            path.stem == f"test_{mod_short}"
+            or path.stem.startswith(f"test_{mod_short}_")
+            or path.stem == f"{mod_short}_test"
+        )
+    ]
+    if filename_matches:
+        return _wrap(filename_matches, "filename")
+
+    import_matches = [path for path in candidates if _imports_target(path)]
+    if import_matches:
+        return _wrap(import_matches, "import")
+
+    collected = _pytest_collected_test_files(test_dir)
+    if not collected:
+        return []
+
+    filename_matches = [
+        path
+        for path in collected
+        if (
+            path.stem == f"test_{mod_short}"
+            or path.stem.startswith(f"test_{mod_short}_")
+            or path.stem == f"{mod_short}_test"
+        )
+    ]
+    if filename_matches:
+        return _wrap(filename_matches, "pytest_collection")
+
+    import_matches = [path for path in collected if _imports_target(path)]
+    if import_matches:
+        return _wrap(import_matches, "pytest_collection")
+
+    return []
+
+
+def _collect_pytest_nodeids(test_files: list[Path]) -> dict[Path, list[str]]:
+    """Collect node IDs for pytest test files when available."""
+    if not test_files:
+        return {}
+
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "--collect-only",
+                "-q",
+                *[str(f) for f in test_files],
+            ],
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+
+    if completed.returncode not in (0, 1, 5):
+        return {}
+
+    results: dict[Path, list[str]] = {}
+    for raw_line in completed.stdout.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("=") or "collected " in line:
+            continue
+        path_text = line.split("::", 1)[0]
+        if not path_text.endswith(".py"):
+            continue
+        candidate = Path(path_text)
+        if not candidate.is_absolute():
+            candidate = (Path.cwd() / candidate).resolve()
+        else:
+            candidate = candidate.resolve()
+        results.setdefault(candidate, []).append(line)
+    return results
+
+
 def _generated_test_path(module: str) -> Path:
     """Return the generated migrated-test path for *module*."""
     mod_short = module.rsplit(".", 1)[-1]
@@ -995,6 +1267,98 @@ def _collect_audit_functions(
         else:
             scannable.append((name, func))
     return scannable, skipped
+
+
+def _function_name_in_nodeid(function_name: str, nodeid: str) -> bool:
+    """Return True when *nodeid* directly mentions *function_name*."""
+    tail = nodeid.rsplit("::", 1)[-1]
+    return function_name in tail or function_name in nodeid
+
+
+def _build_function_audits(
+    functions: list[tuple[str, object]],
+    *,
+    current_coverage: CoverageMeasurement,
+    test_file_evidence: list[TestFileEvidence],
+    collected_nodeids: dict[Path, list[str]],
+) -> list[FunctionAudit]:
+    """Build an epistemic function-level coverage map."""
+    audits: list[FunctionAudit] = []
+
+    for name, func in functions:
+        body_lines = _function_body_line_numbers(func)
+        total_body_lines = len(body_lines) if body_lines is not None else 0
+        covered_body_lines = 0
+        evidence: list[dict[str, str]] = []
+
+        if body_lines and current_coverage.status == Status.VERIFIED:
+            covered = sorted(body_lines - current_coverage.missing_lines)
+            covered_body_lines = len(covered)
+            if covered_body_lines > 0:
+                evidence.append(
+                    {
+                        "kind": "coverage_lines",
+                        "epistemic": "verified",
+                        "detail": (
+                            f"coverage hits {covered_body_lines}/{total_body_lines}"
+                            " body line(s)"
+                        ),
+                    }
+                )
+
+        direct_nodeids = [
+            nodeid
+            for nodeids in collected_nodeids.values()
+            for nodeid in nodeids
+            if _function_name_in_nodeid(name, nodeid)
+        ]
+        if direct_nodeids:
+            evidence.append(
+                {
+                    "kind": "pytest_nodeid",
+                    "epistemic": "inferred",
+                    "detail": ", ".join(direct_nodeids[:DISPLAY_CAP]),
+                }
+            )
+
+        if covered_body_lines > 0:
+            status: FunctionAuditStatus = "exercised"
+            epistemic: EvidenceLabel = "verified"
+        elif test_file_evidence:
+            status = "exploratory"
+            epistemic = "inferred"
+            if not evidence:
+                evidence.extend(
+                    {
+                        "kind": item.basis,
+                        "epistemic": item.epistemic,
+                        "detail": item.path,
+                    }
+                    for item in test_file_evidence[:DISPLAY_CAP]
+                )
+        else:
+            status = "uncovered"
+            epistemic = "none"
+            evidence.append(
+                {
+                    "kind": "no_tests",
+                    "epistemic": "none",
+                    "detail": "no matching pytest files or collected nodeids",
+                }
+            )
+
+        audits.append(
+            FunctionAudit(
+                name=name,
+                status=status,
+                epistemic=epistemic,
+                covered_body_lines=covered_body_lines,
+                total_body_lines=total_body_lines,
+                evidence=evidence,
+            )
+        )
+
+    return audits
 
 
 def _mine_audit_functions(
@@ -2600,6 +2964,7 @@ def audit(
 
     # -- 1. Find and measure existing tests --
     test_files = _find_test_files(module, test_path)
+    test_file_evidence = _find_test_file_evidence(module, test_path)
     for tf in test_files:
         count, err = _count_tests_in_file(tf)
         result.current_test_count += count
@@ -2730,6 +3095,13 @@ def audit(
         test_files,
         [out_path],
         module,
+    )
+
+    result.function_audits = _build_function_audits(
+        scannable,
+        current_coverage=result.current_coverage,
+        test_file_evidence=test_file_evidence,
+        collected_nodeids=_collect_pytest_nodeids(test_files),
     )
 
     # -- 4. Suggest tests to close the gap --

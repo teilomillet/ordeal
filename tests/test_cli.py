@@ -233,7 +233,14 @@ class TestCLI:
         capsys,
     ):
         config = tmp_path / "ordeal.toml"
-        config.write_text('[[scan]]\nmodule = "pkg.mod"\nmax_examples = 7\n', encoding="utf-8")
+        config.write_text(
+            '[[scan]]\n'
+            'module = "pkg.mod"\n'
+            'max_examples = 7\n'
+            'ignore_relations = ["commutative_composition"]\n'
+            'relation_overrides = { normalize = ["roundtrip"] }\n',
+            encoding="utf-8",
+        )
 
         import ordeal.auto as auto_mod
 
@@ -257,10 +264,13 @@ class TestCLI:
         assert rc == 0
         assert calls["module"] == "pkg.mod"
         assert calls["max_examples"] == 7
+        assert calls["ignore_relations"] == ["commutative_composition"]
+        assert calls["relation_overrides"] == {"normalize": ["roundtrip"]}
         assert "scan_module('pkg.mod')" in capsys.readouterr().out
 
     def test_scan_uses_fixture_registries_and_scan_config(self, monkeypatch, tmp_path, capsys):
         monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
         (tmp_path / "tests").mkdir()
         (tmp_path / "tests" / "conftest.py").write_text(
             "import hypothesis.strategies as st\n"
@@ -268,14 +278,31 @@ class TestCLI:
             "register_fixture('model', st.just('fixture-model'))\n",
             encoding="utf-8",
         )
+        (tmp_path / "shared_registry.py").write_text(
+            "import hypothesis.strategies as st\n"
+            "from ordeal.auto import register_fixture\n"
+            "register_fixture('shared_mode', st.just('shared-mode'))\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "scan_registry.py").write_text(
+            "import hypothesis.strategies as st\n"
+            "from ordeal.auto import register_fixture\n"
+            "register_fixture('scan_mode', st.just('scan-mode'))\n",
+            encoding="utf-8",
+        )
         (tmp_path / "ordeal.toml").write_text(
+            "[fixtures]\n"
+            'registries = ["shared_registry"]\n'
+            "\n"
             "[[scan]]\n"
             'module = "pkg.mod"\n'
             "max_examples = 7\n"
             'expected_failures = ["known_bad"]\n'
-            'fixture_registries = ["custom_registry"]\n'
+            'fixture_registries = ["scan_registry"]\n'
             'ignore_properties = ["commutative"]\n'
+            'ignore_relations = ["commutative_composition"]\n'
             'property_overrides = { normalize = ["idempotent"] }\n'
+            'relation_overrides = { normalize = ["roundtrip"] }\n'
             'fixtures = { mode = "fast,slow" }\n',
             encoding="utf-8",
         )
@@ -304,7 +331,20 @@ class TestCLI:
         monkeypatch.setattr(ordeal_state, "explore", fake_explore)
 
         try:
-            rc = main(["scan", "pkg.mod"])
+            rc = main(
+                [
+                    "scan",
+                    "pkg.mod",
+                    "--ignore-property",
+                    "associative",
+                    "--ignore-relation",
+                    "distributive",
+                    "--property-override",
+                    "normalize=bounded",
+                    "--relation-override",
+                    "normalize=dual",
+                ]
+            )
             loaded_fixture_names = set(ordeal_auto._REGISTERED_STRATEGIES)
         finally:
             ordeal_auto._REGISTERED_STRATEGIES.clear()
@@ -316,11 +356,61 @@ class TestCLI:
         assert calls["module"] == "pkg.mod"
         assert calls["max_examples"] == 7
         assert calls["scan_expected_failures"] == ["known_bad"]
-        assert calls["scan_ignore_properties"] == ["commutative"]
-        assert calls["scan_property_overrides"] == {"normalize": ["idempotent"]}
+        assert calls["scan_ignore_properties"] == ["commutative", "associative"]
+        assert calls["scan_ignore_relations"] == [
+            "commutative_composition",
+            "distributive",
+        ]
+        assert calls["scan_property_overrides"] == {
+            "normalize": ["idempotent", "bounded"]
+        }
+        assert calls["scan_relation_overrides"] == {"normalize": ["roundtrip", "dual"]}
         assert "mode" in calls["scan_fixtures"]
-        assert "model" in loaded_fixture_names
+        assert {"model", "shared_mode", "scan_mode"} <= loaded_fixture_names
         assert "status: no findings yet" in capsys.readouterr().out
+
+    def test_scan_warns_when_shared_fixture_registry_missing(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "ordeal.toml").write_text(
+            "[fixtures]\n"
+            'registries = ["missing_registry"]\n'
+            "\n"
+            "[[scan]]\n"
+            'module = "pkg.mod"\n',
+            encoding="utf-8",
+        )
+
+        original_strategies = dict(ordeal_auto._REGISTERED_STRATEGIES)
+        original_modules = set(ordeal_auto._FIXTURE_REGISTRY_MODULES)
+        ordeal_auto._REGISTERED_STRATEGIES.clear()
+        ordeal_auto._FIXTURE_REGISTRY_MODULES.clear()
+
+        monkeypatch.setattr(
+            ordeal_state,
+            "explore",
+            lambda *args, **kwargs: SimpleNamespace(
+                module="pkg.mod",
+                confidence=0.0,
+                functions={},
+                supervisor_info={},
+                tree=SimpleNamespace(size=0),
+                findings=[],
+                frontier={},
+                skipped=[],
+            ),
+        )
+
+        try:
+            rc = main(["scan", "pkg.mod"])
+        finally:
+            ordeal_auto._REGISTERED_STRATEGIES.clear()
+            ordeal_auto._REGISTERED_STRATEGIES.update(original_strategies)
+            ordeal_auto._FIXTURE_REGISTRY_MODULES.clear()
+            ordeal_auto._FIXTURE_REGISTRY_MODULES.update(original_modules)
+
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "warning: fixture registry load failed for missing_registry" in err
 
     def test_replay_missing_file(self):
         assert main(["replay", "/nonexistent/trace.json"]) == 1
@@ -1160,13 +1250,21 @@ class TestCLI:
             ),
         )
         gap_stub = (
-            '"""Tests to close mutation gaps in pkg.value.\n\n'
+            '"""Draft review stubs for mutation gaps in pkg.value.\n\n'
             "Generated by ordeal.\n"
+            "These are review notes, not runnable regressions yet.\n"
+            "Reviewed signature: value() -> int\n"
             '"""\n\n'
             "from __future__ import annotations\n\n"
-            "from pkg import value\n\n"
+            "import pkg as _ordeal_target\n\n"
             "def test_pkg_value_gap() -> None:\n"
-            "    assert value() is not None\n"
+            "    # Review this draft before pinning it as a regression.\n"
+            "    # Mutant: arithmetic: + -> - at L1:0\n"
+            "    # Source: return 1\n"
+            "    # Fix idea: Add a test that distinguishes the original from: + -> -\n"
+            "    result = _ordeal_target.value()\n"
+            "    # Pinned behavior candidate. Replace this placeholder once reviewed.\n"
+            "    # assert result == ...\n"
         )
 
         def fake_run(cmd, capture_output=None, text=None, env=None, cwd=None, check=False):
@@ -1288,6 +1386,9 @@ class TestCLI:
                         passed=False,
                         error="boom",
                         failing_args={"x": -1},
+                        replayable=True,
+                        replay_attempts=2,
+                        replay_matches=2,
                     ),
                 ],
             ),
@@ -1311,7 +1412,7 @@ class TestCLI:
         assert "pkg.score: crash safety failed" in captured.err
 
         report = json.loads(captured.out)
-        assert report["initial_scan"]["status"] == "exploratory findings"
+        assert report["initial_scan"]["status"] == "findings found"
         finding = report["initial_scan"]["findings"][0]["summary"]
         assert finding == "pkg.normalize: idempotent (92%)"
         assert report["initial_scan"]["findings"][1]["error"] == "boom"

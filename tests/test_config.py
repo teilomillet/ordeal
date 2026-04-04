@@ -115,3 +115,25 @@ relation_overrides = { normalize = ["equivalent"] }
         assert scan.ignore_relations == ["commutative_composition"]
         assert scan.property_overrides == {"score": ["idempotent"]}
         assert scan.relation_overrides == {"normalize": ["equivalent"]}
+
+    def test_shared_fixture_registries_section(self, tmp_toml):
+        cfg = load_config(
+            tmp_toml(
+                """
+[fixtures]
+registries = ["tests.support.shared_fixtures", "tests.support.more_fixtures"]
+
+[[scan]]
+module = "myapp.scoring"
+fixture_registries = ["tests.support.fixtures"]
+ignore_properties = ["commutative"]
+ignore_relations = ["commutative_composition"]
+property_overrides = { score = ["idempotent"] }
+relation_overrides = { normalize = ["equivalent"] }
+"""
+            )
+        )
+        assert cfg.fixtures.registries == [
+            "tests.support.shared_fixtures",
+            "tests.support.more_fixtures",
+        ]

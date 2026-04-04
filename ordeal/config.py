@@ -106,6 +106,13 @@ class ScanConfig:
 
 
 @dataclass
+class FixturesConfig:
+    """Shared fixture registry configuration for the whole project."""
+
+    registries: list[str] = field(default_factory=list)
+
+
+@dataclass
 class APIConfig:
     """Settings for ``[api]`` OpenAPI chaos testing."""
 
@@ -162,6 +169,7 @@ class OrdealConfig:
 
     explorer: ExplorerConfig = field(default_factory=ExplorerConfig)
     tests: list[TestConfig] = field(default_factory=list)
+    fixtures: FixturesConfig = field(default_factory=FixturesConfig)
     scan: list[ScanConfig] = field(default_factory=list)
     report: ReportConfig = field(default_factory=ReportConfig)
     api: APIConfig | None = None
@@ -185,6 +193,7 @@ def _valid_presets() -> frozenset[str]:
 _KNOWN_SECTIONS = {
     "explorer",
     "tests",
+    "fixtures",
     "scan",
     "report",
     "faults",
@@ -203,6 +212,7 @@ def _fields_of(cls: type) -> set[str]:
 _KNOWN_EXPLORER_KEYS = _fields_of(ExplorerConfig)
 _KNOWN_REPORT_KEYS = _fields_of(ReportConfig)
 _KNOWN_MUTATIONS_KEYS = _fields_of(MutationConfig)
+_KNOWN_FIXTURES_KEYS = _fields_of(FixturesConfig)
 _KNOWN_SCAN_KEYS = _fields_of(ScanConfig)
 # API and Test configs have extra TOML-only keys not in the dataclass
 _KNOWN_API_KEYS = _fields_of(APIConfig) | {"stateful", "mutation_targets", "auto_discover"}
@@ -299,6 +309,13 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
                 rule_timeout=(float(t["rule_timeout"]) if "rule_timeout" in t else None),
             )
         )
+
+    # -- Shared fixtures --
+    fixtures_raw = raw.get("fixtures", {})
+    _warn_unknown_keys("fixtures", fixtures_raw, _KNOWN_FIXTURES_KEYS)
+    fixtures = FixturesConfig(
+        registries=list(fixtures_raw.get("registries", [])),
+    )
 
     # -- Scan --
     scans: list[ScanConfig] = []
@@ -398,6 +415,7 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
     return OrdealConfig(
         explorer=explorer,
         tests=tests,
+        fixtures=fixtures,
         scan=scans,
         report=report,
         api=api_cfg,

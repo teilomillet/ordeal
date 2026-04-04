@@ -128,6 +128,20 @@ class ScanRuntimeDefaults:
     relation_overrides: dict[str, list[str]] = field(default_factory=dict)
 
 
+def _load_fixture_registry_warnings(
+    *,
+    shared_modules: Sequence[str] = (),
+    extra_modules: Sequence[str] = (),
+) -> list[str]:
+    """Load shared and per-scan fixture registries, returning warnings."""
+    from ordeal.auto import load_project_fixture_registries
+
+    registries = [module for module in (*shared_modules, *extra_modules) if module]
+    if not registries:
+        return load_project_fixture_registries()
+    return load_project_fixture_registries(extra_modules=list(dict.fromkeys(registries)))
+
+
 def _arg(*tokens: str, **kwargs: Any) -> ArgumentSpec:
     """Create a declarative CLI argument spec."""
     return ArgumentSpec(tokens=tokens, kwargs=dict(kwargs))
@@ -361,6 +375,62 @@ def _parse_scan_fixture_specs(raw: Mapping[str, Any]) -> dict[str, Any] | None:
     return fixtures
 
 
+def _parse_named_override_spec(raw: str) -> tuple[str, list[str]]:
+    """Parse a repeatable ``NAME=value1,value2`` override spec."""
+    if "=" not in raw:
+        raise argparse.ArgumentTypeError("Expected NAME=value1,value2")
+    name, values = raw.split("=", 1)
+    name = name.strip()
+    items = [item.strip() for item in values.split(",") if item.strip()]
+    if not name or not items:
+        raise argparse.ArgumentTypeError("Expected NAME=value1,value2")
+    return name, items
+
+
+def _merge_unique_strings(*groups: Sequence[str] | None) -> list[str]:
+    """Merge string sequences while preserving order and uniqueness."""
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        if not group:
+            continue
+        for item in group:
+            if item in seen:
+                continue
+            seen.add(item)
+            merged.append(item)
+    return merged
+
+
+def _named_override_specs_to_map(
+    specs: Sequence[tuple[str, Sequence[str]]] | None,
+) -> dict[str, list[str]]:
+    """Convert repeatable CLI override specs to a mapping."""
+    merged: dict[str, list[str]] = {}
+    for name, values in specs or ():
+        bucket = merged.setdefault(name, [])
+        for value in values:
+            if value not in bucket:
+                bucket.append(value)
+    return merged
+
+
+def _merge_named_overrides(
+    *groups: Mapping[str, Sequence[str]] | None,
+) -> dict[str, list[str]]:
+    """Merge named override mappings while preserving order and uniqueness."""
+    merged: dict[str, list[str]] = {}
+    for group in groups:
+        if not group:
+            continue
+        for name, values in group.items():
+            bucket = merged.setdefault(str(name), [])
+            for value in values:
+                if value not in bucket:
+                    bucket.append(value)
+    return merged
+
+
 def _resolve_scan_runtime_defaults(
     target: str,
     *,
@@ -368,9 +438,7 @@ def _resolve_scan_runtime_defaults(
     allow_config_override: bool = False,
 ) -> ScanRuntimeDefaults:
     """Load fixture registries and optional ``[[scan]]`` defaults for *target*."""
-    from ordeal.auto import load_project_fixture_registries
-
-    warnings = load_project_fixture_registries()
+    warnings = []
     effective_examples = requested_examples
     fixtures = None
     expected_failures: list[str] = []
@@ -391,6 +459,7 @@ def _resolve_scan_runtime_defaults(
     try:
         cfg = load_config(config_path)
     except (FileNotFoundError, ConfigError):
+        warnings.extend(_load_fixture_registry_warnings())
         return ScanRuntimeDefaults(
             max_examples=effective_examples,
             fixtures=fixtures,
@@ -398,6 +467,7 @@ def _resolve_scan_runtime_defaults(
             registry_warnings=warnings,
         )
 
+    warnings.extend(_load_fixture_registry_warnings(shared_modules=cfg.fixtures.registries))
     match = next((entry for entry in cfg.scan if entry.module == target), None)
     if match is None:
         return ScanRuntimeDefaults(
@@ -411,7 +481,7 @@ def _resolve_scan_runtime_defaults(
         effective_examples = match.max_examples
     fixtures = _parse_scan_fixture_specs(match.fixtures)
     expected_failures = list(match.expected_failures)
-    warnings.extend(load_project_fixture_registries(extra_modules=match.fixture_registries))
+    warnings.extend(_load_fixture_registry_warnings(extra_modules=match.fixture_registries))
     ignore_properties = list(match.ignore_properties)
     ignore_relations = list(match.ignore_relations)
     property_overrides = {
@@ -435,27 +505,32 @@ def _resolve_scan_runtime_defaults(
 def _run_configured_scans(
     scan_entries: Sequence[Any],
     *,
+    shared_fixture_registries: Sequence[str] = (),
     verbose: bool = True,
 ) -> int:
     """Execute ``[[scan]]`` entries from config through the library scan API."""
-    from ordeal.auto import load_project_fixture_registries, scan_module
+    from ordeal.auto import scan_module
 
     exit_code = 0
+    for warning in _load_fixture_registry_warnings(shared_modules=shared_fixture_registries):
+        _stderr(f"warning: {warning}\n")
     for scan_cfg in scan_entries:
-        warnings = load_project_fixture_registries(extra_modules=scan_cfg.fixture_registries)
+        warnings = _load_fixture_registry_warnings(extra_modules=scan_cfg.fixture_registries)
         for warning in warnings:
             _stderr(f"warning: {warning}\n")
         fixtures = _parse_scan_fixture_specs(scan_cfg.fixtures)
         if verbose:
             _stderr(f"Scanning {scan_cfg.module} from [[scan]]...\n")
-        result = scan_module(
-            scan_cfg.module,
-            max_examples=scan_cfg.max_examples,
-            fixtures=fixtures,
-            expected_failures=scan_cfg.expected_failures,
-            ignore_properties=scan_cfg.ignore_properties,
-            property_overrides=scan_cfg.property_overrides,
-        )
+        scan_kwargs: dict[str, Any] = {
+            "max_examples": scan_cfg.max_examples,
+            "fixtures": fixtures,
+            "expected_failures": scan_cfg.expected_failures,
+            "ignore_properties": scan_cfg.ignore_properties,
+            "ignore_relations": scan_cfg.ignore_relations,
+            "property_overrides": scan_cfg.property_overrides,
+            "relation_overrides": scan_cfg.relation_overrides,
+        }
+        result = scan_module(scan_cfg.module, **scan_kwargs)
         print(result.summary())
         if not result.passed:
             exit_code = 1
@@ -479,6 +554,22 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         requested_examples=args.max_examples,
         allow_config_override=allow_config_override,
     )
+    scan_ignore_properties = _merge_unique_strings(
+        runtime_defaults.ignore_properties,
+        getattr(args, "ignore_properties", None),
+    )
+    scan_ignore_relations = _merge_unique_strings(
+        runtime_defaults.ignore_relations,
+        getattr(args, "ignore_relations", None),
+    )
+    scan_property_overrides = _merge_named_overrides(
+        runtime_defaults.property_overrides,
+        _named_override_specs_to_map(getattr(args, "cli_property_overrides", None)),
+    )
+    scan_relation_overrides = _merge_named_overrides(
+        runtime_defaults.relation_overrides,
+        _named_override_specs_to_map(getattr(args, "cli_relation_overrides", None)),
+    )
     if not args.json:
         _stderr(f"Scanning {args.target} (seed={args.seed})...\n")
         for warning in runtime_defaults.registry_warnings:
@@ -493,8 +584,10 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             include_private=inc_private,
             scan_fixtures=runtime_defaults.fixtures,
             scan_expected_failures=runtime_defaults.expected_failures,
-            scan_ignore_properties=runtime_defaults.ignore_properties,
-            scan_property_overrides=runtime_defaults.property_overrides,
+            scan_ignore_properties=scan_ignore_properties,
+            scan_ignore_relations=scan_ignore_relations,
+            scan_property_overrides=scan_property_overrides,
+            scan_relation_overrides=scan_relation_overrides,
         )
 
     if not args.json:
@@ -586,7 +679,11 @@ def _cmd_explore(args: argparse.Namespace) -> int:
 
     if not cfg.tests:
         if cfg.scan:
-            return _run_configured_scans(cfg.scan, verbose=verbose)
+            return _run_configured_scans(
+                cfg.scan,
+                shared_fixture_registries=cfg.fixtures.registries,
+                verbose=verbose,
+            )
         _stderr("No [[tests]] entries in config.\n")
         return 1
 
@@ -1322,8 +1419,12 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
             }
             if runtime_defaults.ignore_properties:
                 scan_kwargs["ignore_properties"] = runtime_defaults.ignore_properties
+            if runtime_defaults.ignore_relations:
+                scan_kwargs["ignore_relations"] = runtime_defaults.ignore_relations
             if runtime_defaults.property_overrides:
                 scan_kwargs["property_overrides"] = runtime_defaults.property_overrides
+            if runtime_defaults.relation_overrides:
+                scan_kwargs["relation_overrides"] = runtime_defaults.relation_overrides
             result = scan_module(module, **scan_kwargs)
         except Exception as exc:
             errors.append({"module": module, "error": str(exc)})
@@ -1335,7 +1436,12 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
 
         for function in result.functions:
             qualname = f"{module}.{function.name}"
-            if not function.passed and function.replayable:
+            crash_category = (
+                function.crash_category
+                if getattr(function, "crash_category", None) is not None
+                else ("likely_bug" if function.replayable else "speculative_crash")
+            )
+            if not function.passed and crash_category == "likely_bug":
                 findings.append(
                     {
                         "kind": "crash",
@@ -1352,11 +1458,11 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
                 findings.append(
                     {
                         "kind": "crash",
-                        "category": "speculative_property",
+                        "category": "speculative_crash",
                         "module": module,
                         "function": function.name,
                         "qualname": qualname,
-                        "summary": f"{qualname}: crash safety failed",
+                        "summary": f"{qualname}: unreplayed crash on random inputs",
                         "error": function.error,
                         "failing_args": function.failing_args,
                     }
@@ -2053,7 +2159,10 @@ def _format_scan_summary(state: Any) -> str:
     """Render a concise, action-oriented summary for ``ordeal scan``."""
     lines = [f"ordeal scan: {state.module}"]
     details = _scan_report_details(state)
-    exploratory = [
+    exploratory_crashes = [
+        detail for detail in details if detail.get("category") == "speculative_crash"
+    ]
+    exploratory_properties = [
         detail for detail in details if detail.get("category") == "speculative_property"
     ]
     expected = [
@@ -2061,7 +2170,7 @@ def _format_scan_summary(state: Any) -> str:
     ]
     if state.findings:
         status = "findings found"
-    elif exploratory:
+    elif exploratory_crashes or exploratory_properties:
         status = "exploratory findings"
     elif expected:
         status = "expected preconditions observed"
@@ -2078,9 +2187,13 @@ def _format_scan_summary(state: Any) -> str:
             lines.append(f"    - {finding}")
     else:
         lines.append("  findings: none promoted")
-        if exploratory:
-            lines.append("  exploratory:")
-            for detail in exploratory[:5]:
+        if exploratory_crashes:
+            lines.append("  exploratory crashes:")
+            for detail in exploratory_crashes[:5]:
+                lines.append(f"    - {detail.get('summary', detail.get('function', '?'))}")
+        if exploratory_properties:
+            lines.append("  exploratory properties:")
+            for detail in exploratory_properties[:5]:
                 lines.append(f"    - {detail.get('summary', detail.get('function', '?'))}")
         if expected:
             lines.append("  expected preconditions:")
@@ -2111,6 +2224,14 @@ def _scan_report_details(state: Any) -> list[dict[str, Any]]:
     if details is not None:
         return list(details)
     return []
+
+
+_SPECULATIVE_SCAN_CATEGORIES = {"speculative_crash", "speculative_property"}
+
+
+def _is_speculative_scan_detail(detail: Mapping[str, Any]) -> bool:
+    """Return whether a scan detail is exploratory rather than promoted."""
+    return detail.get("category") in _SPECULATIVE_SCAN_CATEGORIES
 
 
 def _scan_checked_items(state: Any) -> list[str]:
@@ -2578,7 +2699,10 @@ def _build_scan_report(state: Any) -> dict[str, Any]:
         for detail in _scan_report_details(state)
     ]
     promoted_count = len(getattr(state, "findings", []))
-    exploratory_count = sum(
+    exploratory_crash_count = sum(
+        1 for detail in details if detail.get("category") == "speculative_crash"
+    )
+    exploratory_property_count = sum(
         1 for detail in details if detail.get("category") == "speculative_property"
     )
     expected_count = sum(
@@ -2586,7 +2710,7 @@ def _build_scan_report(state: Any) -> dict[str, Any]:
     )
     if promoted_count:
         status = "findings found"
-    elif exploratory_count:
+    elif exploratory_crash_count or exploratory_property_count:
         status = "exploratory findings"
     elif expected_count:
         status = "expected preconditions observed"
@@ -2601,7 +2725,8 @@ def _build_scan_report(state: Any) -> dict[str, Any]:
         "summary": [
             f"Checked: {', '.join(_scan_checked_items(state))}",
             f"Promoted findings: {promoted_count}",
-            f"Exploratory findings: {exploratory_count}",
+            f"Exploratory crashes: {exploratory_crash_count}",
+            f"Exploratory properties: {exploratory_property_count}",
             f"Expected precondition failures: {expected_count}",
             f"Gaps: {sum(len(v) for v in state.frontier.values()) if state.frontier else 0}",
             (
@@ -3151,7 +3276,7 @@ def _build_scan_agent_envelope(
         status=(
             "findings"
             if state.findings
-            else ("exploratory" if "speculative_property" in detail_categories else "ok")
+            else ("exploratory" if detail_categories & _SPECULATIVE_SCAN_CATEGORIES else "ok")
         ),
         confidence=float(getattr(state, "confidence", 0.0)),
         confidence_basis=(
@@ -4149,6 +4274,8 @@ def _scan_command_description() -> str:
         f"{scan_desc}\n\n"
         "Scan is exploratory first: prioritize replayable, semantically plausible findings.\n"
         "For stronger signals on a mature codebase, prefer `ordeal audit` and `ordeal mutate`.\n"
+        "Use `--ignore-property`, `--ignore-relation`, `--property-override`, and\n"
+        " `--relation-override` to suppress noisy mined signals without changing code.\n"
         f"Use --save-artifacts to save both {_default_scan_report_path('mymod')} and"
         f" {_default_scan_bundle_path('mymod')} + {_DEFAULT_REGRESSION_PATH},"
         f" then update {_default_artifact_index_path()}.\n"
@@ -4265,6 +4392,40 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     type=float,
                     default=None,
                     help="Time budget in seconds",
+                ),
+                _arg(
+                    "--ignore-property",
+                    dest="ignore_properties",
+                    action="append",
+                    default=None,
+                    metavar="NAME",
+                    help="Suppress mined property NAME (repeatable)",
+                ),
+                _arg(
+                    "--ignore-relation",
+                    dest="ignore_relations",
+                    action="append",
+                    default=None,
+                    metavar="NAME",
+                    help="Suppress mined relation NAME (repeatable)",
+                ),
+                _arg(
+                    "--property-override",
+                    dest="cli_property_overrides",
+                    action="append",
+                    type=_parse_named_override_spec,
+                    default=None,
+                    metavar="FUNC=PROP[,PROP...]",
+                    help="Suppress mined properties for one function (repeatable)",
+                ),
+                _arg(
+                    "--relation-override",
+                    dest="cli_relation_overrides",
+                    action="append",
+                    type=_parse_named_override_spec,
+                    default=None,
+                    metavar="FUNC=REL[,REL...]",
+                    help="Suppress mined relations for one function (repeatable)",
                 ),
                 _arg("--json", action="store_true", help="Output JSON instead of text"),
                 _arg(

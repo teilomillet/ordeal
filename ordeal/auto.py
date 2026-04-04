@@ -52,6 +52,7 @@ class FunctionResult:
     error: str | None = None
     error_type: str | None = None
     failing_args: dict[str, Any] | None = None
+    crash_category: str | None = None
     property_violations: list[str] = field(default_factory=list)
     property_violation_details: list[dict[str, Any]] = field(default_factory=list)
     contract_violations: list[str] = field(default_factory=list)
@@ -64,7 +65,8 @@ class FunctionResult:
         if self.passed and not self.property_violations and not self.contract_violations:
             return f"  PASS  {self.name}"
         if not self.passed:
-            return f"  FAIL  {self.name}: {self.error}"
+            label = "WARN" if self.crash_category == "speculative_crash" else "FAIL"
+            return f"  {label}  {self.name}: {self.error}"
         if self.contract_violations:
             viols = "; ".join(self.contract_violations)
             return f"  NOTE  {self.name}: {viols}"
@@ -630,7 +632,9 @@ def scan_module(
     fixtures: dict[str, st.SearchStrategy] | None = None,
     expected_failures: list[str] | None = None,
     ignore_properties: list[str] | None = None,
+    ignore_relations: list[str] | None = None,
     property_overrides: dict[str, list[str]] | None = None,
+    relation_overrides: dict[str, list[str]] | None = None,
 ) -> ScanResult:
     """Smoke-test every public function in *module*.
 
@@ -671,7 +675,9 @@ def scan_module(
             Failures from these functions are tracked separately and
             do not cause ``result.passed`` to be ``False``.
         ignore_properties: Property names to suppress in mined warnings.
+        ignore_relations: Relation names to suppress in mined warnings.
         property_overrides: Per-function property suppressions.
+        relation_overrides: Per-function relation suppressions.
     """
     mod = _resolve_module(module)
     mod_name = module if isinstance(module, str) else mod.__name__
@@ -715,6 +721,14 @@ def scan_module(
                     *(property_overrides or {}).get(name, []),
                 }
             ),
+            ignore_relations=sorted(
+                {
+                    *(ignore_relations or []),
+                    *(relation_overrides or {}).get(name, []),
+                }
+            ),
+            property_overrides=property_overrides,
+            relation_overrides=relation_overrides,
         )
         result.functions.append(func_result)
 
@@ -731,6 +745,9 @@ def _test_one_function(
     check_return_type: bool,
     fixtures: dict[str, st.SearchStrategy[Any]] | None = None,
     ignore_properties: list[str] | None = None,
+    ignore_relations: list[str] | None = None,
+    property_overrides: dict[str, list[str]] | None = None,
+    relation_overrides: dict[str, list[str]] | None = None,
 ) -> FunctionResult:
     """Run no-crash + return-type + mined-property checks on a single function."""
 
@@ -787,12 +804,14 @@ def _test_one_function(
                 contract_violation_details=[precondition],
             )
         replayable, replay_attempts, replay_matches = _replay_failure(e)
+        crash_category = "likely_bug" if replayable else "speculative_crash"
         return FunctionResult(
             name=name,
             passed=False,
             error=str(e)[:300],
             error_type=type(e).__name__,
             failing_args=last_kwargs or None,
+            crash_category=crash_category,
             replayable=replayable,
             replay_attempts=replay_attempts,
             replay_matches=replay_matches,
@@ -808,6 +827,9 @@ def _test_one_function(
             func,
             max_examples=min(max_examples, 30),
             ignore_properties=ignore_properties or [],
+            ignore_relations=ignore_relations or [],
+            property_overrides=property_overrides or {},
+            relation_overrides=relation_overrides or {},
         )
         for prop in mine_result.properties:
             if _is_suspicious_property(prop):

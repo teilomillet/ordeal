@@ -110,14 +110,21 @@ class TestScanModule:
     def test_filters_low_signal_property_warnings(self, monkeypatch):
         import ordeal.mine as mine_mod
 
-        def fake_mine(fn, max_examples, ignore_properties=()):
+        def fake_mine(
+            fn,
+            max_examples,
+            ignore_properties=(),
+            ignore_relations=(),
+            property_overrides=None,
+            relation_overrides=None,
+        ):
             return type(
                 "_FakeMineResult",
                 (),
                 {
                     "properties": [
                         MinedProperty("monotonically non-decreasing in lo", 19, 20),
-                        MinedProperty("idempotent", 17, 20),
+                        MinedProperty("idempotent", 19, 20),
                     ]
                 },
             )()
@@ -133,7 +140,7 @@ class TestScanModule:
             check_return_type=False,
         )
 
-        assert "idempotent (85%)" in result.property_violations
+        assert "idempotent (95%)" in result.property_violations
         assert not any("monotonically" in v for v in result.property_violations)
 
     def test_records_replayable_crashes(self):
@@ -142,11 +149,39 @@ class TestScanModule:
         assert divide_result.replayable is True
         assert divide_result.replay_attempts == 2
         assert divide_result.replay_matches == 2
+        assert divide_result.crash_category == "likely_bug"
+
+    def test_marks_unreplayed_crashes_as_speculative(self):
+        calls = iter(range(10_000))
+
+        def flaky(x: int) -> int:
+            raise RuntimeError(f"boom-{next(calls)}")
+
+        result = _test_one_function(
+            "flaky",
+            flaky,
+            {"x": st.integers()},
+            None,
+            max_examples=1,
+            check_return_type=False,
+        )
+
+        assert not result.passed
+        assert result.crash_category == "speculative_crash"
+        assert result.replayable is False
+        assert "WARN  flaky" in str(result)
 
     def test_ignore_properties_suppresses_noisy_scan_warnings(self, monkeypatch):
         import ordeal.mine as mine_mod
 
-        def fake_mine(fn, max_examples, ignore_properties=()):
+        def fake_mine(
+            fn,
+            max_examples,
+            ignore_properties=(),
+            ignore_relations=(),
+            property_overrides=None,
+            relation_overrides=None,
+        ):
             props = [MinedProperty("commutative", 17, 20), MinedProperty("idempotent", 17, 20)]
             suppressed = set(ignore_properties)
             return type(
@@ -166,6 +201,40 @@ class TestScanModule:
 
         add_result = next(f for f in result.functions if f.name == "add")
         assert add_result.property_violations == []
+
+    def test_ignore_relations_suppresses_noisy_relation_warnings(self, monkeypatch):
+        import ordeal.mine as mine_mod
+
+        captured: dict[str, object] = {}
+
+        def fake_mine(
+            fn,
+            max_examples,
+            ignore_properties=(),
+            ignore_relations=(),
+            property_overrides=None,
+            relation_overrides=None,
+        ):
+            captured["ignore_relations"] = list(ignore_relations)
+            captured["relation_overrides"] = relation_overrides
+            return type(
+                "_FakeMineResult",
+                (),
+                {"properties": [MinedProperty("idempotent", 17, 20)]},
+            )()
+
+        monkeypatch.setattr(mine_mod, "mine", fake_mine)
+
+        result = scan_module(
+            "tests._auto_target",
+            max_examples=5,
+            ignore_relations=["commutative_composition"],
+            relation_overrides={"add": ["roundtrip"]},
+        )
+
+        assert captured["ignore_relations"] == ["commutative_composition"]
+        assert captured["relation_overrides"] == {"add": ["roundtrip"]}
+        assert result.total > 0
 
 
 class TestFuzz:

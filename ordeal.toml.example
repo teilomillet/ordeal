@@ -110,12 +110,28 @@ verbose = true
 # equivalence_samples = 10
 
 
-# Auto-scan — smoke-test every public function in a module.
+# Auto-scan — exploratory smoke-test for every public function in a module.
 # Run with:  ordeal audit <module>
 #
 # [[scan]]
 # module = "myapp.scoring"
 # max_examples = 50
+#
+# # Load project-specific fixture registrations from importable modules that
+# # call register_fixture(). This supplements local conftest.py discovery.
+# fixture_registries = ["tests.support.fixtures"]
+#
+# # Suppress noisy mined properties or relations when they are domain-shaped
+# # constraints rather than defects.
+# ignore_properties = ["commutative"]
+# ignore_relations = ["commutative_composition"]
+#
+# # Keep expected validation failures visible without promoting them as bugs.
+# expected_failures = ["validate_input"]
+#
+# # Per-function suppression / override knobs.
+# property_overrides = { normalize = ["idempotent"] }
+# relation_overrides = { normalize = ["equivalent"] }
 #
 # # Custom fixtures: keys = parameter names, values = comma-separated choices.
 # # These override Hypothesis strategy inference for parameters that need
@@ -123,12 +139,17 @@ verbose = true
 # [scan.fixtures]
 # category = "violence,cyber,sexual"
 #
+# Shared fixture registries for every scan in this project.
+# These modules are imported for their register_fixture() side effects.
+#
+# [fixtures]
+# registries = ["tests.support.shared_fixtures"]
+#
 # [[scan]]
 # module = "myapp.validation"
 # max_examples = 100
 #
-# # Functions that are expected to fail (e.g. input validation that raises).
-# # These are skipped during scanning, so known failures don't break the suite.
+# # Expected failures stay visible but are not treated as bugs.
 # expected_failures = ["validate_input", "check_permissions"]
 
 

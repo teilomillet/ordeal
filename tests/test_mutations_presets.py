@@ -692,15 +692,16 @@ def test_generate_test_stubs_for_surviving_mutants():
     )
     stubs = result.generate_test_stubs()
     if result.survived:
+        assert "Draft review stubs for mutation gaps" in stubs
         assert "from __future__ import annotations" in stubs
-        assert f"from {__name__} import _add" in stubs
+        assert f"import {__name__} as _ordeal_target" in stubs
         assert "def test_" in stubs
         # Uses real param names from inspect.signature
         assert "a=" in stubs
         assert "b=" in stubs
-        # Includes function signature in header
-        assert "Function signature:" in stubs
-        assert "Review this case" in stubs
+        # Includes a reviewable signature and pinned-behavior comment
+        assert "Reviewed signature:" in stubs
+        assert "Pinned behavior candidate" in stubs
     else:
         assert stubs == ""
 
@@ -714,6 +715,39 @@ def test_generate_test_stubs_empty_when_all_killed():
     )
     if not result.survived:
         assert result.generate_test_stubs() == ""
+
+
+def test_generate_test_stubs_qualifies_local_types(tmp_path: Path, monkeypatch):
+    pkg = tmp_path / "reviewpkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "types.py").write_text(
+        "class PolicyConfig:\n"
+        "    pass\n"
+    )
+    (pkg / "mod.py").write_text(
+        "from reviewpkg.types import PolicyConfig\n\n"
+        "def process(config: PolicyConfig) -> PolicyConfig:\n"
+        "    return config\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    mutant = Mutant(
+        operator="arithmetic",
+        description="+ -> -",
+        line=3,
+        col=4,
+        source_line="return config",
+    )
+    result = MutationResult(target="reviewpkg.mod.process", mutants=[mutant])
+    stubs = result.generate_test_stubs()
+
+    assert "import reviewpkg.mod as _ordeal_target" in stubs
+    assert (
+        "Reviewed signature: process(config: reviewpkg.types.PolicyConfig)"
+        in stubs
+    )
+    assert "# assert result == ..." in stubs
 
 
 # ============================================================================

@@ -98,7 +98,7 @@ ordeal init myapp --ci
 
 `--dry-run` is the safe preview mode: it discovers modules from the filesystem and signatures from AST only, without importing the target package, executing functions, or writing files.
 
-By default, `init` does not install the bundled skill and does not append mutation-gap stubs back into your test files. Those extra writes are explicit opt-ins.
+By default, `init` does not install the bundled skill and does not write draft mutation-gap stub files. Those extra writes are explicit opt-ins.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -108,7 +108,7 @@ By default, `init` does not install the bundled skill and does not append mutati
 | `--ci` | off | Generate `.github/workflows/<name>.yml` |
 | `--ci-name` | `ordeal` | Workflow filename stem |
 | `--install-skill` | off | Also install the bundled AI-agent skill into `.claude/skills/ordeal/` |
-| `--close-gaps` | off | Append suggested mutation-gap stubs into a generated test file |
+| `--close-gaps` | off | Write draft audit stub files for surviving mutation gaps |
 
 ### `ordeal mutate`
 

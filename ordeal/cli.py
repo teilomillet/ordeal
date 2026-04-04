@@ -1410,6 +1410,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
     import re
     import subprocess
 
+    from ordeal.audit import audit
     from ordeal.mutations import init_project
 
     target: str | None = args.target or None
@@ -1493,6 +1494,47 @@ def _cmd_init(args: argparse.Namespace) -> int:
             env=env,
         )
 
+    def _aggregate_mutation_score(results: Sequence[Any]) -> str:
+        counts = [result.mutation_score_counts for result in results]
+        concrete = [count for count in counts if count is not None]
+        if not concrete:
+            return ""
+        killed = sum(count[0] for count in concrete)
+        total = sum(count[1] for count in concrete)
+        if total <= 0:
+            return ""
+        return f"{killed}/{total} ({(killed / total):.0%})"
+
+    def _gap_stub_path(output_dir: str, target_name: str) -> Path:
+        safe = target_name.replace(".", "_")
+        return Path(output_dir) / f"test_{safe}_gaps.py"
+
+    def _write_init_gap_stubs(
+        audit_results: Sequence[Any],
+        *,
+        output_dir: str,
+    ) -> list[dict[str, Any]]:
+        written: list[dict[str, Any]] = []
+        for result in audit_results:
+            for item in result.mutation_gap_stubs:
+                content = str(item.get("content", "")).strip()
+                target_name = str(item.get("target", "")).strip()
+                if not content or not target_name:
+                    continue
+                path = _gap_stub_path(output_dir, target_name)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                existing = path.read_text(encoding="utf-8") if path.exists() else None
+                if existing != content + "\n":
+                    path.write_text(content + "\n", encoding="utf-8")
+                written.append(
+                    {
+                        "module": result.module,
+                        "target": target_name,
+                        "path": str(path),
+                    }
+                )
+        return written
+
     # --- Phase 1: Verify generated tests pass ---
     test_files = [r["path"] for r in generated]
     proc = subprocess.run(
@@ -1518,36 +1560,26 @@ def _cmd_init(args: argparse.Namespace) -> int:
         mut_targets = [r["module"] for r in generated]
 
     mutation_score = ""
-    for round_num in range(3):
-        mutate_argv = ["mutate", *mut_targets, "-p", "essential"]
-        if close_gaps:
-            mutate_argv.extend(["--generate-stubs", ".ordeal_stubs_tmp.py"])
-        mp = _run_ordeal(mutate_argv)
+    gap_stub_files: list[dict[str, Any]] = []
+    weakest_tests: list[dict[str, Any]] = []
+    if close_gaps:
+        generated_modules = [r["module"] for r in generated]
+        audit_results = [
+            audit(module, test_dir=output_dir, max_examples=10) for module in generated_modules
+        ]
+        mutation_score = _aggregate_mutation_score(audit_results)
+        gap_stub_files = _write_init_gap_stubs(audit_results, output_dir=output_dir)
+        weakest_tests = [
+            {"module": result.module, **item}
+            for result in audit_results
+            for item in result.weakest_tests
+        ]
+    else:
+        mp = _run_ordeal(["mutate", *mut_targets, "-p", "essential"])
         for line in mp.stdout.splitlines():
             if line.startswith("Score:"):
                 mutation_score = line.strip()
                 break
-        if not close_gaps:
-            break
-        stubs_path = Path(".ordeal_stubs_tmp.py")
-        if "(100%)" in mutation_score or not stubs_path.exists():
-            stubs_path.unlink(missing_ok=True)
-            break
-        stubs = stubs_path.read_text(encoding="utf-8").strip()
-        stubs_path.unlink(missing_ok=True)
-        if not stubs:
-            break
-        # Append gap-closing tests
-        for r in generated:
-            if r["path"]:
-                p = Path(r["path"])
-                p.write_text(
-                    p.read_text(encoding="utf-8") + "\n\n" + stubs + "\n",
-                    encoding="utf-8",
-                )
-                break
-
-    Path(".ordeal_stubs_tmp.py").unlink(missing_ok=True)
 
     # --- Phase 3: Lightweight read-only scan ---
     initial_scan = _run_init_scan([r["module"] for r in generated], max_examples=10)
@@ -1647,7 +1679,17 @@ def _cmd_init(args: argparse.Namespace) -> int:
     if mutation_score and "0/0" not in mutation_score:
         _stderr(f"  Mutations:  {mutation_score.removeprefix('Score: ')}\n")
         if not close_gaps:
-            _stderr("  Gaps:       report-only (use --close-gaps to append suggested stubs)\n")
+            _stderr(
+                "  Gaps:       report-only"
+                " (use --close-gaps to write draft audit stub files)\n"
+            )
+    if close_gaps and gap_stub_files:
+        _stderr(f"  Gaps:       wrote {len(gap_stub_files)} draft stub file(s) from audit\n")
+    if close_gaps and weakest_tests:
+        preview = ", ".join(
+            f"{item['test']} ({item['kills']} kill(s))" for item in weakest_tests[:3]
+        )
+        _stderr(f"  Weakest:    {preview}\n")
 
     if initial_scan["status"] in {"findings found", "exploratory findings"}:
         _stderr(
@@ -1677,6 +1719,8 @@ def _cmd_init(args: argparse.Namespace) -> int:
     _stderr("\n  Files:\n")
     for r in generated:
         _stderr(f"    {r['path']}\n")
+    for item in gap_stub_files:
+        _stderr(f"    {item['path']}\n")
     if Path("ordeal.toml").exists():
         _stderr("    ordeal.toml\n")
     if ci_path:
@@ -1705,10 +1749,13 @@ def _cmd_init(args: argparse.Namespace) -> int:
         "mutation_score": mutation_score.removeprefix("Score: ") if mutation_score else None,
         "initial_scan": initial_scan,
         "close_gaps": close_gaps,
+        "gap_stub_files": gap_stub_files,
+        "weakest_tests": weakest_tests,
         "ci_workflow": ci_path,
         "install_skill": install_skill,
         "skill": skill_path,
         "files": [r["path"] for r in generated]
+        + [item["path"] for item in gap_stub_files]
         + (["ordeal.toml"] if Path("ordeal.toml").exists() else [])
         + ([ci_path] if ci_path else [])
         + ([skill_path] if skill_path else []),
@@ -4619,7 +4666,7 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                 _arg(
                     "--close-gaps",
                     action="store_true",
-                    help="Append suggested mutation-gap stubs into a generated test file",
+                    help="Write draft audit stub files for surviving mutation gaps",
                 ),
             ),
         ),

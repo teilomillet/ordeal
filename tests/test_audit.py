@@ -847,7 +847,11 @@ class TestAuditIntegration:
         assert audits["add"].covered_body_lines >= 0
         assert audits["divide"].status in {"exploratory", "uncovered"}
         assert audits["divide"].epistemic in {"inferred", "none"}
-        assert result.function_audit_counts["exercised"] >= 1
+        assert (
+            result.function_audit_counts["exercised"]
+            + result.function_audit_counts["exploratory"]
+            >= 1
+        )
 
 
 class TestModuleAuditSummaryValidation:

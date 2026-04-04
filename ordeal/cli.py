@@ -610,7 +610,7 @@ def _write_audit_gap_stubs(
                 {
                     "module": result.module,
                     "target": target_name,
-                    "path": str(path),
+                    "path": _display_path(path),
                     "source": "mutation_gap",
                 }
             )
@@ -646,7 +646,7 @@ def _write_audit_gap_stubs(
                 {
                     "module": result.module,
                     "target": target_name,
-                    "path": str(path),
+                    "path": _display_path(path),
                     "source": "function_audit",
                     "status": status,
                     "epistemic": str(getattr(item, "epistemic", "")),
@@ -2146,17 +2146,22 @@ def _cmd_init(args: argparse.Namespace) -> int:
         "close_gaps": close_gaps,
         "gap_stub_files": gap_stub_files,
         "weakest_tests": weakest_tests,
-        "ci_workflow": ci_path,
+        "ci_workflow": _display_path(Path(ci_path)) if ci_path else None,
         "install_skill": install_skill,
-        "skill": skill_path,
-        "files": [r["path"] for r in generated]
+        "skill": _display_path(Path(skill_path)) if skill_path else None,
+        "files": [_display_path(Path(r["path"])) for r in generated if r["path"]]
         + [item["path"] for item in gap_stub_files]
-        + (["ordeal.toml"] if Path("ordeal.toml").exists() else [])
-        + ([ci_path] if ci_path else [])
-        + ([skill_path] if skill_path else []),
+        + ([_display_path(Path("ordeal.toml"))] if Path("ordeal.toml").exists() else [])
+        + ([_display_path(Path(ci_path))] if ci_path else [])
+        + ([_display_path(Path(skill_path))] if skill_path else []),
         "pinned_values": pinned_values,
         "functions": [
-            {"module": r["module"], "status": r["status"], "test_file": r["path"]} for r in results
+            {
+                "module": r["module"],
+                "status": r["status"],
+                "test_file": _display_path(Path(r["path"])) if r["path"] else None,
+            }
+            for r in results
         ],
     }
     print(json.dumps(report, indent=2))

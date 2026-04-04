@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.12
+
+**Features:**
+
+- add collaborator scenarios and target introspection
+
+**Fixes:**
+
+- harden Windows path and target resolution
+
+
 ## 0.3.11
 
 **Features:**

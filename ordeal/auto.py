@@ -691,7 +691,7 @@ def shell_safe_contract(
         if tokens is None:
             return False
         for raw in _tracked_string_args(kwargs, tracked_params):
-            if any(ch in raw for ch in ' \t;&|`$><()[]{}*?'):
+            if any(ch in raw for ch in " \t;&|`$><()[]{}*?"):
                 if _tracked_token_count(tokens, raw) != 1:
                     return False
         return True

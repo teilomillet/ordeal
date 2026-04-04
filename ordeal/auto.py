@@ -19,15 +19,19 @@ Three primitives:
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import importlib
 import importlib.util
 import inspect
 import re
+import shlex
 import sys
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
+from typing import Any, Callable, Literal, Union, get_args, get_origin, get_type_hints
 
 import hypothesis.strategies as st
 from hypothesis import given, settings
@@ -72,6 +76,16 @@ class FunctionResult:
             return f"  NOTE  {self.name}: {viols}"
         viols = "; ".join(self.property_violations)
         return f"  WARN  {self.name}: {viols}"
+
+
+@dataclass(frozen=True)
+class ContractCheck:
+    """Explicit semantic contract probe for a scanned callable."""
+
+    name: str
+    predicate: Callable[[Any], bool] = field(repr=False)
+    kwargs: dict[str, Any] = field(default_factory=dict)
+    summary: str | None = None
 
 
 @dataclass
@@ -127,7 +141,14 @@ class ScanResult:
         if self.expected_failure_names:
             lines.append(f"  ({len(self.expected_failures)} expected failure(s))")
         if self.skipped:
-            lines.append(f"  ({len(self.skipped)} skipped: no type hints)")
+            reasons: dict[str, int] = {}
+            for _, reason in self.skipped:
+                reasons[reason] = reasons.get(reason, 0) + 1
+            reason_bits = ", ".join(
+                f"{count} {reason}" if count > 1 else f"1 {reason}"
+                for reason, count in sorted(reasons.items())
+            )
+            lines.append(f"  ({len(self.skipped)} skipped: {reason_bits})")
         from ordeal.suggest import format_suggestions
 
         avail = format_suggestions(self)
@@ -222,6 +243,8 @@ _SUFFIX_STRATEGIES: dict[str, st.SearchStrategy[Any]] = {
 
 # User-registered strategies (project-specific, added at runtime)
 _REGISTERED_STRATEGIES: dict[str, st.SearchStrategy[Any]] = {}
+_REGISTERED_OBJECT_FACTORIES: dict[str, Any] = {}
+_REGISTERED_OBJECT_SETUPS: dict[str, Any] = {}
 _BOUNDARY_SMOKE_VALUES: dict[object, tuple[object, ...]] = {
     bool: (False, True),
     int: (0, 1, -1),
@@ -248,6 +271,20 @@ def register_fixture(name: str, strategy: st.SearchStrategy[Any]) -> None:
     parameters named ``model`` or ``direction`` without explicit fixtures.
     """
     _REGISTERED_STRATEGIES[name] = strategy
+
+
+def register_object_factory(name: str, factory: Any) -> None:
+    """Register an object factory for class-method targets.
+
+    Use this for methods that need a prebuilt instance or collaborators.
+    The factory can be sync or async and may return the instance directly.
+    """
+    _REGISTERED_OBJECT_FACTORIES[name] = factory
+
+
+def register_object_setup(name: str, setup: Any) -> None:
+    """Register a per-instance setup hook for class-method targets."""
+    _REGISTERED_OBJECT_SETUPS[name] = setup
 
 
 def _strategy_for_name(name: str) -> st.SearchStrategy[Any] | None:
@@ -285,40 +322,531 @@ def _unwrap(func: Any) -> Any:
     import inspect
 
     func = getattr(func, "_function", func)
+    if getattr(func, "__ordeal_keep_wrapped__", False):
+        return func
     try:
-        func = inspect.unwrap(func)
+        func = inspect.unwrap(
+            func,
+            stop=lambda wrapped: getattr(wrapped, "__ordeal_keep_wrapped__", False),
+        )
     except (ValueError, TypeError):
         pass
     return func
 
 
+def _resolve_awaitable(value: Any) -> Any:
+    """Resolve an awaitable value without forcing callers to use async APIs."""
+    if not inspect.isawaitable(value):
+        return value
+    try:
+        return asyncio.run(value)
+    except RuntimeError as exc:
+        if "asyncio.run()" not in str(exc):
+            raise
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(value)
+        finally:
+            loop.close()
+
+
+def _call_sync(func: Any, *args: Any, **kwargs: Any) -> Any:
+    """Call *func* and synchronously resolve any returned awaitable."""
+    return _resolve_awaitable(func(*args, **kwargs))
+
+
+def _signature_without_first_context(func: Any) -> inspect.Signature:
+    """Return a callable signature with a leading self/cls parameter removed."""
+    sig = inspect.signature(func)
+    params = list(sig.parameters.values())
+    if params and params[0].name in {"self", "cls"}:
+        sig = sig.replace(parameters=params[1:])
+    return sig
+
+
+def _object_hook_candidates(owner: type) -> list[str]:
+    """Return the registry keys that may refer to *owner*."""
+    candidates = [
+        f"{owner.__module__}:{owner.__qualname__}",
+        f"{owner.__module__}.{owner.__qualname__}",
+        f"{owner.__module__}:{owner.__name__}",
+        f"{owner.__module__}.{owner.__name__}",
+        owner.__qualname__,
+        owner.__name__,
+    ]
+    return list(dict.fromkeys(candidates))
+
+
+def _resolve_object_hook(owner: type, hooks: dict[str, Any] | None) -> Any | None:
+    """Resolve a registered object hook for *owner* from several key styles."""
+    if not hooks:
+        return None
+    for candidate in _object_hook_candidates(owner):
+        if candidate in hooks:
+            return hooks[candidate]
+    return None
+
+
+def _make_sync_callable(
+    func: Any,
+    *,
+    qualname: str | None = None,
+    keep_wrapped: bool = False,
+) -> Any:
+    """Wrap *func* so callers can invoke sync or async callables uniformly."""
+
+    @functools.wraps(func)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        return _call_sync(func, *args, **kwargs)
+
+    try:
+        wrapped.__signature__ = inspect.signature(func)
+    except (TypeError, ValueError):
+        pass
+    if qualname is not None:
+        wrapped.__qualname__ = qualname
+    if keep_wrapped:
+        wrapped.__ordeal_keep_wrapped__ = True
+    return wrapped
+
+
+def _resolve_method_callable(
+    owner: type,
+    method_name: str,
+    raw_attr: Any,
+    *,
+    object_factories: dict[str, Any] | None = None,
+    object_setups: dict[str, Any] | None = None,
+) -> tuple[str, Any]:
+    """Resolve a class attribute into a sync-capable callable."""
+    qualname = f"{owner.__qualname__}.{method_name}"
+    if isinstance(raw_attr, staticmethod) or isinstance(raw_attr, classmethod):
+        bound = getattr(owner, method_name)
+        if inspect.iscoroutinefunction(bound):
+            return qualname, _make_sync_callable(
+                bound,
+                qualname=qualname,
+                keep_wrapped=True,
+            )
+        return qualname, bound
+
+    factory = _resolve_object_hook(owner, object_factories)
+    setup = _resolve_object_hook(owner, object_setups)
+    if inspect.isfunction(raw_attr):
+        if factory is None:
+            return qualname, _make_unbound_method_placeholder(owner, method_name, raw_attr)
+        return (
+            qualname,
+            _make_bound_method_callable(
+                owner,
+                method_name,
+                raw_attr,
+                factory=factory,
+                setup=setup,
+            ),
+        )
+
+    return qualname, _make_sync_callable(getattr(owner, method_name), qualname=qualname)
+
+
+def _make_bound_method_callable(
+    owner: type,
+    method_name: str,
+    method: Any,
+    *,
+    factory: Any,
+    setup: Any | None = None,
+) -> Any:
+    """Build a sync wrapper that creates a fresh object per invocation."""
+    target = _unwrap(method)
+
+    @functools.wraps(target)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        instance = _call_sync(factory)
+        if setup is not None:
+            _call_sync(setup, instance)
+        bound = getattr(instance, method_name)
+        return _call_sync(bound, *args, **kwargs)
+
+    try:
+        wrapped.__signature__ = _signature_without_first_context(target)
+    except (TypeError, ValueError):
+        pass
+    wrapped.__qualname__ = f"{owner.__qualname__}.{method_name}"
+    wrapped.__ordeal_requires_factory__ = False
+    wrapped.__ordeal_owner__ = owner
+    wrapped.__ordeal_keep_wrapped__ = True
+    return wrapped
+
+
+def _make_unbound_method_placeholder(
+    owner: type,
+    method_name: str,
+    method: Any,
+) -> Any:
+    """Build a placeholder callable for a method that still needs a factory."""
+    target = _unwrap(method)
+
+    @functools.wraps(target)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        raise ValueError(
+            f"{owner.__qualname__}.{method_name} needs an object factory"
+        )
+
+    try:
+        wrapped.__signature__ = _signature_without_first_context(target)
+    except (TypeError, ValueError):
+        pass
+    wrapped.__qualname__ = f"{owner.__qualname__}.{method_name}"
+    wrapped.__ordeal_requires_factory__ = True
+    wrapped.__ordeal_owner__ = owner
+    wrapped.__ordeal_skip_reason__ = "missing object factory"
+    wrapped.__ordeal_keep_wrapped__ = True
+    return wrapped
+
+
+def _callable_skip_reason(func: Any) -> str | None:
+    """Return a human-readable reason a generated callable is not runnable."""
+    if getattr(func, "__ordeal_requires_factory__", False):
+        return getattr(func, "__ordeal_skip_reason__", "missing object factory")
+    return None
+
+
+def _resolve_explicit_target(
+    target: str,
+    *,
+    object_factories: dict[str, Any] | None = None,
+    object_setups: dict[str, Any] | None = None,
+) -> tuple[str, Any]:
+    """Resolve ``module:callable`` or ``module:Class.method`` targets."""
+    module_name, sep, attr_path = target.partition(":")
+    if not sep or not attr_path:
+        raise ValueError("Explicit targets must use 'module:callable' syntax")
+
+    obj = _resolve_module(module_name)
+    parts = [part for part in attr_path.split(".") if part]
+    if not parts:
+        raise ValueError("Explicit targets must name a callable")
+
+    for part in parts[:-1]:
+        obj = getattr(obj, part)
+
+    final_name = parts[-1]
+    if inspect.isclass(obj):
+        static_attr = inspect.getattr_static(obj, final_name, None)
+        if static_attr is None:
+            raise AttributeError(f"{target} does not exist")
+        return _resolve_method_callable(
+            obj,
+            final_name,
+            static_attr,
+            object_factories=object_factories,
+            object_setups=object_setups,
+        )
+
+    resolved = getattr(obj, final_name)
+    if inspect.isclass(resolved):
+        raise TypeError(f"{target} resolves to a class, not a callable")
+    if not callable(resolved):
+        raise TypeError(f"{target} does not resolve to a callable")
+
+    qualname = (
+        final_name
+        if obj.__class__.__module__ == "builtins"
+        else f"{getattr(obj, '__qualname__', obj.__class__.__name__)}.{final_name}"
+    )
+    return qualname, resolved
+
+
+def _selected_public_functions(
+    mod: ModuleType,
+    *,
+    targets: Sequence[str] | None = None,
+    include_private: bool = False,
+    object_factories: dict[str, Any] | None = None,
+    object_setups: dict[str, Any] | None = None,
+) -> list[tuple[str, Any]]:
+    """Return discovered callables filtered to *targets* when provided."""
+    discovered = _get_public_functions(
+        mod,
+        include_private=include_private,
+        object_factories=object_factories,
+        object_setups=object_setups,
+    )
+    if not targets:
+        return discovered
+
+    discovered_map = {name: func for name, func in discovered}
+    selected: list[tuple[str, Any]] = []
+    seen: set[str] = set()
+    module_prefix = f"{mod.__name__}."
+
+    for raw_target in targets:
+        target = str(raw_target).strip()
+        if not target:
+            continue
+        if target in discovered_map:
+            name = target
+            func = discovered_map[target]
+        elif target.startswith(module_prefix) and target[len(module_prefix) :] in discovered_map:
+            name = target[len(module_prefix) :]
+            func = discovered_map[name]
+        elif ":" in target:
+            base_module = target.split(":", 1)[0]
+            if base_module != mod.__name__:
+                raise ValueError(
+                    f"target {target!r} does not belong to module {mod.__name__!r}"
+                )
+            name, func = _resolve_explicit_target(
+                target,
+                object_factories=object_factories,
+                object_setups=object_setups,
+            )
+        else:
+            raise ValueError(f"target {target!r} was not discovered in module {mod.__name__!r}")
+
+        if name in seen:
+            continue
+        seen.add(name)
+        selected.append((name, func))
+    return selected
+
+
+def _command_tokens(value: Any) -> list[str] | None:
+    """Return command tokens for shell-like return values."""
+    if isinstance(value, str):
+        try:
+            return shlex.split(value)
+        except ValueError:
+            return None
+    if isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value):
+        return list(value)
+    return None
+
+
+def _tracked_string_args(
+    kwargs: Mapping[str, Any],
+    tracked_params: Sequence[str] | None,
+) -> list[str]:
+    """Return the string argument values tracked by a semantic contract."""
+    names = list(
+        tracked_params
+        or [name for name, value in kwargs.items() if isinstance(value, str)]
+    )
+    tracked: list[str] = []
+    for name in names:
+        value = kwargs.get(name)
+        if isinstance(value, str):
+            tracked.append(value)
+    return tracked
+
+
+def shell_safe_contract(
+    *,
+    kwargs: dict[str, Any],
+    tracked_params: Sequence[str] | None = None,
+) -> ContractCheck:
+    """Build a shell-safety probe for command construction helpers."""
+
+    def predicate(value: Any) -> bool:
+        tokens = _command_tokens(value)
+        if tokens is None:
+            return False
+        for raw in _tracked_string_args(kwargs, tracked_params):
+            if any(ch in raw for ch in ' \t;&|`$><()[]{}*?'):
+                if tokens.count(raw) != 1:
+                    return False
+        return True
+
+    return ContractCheck(
+        name="shell_safe",
+        kwargs=dict(kwargs),
+        predicate=predicate,
+        summary="shell-unsafe string interpolation",
+    )
+
+
+def quoted_paths_contract(
+    *,
+    kwargs: dict[str, Any],
+    tracked_params: Sequence[str] | None = None,
+) -> ContractCheck:
+    """Build a path-quoting probe for command builders."""
+
+    def predicate(value: Any) -> bool:
+        tokens = _command_tokens(value)
+        if tokens is None:
+            return False
+        for raw in _tracked_string_args(kwargs, tracked_params):
+            if "/" in raw or "\\" in raw or " " in raw:
+                if tokens.count(raw) != 1:
+                    return False
+        return True
+
+    return ContractCheck(
+        name="quoted_paths",
+        kwargs=dict(kwargs),
+        predicate=predicate,
+        summary="path quoting or escaping regression",
+    )
+
+
+def command_arg_stability_contract(
+    *,
+    kwargs: dict[str, Any],
+    tracked_params: Sequence[str] | None = None,
+) -> ContractCheck:
+    """Build a probe that ensures tracked args survive command construction."""
+
+    def predicate(value: Any) -> bool:
+        tokens = _command_tokens(value)
+        if tokens is None:
+            return False
+        for raw in _tracked_string_args(kwargs, tracked_params):
+            if tokens.count(raw) != 1:
+                return False
+        return True
+
+    return ContractCheck(
+        name="command_arg_stability",
+        kwargs=dict(kwargs),
+        predicate=predicate,
+        summary="command construction invariant failed",
+    )
+
+
+def protected_env_keys_contract(
+    *,
+    kwargs: dict[str, Any],
+    protected_keys: Sequence[str],
+    env_param: str | None = None,
+) -> ContractCheck:
+    """Build a probe that checks protected env keys survive updates."""
+    resolved_env_param = env_param or next(
+        (
+            name
+            for name, value in kwargs.items()
+            if isinstance(value, Mapping)
+        ),
+        None,
+    )
+
+    def predicate(value: Any) -> bool:
+        if resolved_env_param is None:
+            return False
+        original = kwargs.get(resolved_env_param)
+        if not isinstance(original, Mapping) or not isinstance(value, Mapping):
+            return False
+        return all(value.get(key) == original.get(key) for key in protected_keys)
+
+    return ContractCheck(
+        name="protected_env_keys",
+        kwargs=dict(kwargs),
+        predicate=predicate,
+        summary="protected env-var contract violated",
+    )
+
+
+def builtin_contract_check(
+    name: str,
+    *,
+    kwargs: dict[str, Any],
+    tracked_params: Sequence[str] | None = None,
+    protected_keys: Sequence[str] | None = None,
+    env_param: str | None = None,
+) -> ContractCheck:
+    """Build one built-in semantic contract probe by *name*."""
+    match name:
+        case "shell_safe":
+            return shell_safe_contract(kwargs=kwargs, tracked_params=tracked_params)
+        case "quoted_paths":
+            return quoted_paths_contract(kwargs=kwargs, tracked_params=tracked_params)
+        case "command_arg_stability":
+            return command_arg_stability_contract(kwargs=kwargs, tracked_params=tracked_params)
+        case "protected_env_keys":
+            return protected_env_keys_contract(
+                kwargs=kwargs,
+                protected_keys=list(protected_keys or []),
+                env_param=env_param,
+            )
+        case _:
+            raise ValueError(f"unknown built-in contract check: {name}")
+
+
 def _get_public_functions(
-    mod: ModuleType, *, include_private: bool = False
+    mod: ModuleType,
+    *,
+    include_private: bool = False,
+    object_factories: dict[str, Any] | None = None,
+    object_setups: dict[str, Any] | None = None,
 ) -> list[tuple[str, Any]]:
     """Return (name, callable) pairs for testable callables.
 
-    By default only public functions (no ``_`` prefix).  Set
-    *include_private* to also include ``_single_underscore``
-    functions — many real codebases have most logic there.
-    ``__dunder__`` methods are always excluded.
+    By default this includes public module functions and public class
+    methods. Instance methods are wrapped only when a registered or
+    explicit object factory is available; otherwise they are returned as
+    placeholder callables that report a missing object factory.
+
+    Discovery is based on the module's own ``__dict__`` and class
+    ``__dict__`` entries so lazy package exports do not become accidental
+    scan targets or raise ``AttributeError`` during iteration.
 
     Decorated functions (``@ray.remote``, ``@functools.wraps``, etc.)
     are auto-unwrapped so that ``mine()``, ``fuzz()``, and ``scan_module()``
     can inspect signatures and call the real function.
     """
-    results = []
-    for name in sorted(dir(mod)):
+    merged_factories = dict(_REGISTERED_OBJECT_FACTORIES)
+    if object_factories:
+        merged_factories.update(object_factories)
+    merged_setups = dict(_REGISTERED_OBJECT_SETUPS)
+    if object_setups:
+        merged_setups.update(object_setups)
+
+    results: list[tuple[str, Any]] = []
+    for name, obj in sorted(vars(mod).items()):
         if name.startswith("__"):
             continue
         if name.startswith("_") and not include_private:
             continue
-        obj = getattr(mod, name)
         if callable(obj) and not isinstance(obj, type):
-            # Skip re-imports from other modules
             obj_mod = getattr(obj, "__module__", None)
             if obj_mod and obj_mod != mod.__name__:
                 continue
-            results.append((name, _unwrap(obj)))
+            target = _unwrap(obj)
+            if inspect.iscoroutinefunction(target):
+                results.append(
+                    (
+                        name,
+                        _make_sync_callable(target, qualname=name, keep_wrapped=True),
+                    )
+                )
+            else:
+                results.append((name, target))
+            continue
+        if not inspect.isclass(obj) or getattr(obj, "__module__", None) != mod.__name__:
+            continue
+
+        for meth_name, static_attr in sorted(vars(obj).items()):
+            if meth_name.startswith("__"):
+                continue
+            if meth_name.startswith("_") and not include_private:
+                continue
+            if isinstance(static_attr, property):
+                continue
+            if not (
+                isinstance(static_attr, (staticmethod, classmethod))
+                or inspect.isfunction(static_attr)
+            ):
+                continue
+            results.append(
+                _resolve_method_callable(
+                    obj,
+                    meth_name,
+                    static_attr,
+                    object_factories=merged_factories,
+                    object_setups=merged_setups,
+                )
+            )
     return results
 
 
@@ -404,12 +932,22 @@ def _infer_strategies(
     4. Default value → skip
     5. None → can't infer, return None for entire function
     """
-    try:
-        hints = get_type_hints(func)
-    except Exception:
-        hints = {}
+    target = _unwrap(func)
+    if _callable_skip_reason(target) is not None:
+        return None
 
-    sig = inspect.signature(func)
+    hints: dict[str, Any] = {}
+    for candidate in (target, getattr(target, "__func__", None)):
+        if candidate is None:
+            continue
+        try:
+            hints = get_type_hints(candidate)
+        except Exception:
+            continue
+        if hints:
+            break
+
+    sig = inspect.signature(target)
     strategies: dict[str, st.SearchStrategy[Any]] = {}
 
     for name, param in sig.parameters.items():
@@ -619,6 +1157,64 @@ def _documented_precondition_failure(
     }
 
 
+def _evaluate_contract_checks(
+    func: Any,
+    contract_checks: list[ContractCheck] | None,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Run explicit contract probes against *func* and collect violations."""
+    if not contract_checks:
+        return [], []
+
+    violations: list[str] = []
+    details: list[dict[str, Any]] = []
+    for check in contract_checks:
+        kwargs = dict(check.kwargs)
+        try:
+            value = _call_sync(func, **kwargs)
+        except Exception as exc:
+            summary = check.summary or f"explicit contract failed: {check.name}"
+            violations.append(summary)
+            details.append(
+                {
+                    "kind": "contract",
+                    "category": "semantic_contract",
+                    "name": check.name,
+                    "summary": summary,
+                    "error": str(exc)[:300],
+                    "error_type": type(exc).__name__,
+                    "failing_args": kwargs,
+                }
+            )
+            continue
+
+        try:
+            passed = bool(_call_sync(check.predicate, value))
+        except Exception as exc:
+            passed = False
+            error = f"{type(exc).__name__}: {exc}"
+        else:
+            error = None
+
+        if passed:
+            continue
+
+        summary = check.summary or f"explicit contract failed: {check.name}"
+        violations.append(summary)
+        detail = {
+            "kind": "contract",
+            "category": "semantic_contract",
+            "name": check.name,
+            "summary": summary,
+            "failing_args": kwargs,
+            "value": repr(value)[:300],
+        }
+        if error is not None:
+            detail["error"] = error[:300]
+        details.append(detail)
+
+    return violations, details
+
+
 # ============================================================================
 # 1. scan_module
 # ============================================================================
@@ -629,16 +1225,21 @@ def scan_module(
     *,
     max_examples: int | dict[str, int] = 50,
     check_return_type: bool = True,
+    targets: Sequence[str] | None = None,
+    include_private: bool = False,
     fixtures: dict[str, st.SearchStrategy] | None = None,
+    object_factories: dict[str, Any] | None = None,
+    object_setups: dict[str, Any] | None = None,
     expected_failures: list[str] | None = None,
     ignore_properties: list[str] | None = None,
     ignore_relations: list[str] | None = None,
     property_overrides: dict[str, list[str]] | None = None,
     relation_overrides: dict[str, list[str]] | None = None,
+    contract_checks: dict[str, list[ContractCheck]] | None = None,
 ) -> ScanResult:
-    """Smoke-test every public function in *module*.
+    """Smoke-test every public callable in *module*.
 
-    For each function with type hints, generates random inputs and checks:
+    For each callable with type hints, generates random inputs and checks:
 
     - **No crash**: calling with valid inputs doesn't raise
     - **Return type**: if annotated, the return value matches (optional)
@@ -670,7 +1271,13 @@ def scan_module(
             (same budget for all functions) or a dict mapping function names
             to budgets, with ``"__default__"`` as fallback (default: 50).
         check_return_type: Verify return type annotations.
+        targets: Optional explicit callable targets within the module. Accepts
+            local names like ``"Env.build_env_vars"`` or explicit targets like
+            ``"pkg.mod:Env.build_env_vars"``.
+        include_private: Also include single-underscore names.
         fixtures: Strategy overrides for specific parameter names.
+        object_factories: Factory overrides for class targets.
+        object_setups: Optional per-class setup hooks run after factory creation.
         expected_failures: Function names that are expected to fail.
             Failures from these functions are tracked separately and
             do not cause ``result.passed`` to be ``False``.
@@ -678,6 +1285,9 @@ def scan_module(
         ignore_relations: Relation names to suppress in mined warnings.
         property_overrides: Per-function property suppressions.
         relation_overrides: Per-function relation suppressions.
+        contract_checks: Explicit semantic contract probes keyed by
+            callable name. Each probe runs with explicit ``kwargs`` and
+            reports a contract violation when its predicate fails.
     """
     mod = _resolve_module(module)
     mod_name = module if isinstance(module, str) else mod.__name__
@@ -694,10 +1304,17 @@ def scan_module(
         default_examples = max_examples.get("__default__", 50)
         examples_map = max_examples
 
-    for name, func in _get_public_functions(mod):
+    for name, func in _selected_public_functions(
+        mod,
+        targets=targets,
+        include_private=include_private,
+        object_factories=object_factories,
+        object_setups=object_setups,
+    ):
         strategies = _infer_strategies(func, fixtures)
         if strategies is None:
-            result.skipped.append((name, "missing type hints"))
+            reason = _callable_skip_reason(func) or "missing type hints"
+            result.skipped.append((name, reason))
             continue
 
         try:
@@ -729,6 +1346,7 @@ def scan_module(
             ),
             property_overrides=property_overrides,
             relation_overrides=relation_overrides,
+            contract_checks=(contract_checks or {}).get(name),
         )
         result.functions.append(func_result)
 
@@ -748,6 +1366,7 @@ def _test_one_function(
     ignore_relations: list[str] | None = None,
     property_overrides: dict[str, list[str]] | None = None,
     relation_overrides: dict[str, list[str]] | None = None,
+    contract_checks: list[ContractCheck] | None = None,
 ) -> FunctionResult:
     """Run no-crash + return-type + mined-property checks on a single function."""
 
@@ -770,7 +1389,7 @@ def _test_one_function(
     try:
         for kwargs in _boundary_smoke_inputs(func, fixtures=fixtures):
             last_kwargs = dict(kwargs)
-            result = func(**dict(kwargs))
+            result = _call_sync(func, **dict(kwargs))
             if check_return_type and return_type is not None:
                 if not _type_matches(result, return_type):
                     raise AssertionError(
@@ -783,7 +1402,7 @@ def _test_one_function(
         def test(**kwargs: Any) -> None:
             nonlocal last_kwargs
             last_kwargs = dict(kwargs)
-            result = func(**kwargs)
+            result = _call_sync(func, **kwargs)
             if check_return_type and return_type is not None:
                 if not _type_matches(result, return_type):
                     raise AssertionError(
@@ -848,11 +1467,14 @@ def _test_one_function(
     except Exception:
         pass  # mining failed — still report crash-safety pass
 
+    contract_violations, contract_details = _evaluate_contract_checks(func, contract_checks)
     return FunctionResult(
         name=name,
         passed=True,
         property_violations=violations,
         property_violation_details=details,
+        contract_violations=contract_violations,
+        contract_violation_details=contract_details,
     )
 
 
@@ -866,6 +1488,8 @@ def fuzz(
     *,
     max_examples: int = 1000,
     check_return_type: bool = False,
+    object_factories: dict[str, Any] | None = None,
+    object_setups: dict[str, Any] | None = None,
     **fixtures: st.SearchStrategy[Any] | Any,
 ) -> FuzzResult:
     """Deep-fuzz a single function with auto-inferred strategies.
@@ -884,9 +1508,17 @@ def fuzz(
         fn: The function to fuzz.
         max_examples: Number of random inputs to try.
         check_return_type: Verify return type annotation.
+        object_factories: Factory overrides for class targets.
+        object_setups: Optional per-class setup hooks run after factory creation.
         **fixtures: Strategy overrides or plain values (auto-wrapped in st.just).
     """
-    fn = _unwrap(fn)
+    fn_name = getattr(fn, "__qualname__", getattr(fn, "__name__", repr(fn)))
+    if isinstance(fn, str):
+        fn_name, fn = _resolve_explicit_target(
+            fn,
+            object_factories=object_factories,
+            object_setups=object_setups,
+        )
 
     # Auto-wrap plain values in st.just()
     normalized: dict[str, st.SearchStrategy[Any]] | None = None
@@ -899,8 +1531,11 @@ def fuzz(
                 normalized[k] = st.just(v)
     strategies = _infer_strategies(fn, normalized)
     if strategies is None:
+        reason = _callable_skip_reason(fn)
+        if reason is not None:
+            raise ValueError(f"Cannot fuzz {fn_name}: {reason}")
         raise ValueError(
-            f"Cannot infer strategies for {fn.__name__}. Provide fixtures for untyped parameters."
+            f"Cannot infer strategies for {fn_name}. Provide fixtures for untyped parameters."
         )
 
     try:
@@ -914,7 +1549,7 @@ def fuzz(
     try:
         for kwargs in _boundary_smoke_inputs(fn, fixtures=normalized):
             last_kwargs = dict(kwargs)
-            result = fn(**dict(kwargs))
+            result = _call_sync(fn, **dict(kwargs))
             if check_return_type and return_type is not None:
                 if not _type_matches(result, return_type):
                     raise AssertionError(f"Expected {return_type}, got {type(result).__name__}")
@@ -924,7 +1559,7 @@ def fuzz(
         def test(**kwargs: Any) -> None:
             nonlocal last_kwargs
             last_kwargs = dict(kwargs)
-            result = fn(**kwargs)
+            result = _call_sync(fn, **kwargs)
             if check_return_type and return_type is not None:
                 if not _type_matches(result, return_type):
                     raise AssertionError(f"Expected {return_type}, got {type(result).__name__}")
@@ -968,7 +1603,13 @@ _FAULT_PATTERNS: dict[str, list[tuple[str, str, dict[str, Any]]]] = {
 }
 
 
-def _infer_faults(mod: ModuleType, mod_name: str) -> list[Fault]:
+def _infer_faults(
+    mod: ModuleType,
+    mod_name: str,
+    *,
+    object_factories: dict[str, Any] | None = None,
+    object_setups: dict[str, Any] | None = None,
+) -> list[Fault]:
     """Auto-discover faults by scanning function ASTs for risky calls.
 
     Detects subprocess, file I/O, and cross-function calls, then
@@ -980,9 +1621,13 @@ def _infer_faults(mod: ModuleType, mod_name: str) -> list[Fault]:
     faults: list[Fault] = []
     seen: set[str] = set()
 
-    for name, func in _get_public_functions(mod):
+    for name, func in _get_public_functions(
+        mod,
+        object_factories=object_factories,
+        object_setups=object_setups,
+    ):
         try:
-            source = textwrap.dedent(inspect.getsource(func))
+            source = textwrap.dedent(inspect.getsource(inspect.unwrap(func)))
             tree = ast.parse(source)
         except (OSError, TypeError, SyntaxError):
             continue
@@ -1046,6 +1691,9 @@ def _call_to_string(node: Any) -> str | None:
 def _infer_invariants(
     mod: ModuleType,
     fixtures: dict[str, Any] | None,
+    *,
+    object_factories: dict[str, Any] | None = None,
+    object_setups: dict[str, Any] | None = None,
 ) -> tuple[dict[str, list[Invariant]], list[Invariant]]:
     """Auto-discover invariants by mining function properties.
 
@@ -1064,7 +1712,11 @@ def _infer_invariants(
     }
 
     invariant_map: dict[str, list[Invariant]] = {}
-    for name, func in _get_public_functions(mod):
+    for name, func in _get_public_functions(
+        mod,
+        object_factories=object_factories,
+        object_setups=object_setups,
+    ):
         strats = _infer_strategies(func, fixtures)
         if strats is None:
             continue
@@ -1097,6 +1749,8 @@ def chaos_for(
     module: str | ModuleType,
     *,
     fixtures: dict[str, st.SearchStrategy] | None = None,
+    object_factories: dict[str, Any] | None = None,
+    object_setups: dict[str, Any] | None = None,
     invariants: list[Invariant] | dict[str, Invariant] | None = None,
     faults: list[Fault] | None = None,
     max_examples: int = 50,
@@ -1130,6 +1784,8 @@ def chaos_for(
     Args:
         module: Module path or object.
         fixtures: Strategy overrides for parameter names.
+        object_factories: Factory overrides for class targets.
+        object_setups: Optional per-class setup hooks run after factory creation.
         invariants: ``None`` = auto-mine, list = global, dict = per-function.
         faults: ``None`` = auto-infer from code, list = explicit.
         max_examples: Hypothesis examples.
@@ -1141,13 +1797,23 @@ def chaos_for(
 
     # Auto-discover faults from code analysis when not provided
     if faults is None:
-        fault_list = _infer_faults(mod, mod_name)
+        fault_list = _infer_faults(
+            mod,
+            mod_name,
+            object_factories=object_factories,
+            object_setups=object_setups,
+        )
     else:
         fault_list = list(faults)
 
     # Auto-discover invariants from mine() when not provided
     if invariants is None:
-        invariant_map, global_invs = _infer_invariants(mod, fixtures)
+        invariant_map, global_invs = _infer_invariants(
+            mod,
+            fixtures,
+            object_factories=object_factories,
+            object_setups=object_setups,
+        )
     elif isinstance(invariants, dict):
         invariant_map: dict[str, list[Invariant]] = {
             k: [v] if isinstance(v, Invariant) else list(v) for k, v in invariants.items()
@@ -1159,7 +1825,11 @@ def chaos_for(
 
     # Collect rule methods
     rules_dict: dict[str, Any] = {}
-    for name, func in _get_public_functions(mod):
+    for name, func in _get_public_functions(
+        mod,
+        object_factories=object_factories,
+        object_setups=object_setups,
+    ):
         strategies = _infer_strategies(func, fixtures)
         if strategies is None:
             continue
@@ -1199,10 +1869,11 @@ def _make_rule_method(
     invariants: list[Invariant],
 ) -> Any:
     """Create a @rule method that calls func and checks invariants on the result."""
+    safe_name = func_name.replace(".", "_")
 
     @rule(**strategies)
     def method(self: Any, **kwargs: Any) -> None:
-        result = func(**kwargs)
+        result = _call_sync(func, **kwargs)
         if result is not None:
             for inv in invariants:
                 try:
@@ -1210,6 +1881,6 @@ def _make_rule_method(
                 except TypeError:
                     pass  # invariant doesn't apply to this return type
 
-    method.__name__ = f"call_{func_name}"
-    method.__qualname__ = f"AutoChaos.call_{func_name}"
+    method.__name__ = f"call_{safe_name}"
+    method.__qualname__ = f"AutoChaos.call_{safe_name}"
     return method

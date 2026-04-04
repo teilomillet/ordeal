@@ -94,6 +94,8 @@ class ScanConfig:
 
     module: str
     max_examples: int = 50
+    targets: list[str] = field(default_factory=list)
+    include_private: bool = False
     fixtures: dict[str, str] = field(default_factory=dict)
     # fixture values are sampled_from specs like "violence,cyber,sexual"
     expected_failures: list[str] = field(default_factory=list)
@@ -164,10 +166,45 @@ class MutationConfig:
 
 
 @dataclass
+class ObjectConfig:
+    """One ``[[objects]]`` entry — reusable factory/setup for object targets."""
+
+    target: str
+    factory: str | None = None
+    setup: str | None = None
+    methods: list[str] = field(default_factory=list)
+    include_private: bool = False
+
+
+@dataclass
+class ContractConfig:
+    """One ``[[contracts]]`` entry — semantic probes for scan targets."""
+
+    target: str
+    checks: list[str] = field(default_factory=list)
+    kwargs: dict[str, object] = field(default_factory=dict)
+    tracked_params: list[str] = field(default_factory=list)
+    protected_keys: list[str] = field(default_factory=list)
+    env_param: str | None = None
+
+
+@dataclass
+class AuditTargetConfig:
+    """One ``[[audit.targets]]`` entry — a module/class/method target."""
+
+    target: str
+    factory: str | None = None
+    setup: str | None = None
+    methods: list[str] = field(default_factory=list)
+    include_private: bool = False
+
+
+@dataclass
 class AuditConfig:
     """Settings for ``[audit]`` — declarative audit defaults."""
 
     modules: list[str] = field(default_factory=list)
+    targets: list[AuditTargetConfig] = field(default_factory=list)
     test_dir: str = "tests"
     max_examples: int = 20
     workers: int = 1
@@ -202,6 +239,8 @@ class OrdealConfig:
     tests: list[TestConfig] = field(default_factory=list)
     fixtures: FixturesConfig = field(default_factory=FixturesConfig)
     scan: list[ScanConfig] = field(default_factory=list)
+    objects: list[ObjectConfig] = field(default_factory=list)
+    contracts: list[ContractConfig] = field(default_factory=list)
     report: ReportConfig = field(default_factory=ReportConfig)
     api: APIConfig | None = None
     mutations: MutationConfig | None = None
@@ -229,6 +268,8 @@ _KNOWN_SECTIONS = {
     "tests",
     "fixtures",
     "scan",
+    "objects",
+    "contracts",
     "report",
     "faults",
     "api",
@@ -250,6 +291,9 @@ _KNOWN_REPORT_KEYS = _fields_of(ReportConfig)
 _KNOWN_MUTATIONS_KEYS = _fields_of(MutationConfig)
 _KNOWN_FIXTURES_KEYS = _fields_of(FixturesConfig)
 _KNOWN_SCAN_KEYS = _fields_of(ScanConfig)
+_KNOWN_OBJECT_KEYS = _fields_of(ObjectConfig)
+_KNOWN_CONTRACT_KEYS = _fields_of(ContractConfig)
+_KNOWN_AUDIT_TARGET_KEYS = _fields_of(AuditTargetConfig)
 _KNOWN_AUDIT_KEYS = _fields_of(AuditConfig)
 _KNOWN_INIT_KEYS = _fields_of(InitConfig)
 # API and Test configs have extra TOML-only keys not in the dataclass
@@ -365,6 +409,8 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
             ScanConfig(
                 module=s["module"],
                 max_examples=int(s.get("max_examples", 50)),
+                targets=list(s.get("targets", [])),
+                include_private=bool(s.get("include_private", False)),
                 fixtures=s.get("fixtures", {}),
                 expected_failures=s.get("expected_failures", []),
                 fixture_registries=list(s.get("fixture_registries", [])),
@@ -372,6 +418,39 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
                 ignore_relations=list(s.get("ignore_relations", [])),
                 property_overrides=dict(s.get("property_overrides", {})),
                 relation_overrides=dict(s.get("relation_overrides", {})),
+            )
+        )
+
+    # -- Objects --
+    object_cfgs: list[ObjectConfig] = []
+    for i, obj_raw in enumerate(raw.get("objects", [])):
+        _warn_unknown_keys(f"objects.{i}", obj_raw, _KNOWN_OBJECT_KEYS)
+        if "target" not in obj_raw:
+            raise ConfigError(f"[[objects]] entry {i} is missing required 'target' key")
+        object_cfgs.append(
+            ObjectConfig(
+                target=str(obj_raw["target"]),
+                factory=obj_raw.get("factory"),
+                setup=obj_raw.get("setup"),
+                methods=list(obj_raw.get("methods", [])),
+                include_private=bool(obj_raw.get("include_private", False)),
+            )
+        )
+
+    # -- Contracts --
+    contract_cfgs: list[ContractConfig] = []
+    for i, contract_raw in enumerate(raw.get("contracts", [])):
+        _warn_unknown_keys(f"contracts.{i}", contract_raw, _KNOWN_CONTRACT_KEYS)
+        if "target" not in contract_raw:
+            raise ConfigError(f"[[contracts]] entry {i} is missing required 'target' key")
+        contract_cfgs.append(
+            ContractConfig(
+                target=str(contract_raw["target"]),
+                checks=list(contract_raw.get("checks", [])),
+                kwargs=dict(contract_raw.get("kwargs", {})),
+                tracked_params=list(contract_raw.get("tracked_params", [])),
+                protected_keys=list(contract_raw.get("protected_keys", [])),
+                env_param=contract_raw.get("env_param"),
             )
         )
 
@@ -453,8 +532,24 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
     # -- Audit --
     audit_raw = raw.get("audit", {})
     _warn_unknown_keys("audit", audit_raw, _KNOWN_AUDIT_KEYS)
+    audit_targets_raw = audit_raw.get("targets", [])
+    audit_targets: list[AuditTargetConfig] = []
+    for i, target_raw in enumerate(audit_targets_raw):
+        _warn_unknown_keys(f"audit.targets.{i}", target_raw, _KNOWN_AUDIT_TARGET_KEYS)
+        if "target" not in target_raw:
+            raise ConfigError(f"[[audit.targets]] entry {i} is missing required 'target' key")
+        audit_targets.append(
+            AuditTargetConfig(
+                target=str(target_raw["target"]),
+                factory=target_raw.get("factory"),
+                setup=target_raw.get("setup"),
+                methods=list(target_raw.get("methods", [])),
+                include_private=bool(target_raw.get("include_private", False)),
+            )
+        )
     audit_cfg = AuditConfig(
         modules=list(audit_raw.get("modules", [])),
+        targets=audit_targets,
         test_dir=audit_raw.get("test_dir", "tests"),
         max_examples=int(audit_raw.get("max_examples", 20)),
         workers=int(audit_raw.get("workers", 1)),
@@ -498,6 +593,8 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
         tests=tests,
         fixtures=fixtures,
         scan=scans,
+        objects=object_cfgs,
+        contracts=contract_cfgs,
         report=report,
         api=api_cfg,
         mutations=mutations_cfg,

@@ -418,6 +418,9 @@ def explore_mine(
     *,
     max_examples: int = 50,
     include_private: bool = False,
+    targets: list[str] | None = None,
+    object_factories: dict[str, Any] | None = None,
+    object_setups: dict[str, Any] | None = None,
     ignore_properties: list[str] | None = None,
     ignore_relations: list[str] | None = None,
     property_overrides: dict[str, list[str]] | None = None,
@@ -425,11 +428,17 @@ def explore_mine(
 ) -> ExplorationState:
     """Mine all functions in the module and update state."""
 
-    from ordeal.auto import _get_public_functions, _infer_strategies, _resolve_module
+    from ordeal.auto import _infer_strategies, _resolve_module, _selected_public_functions
     from ordeal.mine import _is_suspicious_property, mine
 
     mod = _resolve_module(state.module)
-    funcs = _get_public_functions(mod, include_private=include_private)
+    funcs = _selected_public_functions(
+        mod,
+        targets=targets,
+        include_private=include_private,
+        object_factories=object_factories,
+        object_setups=object_setups,
+    )
 
     # Track skipped functions with reasons
     for name, func in funcs:
@@ -499,12 +508,16 @@ def explore_scan(
     state: ExplorationState,
     *,
     max_examples: int = 30,
+    targets: list[str] | None = None,
     fixtures: dict[str, Any] | None = None,
+    object_factories: dict[str, Any] | None = None,
+    object_setups: dict[str, Any] | None = None,
     expected_failures: list[str] | None = None,
     ignore_properties: list[str] | None = None,
     ignore_relations: list[str] | None = None,
     property_overrides: dict[str, list[str]] | None = None,
     relation_overrides: dict[str, list[str]] | None = None,
+    contract_checks: dict[str, list[Any]] | None = None,
 ) -> ExplorationState:
     """Scan module for crashes and update state."""
     from ordeal.auto import scan_module
@@ -512,12 +525,16 @@ def explore_scan(
     result = scan_module(
         state.module,
         max_examples=max_examples,
+        targets=targets,
         fixtures=fixtures,
+        object_factories=object_factories,
+        object_setups=object_setups,
         expected_failures=expected_failures,
         ignore_properties=ignore_properties,
         ignore_relations=ignore_relations,
         property_overrides=property_overrides,
         relation_overrides=relation_overrides,
+        contract_checks=contract_checks,
     )
     for fr in result.functions:
         fs = state.function(fr.name)
@@ -662,12 +679,16 @@ def explore(
     seed: int = 42,
     patch_io: bool = False,
     include_private: bool = False,
+    scan_targets: list[str] | None = None,
     scan_fixtures: dict[str, Any] | None = None,
+    scan_object_factories: dict[str, Any] | None = None,
+    scan_object_setups: dict[str, Any] | None = None,
     scan_expected_failures: list[str] | None = None,
     scan_ignore_properties: list[str] | None = None,
     scan_ignore_relations: list[str] | None = None,
     scan_property_overrides: dict[str, list[str]] | None = None,
     scan_relation_overrides: dict[str, list[str]] | None = None,
+    scan_contract_checks: dict[str, list[Any]] | None = None,
 ) -> ExplorationState:
     """Run all exploration strategies on a module.
 
@@ -736,6 +757,9 @@ def explore(
             state,
             max_examples=max_examples,
             include_private=include_private,
+            targets=scan_targets,
+            object_factories=scan_object_factories,
+            object_setups=scan_object_setups,
             ignore_properties=scan_ignore_properties,
             ignore_relations=scan_ignore_relations,
             property_overrides=scan_property_overrides,
@@ -758,12 +782,16 @@ def explore(
             state = explore_scan(
                 state,
                 max_examples=max_examples,
+                targets=scan_targets,
                 fixtures=scan_fixtures,
+                object_factories=scan_object_factories,
+                object_setups=scan_object_setups,
                 expected_failures=scan_expected_failures,
                 ignore_properties=scan_ignore_properties,
                 ignore_relations=scan_ignore_relations,
                 property_overrides=scan_property_overrides,
                 relation_overrides=scan_relation_overrides,
+                contract_checks=scan_contract_checks,
             )
             scan_hash = hash(("scanned", state.confidence))
             state.tree.checkpoint(

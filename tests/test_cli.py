@@ -235,6 +235,12 @@ test_dir = "spec"
 max_examples = 31
 workers = 3
 validation_mode = "deep"
+
+[[audit.targets]]
+target = "ordeal.demo:ComposableEnv.post_sandbox_setup"
+factory = "tests.support.factories:make_composable_env"
+setup = "tests.support.factories:prime_composable_env"
+methods = ["post_sandbox_setup"]
 """,
             encoding="utf-8",
         )
@@ -285,6 +291,9 @@ validation_mode = "deep"
         assert calls["max_examples"] == 31
         assert calls["workers"] == 3
         assert calls["validation_mode"] == "deep"
+        assert len(calls["targets"]) == 1
+        assert calls["targets"][0].target == "ordeal.demo:ComposableEnv.post_sandbox_setup"
+        assert calls["targets"][0].factory == "tests.support.factories:make_composable_env"
         assert "ordeal audit" in capsys.readouterr().out
 
     def test_audit_cli_can_disable_configured_direct_test_gate(
@@ -918,6 +927,74 @@ scan_max_examples = 12
         assert rc == 0
         err = capsys.readouterr().err
         assert "warning: fixture registry load failed for missing_registry" in err
+
+    def test_scan_reads_object_factories_targets_and_contracts_from_toml(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        (tmp_path / "scan_support.py").write_text(
+            "class Env:\n"
+            "    pass\n"
+            "\n"
+            "def make_env():\n"
+            "    return Env()\n"
+            "\n"
+            "def prime_env(instance):\n"
+            "    instance.ready = True\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "ordeal.toml").write_text(
+            "[[scan]]\n"
+            'module = "pkg.mod"\n'
+            'targets = ["pkg.mod:Env.build_command"]\n'
+            "include_private = true\n"
+            "\n"
+            "[[objects]]\n"
+            'target = "pkg.mod:Env"\n'
+            'factory = "scan_support:make_env"\n'
+            'setup = "scan_support:prime_env"\n'
+            "\n"
+            "[[contracts]]\n"
+            'target = "pkg.mod:Env.build_command"\n'
+            'checks = ["shell_safe", "quoted_paths", "command_arg_stability"]\n'
+            'kwargs = { path = "a b" }\n'
+            'tracked_params = ["path"]\n',
+            encoding="utf-8",
+        )
+
+        calls: dict[str, object] = {}
+
+        def fake_explore(module: str, **kwargs):
+            calls["module"] = module
+            calls.update(kwargs)
+            return SimpleNamespace(
+                module=module,
+                confidence=0.0,
+                functions={},
+                supervisor_info={},
+                tree=SimpleNamespace(size=0),
+                findings=[],
+                frontier={},
+                skipped=[],
+            )
+
+        monkeypatch.setattr(ordeal_state, "explore", fake_explore)
+
+        rc = main(["scan", "pkg.mod"])
+
+        assert rc == 0
+        assert calls["module"] == "pkg.mod"
+        assert calls["include_private"] is True
+        assert calls["scan_targets"] == ["pkg.mod:Env.build_command"]
+        assert callable(calls["scan_object_factories"]["pkg.mod:Env"])
+        assert callable(calls["scan_object_setups"]["pkg.mod:Env"])
+        checks = calls["scan_contract_checks"]["Env.build_command"]
+        assert [check.name for check in checks] == [
+            "shell_safe",
+            "quoted_paths",
+            "command_arg_stability",
+        ]
 
     def test_replay_missing_file(self):
         assert main(["replay", "/nonexistent/trace.json"]) == 1

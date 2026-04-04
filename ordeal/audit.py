@@ -49,7 +49,9 @@ so the developer can inspect, run, and debug it.
 from __future__ import annotations
 
 import ast
+import asyncio
 import enum
+import functools
 import hashlib
 import importlib.util
 import inspect
@@ -64,7 +66,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Literal, Sequence, Union, get_args, get_origin
+from typing import Any, Callable, Literal, Sequence, Union, get_args, get_origin
 
 from ordeal.auto import (
     _get_public_functions,
@@ -1188,9 +1190,32 @@ def _generated_test_path(module: str) -> Path:
     return Path(".ordeal") / f"test_{mod_short}_migrated.py"
 
 
+def _audit_target_cache_key(module: str, target_specs: Sequence[Any] | None = None) -> str:
+    """Return a stable cache key for a module plus optional object targets."""
+    if not target_specs:
+        return module
+
+    serial: list[dict[str, Any]] = []
+    for spec in target_specs:
+        if isinstance(spec, str):
+            serial.append({"target": spec})
+            continue
+        serial.append(
+            {
+                "target": str(getattr(spec, "target", "")),
+                "factory": getattr(spec, "factory", None),
+                "setup": getattr(spec, "setup", None),
+                "methods": list(getattr(spec, "methods", [])),
+                "include_private": bool(getattr(spec, "include_private", False)),
+            }
+        )
+    digest = hashlib.sha256(json.dumps(serial, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+    return f"{module}::{digest}"
+
+
 def _audit_cache_path(module: str) -> Path:
     """Return the on-disk cache path for *module*."""
-    safe = module.replace(".", "_")
+    safe = module.replace(".", "_").replace(":", "_")
     return Path(".ordeal") / "audit" / f"{safe}.json"
 
 
@@ -1208,6 +1233,7 @@ def _audit_state_hash(
     test_dir: str,
     max_examples: int,
     validation_mode: AuditValidationMode,
+    target_specs: Sequence[Any] | None = None,
 ) -> str:
     """Hash the inputs that determine an audit result.
 
@@ -1217,6 +1243,7 @@ def _audit_state_hash(
     """
     h = hashlib.sha256()
     h.update(module.encode("utf-8"))
+    h.update(_audit_target_cache_key(module, target_specs).encode("utf-8"))
     h.update(str(Path(test_dir).resolve()).encode("utf-8"))
     h.update(str(max_examples).encode("utf-8"))
     h.update(validation_mode.encode("utf-8"))
@@ -1265,9 +1292,9 @@ def _audit_state_hash(
     return h.hexdigest()[:16]
 
 
-def _load_audit_cache(module: str, state_hash: str) -> ModuleAudit | None:
+def _load_audit_cache(cache_key: str, state_hash: str) -> ModuleAudit | None:
     """Load a cached audit result when the state hash still matches."""
-    cache_path = _audit_cache_path(module)
+    cache_path = _audit_cache_path(cache_key)
     if not cache_path.exists():
         return None
     try:
@@ -1285,9 +1312,9 @@ def _load_audit_cache(module: str, state_hash: str) -> ModuleAudit | None:
         return None
 
 
-def _save_audit_cache(module: str, state_hash: str, result: ModuleAudit) -> None:
+def _save_audit_cache(cache_key: str, state_hash: str, result: ModuleAudit) -> None:
     """Persist an audit result to the local `.ordeal/audit` cache."""
-    cache_path = _audit_cache_path(module)
+    cache_path = _audit_cache_path(cache_key)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "state_hash": state_hash,
@@ -1303,24 +1330,427 @@ def _save_audit_cache(module: str, state_hash: str, result: ModuleAudit) -> None
 # ============================================================================
 
 
+def _split_audit_target_spec(target: str) -> tuple[str, str | None, str | None]:
+    """Split ``module[:Owner[.method]]`` into module, owner, and method parts."""
+    if ":" not in target:
+        return target, None, None
+    module_path, remainder = target.split(":", 1)
+    if "." not in remainder:
+        return module_path, remainder, None
+    owner_path, method_name = remainder.rsplit(".", 1)
+    return module_path, owner_path, method_name
+
+
+def _resolve_audit_symbol(path: str) -> Any:
+    """Resolve a dotted import path, including lazy-exported package members."""
+    if ":" in path:
+        module_path, attr_path = path.split(":", 1)
+        obj: Any = importlib.import_module(module_path)
+        for part in attr_path.split("."):
+            obj = getattr(obj, part)
+        return obj
+
+    try:
+        return importlib.import_module(path)
+    except ImportError:
+        pass
+
+    parts = path.split(".")
+    for i in range(len(parts) - 1, 0, -1):
+        try:
+            obj: Any = importlib.import_module(".".join(parts[:i]))
+        except ImportError:
+            continue
+        try:
+            for part in parts[i:]:
+                obj = getattr(obj, part)
+            return obj
+        except AttributeError:
+            continue
+    raise ImportError(f"Cannot resolve target: {path!r}")
+
+
+def _call_with_async_support(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Call *func* and run any awaitable result to completion."""
+    result = func(*args, **kwargs)
+    if not inspect.isawaitable(result):
+        return result
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(result)
+
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(result)
+    finally:
+        loop.close()
+
+
+def _instantiate_audit_owner(
+    cls: type[Any],
+    *,
+    factory: str | None = None,
+    setup: str | None = None,
+) -> tuple[Any | None, str | None]:
+    """Create an object for auditing class methods."""
+    try:
+        if factory:
+            factory_obj = _resolve_audit_symbol(factory)
+            if not callable(factory_obj):
+                return None, f"factory {factory} is not callable"
+            instance = _call_with_async_support(factory_obj)
+        else:
+            instance = cls()
+    except Exception as exc:
+        return None, f"cannot instantiate {cls.__name__}: {type(exc).__name__}: {exc}"
+
+    if setup:
+        try:
+            setup_obj = _resolve_audit_symbol(setup)
+            if not callable(setup_obj):
+                return None, f"setup hook {setup} is not callable"
+            _call_with_async_support(setup_obj, instance)
+        except Exception as exc:
+            return None, f"setup failed for {cls.__name__}: {type(exc).__name__}: {exc}"
+
+    return instance, None
+
+
+def _wrap_audit_callable(
+    reference: Callable[..., Any],
+    invoke: Callable[..., Any],
+    *,
+    module_name: str,
+    qualname: str,
+    owner_name: str | None = None,
+    method_name: str | None = None,
+    factory: str | None = None,
+    setup: str | None = None,
+    kind: str = "function",
+) -> Callable[..., Any]:
+    """Wrap a callable while preserving its signature and metadata."""
+
+    @functools.wraps(reference)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        return _call_with_async_support(invoke, *args, **kwargs)
+
+    wrapped.__ordeal_module__ = module_name  # type: ignore[attr-defined]
+    wrapped.__ordeal_qualname__ = qualname  # type: ignore[attr-defined]
+    wrapped.__ordeal_owner__ = owner_name  # type: ignore[attr-defined]
+    wrapped.__ordeal_method__ = method_name  # type: ignore[attr-defined]
+    wrapped.__ordeal_factory__ = factory  # type: ignore[attr-defined]
+    wrapped.__ordeal_setup__ = setup  # type: ignore[attr-defined]
+    wrapped.__ordeal_kind__ = kind  # type: ignore[attr-defined]
+    return wrapped
+
+
+def _class_target_callables(
+    module_name: str,
+    cls_name: str,
+    cls: type[Any],
+    *,
+    factory: str | None = None,
+    setup: str | None = None,
+    method_names: Sequence[str] | None = None,
+    include_private: bool = False,
+) -> tuple[list[tuple[str, object]], list[str]]:
+    """Collect callable methods from a class target."""
+    discovered: list[tuple[str, object]] = []
+    skipped: list[str] = []
+    candidate_names = list(method_names or [])
+    if not candidate_names:
+        candidate_names = [
+            name
+            for name in sorted(dir(cls))
+            if not name.startswith("__") and (include_private or not name.startswith("_"))
+        ]
+
+    for method_name in candidate_names:
+        if not include_private and method_name.startswith("_"):
+            continue
+        try:
+            descriptor = inspect.getattr_static(cls, method_name)
+        except AttributeError:
+            skipped.append(f"{cls_name}.{method_name} (missing attribute)")
+            continue
+
+        qualname = f"{cls_name}.{method_name}"
+
+        if isinstance(descriptor, staticmethod):
+            reference = getattr(cls, method_name)
+            discovered.append(
+                (
+                    qualname,
+                    _wrap_audit_callable(
+                        reference,
+                        reference,
+                        module_name=module_name,
+                        qualname=qualname,
+                        owner_name=cls_name,
+                        method_name=method_name,
+                        factory=factory,
+                        setup=setup,
+                        kind="static",
+                    ),
+                )
+            )
+            continue
+        if isinstance(descriptor, classmethod):
+            reference = getattr(cls, method_name)
+            discovered.append(
+                (
+                    qualname,
+                    _wrap_audit_callable(
+                        reference,
+                        reference,
+                        module_name=module_name,
+                        qualname=qualname,
+                        owner_name=cls_name,
+                        method_name=method_name,
+                        factory=factory,
+                        setup=setup,
+                        kind="class",
+                    ),
+                )
+            )
+            continue
+        if callable(descriptor):
+            prototype, reason = _instantiate_audit_owner(cls, factory=factory, setup=setup)
+            if prototype is None:
+                skipped.append(f"{qualname} ({reason})")
+                continue
+
+            reference = getattr(prototype, method_name)
+
+            def _invoke(
+                *args: Any,
+                __cls: type[Any] = cls,
+                __method_name: str = method_name,
+                __factory: str | None = factory,
+                __setup: str | None = setup,
+                **kwargs: Any,
+            ) -> Any:
+                instance, inst_reason = _instantiate_audit_owner(
+                    __cls,
+                    factory=__factory,
+                    setup=__setup,
+                )
+                if instance is None:
+                    raise RuntimeError(inst_reason or f"cannot instantiate {__cls.__name__}")
+                bound = getattr(instance, __method_name)
+                return bound(*args, **kwargs)
+
+            discovered.append(
+                (
+                    qualname,
+                    _wrap_audit_callable(
+                        reference,
+                        _invoke,
+                        module_name=module_name,
+                        qualname=qualname,
+                        owner_name=cls_name,
+                        method_name=method_name,
+                        factory=factory,
+                        setup=setup,
+                        kind="instance",
+                    ),
+                )
+            )
+            continue
+
+        skipped.append(f"{qualname} (not callable)")
+
+    return discovered, skipped
+
+
+def _module_target_callables(
+    mod: ModuleType,
+    *,
+    include_private: bool = False,
+    object_factories: dict[str, Any] | None = None,
+    object_setups: dict[str, Any] | None = None,
+) -> tuple[list[tuple[str, object]], list[str]]:
+    """Collect public module callables plus class methods when available."""
+    discovered = _get_public_functions(
+        mod,
+        include_private=include_private,
+        object_factories=object_factories,
+        object_setups=object_setups,
+    )
+    return discovered, []
+
+
+def _collect_target_callables(
+    target: str,
+    *,
+    factory: str | None = None,
+    setup: str | None = None,
+    methods: Sequence[str] | None = None,
+    include_private: bool = False,
+) -> tuple[list[tuple[str, object]], list[str]]:
+    """Collect callables for a configured audit target."""
+    module_path, owner_path, method_name = _split_audit_target_spec(target)
+    mod = _resolve_audit_symbol(module_path)
+    if not isinstance(mod, ModuleType):
+        raise TypeError(f"{module_path!r} is not a module")
+
+    if owner_path is None:
+        return _module_target_callables(mod, include_private=include_private)
+
+    owner: Any = mod
+    for part in owner_path.split("."):
+        owner = getattr(owner, part)
+
+    if not inspect.isclass(owner):
+        raise TypeError(f"{target!r} does not resolve to a class target")
+
+    if method_name is not None:
+        return _class_target_callables(
+            mod.__name__,
+            owner_path,
+            owner,
+            factory=factory,
+            setup=setup,
+            method_names=[method_name],
+            include_private=include_private,
+        )
+
+    return _class_target_callables(
+        mod.__name__,
+        owner_path,
+        owner,
+        factory=factory,
+        setup=setup,
+        method_names=methods,
+        include_private=include_private,
+    )
+
+
+def _audit_object_hook_maps(
+    target_specs: Sequence[Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Resolve configured object factories/setups for class targets."""
+    factories: dict[str, Any] = {}
+    setups: dict[str, Any] = {}
+    for spec in target_specs or []:
+        if isinstance(spec, str):
+            target = spec
+            factory = None
+            setup = None
+        else:
+            target = str(getattr(spec, "target"))
+            factory = getattr(spec, "factory", None)
+            setup = getattr(spec, "setup", None)
+        if ":" not in target:
+            continue
+        module_path, owner_path = target.split(":", 1)
+        owner_keys = {
+            owner_path,
+            f"{module_path}:{owner_path}",
+            f"{module_path}.{owner_path}",
+            f"{module_path}:{owner_path.split('.')[-1]}",
+            f"{module_path}.{owner_path.split('.')[-1]}",
+        }
+        if factory:
+            factory_obj = _resolve_audit_symbol(factory)
+            for key in owner_keys:
+                factories[key] = factory_obj
+        if setup:
+            setup_obj = _resolve_audit_symbol(setup)
+            for key in owner_keys:
+                setups[key] = setup_obj
+    return factories, setups
+
+
 def _collect_audit_functions(
     module: str | ModuleType,
-) -> tuple[list[tuple[str, object]], list[str]]:
-    """Split public module functions into scannable and skipped groups.
+    *,
+    target_specs: Sequence[Any] | None = None,
+) -> tuple[list[tuple[str, object]], list[str], list[tuple[str, object]]]:
+    """Split public module and object-target callables into scannable and skipped groups.
 
     ``scannable`` means ordeal can infer Hypothesis strategies for the
     function, so audit can fuzz it, mine properties, and generate tests.
     ``skipped`` functions still appear in the summary as fixture gaps.
     """
     mod = _resolve_module(module)
-    scannable: list[tuple[str, object]] = []
-    skipped: list[str] = []
-    for name, func in _get_public_functions(mod):
-        if _infer_strategies(func) is None:
-            skipped.append(name)
+    object_factories, object_setups = _audit_object_hook_maps(target_specs)
+    scannable: dict[str, object] = {}
+    discovered_callables: dict[str, object] = {}
+    skipped: dict[str, None] = {}
+
+    def _add_scannable(name: str, func: object) -> None:
+        scannable[name] = func
+        discovered_callables[name] = func
+        skipped.pop(name, None)
+
+    def _add_skipped(name: str, func: object | None = None) -> None:
+        if func is not None:
+            discovered_callables[name] = func
+        skipped.setdefault(name, None)
+
+    discovered, module_skipped = _module_target_callables(
+        mod,
+        object_factories=object_factories,
+        object_setups=object_setups,
+    )
+    for name, func in discovered:
+        _add_scannable(name, func)
+    for name in module_skipped:
+        _add_skipped(name)
+
+    for spec in target_specs or []:
+        if isinstance(spec, str):
+            target = spec
+            factory = None
+            setup = None
+            methods = None
+            include_private = False
         else:
-            scannable.append((name, func))
-    return scannable, skipped
+            target = str(getattr(spec, "target"))
+            factory = getattr(spec, "factory", None)
+            setup = getattr(spec, "setup", None)
+            methods = list(getattr(spec, "methods", []))
+            include_private = bool(getattr(spec, "include_private", False))
+        discovered, target_skipped = _collect_target_callables(
+            target,
+            factory=factory,
+            setup=setup,
+            methods=methods,
+            include_private=include_private,
+        )
+        for name, func in discovered:
+            _add_scannable(name, func)
+        for name in target_skipped:
+            _add_skipped(name)
+
+    for name, func in list(scannable.items()):
+        if _infer_strategies(func) is None:
+            scannable.pop(name, None)
+            _add_skipped(name, func)
+
+    return list(scannable.items()), list(skipped.keys()), list(discovered_callables.items())
+
+
+def _normalize_audit_function_collection(
+    collected: tuple[Any, ...],
+) -> tuple[list[tuple[str, object]], list[str], list[tuple[str, object]]]:
+    """Normalize collector output across tuple-shape variations.
+
+    The current implementation returns ``(scannable, skipped, discovered)``,
+    but older call sites and cached environments may still provide the older
+    ``(scannable, skipped)`` shape. Preserve epistemic reporting by filling in
+    placeholder discovered entries when necessary.
+    """
+    if len(collected) == 3:
+        scannable, skipped, discovered = collected
+        return list(scannable), list(skipped), list(discovered)
+    if len(collected) == 2:
+        scannable, skipped = collected
+        discovered = list(scannable) + [(name, object()) for name in skipped]
+        return list(scannable), list(skipped), discovered
+    raise ValueError(f"unexpected audit collection shape: {len(collected)}")
 
 
 def _function_name_in_nodeid(function_name: str, nodeid: str) -> bool:
@@ -2725,14 +3155,60 @@ def _func_sig_for_codegen(
     return (names, decls, ", ".join(names), sorted(imports)) if names else None
 
 
+def _generated_callable_helper(
+    module: str,
+    func: object,
+    name: str,
+    param_names: list[str],
+    param_decls: list[str],
+    call_args: str,
+) -> tuple[list[str], set[str], str]:
+    """Generate a helper wrapper for a callable used in migrated tests."""
+    safe_name = re.sub(r"[^0-9a-zA-Z_]", "_", name.replace(".", "_"))
+    helper_name = f"_ordeal_target_{safe_name}"
+    imports: set[str] = {"from ordeal.audit import _call_with_async_support"}
+    lines = [f"def {helper_name}({', '.join(param_decls)}):"]
+
+    kind = str(getattr(func, "__ordeal_kind__", "function"))
+    owner = getattr(func, "__ordeal_owner__", None)
+    method = getattr(func, "__ordeal_method__", None)
+    factory = getattr(func, "__ordeal_factory__", None)
+    arg_suffix = f", {call_args}" if call_args else ""
+
+    if not owner or not method:
+        target_expr = f"{module}.{name}"
+        lines.append(f"    return _call_with_async_support({target_expr}{arg_suffix})")
+        return lines, imports, helper_name
+
+    if kind in {"static", "class"}:
+        target_expr = f"{module}.{owner}.{method}"
+        lines.append(f"    return _call_with_async_support({target_expr}{arg_suffix})")
+        return lines, imports, helper_name
+
+    factory_expr = None
+    if factory:
+        factory_module, factory_attr = (
+            factory.rsplit(":", 1) if ":" in factory else factory.rsplit(".", 1)
+        )
+        factory_name = f"_ordeal_factory_{safe_name}"
+        factory_expr = factory_name
+        imports.add(f"from {factory_module} import {factory_attr} as {factory_name}")
+
+    if factory_expr is None:
+        lines.append(f"    instance = {module}.{owner}()")
+    else:
+        lines.append(f"    instance = _call_with_async_support({factory_expr})")
+    lines.append(f"    return _call_with_async_support(instance.{method}{arg_suffix})")
+    return lines, imports, helper_name
+
+
 def _property_to_assertion(
     prop_name: str,
-    module: str,
-    func_name: str,
+    call_expr: str,
     param_names: list[str],
 ) -> str | None:
     """Map a mined property name to an assertion line, or *None*."""
-    call = f"{module}.{func_name}"
+    call = call_expr
 
     if prop_name == "never None":
         return "assert result is not None"
@@ -2818,22 +3294,18 @@ def _generate_migrated_test(
     body: list[str] = []
 
     if scannable_functions is None or skipped_functions is None:
-        scannable, skipped = _collect_audit_functions(mod)
+        scannable, skipped, _discovered = _normalize_audit_function_collection(
+            _collect_audit_functions(mod)
+        )
     else:
         scannable = list(scannable_functions)
         skipped = list(skipped_functions)
 
     test_count = 0
-    for name, _func in scannable:
-        test_count += 1
-        body.append(f"def test_{name}_no_crash():")
-        body.append(f'    """Crash safety: {module}.{name} does not raise."""')
-        body.append(f"    result = fuzz({module}.{name}, max_examples={max_examples})")
-        body.append("    assert result.passed, result.summary()")
-        body.append("")
 
     # Mine properties and generate assertion tests
     for name, func in scannable:
+        safe_name = re.sub(r"[^0-9a-zA-Z_]", "_", name.replace(".", "_"))
         mine_result = None if mine_results is None else mine_results.get(name)
         if mine_result is None:
             try:
@@ -2848,32 +3320,51 @@ def _generate_migrated_test(
             for p in mine_result.properties
             if p.universal and p.total >= MIN_SAMPLES_FOR_PROPERTY
         ]
-        if not strong:
-            continue
 
         sig_info = _func_sig_for_codegen(func)
-
-        if sig_info:
+        if strong and sig_info:
             param_names, param_decls, call_args, sig_imports = sig_info
             extra_imports.update(sig_imports)
+            helper_lines, helper_imports, helper_name = _generated_callable_helper(
+                module,
+                func,
+                name,
+                param_names,
+                param_decls,
+                call_args,
+            )
+            extra_imports.update(helper_imports)
+            extra_imports.add("from ordeal.quickcheck import quickcheck")
+            body.extend(helper_lines)
+            body.append("")
             assertions = [
-                (p, _property_to_assertion(p.name, module, name, param_names)) for p in strong
+                (p, _property_to_assertion(p.name, helper_name, param_names)) for p in strong
             ]
             has_any = any(a for _, a in assertions)
         else:
+            helper_name = f"{module}.{name}"
             has_any = False
+
+        test_count += 1
+        body.append(f"def test_{safe_name}_no_crash():")
+        body.append(f'    """Crash safety: {module}.{name} does not raise."""')
+        body.append(f"    result = fuzz({helper_name}, max_examples={max_examples})")
+        body.append("    assert result.passed, result.summary()")
+        body.append("")
+
+        if not strong:
+            continue
 
         test_count += 1
 
         if has_any:
-            extra_imports.add("from ordeal.quickcheck import quickcheck")
             if any(a and "math." in a for _, a in assertions):
                 extra_imports.add("import math")
 
             body.append(f"@quickcheck(max_examples={max_examples})")
-            body.append(f"def test_{name}_properties({', '.join(param_decls)}):")
+            body.append(f"def test_{safe_name}_properties({', '.join(param_decls)}):")
             body.append(f'    """Mined properties for {module}.{name}."""')
-            body.append(f"    result = {module}.{name}({call_args})")
+            body.append(f"    result = {helper_name}({call_args})")
 
             for prop, assertion in assertions:
                 lower = wilson_lower(prop.holds, prop.total)
@@ -2885,14 +3376,14 @@ def _generate_migrated_test(
             body.append("")
         else:
             # Fallback: comment-only (no type hints or no expressible assertions)
-            body.append(f"def test_{name}_properties():")
+            body.append(f"def test_{safe_name}_properties():")
             body.append(f'    """Mined properties for {module}.{name}."""')
             for prop in strong:
                 lower = wilson_lower(prop.holds, prop.total)
                 body.append(
                     f"    # {prop.name}: {prop.holds}/{prop.total} (>={lower:.1%} at 95% CI)"
                 )
-            body.append(f"    result = fuzz({module}.{name}, max_examples={max_examples})")
+            body.append(f"    result = fuzz({helper_name}, max_examples={max_examples})")
             body.append("    assert result.passed")
             body.append("")
 
@@ -2987,6 +3478,7 @@ def _record_validation_result(
 def audit(
     module: str,
     *,
+    targets: Sequence[Any] | None = None,
     test_dir: str = "tests",
     max_examples: int = 20,
     workers: int = 1,
@@ -3014,20 +3506,27 @@ def audit(
         A ``ModuleAudit`` with verified or explicitly-failed measurements.
     """
     validation_mode = _normalize_validation_mode(validation_mode)
-    result = ModuleAudit(module=module, validation_mode=validation_mode)
+    raw_target = module
+    base_module, owner_path, _method_name = _split_audit_target_spec(module)
+    result = ModuleAudit(module=base_module, validation_mode=validation_mode)
     test_path = Path(test_dir)
     state_hash: str | None = None
+    target_specs = list(targets or [])
+    if owner_path is not None:
+        target_specs = [raw_target, *target_specs]
+    cache_key = _audit_target_cache_key(base_module, target_specs)
 
     try:
         state_hash = _audit_state_hash(
-            module,
+            base_module,
             test_dir=test_dir,
             max_examples=max_examples,
             validation_mode=validation_mode,
+            target_specs=target_specs,
         )
-        cached = _load_audit_cache(module, state_hash)
+        cached = _load_audit_cache(cache_key, state_hash)
         if cached is not None:
-            out_path = _generated_test_path(module)
+            out_path = _generated_test_path(base_module)
             out_path.parent.mkdir(exist_ok=True)
             if cached.generated_test:
                 out_path.write_text(cached.generated_test, encoding="utf-8")
@@ -3036,8 +3535,8 @@ def audit(
         state_hash = None
 
     # -- 1. Find and measure existing tests --
-    test_files = _find_test_files(module, test_path)
-    test_file_evidence = _find_test_file_evidence(module, test_path)
+    test_files = _find_test_files(base_module, test_path)
+    test_file_evidence = _find_test_file_evidence(base_module, test_path)
     for tf in test_files:
         count, err = _count_tests_in_file(tf)
         result.current_test_count += count
@@ -3051,21 +3550,26 @@ def audit(
 
     # -- 2. Generate migrated test --
     try:
-        mod = _resolve_module(module)
+        mod = _resolve_module(base_module)
     except ImportError as exc:
         if test_files:
-            result.current_coverage = _measure_coverage(test_files, module)
+            result.current_coverage = _measure_coverage(test_files, base_module)
         else:
             result.current_coverage = CoverageMeasurement(
                 Status.FAILED,
                 error="no test files found",
             )
-        result.warnings.append(f"cannot import {module}: {exc}")
+        result.warnings.append(f"cannot import {base_module}: {exc}")
         return result
 
-    scannable, skipped = _collect_audit_functions(mod)
+    scannable, skipped, discovered_callables = _normalize_audit_function_collection(
+        _collect_audit_functions(
+            mod,
+            target_specs=target_specs,
+        )
+    )
     result.gap_functions = skipped
-    result.total_functions = len(scannable) + len(skipped)
+    result.total_functions = len(discovered_callables)
     mine_examples = min(max_examples, MINE_EXAMPLES_FOR_GENERATED_TEST)
     mine_results = _mine_audit_functions(
         scannable,
@@ -3074,7 +3578,7 @@ def audit(
     )
 
     generated, test_count, _skipped = _generate_migrated_test(
-        module,
+        base_module,
         max_examples,
         result.warnings,
         scannable_functions=scannable,
@@ -3106,7 +3610,7 @@ def audit(
     for name, _func in scannable:
         mine_result = mine_results.get(name)
         if mine_result is not None and _should_validate_mined_properties(mine_result):
-            targets.append((f"{module}.{name}", mine_result))
+            targets.append((f"{base_module}.{name}", mine_result))
 
     total_killed = total_mutants = 0
     max_validation_examples = min(max_examples, 20)
@@ -3160,7 +3664,7 @@ def audit(
         ]
 
     # -- 3. Measure migrated test coverage --
-    out_path = _generated_test_path(module)
+    out_path = _generated_test_path(base_module)
     out_path.parent.mkdir(exist_ok=True)
     out_path.write_text(generated, encoding="utf-8")
 
@@ -3180,7 +3684,7 @@ def audit(
         else {}
     )
     result.function_audits = _build_function_audits(
-        scannable,
+        discovered_callables,
         current_coverage=result.current_coverage,
         test_file_evidence=test_file_evidence,
         collected_nodeids=collected_nodeids,
@@ -3188,7 +3692,7 @@ def audit(
 
     # -- 4. Suggest tests to close the gap --
     result.suggestions = _suggest_tests(
-        module,
+        base_module,
         result.current_coverage.missing_lines,
         result.migrated_coverage.missing_lines,
     )
@@ -3209,7 +3713,7 @@ def audit(
 
     if state_hash is not None:
         try:
-            _save_audit_cache(module, state_hash, result)
+            _save_audit_cache(cache_key, state_hash, result)
         except Exception:
             pass
 

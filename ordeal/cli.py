@@ -119,9 +119,14 @@ class ScanRuntimeDefaults:
     """Resolved scan runtime config for one target module."""
 
     max_examples: int
-    fixtures: dict[str, Any] | None
-    expected_failures: list[str]
-    registry_warnings: list[str]
+    fixtures: dict[str, Any] | None = None
+    targets: list[str] = field(default_factory=list)
+    include_private: bool = False
+    object_factories: dict[str, Any] | None = None
+    object_setups: dict[str, Any] | None = None
+    contract_checks: dict[str, list[Any]] = field(default_factory=dict)
+    expected_failures: list[str] = field(default_factory=list)
+    registry_warnings: list[str] = field(default_factory=list)
     ignore_properties: list[str] = field(default_factory=list)
     ignore_relations: list[str] = field(default_factory=list)
     property_overrides: dict[str, list[str]] = field(default_factory=dict)
@@ -140,6 +145,37 @@ def _load_fixture_registry_warnings(
     if not registries:
         return load_project_fixture_registries()
     return load_project_fixture_registries(extra_modules=list(dict.fromkeys(registries)))
+
+
+def _scan_base_module(target: str) -> str:
+    """Return the module component for a scan target."""
+    return target.split(":", 1)[0]
+
+
+def _scan_display_name(module_name: str, target: str) -> str:
+    """Return the local callable name used in scan results for *target*."""
+    if ":" in target:
+        explicit_module, explicit_target = target.split(":", 1)
+        if explicit_module != module_name:
+            return target
+        return explicit_target
+    dotted_prefix = f"{module_name}."
+    return target[len(dotted_prefix) :] if target.startswith(dotted_prefix) else target
+
+
+def _resolve_symbol_path(path: str) -> Any:
+    """Resolve ``module:attr`` or dotted import paths into Python objects."""
+    import importlib
+
+    module_name, sep, attr_path = path.partition(":")
+    if not sep:
+        module_name, _, attr_path = path.rpartition(".")
+    if not module_name or not attr_path:
+        raise ValueError(f"invalid symbol path: {path!r}")
+    obj = importlib.import_module(module_name)
+    for part in attr_path.split("."):
+        obj = getattr(obj, part)
+    return obj
 
 
 def _arg(*tokens: str, **kwargs: Any) -> ArgumentSpec:
@@ -409,6 +445,8 @@ def _function_gap_status_rank(status: str) -> int:
 
 def _render_audit_function_gap_stub(result: Any, item: Any) -> str:
     """Render a draft review stub from function-level audit evidence."""
+    import inspect
+
     from ordeal.audit import _func_sig_for_codegen
     from ordeal.auto import _resolve_module
 
@@ -424,27 +462,49 @@ def _render_audit_function_gap_stub(result: Any, item: Any) -> str:
     call_expr = f"_ordeal_target.{function_name}(...)"
     try:
         mod = _resolve_module(result.module)
-        func = getattr(mod, function_name)
+        func = mod
+        owner_name = None
+        method_name = function_name
+        if "." in function_name:
+            owner_name, method_name = function_name.rsplit(".", 1)
+            for part in owner_name.split("."):
+                func = getattr(func, part)
+            target_owner = func
+            func = getattr(target_owner, method_name)
+            if inspect.isclass(target_owner):
+                descriptor = inspect.getattr_static(target_owner, method_name)
+                if isinstance(descriptor, (staticmethod, classmethod)):
+                    call_expr = f"_ordeal_target.{owner_name}.{method_name}(...)"
+                else:
+                    try:
+                        target_owner()
+                        call_expr = f"_ordeal_target.{owner_name}().{method_name}(...)"
+                    except Exception:
+                        call_expr = f"_ordeal_target.{owner_name}.{method_name}(...)"
+            else:
+                call_expr = f"_ordeal_target.{owner_name}.{method_name}(...)"
+        else:
+            func = getattr(mod, function_name)
         sig_info = _func_sig_for_codegen(func)
         if sig_info is not None:
             param_names, decls, _call_args, _imports = sig_info
             reviewed_signature = f"{function_name}({', '.join(decls)})"
             placeholders = ", ".join("..." for _ in param_names)
-            call_expr = (
-                f"_ordeal_target.{function_name}({placeholders})"
-                if placeholders
-                else f"_ordeal_target.{function_name}()"
-            )
+            if "." not in function_name:
+                call_expr = (
+                    f"_ordeal_target.{function_name}({placeholders})"
+                    if placeholders
+                    else f"_ordeal_target.{function_name}()"
+                )
         else:
-            import inspect
-
             signature = inspect.signature(func)
             reviewed_signature = f"{function_name}{signature}"
-            call_expr = (
-                f"_ordeal_target.{function_name}()"
-                if len(signature.parameters) == 0
-                else f"_ordeal_target.{function_name}(...)"
-            )
+            if "." not in function_name:
+                call_expr = (
+                    f"_ordeal_target.{function_name}()"
+                    if len(signature.parameters) == 0
+                    else f"_ordeal_target.{function_name}(...)"
+                )
     except Exception:
         pass
 
@@ -728,6 +788,53 @@ def _merge_named_overrides(
     return merged
 
 
+def _config_object_specs_for_module(cfg: OrdealConfig, module_name: str) -> list[Any]:
+    """Return shared object configs that belong to *module_name*."""
+    return [spec for spec in cfg.objects if _scan_base_module(spec.target) == module_name]
+
+
+def _object_runtime_maps(object_specs: Sequence[Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Resolve configured object factories and setup hooks."""
+    factories: dict[str, Any] = {}
+    setups: dict[str, Any] = {}
+    for spec in object_specs:
+        target = str(getattr(spec, "target"))
+        factory_path = getattr(spec, "factory", None)
+        setup_path = getattr(spec, "setup", None)
+        if factory_path:
+            factories[target] = _resolve_symbol_path(str(factory_path))
+        if setup_path:
+            setups[target] = _resolve_symbol_path(str(setup_path))
+    return factories, setups
+
+
+def _config_contract_checks_for_module(
+    cfg: OrdealConfig,
+    module_name: str,
+) -> dict[str, list[Any]]:
+    """Resolve configured semantic contract probes for *module_name*."""
+    from ordeal.auto import builtin_contract_check
+
+    checks: dict[str, list[Any]] = {}
+    for spec in cfg.contracts:
+        target = str(spec.target)
+        if _scan_base_module(target) != module_name:
+            continue
+        display_name = _scan_display_name(module_name, target)
+        bucket = checks.setdefault(display_name, [])
+        for check_name in spec.checks:
+            bucket.append(
+                builtin_contract_check(
+                    str(check_name),
+                    kwargs=dict(spec.kwargs),
+                    tracked_params=list(spec.tracked_params),
+                    protected_keys=list(spec.protected_keys),
+                    env_param=spec.env_param,
+                )
+            )
+    return checks
+
+
 def _resolve_scan_runtime_defaults(
     target: str,
     *,
@@ -735,9 +842,15 @@ def _resolve_scan_runtime_defaults(
     allow_config_override: bool = False,
 ) -> ScanRuntimeDefaults:
     """Load fixture registries and optional ``[[scan]]`` defaults for *target*."""
+    module_name = _scan_base_module(target)
     warnings = []
     effective_examples = requested_examples
+    targets: list[str] = []
+    include_private = False
     fixtures = None
+    object_factories: dict[str, Any] | None = None
+    object_setups: dict[str, Any] | None = None
+    contract_checks: dict[str, list[Any]] = {}
     expected_failures: list[str] = []
     ignore_properties: list[str] = []
     ignore_relations: list[str] = []
@@ -748,7 +861,12 @@ def _resolve_scan_runtime_defaults(
     if not config_path.exists():
         return ScanRuntimeDefaults(
             max_examples=effective_examples,
+            targets=targets,
+            include_private=include_private,
             fixtures=fixtures,
+            object_factories=object_factories,
+            object_setups=object_setups,
+            contract_checks=contract_checks,
             expected_failures=expected_failures,
             registry_warnings=warnings,
         )
@@ -759,23 +877,47 @@ def _resolve_scan_runtime_defaults(
         warnings.extend(_load_fixture_registry_warnings())
         return ScanRuntimeDefaults(
             max_examples=effective_examples,
+            targets=targets,
+            include_private=include_private,
             fixtures=fixtures,
+            object_factories=object_factories,
+            object_setups=object_setups,
+            contract_checks=contract_checks,
             expected_failures=expected_failures,
             registry_warnings=warnings,
         )
 
     warnings.extend(_load_fixture_registry_warnings(shared_modules=cfg.fixtures.registries))
-    match = next((entry for entry in cfg.scan if entry.module == target), None)
+    shared_object_specs = _config_object_specs_for_module(cfg, module_name)
+    try:
+        object_factories, object_setups = _object_runtime_maps(shared_object_specs)
+    except Exception as exc:
+        warnings.append(f"object factory config failed for {module_name}: {exc}")
+        object_factories, object_setups = {}, {}
+    try:
+        contract_checks = _config_contract_checks_for_module(cfg, module_name)
+    except Exception as exc:
+        warnings.append(f"contract config failed for {module_name}: {exc}")
+        contract_checks = {}
+
+    match = next((entry for entry in cfg.scan if entry.module == module_name), None)
     if match is None:
         return ScanRuntimeDefaults(
             max_examples=effective_examples,
+            targets=targets,
+            include_private=include_private,
             fixtures=fixtures,
+            object_factories=object_factories,
+            object_setups=object_setups,
+            contract_checks=contract_checks,
             expected_failures=expected_failures,
             registry_warnings=warnings,
         )
 
     if allow_config_override:
         effective_examples = match.max_examples
+    targets = list(match.targets)
+    include_private = bool(match.include_private)
     fixtures = _parse_scan_fixture_specs(match.fixtures)
     expected_failures = list(match.expected_failures)
     warnings.extend(_load_fixture_registry_warnings(extra_modules=match.fixture_registries))
@@ -789,7 +931,12 @@ def _resolve_scan_runtime_defaults(
     }
     return ScanRuntimeDefaults(
         max_examples=effective_examples,
+        targets=targets,
+        include_private=include_private,
         fixtures=fixtures,
+        object_factories=object_factories,
+        object_setups=object_setups,
+        contract_checks=contract_checks,
         expected_failures=expected_failures,
         registry_warnings=warnings,
         ignore_properties=ignore_properties,
@@ -802,6 +949,7 @@ def _resolve_scan_runtime_defaults(
 def _run_configured_scans(
     scan_entries: Sequence[Any],
     *,
+    cfg: OrdealConfig | None = None,
     shared_fixture_registries: Sequence[str] = (),
     verbose: bool = True,
 ) -> int:
@@ -818,14 +966,33 @@ def _run_configured_scans(
         fixtures = _parse_scan_fixture_specs(scan_cfg.fixtures)
         if verbose:
             _stderr(f"Scanning {scan_cfg.module} from [[scan]]...\n")
+        object_factories: dict[str, Any] = {}
+        object_setups: dict[str, Any] = {}
+        contract_checks: dict[str, list[Any]] = {}
+        if cfg is not None:
+            try:
+                object_factories, object_setups = _object_runtime_maps(
+                    _config_object_specs_for_module(cfg, scan_cfg.module)
+                )
+            except Exception as exc:
+                _stderr(f"warning: object factory config failed for {scan_cfg.module}: {exc}\n")
+            try:
+                contract_checks = _config_contract_checks_for_module(cfg, scan_cfg.module)
+            except Exception as exc:
+                _stderr(f"warning: contract config failed for {scan_cfg.module}: {exc}\n")
         scan_kwargs: dict[str, Any] = {
             "max_examples": scan_cfg.max_examples,
+            "targets": scan_cfg.targets,
+            "include_private": scan_cfg.include_private,
             "fixtures": fixtures,
+            "object_factories": object_factories,
+            "object_setups": object_setups,
             "expected_failures": scan_cfg.expected_failures,
             "ignore_properties": scan_cfg.ignore_properties,
             "ignore_relations": scan_cfg.ignore_relations,
             "property_overrides": scan_cfg.property_overrides,
             "relation_overrides": scan_cfg.relation_overrides,
+            "contract_checks": contract_checks,
         }
         result = scan_module(scan_cfg.module, **scan_kwargs)
         print(result.summary())
@@ -844,13 +1011,17 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     """
     from ordeal.state import explore
 
-    inc_private = getattr(args, "include_private", False)
+    scan_target = args.target
+    module_name = _scan_base_module(scan_target)
     allow_config_override = args.max_examples == 50
     runtime_defaults = _resolve_scan_runtime_defaults(
-        args.target,
+        scan_target,
         requested_examples=args.max_examples,
         allow_config_override=allow_config_override,
     )
+    explicit_target = ":" in scan_target
+    scan_targets = [scan_target] if explicit_target else list(runtime_defaults.targets)
+    inc_private = bool(getattr(args, "include_private", False) or runtime_defaults.include_private)
     scan_ignore_properties = _merge_unique_strings(
         runtime_defaults.ignore_properties,
         getattr(args, "ignore_properties", None),
@@ -868,23 +1039,27 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         _named_override_specs_to_map(getattr(args, "cli_relation_overrides", None)),
     )
     if not args.json:
-        _stderr(f"Scanning {args.target} (seed={args.seed})...\n")
+        _stderr(f"Scanning {scan_target} (seed={args.seed})...\n")
         for warning in runtime_defaults.registry_warnings:
             _stderr(f"warning: {warning}\n")
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         state = explore(
-            args.target,
+            module_name,
             seed=args.seed,
             max_examples=runtime_defaults.max_examples,
             workers=args.workers,
             time_limit=args.time_limit,
             include_private=inc_private,
+            scan_targets=scan_targets,
             scan_fixtures=runtime_defaults.fixtures,
+            scan_object_factories=runtime_defaults.object_factories,
+            scan_object_setups=runtime_defaults.object_setups,
             scan_expected_failures=runtime_defaults.expected_failures,
             scan_ignore_properties=scan_ignore_properties,
             scan_ignore_relations=scan_ignore_relations,
             scan_property_overrides=scan_property_overrides,
             scan_relation_overrides=scan_relation_overrides,
+            scan_contract_checks=runtime_defaults.contract_checks,
         )
 
     if not args.json:
@@ -978,6 +1153,7 @@ def _cmd_explore(args: argparse.Namespace) -> int:
         if cfg.scan:
             return _run_configured_scans(
                 cfg.scan,
+                cfg=cfg,
                 shared_fixture_registries=cfg.fixtures.registries,
                 verbose=verbose,
             )
@@ -1206,6 +1382,8 @@ def _cmd_seeds(args: argparse.Namespace) -> int:
 
 def _cmd_audit(args: argparse.Namespace) -> int:
     """Run ordeal audit on specified modules."""
+    from types import SimpleNamespace
+
     from ordeal.audit import audit
 
     try:
@@ -1221,8 +1399,43 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     modules = list(args.modules or [])
     if not modules and audit_cfg is not None:
         modules = list(audit_cfg.modules)
-    if not modules:
-        _stderr("No modules specified. Pass modules or configure [audit].modules.\n")
+    target_specs_by_module: dict[str, dict[str, Any]] = {}
+
+    def _merge_target_spec(spec: Any) -> None:
+        target = str(getattr(spec, "target"))
+        base_module = _scan_base_module(target)
+        bucket = target_specs_by_module.setdefault(base_module, {})
+        existing = bucket.get(target)
+        if existing is None:
+            bucket[target] = spec
+            return
+        bucket[target] = SimpleNamespace(
+            target=target,
+            factory=getattr(spec, "factory", None) or getattr(existing, "factory", None),
+            setup=getattr(spec, "setup", None) or getattr(existing, "setup", None),
+            methods=list(getattr(spec, "methods", None) or getattr(existing, "methods", []) or []),
+            include_private=bool(
+                getattr(spec, "include_private", False)
+                or getattr(existing, "include_private", False)
+            ),
+        )
+
+    if cfg is not None:
+        for spec in cfg.objects:
+            _merge_target_spec(spec)
+    if audit_cfg is not None:
+        for spec in audit_cfg.targets:
+            _merge_target_spec(spec)
+
+    normalized_target_specs_by_module = {
+        module: list(specs.values()) for module, specs in target_specs_by_module.items()
+    }
+    target_names = modules or list(normalized_target_specs_by_module)
+    if not target_names and not normalized_target_specs_by_module:
+        _stderr(
+            "No modules or audit targets specified. Configure [audit].modules "
+            "or [[audit.targets]].\n"
+        )
         return 2
 
     test_dir = str(
@@ -1277,16 +1490,18 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     )
 
     def _collect_results() -> list[Any]:
-        return [
-            audit(
-                mod,
-                test_dir=test_dir,
-                max_examples=max_examples,
-                workers=workers,
-                validation_mode=validation_mode,
-            )
-            for mod in modules
-        ]
+        collected: list[Any] = []
+        for target in target_names:
+            audit_kwargs: dict[str, Any] = {
+                "test_dir": test_dir,
+                "max_examples": max_examples,
+                "workers": workers,
+                "validation_mode": validation_mode,
+            }
+            if target_specs := normalized_target_specs_by_module.get(_scan_base_module(target)):
+                audit_kwargs["targets"] = target_specs
+            collected.append(audit(target, **audit_kwargs))
+        return collected
 
     results = _collect_results()
     direct_test_gate = _direct_test_gate_payload(results) if require_direct_tests else None
@@ -1318,7 +1533,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
 
     if show_generated or save_generated or write_gaps:
         # Per-module mode with optional generated or gap-stub output
-        for mod, result in zip(modules, results, strict=False):
+        for mod, result in zip(target_names, results, strict=False):
             print(
                 "\n".join(
                     _audit_summary_lines(
@@ -2072,13 +2287,59 @@ def _cmd_init(args: argparse.Namespace) -> int:
     weakest_tests: list[dict[str, Any]] = []
     if close_gaps:
         generated_modules = [r["module"] for r in generated]
+        audit_target_specs_by_module: dict[str, dict[str, Any]] = {}
+
+        def _merge_target_spec(spec: Any) -> None:
+            target = str(getattr(spec, "target"))
+            base_module = _scan_base_module(target)
+            bucket = audit_target_specs_by_module.setdefault(base_module, {})
+            existing = bucket.get(target)
+            if existing is None:
+                bucket[target] = spec
+                return
+            from types import SimpleNamespace
+
+            bucket[target] = SimpleNamespace(
+                target=target,
+                factory=getattr(spec, "factory", None) or getattr(existing, "factory", None),
+                setup=getattr(spec, "setup", None) or getattr(existing, "setup", None),
+                methods=list(
+                    getattr(spec, "methods", None) or getattr(existing, "methods", []) or []
+                ),
+                include_private=bool(
+                    getattr(spec, "include_private", False)
+                    or getattr(existing, "include_private", False)
+                ),
+            )
+
+        if cfg is not None:
+            for spec in cfg.objects:
+                _merge_target_spec(spec)
+        if audit_cfg is not None:
+            for spec in audit_cfg.targets:
+                _merge_target_spec(spec)
+        normalized_audit_specs = {
+            module: list(specs.values()) for module, specs in audit_target_specs_by_module.items()
+        }
         audit_results = [
             audit(
                 module,
-                test_dir=output_dir,
-                max_examples=close_gap_max_examples,
-                workers=close_gap_workers,
-                validation_mode=close_gap_validation_mode,
+                **(
+                    {
+                        "targets": normalized_audit_specs[module],
+                        "test_dir": output_dir,
+                        "max_examples": close_gap_max_examples,
+                        "workers": close_gap_workers,
+                        "validation_mode": close_gap_validation_mode,
+                    }
+                    if module in normalized_audit_specs
+                    else {
+                        "test_dir": output_dir,
+                        "max_examples": close_gap_max_examples,
+                        "workers": close_gap_workers,
+                        "validation_mode": close_gap_validation_mode,
+                    }
+                ),
             )
             for module in generated_modules
         ]
@@ -3578,6 +3839,9 @@ def _agent_finding_from_detail(detail: Mapping[str, Any], fallback_target: str) 
             "qualname",
         }
     }
+    nested_details = detail.get("details")
+    if isinstance(nested_details, Mapping):
+        extras.update(dict(nested_details))
     return AgentFinding(
         kind=str(detail.get("kind", "finding")),
         summary=summary,
@@ -4930,6 +5194,8 @@ def _scan_command_description() -> str:
         "For stronger signals on a mature codebase, prefer `ordeal audit` and `ordeal mutate`.\n"
         "Use `--ignore-property`, `--ignore-relation`, `--property-override`, and\n"
         " `--relation-override` to suppress noisy mined signals without changing code.\n"
+        "Use explicit targets like `pkg.mod:Env.build_env_vars`, shared `[[objects]]`,\n"
+        " and `[[contracts]]` in ordeal.toml for stateful OO code and shell/path/env checks.\n"
         f"Use --save-artifacts to save both {_default_scan_report_path('mymod')} and"
         f" {_default_scan_bundle_path('mymod')} + {_DEFAULT_REGRESSION_PATH},"
         f" then update {_default_artifact_index_path()}.\n"
@@ -4959,7 +5225,7 @@ def _audit_command_description() -> str:
         "  fast  replay mined inputs against mutants (default, faster)\n"
         "  deep  replay mined inputs, then re-mine mutants for extra search depth\n\n"
         "Use [audit] in ordeal.toml to persist module lists, validation depth, "
-        "and direct-test policy.\n"
+        "and direct-test policy, and reuse shared `[[objects]]` for bound methods.\n"
         "Use --write-gaps PATH to emit draft review stubs for surviving mutants "
         "and function-level coverage gaps."
     )

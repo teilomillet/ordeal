@@ -23,7 +23,7 @@ One file, checked into your repo, that anyone (or anything) can read and modify.
 ## Schema
 
 !!! quote "Think of it this way"
-    The config file now covers the main CLI workflows too. `[explorer]` and `[[tests]]` drive stateful exploration, `[report]` controls output, `[fixtures]` and `[[scan]]` tune exploratory module scans, `[audit]` sets test-quality defaults, and `[init]` sets bootstrap defaults for starter tests and gap-closing passes.
+    The config file now covers the main CLI workflows too. `[explorer]` and `[[tests]]` drive stateful exploration, `[report]` controls output, `[fixtures]`, `[[scan]]`, `[[objects]]`, and `[[contracts]]` tune exploratory module scans, `[audit]` sets test-quality defaults, and `[init]` sets bootstrap defaults for starter tests and gap-closing passes.
 
 ### `[explorer]`
 
@@ -85,6 +85,8 @@ Declare modules for auto-scan testing. The pytest plugin auto-collects these and
 |---|---|---|---|
 | `module` | `str` | required | Dotted module path to scan |
 | `max_examples` | `int` | `50` | Hypothesis examples per function |
+| `targets` | `list[str]` | `[]` | Optional explicit callable targets such as `pkg.mod:Env.build_env_vars` |
+| `include_private` | `bool` | `false` | Include single-underscore callables |
 | `fixtures` | `dict[str, str]` | `{}` | Strategy specs for untyped parameters, such as comma-separated `sampled_from` values |
 | `expected_failures` | `list[str]` | `[]` | Function names whose failure is expected behavior |
 | `fixture_registries` | `list[str]` | `[]` | Importable modules that call `register_fixture()` for project-specific strategies |
@@ -97,6 +99,7 @@ Declare modules for auto-scan testing. The pytest plugin auto-collects these and
 [[scan]]
 module = "myapp.scoring"
 max_examples = 100
+targets = ["myapp.scoring:Scorer.score"]
 fixture_registries = ["tests.support.fixtures"]
 ignore_properties = ["commutative"]
 ignore_relations = ["commutative_composition"]
@@ -110,6 +113,48 @@ relation_overrides = { normalize = ["equivalent"] }
 ```
 
 When you run `pytest --chaos`, ordeal auto-discovers these entries and smoke-tests every public function in each module. Functions without type hints are skipped unless fixtures are provided or a registry supplies them. Known preconditions stay separate from likely bugs so the output stays epistemic.
+
+### `[[objects]]`
+
+Reusable object factories for bound instance methods. `scan` and `audit` use these hooks so methods show up as callable targets instead of disappearing behind constructor setup.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `target` | `str` | required | Class target such as `pkg.mod:Env` |
+| `factory` | `str?` | `null` | Import path to a sync or async factory |
+| `setup` | `str?` | `null` | Optional sync or async hook run after factory creation |
+| `methods` | `list[str]` | `[]` | Optional method subset for audit-target expansion |
+| `include_private` | `bool` | `false` | Include single-underscore methods when expanded |
+
+```toml
+[[objects]]
+target = "myapp.envs:ComposableEnv"
+factory = "tests.support.factories:make_composable_env"
+setup = "tests.support.factories:prime_composable_env"
+```
+
+### `[[contracts]]`
+
+Explicit semantic probes for scan targets. Use these for shell/path/env helpers where plain fuzzing is too weak.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `target` | `str` | required | Callable target such as `pkg.mod:Env.build_env_vars` |
+| `checks` | `list[str]` | `[]` | Built-ins: `shell_safe`, `quoted_paths`, `command_arg_stability`, `protected_env_keys` |
+| `kwargs` | `dict[str, object]` | `{}` | Concrete probe inputs |
+| `tracked_params` | `list[str]` | `[]` | String params to track in shell/path checks |
+| `protected_keys` | `list[str]` | `[]` | Env keys that must survive updates |
+| `env_param` | `str?` | `null` | Which kwarg carries the input env mapping |
+
+```toml
+[[contracts]]
+target = "myapp.envs:ComposableEnv.build_env_vars"
+checks = ["shell_safe", "quoted_paths", "protected_env_keys"]
+kwargs = { path = "tmp/my binary", env_vars = { PATH = "/bin", HOME = "/tmp/home" } }
+tracked_params = ["path"]
+protected_keys = ["PATH", "HOME"]
+env_param = "env_vars"
+```
 
 ### `[audit]`
 
@@ -134,6 +179,15 @@ modules = ["myapp.scoring"]
 validation_mode = "deep"
 write_gaps_dir = "tests/gaps"
 require_direct_tests = true
+```
+
+Use `[[audit.targets]]` when one class needs an audit-specific factory or a narrower method subset:
+
+```toml
+[[audit.targets]]
+target = "myapp.envs:ComposableEnv"
+factory = "tests.support.factories:make_composable_env"
+methods = ["build_env_vars", "post_sandbox_setup"]
 ```
 
 ### `[init]`

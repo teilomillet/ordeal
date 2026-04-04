@@ -60,7 +60,7 @@ class AgentFinding:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly representation."""
-        return {
+        payload = {
             "kind": self.kind,
             "summary": self.summary,
             "confidence": self.confidence,
@@ -68,6 +68,10 @@ class AgentFinding:
             "location": self.location,
             "details": _jsonable(self.details),
         }
+        function_name = self.details.get("function")
+        if function_name is not None:
+            payload["function"] = _jsonable(function_name)
+        return payload
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

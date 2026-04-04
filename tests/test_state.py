@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ordeal.auto import FunctionResult, ScanResult
 from ordeal.state import ExplorationState
 
 
@@ -59,3 +60,75 @@ class TestExplorationStateSerialization:
         restored = ExplorationState.from_json(state.to_json())
         assert restored.functions["normalize"].scan_crash_category == "likely_bug"
         assert restored.functions["flaky"].scan_crash_category == "speculative_crash"
+
+    def test_explore_scan_surfaces_contract_violations(self, monkeypatch):
+        import ordeal.auto as auto_mod
+        from ordeal.state import explore_scan
+
+        scan_result = ScanResult(
+            module="pkg.mod",
+            functions=[
+                FunctionResult(
+                    name="build_command",
+                    passed=True,
+                    contract_violations=["shell-safe path quoting"],
+                    contract_violation_details=[
+                        {
+                            "kind": "contract",
+                            "category": "semantic_contract",
+                            "name": "shell-safe path quoting",
+                            "summary": "shell-safe path quoting",
+                            "failing_args": {"path": "a b"},
+                        }
+                    ],
+                )
+            ],
+        )
+        monkeypatch.setattr(auto_mod, "scan_module", lambda *args, **kwargs: scan_result)
+
+        state = ExplorationState("pkg.mod")
+        explored = explore_scan(state, contract_checks={})
+
+        fs = explored.functions["build_command"]
+        assert fs.contract_violations == ["shell-safe path quoting"]
+        assert any(
+            "shell-safe path quoting" in finding
+            for finding in explored.exploratory_findings
+        )
+        assert any(
+            detail["category"] == "semantic_contract" for detail in explored.finding_details
+        )
+
+    def test_explore_scan_forwards_method_targets_and_object_factories(self, monkeypatch):
+        import ordeal.auto as auto_mod
+        from ordeal.state import explore_scan
+
+        calls: dict[str, object] = {}
+
+        def fake_scan_module(module, **kwargs):
+            calls["module"] = module
+            calls.update(kwargs)
+            return ScanResult(module="pkg.mod")
+
+        monkeypatch.setattr(auto_mod, "scan_module", fake_scan_module)
+
+        state = ExplorationState("pkg.mod")
+        def factory() -> object:
+            return object()
+
+        def setup(instance: object) -> None:
+            return None
+
+        explored = explore_scan(
+            state,
+            targets=["pkg.mod:Env.build_command"],
+            object_factories={"pkg.mod:Env": factory},
+            object_setups={"pkg.mod:Env": setup},
+            contract_checks={},
+        )
+
+        assert explored is state
+        assert calls["module"] == "pkg.mod"
+        assert calls["targets"] == ["pkg.mod:Env.build_command"]
+        assert calls["object_factories"] == {"pkg.mod:Env": factory}
+        assert calls["object_setups"] == {"pkg.mod:Env": setup}

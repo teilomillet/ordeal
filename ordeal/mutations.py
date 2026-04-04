@@ -93,10 +93,11 @@ from typing import (
     get_type_hints,
 )
 
+from ordeal.faults import PatchFault
+from ordeal.faults import _resolve_target as _resolve_fault_target
+
 if TYPE_CHECKING:
     from ordeal.mine import MinedProperty, MineResult
-
-from ordeal.faults import PatchFault
 
 # ============================================================================
 # Helpers
@@ -157,6 +158,99 @@ def _unwrap_func(func: object) -> object:
     except (ValueError, TypeError):
         pass
     return func
+
+
+@dataclass(frozen=True)
+class _ResolvedMutationTarget:
+    """Resolved callable target used by mutation execution paths."""
+
+    target: str
+    module: types.ModuleType
+    owner: object
+    attr_name: str | None
+    qualname_parts: tuple[str, ...] = ()
+
+    @property
+    def module_name(self) -> str:
+        return self.module.__name__
+
+    @property
+    def is_module(self) -> bool:
+        return isinstance(self.owner, types.ModuleType)
+
+    @property
+    def leaf_name(self) -> str | None:
+        return self.attr_name
+
+
+def _target_to_normalized_dotted(target: str) -> str:
+    """Normalize explicit module:Class.method targets to dotted form."""
+    return target.replace(":", ".", 1) if ":" in target else target
+
+
+def _local_module_exists(module_name: str) -> bool:
+    """Return whether *module_name* exists in the current project layout."""
+    parts = module_name.split(".")
+    roots = [Path.cwd(), Path.cwd() / "src"]
+    for root in roots:
+        module_path = root.joinpath(*parts)
+        if module_path.with_suffix(".py").exists():
+            return True
+        if (module_path / "__init__.py").exists():
+            return True
+    return False
+
+
+def _resolve_mutation_target(target: str) -> _ResolvedMutationTarget:
+    """Resolve a module, function, or method mutation target explicitly."""
+    normalized = _target_to_normalized_dotted(target)
+    try:
+        module = importlib.import_module(normalized)
+    except ImportError:
+        parent, attr_name = _resolve_fault_target(normalized)
+        if isinstance(parent, types.ModuleType):
+            return _ResolvedMutationTarget(target, parent, parent, attr_name)
+
+        obj = getattr(parent, attr_name)
+        if inspect.isclass(obj):
+            raise ValueError(
+                f"Mutation target must be a function or method, got class target {target!r}"
+            )
+        if not callable(obj):
+            raise ValueError(
+                f"Mutation target must resolve to a callable, got {type(obj).__name__}"
+            )
+
+        module = inspect.getmodule(parent)
+        if module is None:
+            module_name = getattr(parent, "__module__", None)
+            if not module_name:
+                raise ImportError(f"Cannot resolve module for mutation target {target!r}")
+            module = importlib.import_module(module_name)
+
+        qualname = getattr(parent, "__qualname__", "")
+        qual_parts = tuple(part for part in qualname.split(".") if part and part != "<locals>")
+        return _ResolvedMutationTarget(target, module, parent, attr_name, qual_parts)
+
+    return _ResolvedMutationTarget(target, module, module, None)
+
+
+def _resolved_target_callable(target_spec: _ResolvedMutationTarget) -> Any:
+    """Return the actual callable identified by *target_spec*."""
+    if target_spec.leaf_name is None:
+        return target_spec.module
+    return getattr(target_spec.owner, target_spec.leaf_name)
+
+
+def _resolve_dotted_attr(obj: Any, dotted: str) -> Any | None:
+    """Resolve a dotted attribute path against *obj*."""
+    current: Any = obj
+    for part in dotted.split("."):
+        try:
+            current = getattr(current, part)
+        except AttributeError:
+            return None
+    return current
 
 
 def _get_source(func: object) -> str:
@@ -387,11 +481,10 @@ def _resolve_signature(target: str) -> tuple[str, str]:
     Falls back to ``("(...)", "...")``) when the function can't be resolved.
     """
     try:
-        parts = target.rsplit(".", 1)
-        if len(parts) < 2:
+        target_spec = _resolve_mutation_target(target)
+        if target_spec.leaf_name is None:
             return "(...)", "..."
-        mod = importlib.import_module(parts[0])
-        func = getattr(mod, parts[1])
+        func = _resolved_target_callable(target_spec)
         sig = inspect.signature(func)
     except Exception:
         return "(...)", "..."
@@ -438,11 +531,10 @@ def _build_kwargs(func: object, value_set: int = 0) -> dict[str, object]:
 def _build_multiple_kwargs(target: str, n: int = 3) -> list[dict[str, object]]:
     """Build *n* distinct sets of kwargs for a function."""
     try:
-        parts = target.rsplit(".", 1)
-        if len(parts) < 2:
+        target_spec = _resolve_mutation_target(target)
+        if target_spec.leaf_name is None:
             return []
-        mod = importlib.import_module(parts[0])
-        func = getattr(mod, parts[1])
+        func = _resolved_target_callable(target_spec)
     except Exception:
         return []
     return [_build_kwargs(func, value_set=i) for i in range(n)]
@@ -650,9 +742,13 @@ class MutationResult:
         if not self.survived:
             return ""
 
-        parts = self.target.rsplit(".", 1)
-        module_path = parts[0]
-        func_name = parts[-1] if len(parts) > 1 else self.target
+        target_spec = _resolve_mutation_target(self.target)
+        if target_spec.leaf_name is None:
+            return ""
+        module_path = target_spec.module_name
+        func_name = target_spec.leaf_name
+        qual_parts = [*target_spec.qualname_parts, func_name]
+        call_target = ".".join(qual_parts)
         safe_target = self.target.replace(".", "_")
 
         # Try to resolve the function signature for better review notes.
@@ -682,7 +778,7 @@ class MutationResult:
             if m.source_line:
                 lines.extend(_comment_lines(f"Source: {m.source_line}"))
             lines.extend(_comment_lines(f"Fix idea: {m.remediation}"))
-            lines.append(f"    result = _ordeal_target.{func_name}({call_args})")
+            lines.append(f"    result = _ordeal_target.{call_target}({call_args})")
             inv = _suggest_invariant(self.target, func_name)
             if inv:
                 lines.append(
@@ -752,14 +848,14 @@ class MutationResult:
             return HardeningResult()
 
         # Resolve target function for PatchFault swapping
-        parts = self.target.rsplit(".", 1)
-        if len(parts) < 2:
+        target_spec = _resolve_mutation_target(self.target)
+        if target_spec.leaf_name is None:
             return HardeningResult()
-        module_path, func_name = parts
+        func_name = target_spec.leaf_name
 
         try:
-            module = importlib.import_module(module_path)
-            _unwrap_func(getattr(module, func_name))
+            module = target_spec.module
+            _unwrap_func(_resolved_target_callable(target_spec))
         except Exception:
             return HardeningResult()
 
@@ -867,8 +963,7 @@ def _module_source_hash(target: str) -> str:
     h = hashlib.sha256()
 
     # 1. Module source
-    parts = target.rsplit(".", 1)
-    module_name = parts[0] if len(parts) >= 2 and _is_function_target(target) else target
+    module_name = _split_mutation_target(target)[0]
     source_file = None
     try:
         module = importlib.import_module(module_name)
@@ -1170,11 +1265,10 @@ class HardeningResult:
 def _suggest_invariant(target: str, func_name: str) -> str:
     """Suggest an invariant assertion based on function name and return type."""
     try:
-        parts = target.rsplit(".", 1)
-        if len(parts) < 2:
+        target_spec = _resolve_mutation_target(target)
+        if target_spec.leaf_name is None:
             return ""
-        mod = importlib.import_module(parts[0])
-        func = getattr(mod, parts[1])
+        func = _resolved_target_callable(target_spec)
         hints = inspect.get_annotations(func)
         ret = hints.get("return")
     except Exception:
@@ -1277,11 +1371,10 @@ def _review_annotation_expr(tp: object, *, current_module: str) -> str | None:
 def _review_signature(target: str) -> str:
     """Render a function signature with explicit module qualification."""
     try:
-        parts = target.rsplit(".", 1)
-        if len(parts) < 2:
+        target_spec = _resolve_mutation_target(target)
+        if target_spec.leaf_name is None:
             return "(...)"
-        mod = importlib.import_module(parts[0])
-        func = getattr(mod, parts[1])
+        func = _resolved_target_callable(target_spec)
         sig = inspect.signature(func)
         hints = get_type_hints(func)
     except Exception:
@@ -1316,7 +1409,7 @@ def _review_signature(target: str) -> str:
         ann = _review_annotation_expr(ret, current_module=current_module)
         if ann is not None:
             sig_str += f" -> {ann}"
-    return f"{parts[-1]}{sig_str}"
+    return f"{target_spec.leaf_name}{sig_str}"
 
 
 def _comment_lines(text: str, *, indent: str = "    # ") -> list[str]:
@@ -1372,11 +1465,10 @@ class _CallResult:
 def _try_call_with_kwargs(target: str, kwargs: dict[str, object]) -> _CallResult:
     """Call a function with specific kwargs and return what happened."""
     try:
-        parts = target.rsplit(".", 1)
-        if len(parts) < 2:
+        target_spec = _resolve_mutation_target(target)
+        if target_spec.leaf_name is None:
             return _CallResult(error="cannot resolve", error_type="ImportError")
-        mod = importlib.import_module(parts[0])
-        func = getattr(mod, parts[1])
+        func = _resolved_target_callable(target_spec)
         result = func(**kwargs)
         call_repr = ", ".join(f"{k}={v!r}" for k, v in kwargs.items())
         return _CallResult(
@@ -1412,11 +1504,10 @@ class _MineFindings:
 def _run_mine(target: str, safe_name: str, func_name: str) -> _MineFindings | None:
     """Run mine() on a function. Return all findings or None."""
     try:
-        parts = target.rsplit(".", 1)
-        if len(parts) < 2:
+        target_spec = _resolve_mutation_target(target)
+        if target_spec.leaf_name is None:
             return None
-        mod = importlib.import_module(parts[0])
-        func = getattr(mod, parts[1])
+        func = _resolved_target_callable(target_spec)
 
         from ordeal.mine import mine
 
@@ -1465,7 +1556,11 @@ def _run_mine(target: str, safe_name: str, func_name: str) -> _MineFindings | No
         if not assertions:
             return _MineFindings(pinned=pinned, property_lines=[], prop_names=doc_parts)
 
-        module_path = parts[0]
+        module_path = target_spec.module_name
+        if target_spec.qualname_parts:
+            call_target = ".".join([*target_spec.qualname_parts, func_name])
+        else:
+            call_target = func_name
         param_sig, param_imports = _param_sig(target)
         needs_math = any("math." in a for a in assertions)
 
@@ -1478,11 +1573,11 @@ def _run_mine(target: str, safe_name: str, func_name: str) -> _MineFindings | No
         lines.append("    from ordeal.quickcheck import quickcheck")
         for import_line in param_imports:
             lines.append(f"    {import_line}")
-        lines.append(f"    from {module_path} import {func_name}")
+        lines.append(f"    import {module_path} as _ordeal_target")
         lines.append("")
         lines.append("    @quickcheck")
         lines.append(f"    def check({param_sig}):")
-        lines.append(f"        result = {func_name}({param_call})")
+        lines.append(f"        result = _ordeal_target.{call_target}({param_call})")
         for a in assertions:
             lines.append(f"        {a}")
         lines.append("")
@@ -1615,9 +1710,10 @@ def _annotation_expr(
 def _param_sig(target: str) -> tuple[str, list[str]]:
     """Build a parameter signature for a quickcheck function."""
     try:
-        parts = target.rsplit(".", 1)
-        mod = importlib.import_module(parts[0])
-        func = getattr(mod, parts[1])
+        target_spec = _resolve_mutation_target(target)
+        if target_spec.leaf_name is None:
+            return "...", []
+        func = _resolved_target_callable(target_spec)
         sig = inspect.signature(func)
         annotations = inspect.get_annotations(func, eval_str=True)
         imports: set[str] = set()
@@ -1644,9 +1740,10 @@ def _param_sig(target: str) -> tuple[str, list[str]]:
 def _param_call(target: str) -> str:
     """Build a call expression using parameter names."""
     try:
-        parts = target.rsplit(".", 1)
-        mod = importlib.import_module(parts[0])
-        func = getattr(mod, parts[1])
+        target_spec = _resolve_mutation_target(target)
+        if target_spec.leaf_name is None:
+            return "..."
+        func = _resolved_target_callable(target_spec)
         sig = inspect.signature(func)
         names = []
         for name, p in sig.parameters.items():
@@ -1701,11 +1798,10 @@ def _property_to_assert(prop_name: str, *, is_float: bool = False) -> str | None
 def _returns_none(target: str) -> bool:
     """Check if a function's return annotation is None."""
     try:
-        parts = target.rsplit(".", 1)
-        if len(parts) < 2:
+        target_spec = _resolve_mutation_target(target)
+        if target_spec.leaf_name is None:
             return False
-        mod = importlib.import_module(parts[0])
-        func = getattr(mod, parts[1])
+        func = _resolved_target_callable(target_spec)
         hints = inspect.get_annotations(func)
         ret = hints.get("return", _SENTINEL)
         return ret is None or ret is type(None)
@@ -1796,10 +1892,15 @@ def _starter_for_function(target: str) -> str:
     values, then runs mine() to discover properties and turn them into
     assertions.
     """
-    parts = target.rsplit(".", 1)
-    if len(parts) < 2:
+    target_spec = _resolve_mutation_target(target)
+    if target_spec.leaf_name is None:
         return ""
-    module_path, func_name = parts
+    module_path = target_spec.module_name
+    func_name = target_spec.leaf_name
+    if target_spec.qualname_parts:
+        call_target = ".".join([*target_spec.qualname_parts, func_name])
+    else:
+        call_target = func_name
     safe_name = target.replace(".", "_")
 
     sig_str, _ = _resolve_signature(target)
@@ -1814,7 +1915,7 @@ def _starter_for_function(target: str) -> str:
         "If a value looks wrong, the code has a bug.",
         '"""',
         "",
-        f"from {module_path} import {func_name}",
+        f"import {module_path} as _ordeal_target",
         "",
     ]
 
@@ -1836,9 +1937,13 @@ def _starter_for_function(target: str) -> str:
         lines.append(f'    """{func_name}{sig_str} — pinned return values."""')
         for r in successes:
             if returns_none:
-                lines.append(f"    assert {func_name}({r.call_repr}) is None")
+                lines.append(f"    assert _ordeal_target.{call_target}({r.call_repr}) is None")
             else:
-                a = _pin_assertion(f"{func_name}({r.call_repr})", r.value, r.value_repr)
+                a = _pin_assertion(
+                    f"_ordeal_target.{call_target}({r.call_repr})",
+                    r.value,
+                    r.value_repr,
+                )
                 lines.append(f"    {a}")
         lines.append("")
 
@@ -1849,7 +1954,7 @@ def _starter_for_function(target: str) -> str:
         lines.append(f'    """Crashes on some inputs: {err.error_type}."""')
         for f in failures:
             lines.append(f"    with pytest.raises({f.error_type}):")
-            lines.append(f"        {func_name}({f.call_repr})")
+            lines.append(f"        _ordeal_target.{call_target}({f.call_repr})")
         lines.append("")
 
     # Mine properties
@@ -2266,6 +2371,37 @@ def _find_test_dirs() -> list[Path]:
     if list(cwd.glob("test_*.py")):
         found.append(cwd)
     return found or [cwd / "tests"]  # default to tests/ even if missing
+
+
+def _mutation_test_dirs(module_name: str) -> list[Path]:
+    """Return candidate test directories for *module_name*."""
+    dirs: list[Path] = []
+    seen: set[Path] = set()
+
+    def _add(path: Path) -> None:
+        resolved = path.resolve()
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        dirs.append(resolved)
+
+    for path in _find_test_dirs():
+        _add(path)
+
+    try:
+        module = importlib.import_module(module_name)
+    except Exception:
+        module = None
+    if module is not None:
+        source_file = getattr(module, "__file__", None)
+        if source_file:
+            module_path = Path(source_file).resolve()
+            for parent in module_path.parents:
+                candidate = parent / "tests"
+                if candidate.is_dir():
+                    _add(candidate)
+
+    return dirs
 
 
 def _has_tests(module_name: str, test_dir: str = "tests") -> str | None:
@@ -3878,8 +4014,7 @@ def _needs_disk_mutation(target: str) -> bool:
     module itself may be pure Python while the *tests* call it through
     Ray ``.remote()`` — scanning only the target would miss this.
     """
-    parts = target.rsplit(".", 1)
-    module_name = parts[0] if len(parts) >= 2 else target
+    module_name = _split_mutation_target(target)[0]
 
     # Scan the target module
     source = _read_module_source(module_name)
@@ -4014,8 +4149,7 @@ def _mutated_module_on_disk(module_name: str, mutated_tree: ast.Module):
 
 @contextmanager
 def _function_mutated_on_disk(
-    module_path: str,
-    func_name: str,
+    target_spec: _ResolvedMutationTarget,
     mutated_func_tree: ast.Module,
 ):
     """Rewrite a single function on disk inside its module.
@@ -4024,7 +4158,7 @@ def _function_mutated_on_disk(
     node with the mutated version, writes to disk, and restores on exit.
     Used alongside :class:`PatchFault` for full cross-process coverage.
     """
-    module = importlib.import_module(module_path)
+    module = target_spec.module
     source_path = getattr(module, "__file__", None)
     if source_path is None:
         yield  # nothing to do — no source file
@@ -4047,28 +4181,34 @@ def _function_mutated_on_disk(
     # Parse full module, replace the target function
     module_tree = ast.parse(module_source)
     replaced = False
-    for i, node in enumerate(module_tree.body):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name:
-            # Preserve the original line number for ast.fix_missing_locations
-            mutated_func_node.lineno = node.lineno
-            mutated_func_node.col_offset = node.col_offset
-            module_tree.body[i] = mutated_func_node
-            replaced = True
-            break
-        # Also check inside class definitions
-        if isinstance(node, ast.ClassDef):
-            for j, method in enumerate(node.body):
-                if (
-                    isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and method.name == func_name
+    target_name = target_spec.leaf_name
+    if target_name is None:
+        yield  # module-level target has no replaceable function name
+        return
+
+    body = module_tree.body
+    class_path = list(target_spec.qualname_parts)
+
+    def _replace_in_body(nodes: list[ast.stmt], path: list[str]) -> bool:
+        if not path:
+            for i, node in enumerate(nodes):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
+                    node.name == target_name
                 ):
-                    mutated_func_node.lineno = method.lineno
-                    mutated_func_node.col_offset = method.col_offset
-                    node.body[j] = mutated_func_node
-                    replaced = True
-                    break
-            if replaced:
-                break
+                    mutated_func_node.lineno = node.lineno
+                    mutated_func_node.col_offset = node.col_offset
+                    nodes[i] = mutated_func_node
+                    return True
+            return False
+
+        head = path[0]
+        tail = path[1:]
+        for node in nodes:
+            if isinstance(node, ast.ClassDef) and node.name == head:
+                return _replace_in_body(node.body, tail)
+        return False
+
+    replaced = _replace_in_body(body, class_path)
 
     if not replaced:
         yield  # function not found in module — skip disk mutation
@@ -4104,13 +4244,17 @@ def _module_is_equivalent(
     except Exception:
         return False
 
-    for name in sorted(dir(original)):
-        if name.startswith("_"):
+    for name, obj in sorted(vars(original).items()):
+        if name.startswith("__"):
             continue
-        orig_fn = getattr(original, name, None)
-        mut_fn = getattr(mutated, name, None)
-        if not callable(orig_fn) or inspect.isclass(orig_fn):
+        if not callable(obj) or isinstance(obj, type):
             continue
+        orig_fn = _unwrap_func(obj)
+        if getattr(orig_fn, "__ordeal_requires_factory__", False):
+            continue
+        if getattr(orig_fn, "__module__", None) not in {original.__name__, None}:
+            continue
+        mut_fn = _resolve_dotted_attr(mutated, name)
         if mut_fn is None:
             return False
         if not _is_runtime_equivalent(orig_fn, mut_fn, n_samples):
@@ -4143,12 +4287,22 @@ class _EquivalenceSamplePlan:
 @functools.lru_cache(maxsize=128)
 def _split_mutation_target(target: str) -> tuple[str, str | None]:
     """Return ``(module_name, func_name)`` for a mutation target."""
-    try:
-        importlib.import_module(target)
+    if ":" in target:
+        module_name, _, attr_path = target.partition(":")
+        attr_parts = [part for part in attr_path.split(".") if part]
+        return module_name, (attr_parts[-1] if attr_parts else None)
+
+    if _local_module_exists(target):
         return target, None
-    except ImportError:
-        module_name, func_name = target.rsplit(".", 1)
-        return module_name, func_name
+
+    parts = target.split(".")
+    for idx in range(len(parts) - 1, 0, -1):
+        module_candidate = ".".join(parts[:idx])
+        if _local_module_exists(module_candidate):
+            return module_candidate, parts[-1]
+
+    resolved = _resolve_mutation_target(target)
+    return resolved.module_name, resolved.leaf_name
 
 
 def _mutation_test_name_variants(module_name: str) -> tuple[str, ...]:
@@ -4187,7 +4341,7 @@ def _named_mutation_test_candidates(module_name: str) -> tuple[str, ...]:
     """Return likely test files based on the target module name."""
     seen: set[str] = set()
     found: list[str] = []
-    for test_dir in _find_test_dirs():
+    for test_dir in _mutation_test_dirs(module_name):
         for short in _mutation_test_name_variants(module_name):
             exact = test_dir / f"test_{short}.py"
             if exact.exists():
@@ -4210,6 +4364,19 @@ def _named_mutation_test_candidates(module_name: str) -> tuple[str, ...]:
                 if resolved not in seen:
                     seen.add(resolved)
                     found.append(resolved)
+    return tuple(found)
+
+
+def _additional_mutation_test_candidates(module_name: str) -> tuple[str, ...]:
+    """Return broader test-file candidates for content-based scoring."""
+    seen: set[str] = set()
+    found: list[str] = []
+    for test_dir in _mutation_test_dirs(module_name):
+        for path in sorted(test_dir.rglob("test_*.py")):
+            resolved = str(path)
+            if resolved not in seen:
+                seen.add(resolved)
+                found.append(resolved)
     return tuple(found)
 
 
@@ -4324,7 +4491,7 @@ def _mutation_test_selection(
             scored.append((score, path))
 
     if not scored and func_name is not None:
-        for path in _all_test_files():
+        for path in _additional_mutation_test_candidates(module_name):
             score = _score_mutation_test_file(
                 path,
                 target=target,
@@ -4333,6 +4500,10 @@ def _mutation_test_selection(
             )
             if score > 0:
                 scored.append((score, path))
+
+    if not scored and func_name is not None:
+        fallback_filter = test_filter if test_filter is not None else func_name
+        return _MutationTestSelection(paths=tuple(named), k_filter=fallback_filter)
 
     if scored:
         seen: set[str] = set()
@@ -4343,10 +4514,6 @@ def _mutation_test_selection(
                 ranked_paths.append(path)
         return _MutationTestSelection(paths=tuple(ranked_paths), k_filter=test_filter)
 
-    if named:
-        fallback_filter = test_filter if test_filter is not None else func_name
-        return _MutationTestSelection(paths=tuple(named), k_filter=fallback_filter)
-
     short = module_name.split(".")[-1]
     fallback_filter = test_filter if test_filter is not None else (func_name or f"test_{short}")
     return _MutationTestSelection(paths=(), k_filter=fallback_filter)
@@ -4354,7 +4521,7 @@ def _mutation_test_selection(
 
 def _raise_no_tests_found(target: str) -> None:
     """Raise :class:`NoTestsFoundError` with the standard guidance."""
-    short = target.rsplit(".", 1)[-1]
+    short = _split_mutation_target(target)[0].rsplit(".", 1)[-1]
     suggested = f"tests/test_{short}.py"
     raise NoTestsFoundError(
         f"No tests found for {target!r}. "
@@ -4564,8 +4731,11 @@ def _batch_function_test(
     """
     import pytest
 
-    module_path, func_name = target.rsplit(".", 1)
-    module = importlib.import_module(module_path)
+    target_spec = _resolve_mutation_target(target)
+    module = target_spec.module
+    func_name = target_spec.leaf_name
+    if func_name is None:
+        raise ValueError(f"Function-level mutation target expected, got module {target!r}")
     phase_timings = timings if timings is not None else {}
     with _timed_phase(phase_timings, "test_selection_seconds"):
         selection = _mutation_test_selection(target, test_filter=test_filter)
@@ -4608,7 +4778,7 @@ def _batch_function_test(
                     killer = None
                     fault = PatchFault(target, lambda orig, mf=mutated_func: mf)
                     disk_cm = (
-                        _function_mutated_on_disk(module_path, func_name, mutated_tree)
+                        _function_mutated_on_disk(target_spec, mutated_tree)
                         if disk_mutation
                         else contextlib.nullcontext()
                     )
@@ -4737,15 +4907,15 @@ def _module_mine_oracle_fallback(
     combined = MutationResult(target=target, operators_used=operators, preset_used=preset_used)
     any_killed = False
 
-    for name in sorted(dir(module)):
+    for name, obj in sorted(vars(module).items()):
         if name.startswith("__"):
             continue
-        func = getattr(module, name, None)
-        if not callable(func) or inspect.isclass(func):
+        if not callable(obj) or isinstance(obj, type):
             continue
-        func = _unwrap_func(func)
-        obj_mod = getattr(func, "__module__", None)
-        if obj_mod and not obj_mod.startswith(target):
+        func = _unwrap_func(obj)
+        if getattr(func, "__ordeal_requires_factory__", False):
+            continue
+        if getattr(func, "__module__", None) not in {module.__name__, None}:
             continue
         try:
             source = _get_source(func)
@@ -5006,9 +5176,11 @@ def validate_mined_properties(
     validation_mode = _normalize_validation_mode(validation_mode)
     from ordeal.mine import mine
 
-    module_path, func_name = target.rsplit(".", 1)
-    module = importlib.import_module(module_path)
-    func = getattr(module, func_name)
+    target_spec = _resolve_mutation_target(target)
+    func_name = target_spec.leaf_name
+    if func_name is None:
+        raise ValueError(f"Function-level mutation target expected, got module {target!r}")
+    func = _resolved_target_callable(target_spec)
 
     # Mine the original function's properties
     original_mine: MineResult = mine_result or mine(func, max_examples=max_examples)
@@ -5124,7 +5296,7 @@ def validate_mined_properties(
 
     # Build a test function from the mined properties
     def mined_test() -> None:
-        current_func = getattr(importlib.import_module(module_path), func_name)
+        current_func = _resolved_target_callable(target_spec)
         sample_inputs = _sample_inputs_for_validation(current_func, original_mine)
         if sample_inputs:
             _assert_original_properties_hold(
@@ -5411,9 +5583,12 @@ def mutate_function_and_test(
     auto_discovered_tests = test_fn is None
     if test_fn is None:
         test_fn = _auto_test_fn(target, test_filter=test_filter)
-    module_path, func_name = target.rsplit(".", 1)
-    module = importlib.import_module(module_path)
-    func = _unwrap_func(getattr(module, func_name))
+    target_spec = _resolve_mutation_target(target)
+    module = target_spec.module
+    func_name = target_spec.leaf_name
+    if func_name is None:
+        raise ValueError(f"Function-level mutation target expected, got module {target!r}")
+    func = _unwrap_func(_resolved_target_callable(target_spec))
     source = _get_source(func)
 
     stats: dict[str, int] = {}
@@ -5537,7 +5712,7 @@ def mutate_function_and_test(
                 fn_name = getattr(test_fn, "__qualname__", getattr(test_fn, "__name__", "test_fn"))
                 fault = PatchFault(target, lambda orig, mf=mutated_func: mf)
                 disk_cm = (
-                    _function_mutated_on_disk(module_path, func_name, mutated_tree)
+                    _function_mutated_on_disk(target_spec, mutated_tree)
                     if disk_mutation
                     else contextlib.nullcontext()
                 )
@@ -5643,7 +5818,7 @@ def _mine_based_mutation_test(
     mine_result = mine(func, max_examples=50)
     universal = [p for p in mine_result.properties if p.universal and p.total > 0]
     if not universal:
-        short = target.rsplit(".", 1)[-1]
+        short = _split_mutation_target(target)[0].rsplit(".", 1)[-1]
         raise NoTestsFoundError(
             f"No tests found for {target!r} and mine() discovered no properties. "
             "Cannot validate mutations.\n"
@@ -5786,19 +5961,10 @@ def _parallel_function_test(
 def _is_function_target(target: str) -> bool:
     """Determine if a dotted path refers to a callable (vs a module)."""
     try:
-        importlib.import_module(target)
+        resolved = _resolve_mutation_target(target)
+    except Exception:
         return False
-    except ImportError:
-        pass
-    parts = target.rsplit(".", 1)
-    if len(parts) < 2:
-        return False
-    try:
-        mod = importlib.import_module(parts[0])
-        attr = getattr(mod, parts[1], None)
-        return callable(attr)
-    except ImportError:
-        return False
+    return resolved.leaf_name is not None
 
 
 def mutate(
@@ -5973,9 +6139,12 @@ def mutation_faults(
         List of ``(Mutant, PatchFault)`` pairs.
     """
     operators = _resolve_operators(operators, preset)
-    module_path, func_name = target.rsplit(".", 1)
-    module = importlib.import_module(module_path)
-    func = _unwrap_func(getattr(module, func_name))
+    target_spec = _resolve_mutation_target(target)
+    module = target_spec.module
+    func_name = target_spec.leaf_name
+    if func_name is None:
+        raise ValueError(f"Function-level mutation target expected, got module {target!r}")
+    func = _unwrap_func(_resolved_target_callable(target_spec))
     source = _get_source(func)
 
     results: list[tuple[Mutant, PatchFault]] = []

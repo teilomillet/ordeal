@@ -74,11 +74,11 @@ Use `--save-artifacts` when you want the full handoff package: `.ordeal/findings
 
 `scan` promotes replayable crashes as likely bugs and keeps the rest of the evidence exploratory. That includes unreplayed crashes, weaker mined properties, and expected precondition failures. If you need stronger validation for a mature codebase, prefer `ordeal audit` for coverage and mutation comparison, and `ordeal mutate` for direct mutation scoring.
 
-Most of the tuning knobs for `scan` live in `[[scan]]` inside `ordeal.toml`. Use `[fixtures].registries` for project-wide fixture registrations, `fixture_registries` for scan-specific registry imports, `ignore_properties` and `ignore_relations` to suppress noisy laws, and `property_overrides` or `relation_overrides` when one function needs a narrower set of checks. `expected_failures` keeps known preconditions from being promoted as bugs.
+Most of the tuning knobs for `scan` live in `[[scan]]` inside `ordeal.toml`. Use `[fixtures].registries` for project-wide fixture registrations, `fixture_registries` for scan-specific registry imports, `ignore_properties` and `ignore_relations` to suppress noisy laws, and `property_overrides` or `relation_overrides` when one function needs a narrower set of checks. `expected_failures` keeps known preconditions from being promoted as bugs. For stateful OO code, `[[objects]]` supplies bound-instance factories and `[[contracts]]` adds explicit shell/path/env probes.
 
 | Flag | Default | Description |
 |---|---|---|
-| `target` | required | Module path (for example `myapp.scoring`) |
+| `target` | required | Module path or explicit callable target such as `myapp.scoring` or `myapp.scoring:Env.build_env_vars` |
 | `--seed` | `42` | RNG seed for reproducibility |
 | `--max-examples`, `-n` | `50` | Examples per function |
 | `--workers`, `-w` | `1` | Parallel workers for mutation testing |
@@ -211,7 +211,7 @@ Every number is `[verified]` (measured and cross-checked for consistency) or `FA
 
 `--validation-mode fast` replays mined inputs against each mutant and is the default because it is much faster. `--validation-mode deep` keeps that replay check and then re-runs `mine()` on each mutant, which is slower but keeps the broader exploratory search.
 
-`audit` now reads `[audit]` from `ordeal.toml` too. That means module lists, direct-test gates, validation depth, and gap-writing defaults can live in config and be reused by both humans and agents.
+`audit` now reads `[audit]` from `ordeal.toml` too. That means module lists, direct-test gates, validation depth, and gap-writing defaults can live in config and be reused by both humans and agents. Shared `[[objects]]` entries are expanded automatically, and `[[audit.targets]]` lets you override a factory or limit audit to selected methods.
 
 The "migrated" column shows what a real ordeal test file looks like: `fuzz()` for crash safety plus explicitly mined properties (bounds, determinism, type checks). It generates the test file a developer would write after adopting ordeal.
 

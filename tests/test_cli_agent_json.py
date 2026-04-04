@@ -206,6 +206,54 @@ class TestCLIAgentJson:
             payload["raw_details"]["report"]["extra_sections"][0][0] == "Function-Level Evidence"
         )
 
+    def test_audit_json_preserves_method_level_function_names(self, monkeypatch, capsys):
+        verified = CoverageMeasurement(
+            Status.VERIFIED,
+            CoverageResult(
+                percent=82.0,
+                total_statements=100,
+                missing_count=18,
+                missing_lines=frozenset({10, 11}),
+                source="coverage.py",
+            ),
+        )
+
+        def fake_audit(*args, **kwargs):
+            return ModuleAudit(
+                module="demo_pkg.envs",
+                current_test_count=4,
+                current_test_lines=40,
+                current_coverage=verified,
+                migrated_test_count=3,
+                migrated_lines=30,
+                migrated_coverage=verified,
+                validation_mode="fast",
+                function_audits=[
+                    FunctionAudit(
+                        name="Env.build_env_vars",
+                        status="uncovered",
+                        epistemic="none",
+                        evidence=[
+                            {
+                                "kind": "no_tests",
+                                "detail": "no matching pytest files or collected nodeids",
+                            }
+                        ],
+                    )
+                ],
+            )
+
+        monkeypatch.setattr(audit_mod, "audit", fake_audit)
+
+        rc = main(["audit", "demo_pkg.envs", "--json"])
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["raw_details"]["function_audits"][0]["name"] == "Env.build_env_vars"
+        function_gaps = [item for item in payload["findings"] if item["kind"] == "function_gap"]
+        assert function_gaps[0]["function"] == "Env.build_env_vars"
+        assert function_gaps[0]["details"]["status"] == "uncovered"
+
     def test_audit_json_require_direct_tests_blocks_on_non_exercised_functions(
         self, monkeypatch, capsys
     ):

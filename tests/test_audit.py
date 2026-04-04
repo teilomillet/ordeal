@@ -12,6 +12,7 @@ Tests verify that the audit:
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -851,6 +852,98 @@ class TestAuditIntegration:
             result.function_audit_counts["exercised"] + result.function_audit_counts["exploratory"]
             >= 1
         )
+
+    def test_audit_discovers_public_class_methods(self, tmp_path: Path, monkeypatch):
+        pkg = tmp_path / "demo_pkg"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "envs.py").write_text(
+            """
+class Env:
+    def build_env_vars(self, name: str) -> str:
+        return name.upper()
+
+    def post_sandbox_setup(self) -> str:
+        return "done"
+""",
+            encoding="utf-8",
+        )
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_envs.py").write_text(
+            "from demo_pkg.envs import Env\n"
+            "def test_build_env_vars():\n"
+            "    assert Env().build_env_vars('x') == 'X'\n",
+            encoding="utf-8",
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        from ordeal.audit import audit
+
+        result = audit("demo_pkg.envs", test_dir=str(tests_dir), max_examples=5)
+
+        audits = {item.name: item for item in result.function_audits}
+        assert "Env.build_env_vars" in audits
+        assert audits["Env.build_env_vars"].status in {"exercised", "exploratory"}
+        assert result.total_functions >= 1
+
+    def test_audit_uses_configured_factory_for_instance_methods(
+        self, tmp_path: Path, monkeypatch
+    ):
+        pkg = tmp_path / "factory_pkg"
+        support = tmp_path / "factory_support"
+        pkg.mkdir()
+        support.mkdir()
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (support / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "models.py").write_text(
+            """
+class Env:
+    def __init__(self, prefix: str):
+        self.prefix = prefix
+
+    def build_env_vars(self, name: str) -> str:
+        return f"{self.prefix}:{name}"
+""",
+            encoding="utf-8",
+        )
+        (support / "factories.py").write_text(
+            """
+from factory_pkg.models import Env
+
+def make_env() -> Env:
+    return Env("demo")
+""",
+            encoding="utf-8",
+        )
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_models.py").write_text(
+            "from factory_pkg.models import Env\n"
+            "def test_build_env_vars():\n"
+            "    assert Env('demo').build_env_vars('x') == 'demo:x'\n",
+            encoding="utf-8",
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        from ordeal.audit import audit
+
+        target = SimpleNamespace(
+            target="factory_pkg.models:Env",
+            factory="factory_support.factories:make_env",
+            methods=["build_env_vars"],
+        )
+        result = audit(
+            "factory_pkg.models",
+            targets=[target],
+            test_dir=str(tests_dir),
+            max_examples=5,
+        )
+
+        audits = {item.name: item for item in result.function_audits}
+        assert "Env.build_env_vars" in audits
+        assert result.total_functions >= 1
+        assert result.gap_functions == []
 
 
 class TestModuleAuditSummaryValidation:

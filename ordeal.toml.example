@@ -116,6 +116,11 @@ verbose = true
 # [[scan]]
 # module = "myapp.scoring"
 # max_examples = 50
+# include_private = false
+#
+# # Optional: focus scan on explicit OO/stateful targets instead of the whole
+# # module surface.
+# targets = ["myapp.scoring:Scorer.score", "myapp.scoring:Scorer.normalize"]
 #
 # # Load project-specific fixture registrations from importable modules that
 # # call register_fixture(). This supplements local conftest.py discovery.
@@ -145,6 +150,22 @@ verbose = true
 # [fixtures]
 # registries = ["tests.support.shared_fixtures"]
 #
+# # Shared object factories for bound instance methods. Scan and audit reuse
+# # these automatically.
+# [[objects]]
+# target = "myapp.envs:ComposableEnv"
+# factory = "tests.support.factories:make_composable_env"
+# setup = "tests.support.factories:prime_composable_env"
+#
+# # Optional semantic probes for shell/path/env helpers during scan.
+# [[contracts]]
+# target = "myapp.envs:ComposableEnv.build_env_vars"
+# checks = ["shell_safe", "quoted_paths", "protected_env_keys"]
+# kwargs = { path = "tmp/my binary", env_vars = { PATH = "/bin", HOME = "/tmp/home" } }
+# tracked_params = ["path"]
+# protected_keys = ["PATH", "HOME"]
+# env_param = "env_vars"
+#
 # [[scan]]
 # module = "myapp.validation"
 # max_examples = 100
@@ -161,6 +182,13 @@ verbose = true
 # max_examples = 20
 # workers = 1
 # validation_mode = "fast"
+#
+# # Optional object-level targets with per-target factory/setup hooks.
+# [[audit.targets]]
+# target = "myapp.envs:ComposableEnv"
+# factory = "tests.support.factories:make_composable_env"
+# setup = "tests.support.factories:prime_composable_env"
+# methods = ["build_env_vars", "post_sandbox_setup"]
 #
 # # Optional outputs / gates.
 # show_generated = false

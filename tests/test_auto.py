@@ -2,12 +2,54 @@
 
 from __future__ import annotations
 
+import shlex
+import sys
+import types
+
 import hypothesis.strategies as st
 
+import ordeal.auto as auto_mod
 import tests._auto_target as target
-from ordeal.auto import _test_one_function, chaos_for, fuzz, scan_module
+from ordeal.auto import ContractCheck, _test_one_function, chaos_for, fuzz, scan_module
 from ordeal.invariants import finite
 from ordeal.mine import MinedProperty
+
+
+def _install_method_target_module(module_name: str):
+    import sys
+    import types
+
+    mod = types.ModuleType(module_name)
+    sys.modules[module_name] = mod
+    exec(
+        "class Env:\n"
+        "    def __init__(self) -> None:\n"
+        "        self.ready = False\n"
+        "        self.prefix = 'ready:'\n"
+        "\n"
+        "    def greet(self, name: str) -> str:\n"
+        "        if not self.ready:\n"
+        "            raise RuntimeError('not ready')\n"
+        "        return f'{self.prefix}{name}'\n"
+        "\n"
+        "    async def async_greet(self, name: str) -> str:\n"
+        "        if not self.ready:\n"
+        "            raise RuntimeError('not ready')\n"
+        "        return f'{self.prefix}{name}'\n"
+        "\n"
+        "    @classmethod\n"
+        "    def label(cls, name: str) -> str:\n"
+        "        return f'{cls.__name__}:{name}'\n"
+        "\n"
+        "    @staticmethod\n"
+        "    def shout(name: str) -> str:\n"
+        "        return name.upper()\n"
+        "\n"
+        "async def async_add(a: int, b: int) -> int:\n"
+        "    return a + b\n",
+        mod.__dict__,
+    )
+    return mod
 
 
 class TestScanModule:
@@ -27,6 +69,41 @@ class TestScanModule:
         result = scan_module("tests._auto_target", max_examples=10)
         all_names = [f.name for f in result.functions] + [n for n, _ in result.skipped]
         assert "_private" not in all_names
+
+    def test_discovers_instance_methods_and_ignores_lazy_exports(self, monkeypatch):
+        mod = types.ModuleType("_test_lazy_methods")
+        exec(
+            "class Env:\n"
+            "    def __init__(self):\n"
+            "        self.prefix = 'ok'\n"
+            "\n"
+            "    def build_env_vars(self, path: str) -> str:\n"
+            "        return f'{self.prefix}:{path}'\n"
+            "\n"
+            "def direct(x: int) -> int:\n"
+            "    return x\n"
+            "\n"
+            "def __getattr__(name):\n"
+            "    raise AttributeError(name)\n"
+            "\n"
+            "def __dir__():\n"
+            "    return ['Env', 'direct', 'PhantomExport']\n",
+            mod.__dict__,
+        )
+        sys.modules[mod.__name__] = mod
+        monkeypatch.setitem(
+            auto_mod._REGISTERED_OBJECT_FACTORIES,
+            "_test_lazy_methods:Env",
+            lambda: mod.Env(),
+        )
+        try:
+            result = scan_module(mod, max_examples=10)
+            names = [f.name for f in result.functions]
+            assert "direct" in names
+            assert "Env.build_env_vars" in names
+            assert "PhantomExport" not in names
+        finally:
+            del sys.modules[mod.__name__]
 
     def test_catches_crash(self):
         result = scan_module("tests._auto_target", max_examples=50)
@@ -64,6 +141,87 @@ class TestScanModule:
         result = scan_module(target, max_examples=10)
         assert result.total > 0
 
+    def test_discovers_public_methods_and_skips_missing_factories(self):
+        import sys
+
+        module_name = "_test_method_targets_skip"
+        mod = _install_method_target_module(module_name)
+        try:
+            result = scan_module(mod, max_examples=10)
+            names = [f.name for f in result.functions]
+            assert "Env.label" in names
+            assert "Env.shout" in names
+            assert "async_add" in names
+            skipped = dict(result.skipped)
+            assert skipped["Env.greet"] == "missing object factory"
+            assert skipped["Env.async_greet"] == "missing object factory"
+        finally:
+            del sys.modules[module_name]
+
+    def test_method_factories_enable_async_scan_and_explicit_fuzz_targets(self):
+        import sys
+
+        module_name = "_test_method_targets_factory"
+        mod = _install_method_target_module(module_name)
+        key = f"{module_name}:Env"
+
+        def factory() -> object:
+            return mod.Env()
+
+        def setup(instance: object) -> None:
+            instance.ready = True
+            instance.prefix = "ok:"
+
+        try:
+            result = scan_module(
+                mod,
+                max_examples=20,
+                object_factories={key: factory},
+                object_setups={key: setup},
+            )
+            names = [f.name for f in result.functions]
+            assert "Env.greet" in names
+            assert "Env.async_greet" in names
+            assert "Env.label" in names
+            assert "Env.shout" in names
+            assert "async_add" in names
+            assert result.passed
+
+            fuzz_result = fuzz(
+                f"{module_name}:Env.greet",
+                max_examples=20,
+                object_factories={key: factory},
+                object_setups={key: setup},
+            )
+            assert fuzz_result.passed
+        finally:
+            del sys.modules[module_name]
+
+    def test_scan_module_can_limit_to_explicit_method_targets(self):
+        import sys
+
+        module_name = "_test_method_targets_select"
+        mod = _install_method_target_module(module_name)
+        key = f"{module_name}:Env"
+
+        def factory() -> object:
+            instance = mod.Env()
+            instance.ready = True
+            return instance
+
+        try:
+            result = scan_module(
+                mod,
+                max_examples=10,
+                targets=[f"{module_name}:Env.greet"],
+                object_factories={key: factory},
+            )
+
+            assert [item.name for item in result.functions] == ["Env.greet"]
+            assert result.skipped == []
+        finally:
+            del sys.modules[module_name]
+
     def test_skips_imported_typing_helpers(self):
         import sys
         import types
@@ -82,9 +240,6 @@ class TestScanModule:
             del sys.modules["_test_imported_helpers"]
 
     def test_documented_precondition_is_not_reported_as_crash(self):
-        import sys
-        import types
-
         mod = types.ModuleType("_test_preconditions")
         exec(
             "def score_responses(prompts: list[str], responses: list[str]) -> list[int]:\n"
@@ -106,6 +261,36 @@ class TestScanModule:
             assert result.failed == 0
         finally:
             del sys.modules["_test_preconditions"]
+
+    def test_explicit_contract_checks_are_reported_without_failing_scan(self):
+        mod = types.ModuleType("_test_contracts")
+        exec(
+            "def build_command(path: str) -> str:\n"
+            "    return f'cp {path} /tmp'\n",
+            mod.__dict__,
+        )
+        sys.modules[mod.__name__] = mod
+        try:
+            result = scan_module(
+                mod,
+                max_examples=5,
+                contract_checks={
+                    "build_command": [
+                        ContractCheck(
+                            name="shell-safe path quoting",
+                            kwargs={"path": "a b"},
+                            predicate=lambda cmd: shlex.quote("a b") in cmd,
+                        )
+                    ]
+                },
+            )
+            command = next(f for f in result.functions if f.name == "build_command")
+            assert command.passed
+            assert command.contract_violations
+            assert command.contract_violation_details[0]["category"] == "semantic_contract"
+            assert result.failed == 0
+        finally:
+            del sys.modules[mod.__name__]
 
     def test_filters_low_signal_property_warnings(self, monkeypatch):
         import ordeal.mine as mine_mod
@@ -261,6 +446,17 @@ class TestFuzz:
         result = fuzz(target.add, max_examples=10)
         assert "fuzz" in result.summary()
 
+    def test_async_callable_passes(self):
+        import sys
+
+        module_name = "_test_async_fuzz"
+        mod = _install_method_target_module(module_name)
+        try:
+            result = fuzz(mod.async_add, max_examples=20)
+            assert result.passed
+        finally:
+            del sys.modules[module_name]
+
 
 class TestChaosFor:
     def test_generates_testcase(self):
@@ -318,6 +514,35 @@ class TestChaosFor:
             stateful_step_count=5,
         )
         assert TestCase is not None
+
+    def test_method_targets_work_in_stateful_chaos(self):
+        import sys
+
+        module_name = "_test_method_targets_chaos"
+        mod = _install_method_target_module(module_name)
+        key = f"{module_name}:Env"
+
+        def factory():
+            return mod.Env()
+
+        def setup(instance):
+            instance.ready = True
+            instance.prefix = "ok:"
+
+        try:
+            TestCase = chaos_for(
+                mod,
+                object_factories={key: factory},
+                object_setups={key: setup},
+                faults=[],
+                invariants=[],
+                max_examples=5,
+                stateful_step_count=5,
+            )
+            test = TestCase("runTest")
+            test.runTest()
+        finally:
+            del sys.modules[module_name]
 
 
 # ============================================================================

@@ -105,6 +105,8 @@ verbose = true
                 """
 [[scan]]
 module = "myapp.scoring"
+targets = ["myapp.scoring:Env.build_env_vars"]
+include_private = true
 fixture_registries = ["tests.support.fixtures"]
 ignore_properties = ["commutative"]
 ignore_relations = ["commutative_composition"]
@@ -114,11 +116,48 @@ relation_overrides = { normalize = ["equivalent"] }
             )
         )
         scan = cfg.scan[0]
+        assert scan.targets == ["myapp.scoring:Env.build_env_vars"]
+        assert scan.include_private is True
         assert scan.fixture_registries == ["tests.support.fixtures"]
         assert scan.ignore_properties == ["commutative"]
         assert scan.ignore_relations == ["commutative_composition"]
         assert scan.property_overrides == {"score": ["idempotent"]}
         assert scan.relation_overrides == {"normalize": ["equivalent"]}
+
+    def test_object_and_contract_config_sections(self, tmp_toml):
+        cfg = load_config(
+            tmp_toml(
+                """
+[[objects]]
+target = "myapp.envs:ComposableEnv"
+factory = "tests.support.factories:make_composable_env"
+setup = "tests.support.factories:prime_composable_env"
+methods = ["build_env_vars", "post_sandbox_setup"]
+
+[[contracts]]
+target = "myapp.envs:ComposableEnv.build_env_vars"
+checks = ["shell_safe", "quoted_paths", "protected_env_keys"]
+kwargs = { path = "a b", env_vars = { PATH = "/bin", HOME = "/tmp/home" } }
+tracked_params = ["path"]
+protected_keys = ["PATH", "HOME"]
+env_param = "env_vars"
+"""
+            )
+        )
+
+        assert cfg.objects[0].target == "myapp.envs:ComposableEnv"
+        assert cfg.objects[0].factory == "tests.support.factories:make_composable_env"
+        assert cfg.objects[0].setup == "tests.support.factories:prime_composable_env"
+        assert cfg.objects[0].methods == ["build_env_vars", "post_sandbox_setup"]
+        assert cfg.contracts[0].target == "myapp.envs:ComposableEnv.build_env_vars"
+        assert cfg.contracts[0].checks == [
+            "shell_safe",
+            "quoted_paths",
+            "protected_env_keys",
+        ]
+        assert cfg.contracts[0].tracked_params == ["path"]
+        assert cfg.contracts[0].protected_keys == ["PATH", "HOME"]
+        assert cfg.contracts[0].env_param == "env_vars"
 
     def test_shared_fixture_registries_section(self, tmp_toml):
         cfg = load_config(
@@ -166,6 +205,30 @@ require_direct_tests = true
         assert cfg.audit.write_gaps_dir == "tests/gaps"
         assert cfg.audit.include_exploratory_function_gaps is True
         assert cfg.audit.require_direct_tests is True
+
+    def test_audit_target_config_supports_object_factories(self, tmp_toml):
+        cfg = load_config(
+            tmp_toml(
+                """
+[audit]
+modules = ["myapp.scoring"]
+
+[[audit.targets]]
+target = "verifiers.envs.experimental.cli_agent_env:CliAgentEnv"
+factory = "tests.support.factories:make_cli_agent_env"
+setup = "tests.support.factories:prime_cli_agent_env"
+methods = ["build_env_vars", "post_sandbox_setup"]
+include_private = true
+"""
+            )
+        )
+
+        target = cfg.audit.targets[0]
+        assert target.target == "verifiers.envs.experimental.cli_agent_env:CliAgentEnv"
+        assert target.factory == "tests.support.factories:make_cli_agent_env"
+        assert target.setup == "tests.support.factories:prime_cli_agent_env"
+        assert target.methods == ["build_env_vars", "post_sandbox_setup"]
+        assert target.include_private is True
 
     def test_init_section_defaults(self, tmp_toml):
         cfg = load_config(

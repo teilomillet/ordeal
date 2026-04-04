@@ -1,0 +1,56 @@
+"""Focused tests for method-aware mutation target resolution."""
+
+from __future__ import annotations
+
+import ast
+import importlib
+from pathlib import Path
+
+import ordeal.mutations as mutations
+
+
+def _write_method_target_module(root: Path) -> None:
+    pkg = root / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "mod.py").write_text(
+        "class First:\n"
+        "    def render(self) -> str:\n"
+        "        return 'first'\n"
+        "\n"
+        "class Second:\n"
+        "    def render(self) -> str:\n"
+        "        return 'second'\n",
+        encoding="utf-8",
+    )
+
+
+def test_resolve_mutation_target_handles_class_methods(tmp_path: Path, monkeypatch):
+    _write_method_target_module(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    spec = mutations._resolve_mutation_target("pkg.mod.First.render")
+
+    assert spec.module_name == "pkg.mod"
+    assert spec.leaf_name == "render"
+    assert spec.qualname_parts == ("First",)
+    assert not spec.is_module
+
+
+def test_function_mutated_on_disk_replaces_exact_class_method(tmp_path: Path, monkeypatch):
+    _write_method_target_module(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    import pkg.mod as mod
+
+    spec = mutations._resolve_mutation_target("pkg.mod.First.render")
+    mutated_tree = ast.parse("def render(self) -> str:\n    return 'mutated'\n")
+
+    with mutations._function_mutated_on_disk(spec, mutated_tree):
+        reloaded = importlib.reload(mod)
+        assert reloaded.First().render() == "mutated"
+        assert reloaded.Second().render() == "second"
+
+    restored = importlib.reload(mod)
+    assert restored.First().render() == "first"
+    assert restored.Second().render() == "second"

@@ -887,9 +887,7 @@ class Env:
         assert audits["Env.build_env_vars"].status in {"exercised", "exploratory"}
         assert result.total_functions >= 1
 
-    def test_audit_uses_configured_factory_for_instance_methods(
-        self, tmp_path: Path, monkeypatch
-    ):
+    def test_audit_uses_configured_factory_for_instance_methods(self, tmp_path: Path, monkeypatch):
         pkg = tmp_path / "factory_pkg"
         support = tmp_path / "factory_support"
         pkg.mkdir()

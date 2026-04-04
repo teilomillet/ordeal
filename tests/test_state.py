@@ -92,8 +92,7 @@ class TestExplorationStateSerialization:
         fs = explored.functions["build_command"]
         assert fs.contract_violations == ["shell-safe path quoting"]
         assert any(
-            "shell-safe path quoting" in finding
-            for finding in explored.exploratory_findings
+            "shell-safe path quoting" in finding for finding in explored.exploratory_findings
         )
         assert any(
             detail["category"] == "semantic_contract" for detail in explored.finding_details
@@ -113,6 +112,7 @@ class TestExplorationStateSerialization:
         monkeypatch.setattr(auto_mod, "scan_module", fake_scan_module)
 
         state = ExplorationState("pkg.mod")
+
         def factory() -> object:
             return object()
 

@@ -489,9 +489,7 @@ def _make_unbound_method_placeholder(
 
     @functools.wraps(target)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
-        raise ValueError(
-            f"{owner.__qualname__}.{method_name} needs an object factory"
-        )
+        raise ValueError(f"{owner.__qualname__}.{method_name} needs an object factory")
 
     try:
         wrapped.__signature__ = _signature_without_first_context(target)
@@ -594,9 +592,7 @@ def _selected_public_functions(
         elif ":" in target:
             base_module = target.split(":", 1)[0]
             if base_module != mod.__name__:
-                raise ValueError(
-                    f"target {target!r} does not belong to module {mod.__name__!r}"
-                )
+                raise ValueError(f"target {target!r} does not belong to module {mod.__name__!r}")
             name, func = _resolve_explicit_target(
                 target,
                 object_factories=object_factories,
@@ -630,8 +626,7 @@ def _tracked_string_args(
 ) -> list[str]:
     """Return the string argument values tracked by a semantic contract."""
     names = list(
-        tracked_params
-        or [name for name, value in kwargs.items() if isinstance(value, str)]
+        tracked_params or [name for name, value in kwargs.items() if isinstance(value, str)]
     )
     tracked: list[str] = []
     for name in names:
@@ -653,7 +648,7 @@ def shell_safe_contract(
         if tokens is None:
             return False
         for raw in _tracked_string_args(kwargs, tracked_params):
-            if any(ch in raw for ch in ' \t;&|`$><()[]{}*?'):
+            if any(ch in raw for ch in " \t;&|`$><()[]{}*?"):
                 if tokens.count(raw) != 1:
                     return False
         return True
@@ -723,11 +718,7 @@ def protected_env_keys_contract(
 ) -> ContractCheck:
     """Build a probe that checks protected env keys survive updates."""
     resolved_env_param = env_param or next(
-        (
-            name
-            for name, value in kwargs.items()
-            if isinstance(value, Mapping)
-        ),
+        (name for name, value in kwargs.items() if isinstance(value, Mapping)),
         None,
     )
 

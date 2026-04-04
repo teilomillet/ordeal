@@ -265,8 +265,7 @@ class TestScanModule:
     def test_explicit_contract_checks_are_reported_without_failing_scan(self):
         mod = types.ModuleType("_test_contracts")
         exec(
-            "def build_command(path: str) -> str:\n"
-            "    return f'cp {path} /tmp'\n",
+            "def build_command(path: str) -> str:\n    return f'cp {path} /tmp'\n",
             mod.__dict__,
         )
         sys.modules[mod.__name__] = mod

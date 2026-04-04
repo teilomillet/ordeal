@@ -1361,7 +1361,7 @@ class TestCLI:
                 "source": "function_audit",
                 "status": "uncovered",
                 "epistemic": "none",
-            }
+            },
         ]
         assert report["weakest_tests"] == [
             {

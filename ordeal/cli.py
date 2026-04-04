@@ -3724,7 +3724,7 @@ def _build_audit_agent_envelope(
                 ),
                 f"fixture completeness: {evidence['fixture_completeness']:.0%}",
             ],
-        )
+        ),
     ]
     artifacts: list[Any] = []
     if saved_generated_path is not None:

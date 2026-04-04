@@ -180,8 +180,7 @@ class TestCLIAgentJson:
         assert "Function evidence:" in payload["summary"]
         assert payload["raw_details"]["function_audits"][0]["module"] == "ordeal.demo"
         assert (
-            payload["raw_details"]["report"]["extra_sections"][0][0]
-            == "Function-Level Evidence"
+            payload["raw_details"]["report"]["extra_sections"][0][0] == "Function-Level Evidence"
         )
 
     def test_mutate_json_outputs_agent_envelope(self, monkeypatch, capsys):

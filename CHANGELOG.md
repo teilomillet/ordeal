@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.10
+
+**Features:**
+
+- configure audit and init via toml
+
+
 ## 0.3.9
 
 **Features:**

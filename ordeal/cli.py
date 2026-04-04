@@ -147,6 +147,21 @@ def _arg(*tokens: str, **kwargs: Any) -> ArgumentSpec:
     return ArgumentSpec(tokens=tokens, kwargs=dict(kwargs))
 
 
+def _load_optional_config(path_str: str | None) -> OrdealConfig | None:
+    """Load a config file when explicitly requested or present in cwd."""
+    config_path = Path(path_str or "ordeal.toml")
+    if not config_path.exists():
+        if path_str is None:
+            return None
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    return load_config(config_path)
+
+
+def _cli_or_config(value: Any, fallback: Any) -> Any:
+    """Prefer an explicit CLI value, otherwise use the config/default fallback."""
+    return fallback if value is None else value
+
+
 def _make_signal_profiler(
     checkpoints: tuple[float, ...] = _BENCHMARK_SIGNAL_CHECKPOINTS,
 ) -> tuple[
@@ -253,6 +268,8 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
     print("\nRun 'ordeal --help' for the full live CLI surface.")
     print("Run 'ordeal <command> --help' for command-specific options.")
     print("Run 'ordeal catalog --detail' for signatures and docs.")
+    print("Key CLI entrypoints: scan, init, audit, mutate, verify, skill.")
+    print("Run 'ordeal skill' or 'ordeal init --install-skill' for local agent guidance.")
     print("Python: from ordeal import catalog; catalog()")
 
     if getattr(args, "detail", False):
@@ -1191,35 +1208,99 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     """Run ordeal audit on specified modules."""
     from ordeal.audit import audit
 
+    try:
+        cfg = _load_optional_config(getattr(args, "config", None))
+    except FileNotFoundError:
+        _stderr(f"Config not found: {args.config}\n")
+        return 1
+    except ConfigError as e:
+        _stderr(f"Config error: {e}\n")
+        return 1
+
+    audit_cfg = cfg.audit if cfg is not None else None
+    modules = list(args.modules or [])
+    if not modules and audit_cfg is not None:
+        modules = list(audit_cfg.modules)
+    if not modules:
+        _stderr("No modules specified. Pass modules or configure [audit].modules.\n")
+        return 2
+
+    test_dir = str(
+        _cli_or_config(
+            getattr(args, "test_dir", None),
+            audit_cfg.test_dir if audit_cfg else "tests",
+        )
+    )
+    max_examples = int(
+        _cli_or_config(
+            getattr(args, "max_examples", None),
+            audit_cfg.max_examples if audit_cfg else 20,
+        )
+    )
+    workers = int(
+        _cli_or_config(
+            getattr(args, "workers", None),
+            audit_cfg.workers if audit_cfg else 1,
+        )
+    )
+    validation_mode = str(
+        _cli_or_config(
+            getattr(args, "validation_mode", None),
+            audit_cfg.validation_mode if audit_cfg else "fast",
+        )
+    )
+    show_generated = bool(
+        _cli_or_config(
+            getattr(args, "show_generated", None),
+            audit_cfg.show_generated if audit_cfg else False,
+        )
+    )
+    save_generated = _cli_or_config(
+        getattr(args, "save_generated", None),
+        audit_cfg.save_generated if audit_cfg else None,
+    )
+    write_gaps = _cli_or_config(
+        getattr(args, "write_gaps", None),
+        audit_cfg.write_gaps_dir if audit_cfg else None,
+    )
+    include_exploratory_function_gaps = bool(
+        _cli_or_config(
+            getattr(args, "include_exploratory_function_gaps", None),
+            audit_cfg.include_exploratory_function_gaps if audit_cfg else False,
+        )
+    )
+    require_direct_tests = bool(
+        _cli_or_config(
+            getattr(args, "require_direct_tests", None),
+            audit_cfg.require_direct_tests if audit_cfg else False,
+        )
+    )
+
     def _collect_results() -> list[Any]:
         return [
             audit(
                 mod,
-                test_dir=args.test_dir,
-                max_examples=args.max_examples,
-                workers=args.workers,
-                validation_mode=args.validation_mode,
+                test_dir=test_dir,
+                max_examples=max_examples,
+                workers=workers,
+                validation_mode=validation_mode,
             )
-            for mod in args.modules
+            for mod in modules
         ]
 
     results = _collect_results()
-    include_exploratory_function_gaps = bool(
-        getattr(args, "include_exploratory_function_gaps", False)
-    )
-    require_direct_tests = bool(getattr(args, "require_direct_tests", False))
     direct_test_gate = _direct_test_gate_payload(results) if require_direct_tests else None
 
     if getattr(args, "json", False):
         saved_generated_path: Path | None = None
         written_gap_files: list[dict[str, Any]] = []
-        if args.save_generated and len(results) == 1 and results[0].generated_test:
-            saved_generated_path = Path(args.save_generated)
+        if save_generated and len(results) == 1 and results[0].generated_test:
+            saved_generated_path = Path(save_generated)
             saved_generated_path.write_text(results[0].generated_test, encoding="utf-8")
-        if args.write_gaps:
+        if write_gaps:
             written_gap_files = _write_audit_gap_stubs(
                 results,
-                output_dir=args.write_gaps,
+                output_dir=write_gaps,
                 include_exploratory_function_gaps=include_exploratory_function_gaps,
             )
         print(
@@ -1235,9 +1316,9 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             return 1
         return 0
 
-    if args.show_generated or args.save_generated or args.write_gaps:
+    if show_generated or save_generated or write_gaps:
         # Per-module mode with optional generated or gap-stub output
-        for mod, result in zip(args.modules, results, strict=False):
+        for mod, result in zip(modules, results, strict=False):
             print(
                 "\n".join(
                     _audit_summary_lines(
@@ -1246,26 +1327,26 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                     )
                 )
             )
-            if args.show_generated and result.generated_test:
+            if show_generated and result.generated_test:
                 print(f"\n  --- generated test for {mod} ---")
                 print(result.generated_test)
                 print("  --- end ---")
-            if args.save_generated and result.generated_test:
-                path = Path(args.save_generated)
+            if save_generated and result.generated_test:
+                path = Path(save_generated)
                 path.write_text(result.generated_test, encoding="utf-8")
                 _stderr(f"Saved: {path}\n")
-        if args.write_gaps:
+        if write_gaps:
             written_gap_files = _write_audit_gap_stubs(
                 results,
-                output_dir=args.write_gaps,
+                output_dir=write_gaps,
                 include_exploratory_function_gaps=include_exploratory_function_gaps,
             )
             if written_gap_files:
                 _stderr(
-                    f"Wrote {len(written_gap_files)} draft gap stub file(s) to {args.write_gaps}\n"
+                    f"Wrote {len(written_gap_files)} draft gap stub file(s) to {write_gaps}\n"
                 )
             else:
-                _stderr(f"No draft gap stubs were written to {args.write_gaps}\n")
+                _stderr(f"No draft gap stubs were written to {write_gaps}\n")
     else:
         print(
             _render_audit_report_text(
@@ -1839,13 +1920,46 @@ def _cmd_init(args: argparse.Namespace) -> int:
     from ordeal.audit import audit
     from ordeal.mutations import init_project
 
-    target: str | None = args.target or None
-    output_dir: str = args.output_dir
+    try:
+        cfg = _load_optional_config(getattr(args, "config", None))
+    except FileNotFoundError:
+        _stderr(f"Config not found: {args.config}\n")
+        return 1
+    except ConfigError as e:
+        _stderr(f"Config error: {e}\n")
+        return 1
+
+    init_cfg = cfg.init if cfg is not None else None
+    audit_cfg = cfg.audit if cfg is not None else None
+
+    target_value = _cli_or_config(args.target, init_cfg.target if init_cfg else None)
+    target: str | None = target_value or None
+    output_dir = str(_cli_or_config(args.output_dir, init_cfg.output_dir if init_cfg else "tests"))
     dry_run: bool = args.dry_run
-    ci: bool = args.ci
-    ci_name: str = args.ci_name
-    install_skill: bool = args.install_skill
-    close_gaps: bool = args.close_gaps
+    ci = bool(_cli_or_config(args.ci, init_cfg.ci if init_cfg else False))
+    ci_name = str(_cli_or_config(args.ci_name, init_cfg.ci_name if init_cfg else "ordeal"))
+    install_skill = bool(
+        _cli_or_config(args.install_skill, init_cfg.install_skill if init_cfg else False)
+    )
+    close_gaps = bool(_cli_or_config(args.close_gaps, init_cfg.close_gaps if init_cfg else False))
+    gap_output_dir = str(
+        _cli_or_config(
+            None,
+            init_cfg.gap_output_dir if init_cfg and init_cfg.gap_output_dir else output_dir,
+        )
+    )
+    init_mutation_preset = str(
+        _cli_or_config(None, init_cfg.mutation_preset if init_cfg else "essential")
+    )
+    init_scan_max_examples = int(
+        _cli_or_config(None, init_cfg.scan_max_examples if init_cfg else 10)
+    )
+    close_gap_max_examples = audit_cfg.max_examples if audit_cfg is not None else 10
+    close_gap_workers = audit_cfg.workers if audit_cfg is not None else 1
+    close_gap_validation_mode = audit_cfg.validation_mode if audit_cfg is not None else "fast"
+    close_gap_include_exploratory = bool(
+        audit_cfg.include_exploratory_function_gaps if audit_cfg is not None else False
+    )
 
     results = init_project(target=target, output_dir=output_dir, dry_run=dry_run)
 
@@ -1961,24 +2075,38 @@ def _cmd_init(args: argparse.Namespace) -> int:
     if close_gaps:
         generated_modules = [r["module"] for r in generated]
         audit_results = [
-            audit(module, test_dir=output_dir, max_examples=10) for module in generated_modules
+            audit(
+                module,
+                test_dir=output_dir,
+                max_examples=close_gap_max_examples,
+                workers=close_gap_workers,
+                validation_mode=close_gap_validation_mode,
+            )
+            for module in generated_modules
         ]
         mutation_score = _aggregate_mutation_score(audit_results)
-        gap_stub_files = _write_audit_gap_stubs(audit_results, output_dir=output_dir)
+        gap_stub_files = _write_audit_gap_stubs(
+            audit_results,
+            output_dir=gap_output_dir,
+            include_exploratory_function_gaps=close_gap_include_exploratory,
+        )
         weakest_tests = [
             {"module": result.module, **item}
             for result in audit_results
             for item in result.weakest_tests
         ]
     else:
-        mp = _run_ordeal(["mutate", *mut_targets, "-p", "essential"])
+        mp = _run_ordeal(["mutate", *mut_targets, "-p", init_mutation_preset])
         for line in mp.stdout.splitlines():
             if line.startswith("Score:"):
                 mutation_score = line.strip()
                 break
 
     # --- Phase 3: Lightweight read-only scan ---
-    initial_scan = _run_init_scan([r["module"] for r in generated], max_examples=10)
+    initial_scan = _run_init_scan(
+        [r["module"] for r in generated],
+        max_examples=init_scan_max_examples,
+    )
 
     # --- Count what was generated ---
     n_tests = 0
@@ -4832,6 +4960,8 @@ def _audit_command_description() -> str:
         "Validation modes:\n"
         "  fast  replay mined inputs against mutants (default, faster)\n"
         "  deep  replay mined inputs, then re-mine mutants for extra search depth\n\n"
+        "Use [audit] in ordeal.toml to persist module lists, validation depth, "
+        "and direct-test policy.\n"
         "Use --write-gaps PATH to emit draft review stubs for surviving mutants "
         "and function-level coverage gaps."
     )
@@ -4852,7 +4982,8 @@ def _init_command_description() -> str:
     return (
         "Bootstrap starter tests and ordeal.toml. By default this writes only the "
         "starter files, validates them, and prints a lightweight read-only scan "
-        "summary. Use --install-skill and --close-gaps to opt into extra writes."
+        "summary. Use [init] in ordeal.toml to persist bootstrap defaults, and "
+        "use --install-skill / --close-gaps to opt into extra writes."
     )
 
 
@@ -5098,34 +5229,48 @@ def _command_specs() -> tuple[CommandSpec, ...]:
             description=_audit_command_description,
             formatter_class=argparse.RawDescriptionHelpFormatter,
             arguments=(
-                _arg("modules", nargs="+", help="Module paths to audit"),
+                _arg(
+                    "modules",
+                    nargs="*",
+                    help="Module paths to audit (omit to use [audit].modules)",
+                ),
+                _arg(
+                    "--config",
+                    "-c",
+                    default=None,
+                    help="Config file with [audit] defaults (default: ordeal.toml if present)",
+                ),
                 _arg(
                     "--test-dir",
                     "-t",
-                    default="tests",
-                    help="Test directory (default: tests)",
+                    default=None,
+                    help="Test directory (default: tests, or [audit].test_dir)",
                 ),
                 _arg(
                     "--max-examples",
                     type=int,
-                    default=20,
-                    help="Examples per function (default: 20)",
+                    default=None,
+                    help="Examples per function (default: 20, or [audit].max_examples)",
                 ),
                 _arg(
                     "--workers",
                     type=int,
-                    default=1,
-                    help="Parallel workers for mutation validation (default: 1)",
+                    default=None,
+                    help=(
+                        "Parallel workers for mutation validation "
+                        "(default: 1, or [audit].workers)"
+                    ),
                 ),
                 _arg(
                     "--validation-mode",
                     choices=("fast", "deep"),
-                    default="fast",
+                    default=None,
                     help="Validation mode: fast replay (default) or deep re-mine",
                 ),
                 _arg(
                     "--show-generated",
-                    action="store_true",
+                    action=argparse.BooleanOptionalAction,
+                    default=None,
                     help="Print the generated test file for inspection/debugging",
                 ),
                 _arg(
@@ -5143,12 +5288,14 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                 ),
                 _arg(
                     "--include-exploratory-function-gaps",
-                    action="store_true",
+                    action=argparse.BooleanOptionalAction,
+                    default=None,
                     help=("Include exploratory function gaps in audit findings and draft stubs"),
                 ),
                 _arg(
                     "--require-direct-tests",
-                    action="store_true",
+                    action=argparse.BooleanOptionalAction,
+                    default=None,
                     help=("Return exit code 1 when exploratory function coverage is all indirect"),
                 ),
                 _arg("--json", action="store_true", help="Output agent-facing JSON"),
@@ -5335,16 +5482,25 @@ def _command_specs() -> tuple[CommandSpec, ...]:
             description=_init_command_description,
             arguments=(
                 _arg(
+                    "--config",
+                    "-c",
+                    default=None,
+                    help="Config file with [init] defaults (default: ordeal.toml if present)",
+                ),
+                _arg(
                     "target",
                     nargs="?",
                     default=None,
-                    help="Package path (e.g. myapp); auto-detects if omitted",
+                    help=(
+                        "Package path (e.g. myapp); auto-detects or uses "
+                        "[init].target if omitted"
+                    ),
                 ),
                 _arg(
                     "--output-dir",
                     "-o",
-                    default="tests",
-                    help="Directory to write test files (default: tests)",
+                    default=None,
+                    help="Directory to write test files (default: tests, or [init].output_dir)",
                 ),
                 _arg(
                     "--dry-run",
@@ -5356,23 +5512,29 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                 ),
                 _arg(
                     "--ci",
-                    action="store_true",
+                    action=argparse.BooleanOptionalAction,
+                    default=None,
                     help="Generate a GitHub Actions workflow (.github/workflows/<name>.yml)",
                 ),
                 _arg(
                     "--ci-name",
-                    default="ordeal",
+                    default=None,
                     metavar="NAME",
-                    help="Workflow filename (default: ordeal → .github/workflows/ordeal.yml)",
+                    help=(
+                        "Workflow filename (default: ordeal → .github/workflows/ordeal.yml,"
+                        " or [init].ci_name)"
+                    ),
                 ),
                 _arg(
                     "--install-skill",
-                    action="store_true",
+                    action=argparse.BooleanOptionalAction,
+                    default=None,
                     help="Also install the bundled AI-agent skill into .claude/skills/ordeal/",
                 ),
                 _arg(
                     "--close-gaps",
-                    action="store_true",
+                    action=argparse.BooleanOptionalAction,
+                    default=None,
                     help="Write draft audit stub files for surviving mutation gaps",
                 ),
             ),
@@ -5493,7 +5655,12 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="ordeal",
         description=(
             "Ordeal — discovers what's true about your code.\n\n"
-            "Use `ordeal scan <module>` for the fastest end-to-end path.\n"
+            "Common CLI entrypoints:\n"
+            "  ordeal scan <module>          exploratory module analysis\n"
+            "  ordeal init [package]         starter tests + ordeal.toml\n"
+            "  ordeal audit <module>         test-quality comparison\n"
+            "  ordeal mutate <target>        mutation testing\n"
+            "  ordeal skill                  install the bundled local agent guide\n\n"
             "Run `ordeal <command> --help` for command-specific options.\n"
             "Use `ordeal catalog` or `from ordeal import catalog; catalog()`"
             " for runtime discovery."

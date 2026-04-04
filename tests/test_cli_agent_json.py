@@ -248,6 +248,79 @@ class TestCLIAgentJson:
             "uncovered": ["ordeal.demo.parse"],
         }
 
+    def test_audit_json_uses_config_defaults_and_gate(self, monkeypatch, tmp_path, capsys):
+        verified = CoverageMeasurement(
+            Status.VERIFIED,
+            CoverageResult(
+                percent=82.0,
+                total_statements=100,
+                missing_count=18,
+                missing_lines=frozenset({10, 11}),
+                source="coverage.py",
+            ),
+        )
+        config_path = tmp_path / "ordeal.toml"
+        config_path.write_text(
+            """
+[audit]
+modules = ["ordeal.demo"]
+max_examples = 27
+workers = 3
+validation_mode = "deep"
+include_exploratory_function_gaps = true
+require_direct_tests = true
+""",
+            encoding="utf-8",
+        )
+
+        calls: dict[str, object] = {}
+
+        def fake_audit(module, **kwargs):
+            calls["module"] = module
+            calls.update(kwargs)
+            return ModuleAudit(
+                module=module,
+                current_test_count=4,
+                current_test_lines=40,
+                current_coverage=verified,
+                migrated_test_count=3,
+                migrated_lines=30,
+                migrated_coverage=verified,
+                function_audits=[
+                    FunctionAudit(name="parse", status="uncovered", epistemic="none"),
+                    FunctionAudit(name="score", status="exploratory", epistemic="inferred"),
+                ],
+            )
+
+        monkeypatch.setattr(audit_mod, "audit", fake_audit)
+
+        rc = main(["audit", "--json", "--config", str(config_path)])
+
+        assert rc == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert calls == {
+            "module": "ordeal.demo",
+            "test_dir": "tests",
+            "max_examples": 27,
+            "workers": 3,
+            "validation_mode": "deep",
+        }
+        assert payload["status"] == "blocked"
+        assert payload["blocking_reason"] == "direct tests required for 2 function(s)"
+        function_gap_summaries = {
+            item["summary"] for item in payload["findings"] if item["kind"] == "function_gap"
+        }
+        assert function_gap_summaries == {
+            "parse has no effective tests yet",
+            "score is only indirectly exercised by current tests",
+        }
+        assert payload["raw_details"]["direct_test_gate"] == {
+            "required": True,
+            "passed": False,
+            "exploratory": ["ordeal.demo.score"],
+            "uncovered": ["ordeal.demo.parse"],
+        }
+
     def test_audit_json_write_gaps_outputs_gap_stub_artifacts(self, monkeypatch, tmp_path, capsys):
         verified = CoverageMeasurement(
             Status.VERIFIED,
@@ -344,6 +417,80 @@ class TestCLIAgentJson:
             == (gap_dir / "test_ordeal_demo_value_gaps.py").as_posix()
             for artifact in payload["artifacts"]
         )
+
+    def test_audit_json_uses_configured_gap_output_dir(self, monkeypatch, tmp_path, capsys):
+        verified = CoverageMeasurement(
+            Status.VERIFIED,
+            CoverageResult(
+                percent=82.0,
+                total_statements=100,
+                missing_count=18,
+                missing_lines=frozenset({10, 11}),
+                source="coverage.py",
+            ),
+        )
+        config_path = tmp_path / "ordeal.toml"
+        gap_dir = tmp_path / "audit-gaps"
+        config_path.write_text(
+            f"""
+[audit]
+modules = ["ordeal.demo"]
+write_gaps_dir = "{gap_dir.as_posix()}"
+""",
+            encoding="utf-8",
+        )
+
+        result = ModuleAudit(
+            module="ordeal.demo",
+            current_test_count=4,
+            current_test_lines=40,
+            current_coverage=verified,
+            migrated_test_count=3,
+            migrated_lines=30,
+            migrated_coverage=verified,
+            mutation_score="8/10 (80%)",
+            validation_mode="fast",
+            mutation_gap_stubs=[
+                {
+                    "target": "ordeal.demo.value",
+                    "content": '"""Draft review stubs for audit gaps.\n"""',
+                }
+            ],
+            function_audits=[
+                FunctionAudit(name="parse", status="uncovered", epistemic="none"),
+            ],
+        )
+        monkeypatch.setattr(audit_mod, "audit", lambda *args, **kwargs: result)
+
+        rc = main(["audit", "--json", "--config", str(config_path)])
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert (gap_dir / "test_ordeal_demo_value_gaps.py").exists()
+        assert (gap_dir / "test_ordeal_demo_parse_gaps.py").exists()
+        normalized_gap_stub_files = [
+            {
+                **item,
+                "path": Path(str(item["path"])).as_posix(),
+            }
+            for item in payload["raw_details"]["gap_stub_files"]
+        ]
+        assert normalized_gap_stub_files == [
+            {
+                "module": "ordeal.demo",
+                "target": "ordeal.demo.value",
+                "path": (gap_dir / "test_ordeal_demo_value_gaps.py").as_posix(),
+                "source": "mutation_gap",
+            },
+            {
+                "module": "ordeal.demo",
+                "target": "ordeal.demo.parse",
+                "path": (gap_dir / "test_ordeal_demo_parse_gaps.py").as_posix(),
+                "source": "function_audit",
+                "status": "uncovered",
+                "epistemic": "none",
+            },
+        ]
 
     def test_audit_json_include_exploratory_function_gaps_surfaces_details(
         self, monkeypatch, tmp_path, capsys

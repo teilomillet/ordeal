@@ -10,6 +10,8 @@ description: >-
 !!! quote "In plain English"
     The CLI is how you run ordeal outside of pytest. Use `scan` for exploratory signals, `replay` to reproduce them, and `audit` or `mutate` when you want stronger test-quality evidence. The typical workflow is: explore, replay the concrete failure, then validate with audit or mutation testing.
 
+If you want an AI coding agent to discover the CLI surface inside a repo, run `ordeal skill` or `ordeal init --install-skill` to install the bundled local guide.
+
 ## Install
 
 ```bash
@@ -104,9 +106,12 @@ ordeal init myapp --ci
 
 By default, `init` does not install the bundled skill and does not write draft audit gap stub files. Those extra writes are explicit opt-ins.
 
+`init` now also reads `[init]` from `ordeal.toml` when present. That lets you keep bootstrap defaults like `target`, `output_dir`, `close_gaps`, and CI generation in versioned config instead of repeating flags in scripts.
+
 | Flag | Default | Description |
 |---|---|---|
 | `target` | auto-detect | Package path such as `myapp`; omit to detect from the current directory |
+| `--config`, `-c` | `ordeal.toml` if present | Load `[init]` defaults from a config file |
 | `--output-dir`, `-o` | `tests` | Directory where generated tests are written |
 | `--dry-run` | off | Preview generated files without imports or writes |
 | `--ci` | off | Generate `.github/workflows/<name>.yml` |
@@ -206,6 +211,8 @@ Every number is `[verified]` (measured and cross-checked for consistency) or `FA
 
 `--validation-mode fast` replays mined inputs against each mutant and is the default because it is much faster. `--validation-mode deep` keeps that replay check and then re-runs `mine()` on each mutant, which is slower but keeps the broader exploratory search.
 
+`audit` now reads `[audit]` from `ordeal.toml` too. That means module lists, direct-test gates, validation depth, and gap-writing defaults can live in config and be reused by both humans and agents.
+
 The "migrated" column shows what a real ordeal test file looks like: `fuzz()` for crash safety plus explicitly mined properties (bounds, determinism, type checks). It generates the test file a developer would write after adopting ordeal.
 
 Use `--show-generated` to inspect the generated test, or `--save-generated` to save it and use it directly:
@@ -217,10 +224,14 @@ ordeal audit myapp.scoring --save-generated test_migrated.py  # save to file
 
 | Flag | Default | Description |
 |---|---|---|
-| `modules` | required | Module paths to audit (positional, one or more) |
+| `modules` | required unless `[audit].modules` is set | Module paths to audit |
+| `--config`, `-c` | `ordeal.toml` if present | Load `[audit]` defaults from a config file |
 | `--test-dir`, `-t` | `tests` | Directory containing existing tests |
 | `--max-examples` | `20` | Hypothesis examples per function |
 | `--validation-mode` | `fast` | `fast` replay or `deep` replay + re-mine for mutation validation |
+| `--write-gaps` | — | Write draft gap stubs to this path |
+| `--include-exploratory-function-gaps` | off | Include indirect-only function gaps in reports and draft stubs |
+| `--require-direct-tests` | off | Exit 1 when any function still lacks direct tests |
 | `--show-generated` | off | Print the generated test file |
 | `--save-generated` | — | Save generated test to this path |
 

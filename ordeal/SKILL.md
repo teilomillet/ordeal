@@ -6,7 +6,14 @@ user_invocable: true
 
 # ordeal
 
-Use this file as a capability map, not a workflow guide.
+Use this file as a capability map, not a prescribed workflow.
+
+High-signal entrypoints:
+- `ordeal scan <target>`
+- `ordeal audit <target>`
+- `ordeal mutate <target>`
+- `ordeal init [target]`
+- `ordeal verify <finding-id>`
 
 Read-first CLI:
 - `ordeal scan <target>`: unified bug discovery; `--save-artifacts` writes report, JSON bundle, regressions, and index entries

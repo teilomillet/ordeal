@@ -164,6 +164,37 @@ class MutationConfig:
 
 
 @dataclass
+class AuditConfig:
+    """Settings for ``[audit]`` — declarative audit defaults."""
+
+    modules: list[str] = field(default_factory=list)
+    test_dir: str = "tests"
+    max_examples: int = 20
+    workers: int = 1
+    validation_mode: str = "fast"
+    show_generated: bool = False
+    save_generated: str | None = None
+    write_gaps_dir: str | None = None
+    include_exploratory_function_gaps: bool = False
+    require_direct_tests: bool = False
+
+
+@dataclass
+class InitConfig:
+    """Settings for ``[init]`` — declarative bootstrap defaults."""
+
+    target: str | None = None
+    output_dir: str = "tests"
+    ci: bool = False
+    ci_name: str = "ordeal"
+    install_skill: bool = False
+    close_gaps: bool = False
+    gap_output_dir: str | None = None
+    mutation_preset: str = "essential"
+    scan_max_examples: int = 10
+
+
+@dataclass
 class OrdealConfig:
     """Top-level configuration loaded from ``ordeal.toml``."""
 
@@ -174,6 +205,8 @@ class OrdealConfig:
     report: ReportConfig = field(default_factory=ReportConfig)
     api: APIConfig | None = None
     mutations: MutationConfig | None = None
+    audit: AuditConfig = field(default_factory=AuditConfig)
+    init: InitConfig = field(default_factory=InitConfig)
 
 
 # ============================================================================
@@ -182,6 +215,7 @@ class OrdealConfig:
 
 _VALID_CHECKPOINT_STRATEGIES = {"energy", "uniform", "recent"}
 _VALID_REPORT_FORMATS = {"json", "text", "both"}
+_VALID_AUDIT_VALIDATION_MODES = {"fast", "deep"}
 
 
 def _valid_presets() -> frozenset[str]:
@@ -199,6 +233,8 @@ _KNOWN_SECTIONS = {
     "faults",
     "api",
     "mutations",
+    "audit",
+    "init",
 }
 
 
@@ -209,11 +245,13 @@ def _fields_of(cls: type) -> set[str]:
     return {f.name for f in _dc_fields(cls)}
 
 
-_KNOWN_EXPLORER_KEYS = _fields_of(ExplorerConfig)
+_KNOWN_EXPLORER_KEYS = _fields_of(ExplorerConfig) | {"verbose"}
 _KNOWN_REPORT_KEYS = _fields_of(ReportConfig)
 _KNOWN_MUTATIONS_KEYS = _fields_of(MutationConfig)
 _KNOWN_FIXTURES_KEYS = _fields_of(FixturesConfig)
 _KNOWN_SCAN_KEYS = _fields_of(ScanConfig)
+_KNOWN_AUDIT_KEYS = _fields_of(AuditConfig)
+_KNOWN_INIT_KEYS = _fields_of(InitConfig)
 # API and Test configs have extra TOML-only keys not in the dataclass
 _KNOWN_API_KEYS = _fields_of(APIConfig) | {"stateful", "mutation_targets", "auto_discover"}
 _KNOWN_TEST_KEYS = (_fields_of(TestConfig) - {"class_path"}) | {"class"}
@@ -346,7 +384,7 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
         output=report_raw.get("output", "ordeal-report.json"),
         traces=report_raw.get("traces", False),
         traces_dir=report_raw.get("traces_dir", ".ordeal/traces"),
-        verbose=report_raw.get("verbose", False),
+        verbose=report_raw.get("verbose", explorer_raw.get("verbose", False)),
         corpus_dir=report_raw.get("corpus_dir", ".ordeal/seeds"),
     )
 
@@ -412,6 +450,49 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
             mutant_timeout=float(mt) if (mt := m_raw.get("mutant_timeout")) is not None else None,
         )
 
+    # -- Audit --
+    audit_raw = raw.get("audit", {})
+    _warn_unknown_keys("audit", audit_raw, _KNOWN_AUDIT_KEYS)
+    audit_cfg = AuditConfig(
+        modules=list(audit_raw.get("modules", [])),
+        test_dir=audit_raw.get("test_dir", "tests"),
+        max_examples=int(audit_raw.get("max_examples", 20)),
+        workers=int(audit_raw.get("workers", 1)),
+        validation_mode=audit_raw.get("validation_mode", "fast"),
+        show_generated=bool(audit_raw.get("show_generated", False)),
+        save_generated=audit_raw.get("save_generated"),
+        write_gaps_dir=audit_raw.get("write_gaps_dir"),
+        include_exploratory_function_gaps=bool(
+            audit_raw.get("include_exploratory_function_gaps", False)
+        ),
+        require_direct_tests=bool(audit_raw.get("require_direct_tests", False)),
+    )
+    if audit_cfg.validation_mode not in _VALID_AUDIT_VALIDATION_MODES:
+        raise ConfigError(
+            f"Invalid audit.validation_mode: {audit_cfg.validation_mode!r}. "
+            f"Must be one of: {_VALID_AUDIT_VALIDATION_MODES}"
+        )
+
+    # -- Init --
+    init_raw = raw.get("init", {})
+    _warn_unknown_keys("init", init_raw, _KNOWN_INIT_KEYS)
+    init_cfg = InitConfig(
+        target=init_raw.get("target"),
+        output_dir=init_raw.get("output_dir", "tests"),
+        ci=bool(init_raw.get("ci", False)),
+        ci_name=init_raw.get("ci_name", "ordeal"),
+        install_skill=bool(init_raw.get("install_skill", False)),
+        close_gaps=bool(init_raw.get("close_gaps", False)),
+        gap_output_dir=init_raw.get("gap_output_dir"),
+        mutation_preset=init_raw.get("mutation_preset", "essential"),
+        scan_max_examples=int(init_raw.get("scan_max_examples", 10)),
+    )
+    if init_cfg.mutation_preset not in _valid_presets():
+        raise ConfigError(
+            f"Invalid init.mutation_preset: {init_cfg.mutation_preset!r}. "
+            f"Must be one of: {_valid_presets()}"
+        )
+
     return OrdealConfig(
         explorer=explorer,
         tests=tests,
@@ -420,4 +501,6 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
         report=report,
         api=api_cfg,
         mutations=mutations_cfg,
+        audit=audit_cfg,
+        init=init_cfg,
     )

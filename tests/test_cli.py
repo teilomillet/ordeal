@@ -124,6 +124,8 @@ class TestCLI:
             main(["--help"])
         out = capsys.readouterr().out
         assert "ordeal scan <module>" in out
+        assert "ordeal init [package]" in out
+        assert "ordeal skill" in out
         assert "ordeal <command> --help" in out
         assert "ordeal catalog" in out
         assert "catalog()" in out
@@ -142,6 +144,7 @@ class TestCLI:
         with pytest.raises(SystemExit):
             main(["audit", "--help"])
         out = capsys.readouterr().out
+        assert "--config CONFIG" in out
         assert "--validation-mode {fast,deep}" in out
         assert "fast replay" in out
         assert "--write-gaps PATH" in out
@@ -212,6 +215,130 @@ class TestCLI:
         assert calls["module"] == "ordeal.demo"
         assert calls["validation_mode"] == "deep"
         assert "ordeal audit" in capsys.readouterr().out
+
+    def test_audit_uses_config_defaults_when_modules_omitted(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        import ordeal.audit as audit_mod
+        from ordeal.audit import (
+            CoverageMeasurement,
+            CoverageResult,
+            FunctionAudit,
+            ModuleAudit,
+            Status,
+        )
+
+        config_path = tmp_path / "ordeal.toml"
+        config_path.write_text(
+            """
+[audit]
+modules = ["ordeal.demo"]
+test_dir = "spec"
+max_examples = 31
+workers = 3
+validation_mode = "deep"
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        calls: dict[str, object] = {}
+        verified = CoverageMeasurement(
+            Status.VERIFIED,
+            CoverageResult(
+                percent=82.0,
+                total_statements=100,
+                missing_count=18,
+                missing_lines=frozenset({10, 11}),
+                source="coverage.py",
+            ),
+        )
+
+        def fake_audit(module, **kwargs):
+            calls["module"] = module
+            calls.update(kwargs)
+            return ModuleAudit(
+                module=module,
+                current_test_count=4,
+                current_test_lines=40,
+                current_coverage=verified,
+                migrated_test_count=3,
+                migrated_lines=30,
+                migrated_coverage=verified,
+                validation_mode=kwargs["validation_mode"],
+                function_audits=[
+                    FunctionAudit(
+                        name="score",
+                        status="exercised",
+                        epistemic="verified",
+                        covered_body_lines=2,
+                        total_body_lines=2,
+                    )
+                ],
+            )
+
+        monkeypatch.setattr(audit_mod, "audit", fake_audit)
+
+        rc = main(["audit"])
+
+        assert rc == 0
+        assert calls["module"] == "ordeal.demo"
+        assert calls["test_dir"] == "spec"
+        assert calls["max_examples"] == 31
+        assert calls["workers"] == 3
+        assert calls["validation_mode"] == "deep"
+        assert "ordeal audit" in capsys.readouterr().out
+
+    def test_audit_cli_can_disable_configured_direct_test_gate(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        import ordeal.audit as audit_mod
+        from ordeal.audit import (
+            CoverageMeasurement,
+            CoverageResult,
+            FunctionAudit,
+            ModuleAudit,
+            Status,
+        )
+
+        config_path = tmp_path / "ordeal.toml"
+        config_path.write_text(
+            """
+[audit]
+modules = ["pkg.mod"]
+require_direct_tests = true
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        verified = CoverageMeasurement(
+            Status.VERIFIED,
+            CoverageResult(
+                percent=82.0,
+                total_statements=100,
+                missing_count=18,
+                missing_lines=frozenset({10, 11}),
+                source="coverage.py",
+            ),
+        )
+        result = ModuleAudit(
+            module="pkg.mod",
+            current_test_count=4,
+            current_test_lines=40,
+            current_coverage=verified,
+            migrated_test_count=3,
+            migrated_lines=30,
+            migrated_coverage=verified,
+            function_audits=[FunctionAudit(name="parse", status="uncovered", epistemic="none")],
+        )
+        monkeypatch.setattr(audit_mod, "audit", lambda *args, **kwargs: result)
+
+        rc = main(["audit", "--no-require-direct-tests"])
+
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "Direct test gate:" not in captured.out
 
     def test_audit_write_gaps_writes_draft_stubs(self, monkeypatch, tmp_path, capsys):
         import ordeal.audit as audit_mod
@@ -331,6 +458,128 @@ class TestCLI:
         assert "score is only indirectly exercised" not in captured.out
         assert "Wrote 2 draft gap stub file(s) to" in captured.err
 
+    def test_init_uses_config_defaults_and_audit_settings(self, monkeypatch, tmp_path, capsys):
+        import ordeal.audit as audit_mod
+        import ordeal.mutations as mutations
+        from ordeal.audit import (
+            CoverageMeasurement,
+            CoverageResult,
+            FunctionAudit,
+            ModuleAudit,
+            Status,
+        )
+
+        config_path = tmp_path / "ordeal.toml"
+        config_path.write_text(
+            """
+[audit]
+max_examples = 33
+workers = 5
+validation_mode = "deep"
+include_exploratory_function_gaps = true
+
+[init]
+target = "pkg"
+output_dir = "qa"
+close_gaps = true
+gap_output_dir = "qa/gaps"
+scan_max_examples = 12
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        calls: dict[str, object] = {}
+        verified = CoverageMeasurement(
+            Status.VERIFIED,
+            CoverageResult(
+                percent=82.0,
+                total_statements=100,
+                missing_count=18,
+                missing_lines=frozenset({10, 11}),
+                source="coverage.py",
+            ),
+        )
+
+        def fake_init_project(*, target, output_dir, dry_run):
+            calls["init_project"] = {
+                "target": target,
+                "output_dir": output_dir,
+                "dry_run": dry_run,
+            }
+            return [
+                {
+                    "module": "pkg.mod",
+                    "status": "generated",
+                    "path": str(tmp_path / output_dir / "test_pkg_mod.py"),
+                    "content": (
+                        "def test_pkg_mod_value_pinned() -> None:\n"
+                        "    assert 1 == 1\n"
+                    ),
+                }
+            ]
+
+        def fake_audit(module, **kwargs):
+            calls["audit"] = {"module": module, **kwargs}
+            return ModuleAudit(
+                module=module,
+                current_test_count=4,
+                current_test_lines=40,
+                current_coverage=verified,
+                migrated_test_count=3,
+                migrated_lines=30,
+                migrated_coverage=verified,
+                mutation_score="8/10 (80%)",
+                validation_mode=kwargs["validation_mode"],
+                function_audits=[
+                    FunctionAudit(
+                        name="score",
+                        status="exploratory",
+                        epistemic="inferred",
+                        evidence=[{"kind": "nodeids", "detail": "indirect"}],
+                    )
+                ],
+            )
+
+        def fake_run_init_scan(modules, *, max_examples=10):
+            calls["init_scan"] = {"modules": list(modules), "max_examples": max_examples}
+            return {
+                "status": "no findings",
+                "modules": list(modules),
+                "functions_checked": 1,
+                "skipped_functions": 0,
+                "findings": [],
+                "errors": [],
+                "max_examples": max_examples,
+                "available_commands": [],
+            }
+
+        monkeypatch.setattr(mutations, "init_project", fake_init_project)
+        monkeypatch.setattr(audit_mod, "audit", fake_audit)
+        monkeypatch.setattr(cli, "_run_init_scan", fake_run_init_scan)
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+        )
+
+        rc = main(["init", "--config", str(config_path)])
+        report = json.loads(capsys.readouterr().out)
+
+        assert rc == 0
+        assert calls["init_project"] == {"target": "pkg", "output_dir": "qa", "dry_run": False}
+        assert calls["audit"] == {
+            "module": "pkg.mod",
+            "test_dir": "qa",
+            "max_examples": 33,
+            "workers": 5,
+            "validation_mode": "deep",
+        }
+        assert calls["init_scan"] == {"modules": ["pkg.mod"], "max_examples": 12}
+        assert report["close_gaps"] is True
+        assert report["gap_stub_files"][0]["path"] == "qa/gaps/test_pkg_mod_score_gaps.py"
+        assert Path(tmp_path / "qa" / "gaps" / "test_pkg_mod_score_gaps.py").exists()
+
     def test_audit_require_direct_tests_fails_on_exploratory_coverage(self, monkeypatch, capsys):
         import ordeal.audit as audit_mod
         from ordeal.audit import (
@@ -445,6 +694,8 @@ class TestCLI:
         out = capsys.readouterr().out
         assert "Run 'ordeal --help' for the full live CLI surface." in out
         assert "Run 'ordeal <command> --help' for command-specific options." in out
+        assert "Key CLI entrypoints: scan, init, audit, mutate, verify, skill." in out
+        assert "Run 'ordeal skill' or 'ordeal init --install-skill'" in out
         for entry in cli.command_catalog():
             assert entry["name"] in out
             assert entry["doc"] in out

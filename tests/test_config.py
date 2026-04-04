@@ -86,6 +86,10 @@ verbose = true
         with pytest.raises(ConfigError, match="report format"):
             load_config(tmp_toml('[report]\nformat = "xml"\n'))
 
+    def test_explorer_verbose_alias_sets_report_verbose(self, tmp_toml):
+        cfg = load_config(tmp_toml("[explorer]\nverbose = true\n"))
+        assert cfg.report.verbose is True
+
     def test_test_missing_class(self, tmp_toml):
         with pytest.raises(ConfigError, match="missing required 'class'"):
             load_config(tmp_toml("[[tests]]\nswarm = true\n"))
@@ -137,3 +141,63 @@ relation_overrides = { normalize = ["equivalent"] }
             "tests.support.shared_fixtures",
             "tests.support.more_fixtures",
         ]
+
+    def test_audit_section_defaults(self, tmp_toml):
+        cfg = load_config(
+            tmp_toml(
+                """
+[audit]
+modules = ["myapp.scoring", "myapp.pipeline"]
+test_dir = "spec"
+max_examples = 30
+workers = 4
+validation_mode = "deep"
+write_gaps_dir = "tests/gaps"
+include_exploratory_function_gaps = true
+require_direct_tests = true
+"""
+            )
+        )
+        assert cfg.audit.modules == ["myapp.scoring", "myapp.pipeline"]
+        assert cfg.audit.test_dir == "spec"
+        assert cfg.audit.max_examples == 30
+        assert cfg.audit.workers == 4
+        assert cfg.audit.validation_mode == "deep"
+        assert cfg.audit.write_gaps_dir == "tests/gaps"
+        assert cfg.audit.include_exploratory_function_gaps is True
+        assert cfg.audit.require_direct_tests is True
+
+    def test_init_section_defaults(self, tmp_toml):
+        cfg = load_config(
+            tmp_toml(
+                """
+[init]
+target = "myapp"
+output_dir = "qa"
+ci = true
+ci_name = "quality"
+install_skill = true
+close_gaps = true
+gap_output_dir = "qa/gaps"
+mutation_preset = "standard"
+scan_max_examples = 12
+"""
+            )
+        )
+        assert cfg.init.target == "myapp"
+        assert cfg.init.output_dir == "qa"
+        assert cfg.init.ci is True
+        assert cfg.init.ci_name == "quality"
+        assert cfg.init.install_skill is True
+        assert cfg.init.close_gaps is True
+        assert cfg.init.gap_output_dir == "qa/gaps"
+        assert cfg.init.mutation_preset == "standard"
+        assert cfg.init.scan_max_examples == 12
+
+    def test_invalid_audit_validation_mode(self, tmp_toml):
+        with pytest.raises(ConfigError, match="audit.validation_mode"):
+            load_config(tmp_toml('[audit]\nvalidation_mode = "slow"\n'))
+
+    def test_invalid_init_mutation_preset(self, tmp_toml):
+        with pytest.raises(ConfigError, match="init.mutation_preset"):
+            load_config(tmp_toml('[init]\nmutation_preset = "bogus"\n'))

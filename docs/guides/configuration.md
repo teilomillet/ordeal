@@ -23,7 +23,7 @@ One file, checked into your repo, that anyone (or anything) can read and modify.
 ## Schema
 
 !!! quote "Think of it this way"
-    The config file has five sections. `[explorer]` controls how the engine explores (how long, how deep, how many workers). `[[tests]]` lists which ChaosTest classes to run. `[report]` decides what output you get. `[fixtures]` loads shared fixture registries for the whole project. `[[scan]]` lets you auto-test modules without writing any test code at all, with suppression and fixture-registry knobs for noisy codebases.
+    The config file now covers the main CLI workflows too. `[explorer]` and `[[tests]]` drive stateful exploration, `[report]` controls output, `[fixtures]` and `[[scan]]` tune exploratory module scans, `[audit]` sets test-quality defaults, and `[init]` sets bootstrap defaults for starter tests and gap-closing passes.
 
 ### `[explorer]`
 
@@ -110,6 +110,55 @@ relation_overrides = { normalize = ["equivalent"] }
 ```
 
 When you run `pytest --chaos`, ordeal auto-discovers these entries and smoke-tests every public function in each module. Functions without type hints are skipped unless fixtures are provided or a registry supplies them. Known preconditions stay separate from likely bugs so the output stays epistemic.
+
+### `[audit]`
+
+Set defaults for `ordeal audit`. CLI flags still win, but when omitted the command can read modules and policy directly from `ordeal.toml`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `modules` | `list[str]` | `[]` | Module paths to audit when the CLI omits them |
+| `test_dir` | `str` | `"tests"` | Directory containing existing tests |
+| `max_examples` | `int` | `20` | Hypothesis examples per function |
+| `workers` | `int` | `1` | Parallel workers for mutation validation |
+| `validation_mode` | `str` | `"fast"` | `"fast"` replay or `"deep"` replay + re-mine |
+| `show_generated` | `bool` | `false` | Print generated ordeal tests during audit |
+| `save_generated` | `str?` | `null` | Save generated ordeal tests to this path |
+| `write_gaps_dir` | `str?` | `null` | Write draft gap stubs to this directory |
+| `include_exploratory_function_gaps` | `bool` | `false` | Surface indirect-only function coverage gaps |
+| `require_direct_tests` | `bool` | `false` | Exit 1 when any function is still exploratory or uncovered |
+
+```toml
+[audit]
+modules = ["myapp.scoring"]
+validation_mode = "deep"
+write_gaps_dir = "tests/gaps"
+require_direct_tests = true
+```
+
+### `[init]`
+
+Set defaults for `ordeal init`. This is useful when you want bootstrap behavior to be reproducible in CI or by coding agents.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `target` | `str?` | `null` | Package to bootstrap when the CLI omits it |
+| `output_dir` | `str` | `"tests"` | Directory where generated tests are written |
+| `ci` | `bool` | `false` | Generate `.github/workflows/<name>.yml` |
+| `ci_name` | `str` | `"ordeal"` | Workflow filename stem |
+| `install_skill` | `bool` | `false` | Install the bundled AI-agent skill |
+| `close_gaps` | `bool` | `false` | Run audit-guided draft gap generation after bootstrap |
+| `gap_output_dir` | `str?` | `null` | Override where `close_gaps` writes draft stubs |
+| `mutation_preset` | `str` | `"essential"` | Preset used for the quick mutation pass |
+| `scan_max_examples` | `int` | `10` | Example budget for the lightweight read-only scan summary |
+
+```toml
+[init]
+target = "myapp"
+close_gaps = true
+gap_output_dir = "tests/gaps"
+scan_max_examples = 12
+```
 
 ## Tuning guide
 

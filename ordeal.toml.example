@@ -152,6 +152,39 @@ verbose = true
 # # Expected failures stay visible but are not treated as bugs.
 # expected_failures = ["validate_input", "check_permissions"]
 
+# Audit defaults — stronger test-quality signal than raw scan output.
+# Run with:  ordeal audit  (uses [audit].modules when omitted)
+#
+# [audit]
+# modules = ["myapp.scoring", "myapp.pipeline"]
+# test_dir = "tests"
+# max_examples = 20
+# workers = 1
+# validation_mode = "fast"
+#
+# # Optional outputs / gates.
+# show_generated = false
+# # save_generated = "tests/test_migrated.py"
+# # write_gaps_dir = "tests/gaps"
+# include_exploratory_function_gaps = false
+# require_direct_tests = false
+#
+# Init defaults — bootstrap starter tests and optional follow-up files.
+# Run with:  ordeal init  (uses [init].target when omitted)
+#
+# [init]
+# target = "myapp"
+# output_dir = "tests"
+# ci = false
+# ci_name = "ordeal"
+# install_skill = false
+# close_gaps = false
+#
+# # Optional deeper defaults for the bootstrap loop.
+# # gap_output_dir = "tests/gaps"
+# mutation_preset = "essential"
+# scan_max_examples = 10
+
 
 # API chaos testing — built-in OpenAPI engine, no extra deps.
 # Run with:  ordeal api (or use programmatically via chaos_api_test)

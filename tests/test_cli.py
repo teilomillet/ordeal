@@ -216,9 +216,7 @@ class TestCLI:
         assert calls["validation_mode"] == "deep"
         assert "ordeal audit" in capsys.readouterr().out
 
-    def test_audit_uses_config_defaults_when_modules_omitted(
-        self, monkeypatch, tmp_path, capsys
-    ):
+    def test_audit_uses_config_defaults_when_modules_omitted(self, monkeypatch, tmp_path, capsys):
         import ordeal.audit as audit_mod
         from ordeal.audit import (
             CoverageMeasurement,
@@ -512,10 +510,7 @@ scan_max_examples = 12
                     "module": "pkg.mod",
                     "status": "generated",
                     "path": str(tmp_path / output_dir / "test_pkg_mod.py"),
-                    "content": (
-                        "def test_pkg_mod_value_pinned() -> None:\n"
-                        "    assert 1 == 1\n"
-                    ),
+                    "content": ("def test_pkg_mod_value_pinned() -> None:\n    assert 1 == 1\n"),
                 }
             ]
 

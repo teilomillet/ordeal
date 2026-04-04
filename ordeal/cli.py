@@ -1342,9 +1342,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                 include_exploratory_function_gaps=include_exploratory_function_gaps,
             )
             if written_gap_files:
-                _stderr(
-                    f"Wrote {len(written_gap_files)} draft gap stub file(s) to {write_gaps}\n"
-                )
+                _stderr(f"Wrote {len(written_gap_files)} draft gap stub file(s) to {write_gaps}\n")
             else:
                 _stderr(f"No draft gap stubs were written to {write_gaps}\n")
     else:
@@ -5257,8 +5255,7 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     type=int,
                     default=None,
                     help=(
-                        "Parallel workers for mutation validation "
-                        "(default: 1, or [audit].workers)"
+                        "Parallel workers for mutation validation (default: 1, or [audit].workers)"
                     ),
                 ),
                 _arg(
@@ -5492,8 +5489,7 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     nargs="?",
                     default=None,
                     help=(
-                        "Package path (e.g. myapp); auto-detects or uses "
-                        "[init].target if omitted"
+                        "Package path (e.g. myapp); auto-detects or uses [init].target if omitted"
                     ),
                 ),
                 _arg(

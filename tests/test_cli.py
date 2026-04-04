@@ -145,6 +145,8 @@ class TestCLI:
         assert "--validation-mode {fast,deep}" in out
         assert "fast replay" in out
         assert "--write-gaps PATH" in out
+        assert "--include-exploratory-function-gaps" in out
+        assert "--require-direct-tests" in out
 
     def test_benchmark_help_mentions_perf_contract_quality(self, capsys):
         with pytest.raises(SystemExit):
@@ -157,20 +159,57 @@ class TestCLI:
 
     def test_audit_forwards_validation_mode(self, monkeypatch, capsys):
         import ordeal.audit as audit_mod
+        from ordeal.audit import (
+            CoverageMeasurement,
+            CoverageResult,
+            FunctionAudit,
+            ModuleAudit,
+            Status,
+        )
 
         calls: dict[str, object] = {}
 
-        def fake_audit_report(modules, **kwargs):
-            calls["modules"] = modules
-            calls.update(kwargs)
-            return "ordeal audit"
+        verified = CoverageMeasurement(
+            Status.VERIFIED,
+            CoverageResult(
+                percent=82.0,
+                total_statements=100,
+                missing_count=18,
+                missing_lines=frozenset({10, 11}),
+                source="coverage.py",
+            ),
+        )
 
-        monkeypatch.setattr(audit_mod, "audit_report", fake_audit_report)
+        def fake_audit(module, **kwargs):
+            calls["module"] = module
+            calls.update(kwargs)
+            return ModuleAudit(
+                module=module,
+                current_test_count=4,
+                current_test_lines=40,
+                current_coverage=verified,
+                migrated_test_count=3,
+                migrated_lines=30,
+                migrated_coverage=verified,
+                mutation_score="8/10 (80%)",
+                validation_mode=kwargs["validation_mode"],
+                function_audits=[
+                    FunctionAudit(
+                        name="score",
+                        status="exercised",
+                        epistemic="verified",
+                        covered_body_lines=2,
+                        total_body_lines=2,
+                    )
+                ],
+            )
+
+        monkeypatch.setattr(audit_mod, "audit", fake_audit)
 
         rc = main(["audit", "ordeal.demo", "--validation-mode", "deep"])
 
         assert rc == 0
-        assert calls["modules"] == ["ordeal.demo"]
+        assert calls["module"] == "ordeal.demo"
         assert calls["validation_mode"] == "deep"
         assert "ordeal audit" in capsys.readouterr().out
 
@@ -238,7 +277,20 @@ class TestCLI:
                             "detail": "no matching pytest files or collected nodeids",
                         }
                     ],
-                )
+                ),
+                FunctionAudit(
+                    name="score",
+                    status="exploratory",
+                    epistemic="inferred",
+                    covered_body_lines=4,
+                    total_body_lines=12,
+                    evidence=[
+                        {
+                            "kind": "nodeids",
+                            "detail": "covered indirectly by test_pkg_mod_score_roundtrip",
+                        }
+                    ],
+                ),
             ],
             suggestions=["L42 in normalize(): test when x < 0"],
         )
@@ -262,8 +314,134 @@ class TestCLI:
         assert rc == 0
         assert (gap_dir / "test_pkg_mod_value_gaps.py").exists()
         assert (gap_dir / "test_pkg_mod_parse_gaps.py").exists()
-        assert "Function evidence:" in captured.out
+        assert not (gap_dir / "test_pkg_mod_score_gaps.py").exists()
+        parse_stub = (gap_dir / "test_pkg_mod_parse_gaps.py").read_text(encoding="utf-8")
+        assert "Reviewed signature: parse(...)" in parse_stub
+        assert "Epistemic status: uncovered [none]" in parse_stub
+        assert "# - write a direct regression for pkg.mod.parse" in parse_stub
+        assert "# - keep the assertion small, specific, and reviewable" in parse_stub
+        assert (
+            "# TODO: call parse(...) with a concrete input that matches the evidence."
+            in parse_stub
+        )
+        assert (
+            "# TODO: assert the intended contract, not just that the call succeeds."
+            in parse_stub
+        )
+        assert "exploratory gaps hidden by default" in captured.out
+        assert "score is only indirectly exercised" not in captured.out
         assert "Wrote 2 draft gap stub file(s) to" in captured.err
+
+    def test_audit_require_direct_tests_fails_on_exploratory_coverage(
+        self, monkeypatch, capsys
+    ):
+        import ordeal.audit as audit_mod
+        from ordeal.audit import (
+            CoverageMeasurement,
+            CoverageResult,
+            FunctionAudit,
+            ModuleAudit,
+            Status,
+        )
+
+        verified = CoverageMeasurement(
+            Status.VERIFIED,
+            CoverageResult(
+                percent=82.0,
+                total_statements=100,
+                missing_count=18,
+                missing_lines=frozenset({10, 11}),
+                source="coverage.py",
+            ),
+        )
+        result = ModuleAudit(
+            module="pkg.mod",
+            current_test_count=4,
+            current_test_lines=40,
+            current_coverage=verified,
+            migrated_test_count=3,
+            migrated_lines=30,
+            migrated_coverage=verified,
+            mutation_score="8/10 (80%)",
+            validation_mode="fast",
+            function_audits=[
+                FunctionAudit(
+                    name="score",
+                    status="exploratory",
+                    epistemic="inferred",
+                    covered_body_lines=4,
+                    total_body_lines=12,
+                    evidence=[
+                        {
+                            "kind": "nodeids",
+                            "detail": "covered indirectly by test_pkg_mod_score_roundtrip",
+                        }
+                    ],
+                )
+            ],
+        )
+
+        monkeypatch.setattr(audit_mod, "audit", lambda *args, **kwargs: result)
+
+        rc = main(["audit", "pkg.mod", "--require-direct-tests"])
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        assert "exploratory gaps hidden by default" in captured.out
+        assert "Direct test gate: FAIL (1 exploratory)" in captured.out
+        assert "Direct tests required: fail (1 exploratory)" in captured.err
+
+    def test_audit_require_direct_tests_fails_on_uncovered_coverage(self, monkeypatch, capsys):
+        import ordeal.audit as audit_mod
+        from ordeal.audit import (
+            CoverageMeasurement,
+            CoverageResult,
+            FunctionAudit,
+            ModuleAudit,
+            Status,
+        )
+
+        verified = CoverageMeasurement(
+            Status.VERIFIED,
+            CoverageResult(
+                percent=82.0,
+                total_statements=100,
+                missing_count=18,
+                missing_lines=frozenset({10, 11}),
+                source="coverage.py",
+            ),
+        )
+        result = ModuleAudit(
+            module="pkg.mod",
+            current_test_count=4,
+            current_test_lines=40,
+            current_coverage=verified,
+            migrated_test_count=3,
+            migrated_lines=30,
+            migrated_coverage=verified,
+            function_audits=[
+                FunctionAudit(
+                    name="parse",
+                    status="uncovered",
+                    epistemic="none",
+                    evidence=[
+                        {
+                            "kind": "no_tests",
+                            "detail": "no matching pytest files or collected nodeids",
+                        }
+                    ],
+                )
+            ],
+        )
+
+        monkeypatch.setattr(audit_mod, "audit", lambda *args, **kwargs: result)
+
+        rc = main(["audit", "pkg.mod", "--require-direct-tests"])
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        assert "Direct test gate: FAIL (1 uncovered)" in captured.out
+        assert "Direct tests required: fail (1 uncovered)" in captured.err
 
     def test_catalog_lists_live_cli_commands(self, capsys):
         assert main(["catalog"]) == 0
@@ -1381,12 +1559,17 @@ class TestCLI:
             '"""\n\n'
             "from __future__ import annotations\n\n"
             "import pkg as _ordeal_target\n\n"
-            "# Evidence:\n"
+            "# Evidence summary:\n"
             "# - no_tests: no matching pytest files or collected nodeids\n\n"
+            "# Why this exists:\n"
+            "# - write a direct regression for pkg.parse\n"
+            "# - there is no effective test coverage yet\n"
+            "# - keep the assertion small, specific, and reviewable\n\n"
             "# Suggested starting point:\n"
             "# def test_pkg_parse_gap() -> None:\n"
-            "#     # TODO: replace `...` with concrete inputs and pin intended behavior.\n"
+            "#     # TODO: call parse(...) with a concrete input that matches the evidence.\n"
             "#     result = _ordeal_target.parse(...)\n"
+            "#     # TODO: assert the intended contract, not just that the call succeeds.\n"
             "#     assert ...\n"
         )
 
@@ -1434,22 +1617,27 @@ class TestCLI:
         assert "Gaps:       wrote 2 draft stub file(s) from audit" in captured.err
         assert "Weakest:" in captured.err
 
+        def _normalize_gap_stub_file(item: dict[str, object]) -> dict[str, object]:
+            normalized = dict(item)
+            normalized["path"] = Path(str(normalized["path"])).as_posix()
+            return normalized
+
         report = json.loads(captured.out)
         assert report["install_skill"] is True
         assert report["close_gaps"] is True
         assert report["skill"] == ".claude/skills/ordeal/SKILL.md"
         assert report["initial_scan"]["status"] == "no findings yet"
-        assert report["gap_stub_files"] == [
+        assert [_normalize_gap_stub_file(item) for item in report["gap_stub_files"]] == [
             {
                 "module": "pkg",
                 "target": "pkg.value",
-                "path": "tests/test_pkg_value_gaps.py",
+                "path": Path("tests/test_pkg_value_gaps.py").as_posix(),
                 "source": "mutation_gap",
             },
             {
                 "module": "pkg",
                 "target": "pkg.parse",
-                "path": "tests/test_pkg_parse_gaps.py",
+                "path": Path("tests/test_pkg_parse_gaps.py").as_posix(),
                 "source": "function_audit",
                 "status": "uncovered",
                 "epistemic": "none",

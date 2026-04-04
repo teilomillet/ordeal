@@ -381,6 +381,15 @@ def _audit_gap_stub_path(output_dir: str, target_name: str) -> Path:
     return Path(output_dir) / f"test_{safe}_gaps.py"
 
 
+def _function_gap_status_rank(status: str) -> int:
+    """Rank function-gap statuses from most to least actionable."""
+    if status == "uncovered":
+        return 0
+    if status == "exploratory":
+        return 1
+    return 2
+
+
 def _render_audit_function_gap_stub(result: Any, item: Any) -> str:
     """Render a draft review stub from function-level audit evidence."""
     from ordeal.audit import _func_sig_for_codegen
@@ -390,6 +399,8 @@ def _render_audit_function_gap_stub(result: Any, item: Any) -> str:
     target_name = f"{result.module}.{function_name}"
     status = str(getattr(item, "status", "exploratory"))
     epistemic = str(getattr(item, "epistemic", "inferred"))
+    covered_body_lines = int(getattr(item, "covered_body_lines", 0) or 0)
+    total_body_lines = int(getattr(item, "total_body_lines", 0) or 0)
     evidence = list(getattr(item, "evidence", []))
 
     reviewed_signature = f"{function_name}(...)"
@@ -433,21 +444,44 @@ def _render_audit_function_gap_stub(result: Any, item: Any) -> str:
         "",
         f"import {result.module} as _ordeal_target",
         "",
-        "# Evidence:",
+        "# Evidence summary:",
     ]
+    if total_body_lines > 0:
+        lines.append(f"# - covered body lines: {covered_body_lines}/{total_body_lines}")
     if evidence:
         for entry in evidence[:5]:
-            detail = f"# - {entry.get('kind', 'evidence')}: {entry.get('detail', '')}"
+            kind = entry.get("kind", "evidence")
+            epistemic_note = entry.get("epistemic")
+            detail = entry.get("detail", "")
+            suffix = f" [{epistemic_note}]" if epistemic_note else ""
+            detail = f"# - {kind}{suffix}: {detail}"
             lines.append(detail.rstrip())
     else:
         lines.append("# - no direct evidence recorded")
     lines.extend(
         [
             "",
+            "# Why this exists:",
+            (
+                f"# - write a direct regression for {target_name}"
+                if status == "uncovered"
+                else "# - replace indirect coverage with a direct regression"
+            ),
+            (
+                "# - the current tests only reach this behavior indirectly"
+                if status == "exploratory"
+                else "# - there is no effective test coverage yet"
+            ),
+            "# - keep the assertion small, specific, and reviewable",
+            "",
             "# Suggested starting point:",
             f"# def test_{target_name.replace('.', '_')}_gap() -> None:",
-            "#     # TODO: replace `...` with concrete inputs and pin intended behavior.",
+            (
+                f"#     # TODO: call {reviewed_signature} with a concrete input "
+                "that matches the evidence."
+            ),
             f"#     result = {call_expr}",
+            "#     # TODO: assert the intended contract, not just that the call succeeds.",
             "#     assert ...",
             "",
         ]
@@ -455,10 +489,108 @@ def _render_audit_function_gap_stub(result: Any, item: Any) -> str:
     return "\n".join(lines)
 
 
+def _function_gap_detail_items(
+    result: Any,
+    *,
+    include_exploratory_function_gaps: bool,
+) -> list[dict[str, Any]]:
+    """Normalize function audits into finding-style detail items."""
+    fixture_completeness = (
+        max(getattr(result, "total_functions", 0) - len(getattr(result, "gap_functions", [])), 0)
+        / max(getattr(result, "total_functions", 0), 1)
+    )
+    function_audits = [
+        item
+        for item in getattr(result, "function_audits", [])
+        if getattr(item, "status", "") != "exercised"
+    ]
+    function_audits.sort(
+        key=lambda item: (
+            _function_gap_status_rank(str(getattr(item, "status", ""))),
+            -int(getattr(item, "covered_body_lines", 0) or 0),
+            str(getattr(item, "name", "")),
+        )
+    )
+    details: list[dict[str, Any]] = []
+    for item in function_audits:
+        status = str(getattr(item, "status", ""))
+        if status == "exploratory" and not include_exploratory_function_gaps:
+            continue
+        summary = (
+            f"{item.name} is only indirectly exercised by current tests"
+            if status == "exploratory"
+            else f"{item.name} has no effective tests yet"
+        )
+        details.append(
+            {
+                "kind": "function_gap",
+                "category": "test_strength_gap",
+                "summary": summary,
+                "module": result.module,
+                "function": item.name,
+                "qualname": f"{result.module}.{item.name}",
+                "details": {
+                    "status": status,
+                    "priority": _function_gap_status_rank(status),
+                    "fixture_completeness": fixture_completeness,
+                    "epistemic": getattr(item, "epistemic", ""),
+                    "covered_body_lines": getattr(item, "covered_body_lines", 0),
+                    "total_body_lines": getattr(item, "total_body_lines", 0),
+                    "evidence": list(getattr(item, "evidence", [])),
+                },
+            }
+        )
+    return details
+
+
+def _direct_test_gate_payload(results: Sequence[Any]) -> dict[str, Any]:
+    """Summarize direct-test gate status from function-level audit evidence."""
+    exploratory: list[str] = []
+    uncovered: list[str] = []
+    for result in results:
+        direct_gaps = getattr(result, "direct_test_gaps", None)
+        items = (
+            list(direct_gaps)
+            if direct_gaps is not None
+            else [
+                item
+                for item in getattr(result, "function_audits", [])
+                if getattr(item, "status", "") != "exercised"
+            ]
+        )
+        for item in items:
+            qualname = f"{result.module}.{getattr(item, 'name', '')}".rstrip(".")
+            status = str(getattr(item, "status", ""))
+            if status == "exploratory":
+                exploratory.append(qualname)
+            elif status == "uncovered":
+                uncovered.append(qualname)
+    return {
+        "passed": not exploratory and not uncovered,
+        "exploratory": exploratory,
+        "uncovered": uncovered,
+    }
+
+
+def _direct_test_gate_summary(gate: Mapping[str, Any]) -> str:
+    """Render a compact direct-test gate summary."""
+    exploratory = list(gate.get("exploratory", []))
+    uncovered = list(gate.get("uncovered", []))
+    if not exploratory and not uncovered:
+        return "Direct test gate: PASS"
+    parts: list[str] = []
+    if exploratory:
+        parts.append(f"{len(exploratory)} exploratory")
+    if uncovered:
+        parts.append(f"{len(uncovered)} uncovered")
+    return f"Direct test gate: FAIL ({', '.join(parts)})"
+
+
 def _write_audit_gap_stubs(
     audit_results: Sequence[Any],
     *,
     output_dir: str,
+    include_exploratory_function_gaps: bool = False,
 ) -> list[dict[str, Any]]:
     """Write draft audit gap stubs from mutation gaps and function evidence."""
     written: list[dict[str, Any]] = []
@@ -483,9 +615,23 @@ def _write_audit_gap_stubs(
                     "source": "mutation_gap",
                 }
             )
-        for item in getattr(result, "function_audits", []):
+        function_audits = [
+            item
+            for item in getattr(result, "function_audits", [])
+            if getattr(item, "status", "") != "exercised"
+        ]
+        function_audits.sort(
+            key=lambda item: (
+                _function_gap_status_rank(str(getattr(item, "status", ""))),
+                -int(getattr(item, "covered_body_lines", 0) or 0),
+                str(getattr(item, "name", "")),
+            )
+        )
+        for item in function_audits:
             status = str(getattr(item, "status", ""))
             if status not in {"exploratory", "uncovered"}:
+                continue
+            if status == "exploratory" and not include_exploratory_function_gaps:
                 continue
             target_name = f"{result.module}.{getattr(item, 'name', '')}".strip()
             if not target_name or target_name in written_targets:
@@ -1044,7 +1190,7 @@ def _cmd_seeds(args: argparse.Namespace) -> int:
 
 def _cmd_audit(args: argparse.Namespace) -> int:
     """Run ordeal audit on specified modules."""
-    from ordeal.audit import audit, audit_report
+    from ordeal.audit import audit
 
     def _collect_results() -> list[Any]:
         return [
@@ -1058,37 +1204,49 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             for mod in args.modules
         ]
 
+    results = _collect_results()
+    include_exploratory_function_gaps = bool(
+        getattr(args, "include_exploratory_function_gaps", False)
+    )
+    require_direct_tests = bool(getattr(args, "require_direct_tests", False))
+    direct_test_gate = _direct_test_gate_payload(results) if require_direct_tests else None
+
     if getattr(args, "json", False):
-        results = _collect_results()
         saved_generated_path: Path | None = None
         written_gap_files: list[dict[str, Any]] = []
         if args.save_generated and len(results) == 1 and results[0].generated_test:
             saved_generated_path = Path(args.save_generated)
             saved_generated_path.write_text(results[0].generated_test, encoding="utf-8")
         if args.write_gaps:
-            written_gap_files = _write_audit_gap_stubs(results, output_dir=args.write_gaps)
+            written_gap_files = _write_audit_gap_stubs(
+                results,
+                output_dir=args.write_gaps,
+                include_exploratory_function_gaps=include_exploratory_function_gaps,
+            )
         print(
             _build_audit_agent_envelope(
                 results,
                 saved_generated_path=saved_generated_path,
                 written_gap_files=written_gap_files,
+                include_exploratory_function_gaps=include_exploratory_function_gaps,
+                require_direct_tests=require_direct_tests,
             ).to_json()
         )
+        if direct_test_gate is not None and not bool(direct_test_gate["passed"]):
+            return 1
         return 0
 
     if args.show_generated or args.save_generated or args.write_gaps:
         # Per-module mode with optional generated or gap-stub output
-        results = _collect_results()
         for mod, result in zip(args.modules, results, strict=False):
-            print(result.summary())
-            counts = getattr(result, "function_audit_counts", None)
-            if counts:
-                print(
-                    "    Function evidence:"
-                    f" {counts['exercised']} exercised,"
-                    f" {counts['exploratory']} exploratory,"
-                    f" {counts['uncovered']} uncovered"
+            print(
+                "\n".join(
+                    _audit_summary_lines(
+                        result,
+                        include_exploratory_function_gaps=include_exploratory_function_gaps,
+                    )
                 )
+            )
             if args.show_generated and result.generated_test:
                 print(f"\n  --- generated test for {mod} ---")
                 print(result.generated_test)
@@ -1098,7 +1256,11 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                 path.write_text(result.generated_test, encoding="utf-8")
                 _stderr(f"Saved: {path}\n")
         if args.write_gaps:
-            written_gap_files = _write_audit_gap_stubs(results, output_dir=args.write_gaps)
+            written_gap_files = _write_audit_gap_stubs(
+                results,
+                output_dir=args.write_gaps,
+                include_exploratory_function_gaps=include_exploratory_function_gaps,
+            )
             if written_gap_files:
                 _stderr(
                     f"Wrote {len(written_gap_files)} draft gap stub file(s) to {args.write_gaps}\n"
@@ -1106,14 +1268,24 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             else:
                 _stderr(f"No draft gap stubs were written to {args.write_gaps}\n")
     else:
-        report = audit_report(
-            args.modules,
-            test_dir=args.test_dir,
-            max_examples=args.max_examples,
-            workers=args.workers,
-            validation_mode=args.validation_mode,
+        print(
+            _render_audit_report_text(
+                results,
+                include_exploratory_function_gaps=include_exploratory_function_gaps,
+            )
         )
-        print(report)
+
+    if direct_test_gate is not None:
+        print(f"\n  {_direct_test_gate_summary(direct_test_gate)}")
+    if direct_test_gate is not None and not bool(direct_test_gate["passed"]):
+        gate_suffix = _direct_test_gate_summary(direct_test_gate).removeprefix(
+            "Direct test gate: "
+        )
+        _stderr(
+            "  Direct tests required:"
+            f" {gate_suffix.lower()}\n"
+        )
+        return 1
     return 0
 
 
@@ -3531,7 +3703,11 @@ def _build_mine_agent_envelope(
     )
 
 
-def _audit_detail_items(result: Any) -> list[dict[str, Any]]:
+def _audit_detail_items(
+    result: Any,
+    *,
+    include_exploratory_function_gaps: bool = False,
+) -> list[dict[str, Any]]:
     """Normalize one ModuleAudit into finding-style detail items."""
     details: list[dict[str, Any]] = []
     score_fraction = result.mutation_score_fraction
@@ -3572,31 +3748,12 @@ def _audit_detail_items(result: Any) -> list[dict[str, Any]]:
                 "qualname": f"{result.module}.{function_name}",
             }
         )
-    for item in getattr(result, "function_audits", []):
-        if item.status == "exercised":
-            continue
-        summary = (
-            f"{item.name} is only indirectly exercised by current tests"
-            if item.status == "exploratory"
-            else f"{item.name} has no effective tests yet"
+    details.extend(
+        _function_gap_detail_items(
+            result,
+            include_exploratory_function_gaps=include_exploratory_function_gaps,
         )
-        details.append(
-            {
-                "kind": "function_gap",
-                "category": "test_strength_gap",
-                "summary": summary,
-                "module": result.module,
-                "function": item.name,
-                "qualname": f"{result.module}.{item.name}",
-                "details": {
-                    "status": item.status,
-                    "epistemic": item.epistemic,
-                    "covered_body_lines": item.covered_body_lines,
-                    "total_body_lines": item.total_body_lines,
-                    "evidence": list(item.evidence),
-                },
-            }
-        )
+    )
     for item in result.weakest_tests:
         details.append(
             {
@@ -3630,16 +3787,132 @@ def _audit_detail_items(result: Any) -> list[dict[str, Any]]:
     return details
 
 
+def _audit_summary_lines(
+    result: Any,
+    *,
+    include_exploratory_function_gaps: bool,
+) -> list[str]:
+    """Render one audit summary with filtered function-gap sections."""
+    lines = result.summary().splitlines()
+    rendered: list[str] = []
+    exploratory_count = int(getattr(result, "function_audit_counts", {}).get("exploratory", 0))
+    saw_function_section = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("    functions:"):
+            saw_function_section = True
+            rendered.append(line)
+            for status in ("exercised", "uncovered", "exploratory"):
+                if status == "exploratory" and not include_exploratory_function_gaps:
+                    continue
+                entries = [
+                    item
+                    for item in getattr(result, "function_audits", [])
+                    if getattr(item, "status", "") == status
+                ]
+                entries.sort(
+                    key=lambda item: (
+                        -int(getattr(item, "covered_body_lines", 0) or 0),
+                        str(getattr(item, "name", "")),
+                    )
+                )
+                if not entries:
+                    continue
+                names = ", ".join(item.name for item in entries[:5])
+                rendered.append(f"      - {entries[0].summary_label()}: {names}")
+                if entries[0].evidence:
+                    first = entries[0].evidence[0]
+                    rendered.append(f"        evidence: {first['kind']} — {first['detail']}")
+            if exploratory_count and not include_exploratory_function_gaps:
+                rendered.append(
+                    "      exploratory gaps hidden by default:"
+                    f" {exploratory_count} (use --include-exploratory-function-gaps)"
+                )
+            i += 1
+            while i < len(lines) and (
+                lines[i].startswith("      - ") or lines[i].startswith("        evidence:")
+            ):
+                i += 1
+            continue
+        rendered.append(line)
+        i += 1
+    if exploratory_count and not include_exploratory_function_gaps and not saw_function_section:
+        rendered.append(
+            f"  exploratory gaps hidden by default: {exploratory_count}"
+            " (use --include-exploratory-function-gaps)"
+        )
+    return rendered
+
+
+def _render_audit_report_text(
+    results: Sequence[Any],
+    *,
+    include_exploratory_function_gaps: bool,
+) -> str:
+    """Render a human-readable audit report from precomputed results."""
+    lines = ["ordeal audit"]
+    total_cur_tests = 0
+    total_cur_lines = 0
+    total_mig_tests = 0
+    total_mig_lines = 0
+    total_warnings = 0
+    total_exploratory = 0
+
+    for result in results:
+        lines.extend(
+            _audit_summary_lines(
+                result,
+                include_exploratory_function_gaps=include_exploratory_function_gaps,
+            )
+        )
+        total_cur_tests += result.current_test_count
+        total_cur_lines += result.current_test_lines
+        total_mig_tests += result.migrated_test_count
+        total_mig_lines += result.migrated_lines
+        total_warnings += len(result.warnings)
+        total_exploratory += result.function_audit_counts["exploratory"]
+
+    if len(results) > 1:
+        lines.append("\n  total:")
+        lines.append(f"    current:  {total_cur_tests} tests | {total_cur_lines} lines")
+        lines.append(f"    migrated: {total_mig_tests} tests | {total_mig_lines} lines")
+        if total_cur_tests > 0:
+            saved = total_cur_tests - total_mig_tests
+            pct = saved / total_cur_tests * 100
+            lines.append(f"    saved:    {saved} tests ({pct:.0f}%)")
+
+    if total_exploratory and not include_exploratory_function_gaps:
+        lines.append(
+            f"\n  exploratory function gaps hidden by default: {total_exploratory}"
+            " (use --include-exploratory-function-gaps)"
+        )
+
+    if total_warnings:
+        lines.append(f"\n  warnings: {total_warnings} total")
+
+    return "\n".join(lines)
+
+
 def _build_audit_agent_envelope(
     results: Sequence[Any],
     *,
     saved_generated_path: Path | None = None,
     written_gap_files: Sequence[Mapping[str, Any]] = (),
+    include_exploratory_function_gaps: bool = False,
+    require_direct_tests: bool = False,
 ) -> Any:
     """Build the agent-facing JSON envelope for `ordeal audit`."""
     from ordeal.audit import _generated_test_path, _module_audit_to_dict
 
-    details = [detail for result in results for detail in _audit_detail_items(result)]
+    details = [
+        detail
+        for result in results
+        for detail in _audit_detail_items(
+            result,
+            include_exploratory_function_gaps=include_exploratory_function_gaps,
+        )
+    ]
     modules = [result.module for result in results]
     suggested_commands = []
     for module in modules:
@@ -3706,6 +3979,8 @@ def _build_audit_agent_envelope(
         if evidence["mutation_strength"] is not None
         else "n/a"
     )
+    exploratory_count = sum(result.function_audit_counts["exploratory"] for result in results)
+    direct_test_gate = _direct_test_gate_payload(results) if require_direct_tests else None
     report["summary"].append(
         "Evidence:"
         f" search depth={evidence['search_depth']['modules']} modules/"
@@ -3714,6 +3989,13 @@ def _build_audit_agent_envelope(
         f" mutation strength={mutation_strength_text},"
         f" fixture completeness={evidence['fixture_completeness']:.0%}"
     )
+    if direct_test_gate is not None:
+        report["summary"].append(_direct_test_gate_summary(direct_test_gate))
+    if exploratory_count and not include_exploratory_function_gaps:
+        report["summary"].append(
+            "Exploratory function gaps hidden by default: "
+            f"{exploratory_count} (use --include-exploratory-function-gaps)"
+        )
     if written_gap_files:
         report["summary"].append(f"Gap stubs written: {len(written_gap_files)}")
     report["extra_sections"] = [
@@ -3784,9 +4066,20 @@ def _build_audit_agent_envelope(
             continue
         metadata = {key: value for key, value in item.items() if key != "path"}
         artifacts.append(_agent_artifact("gap-stub", path, "draft audit gap stub", **metadata))
+    blocking_reason = None
+    if direct_test_gate is not None and not bool(direct_test_gate["passed"]):
+        blocking_reason = (
+            "direct tests required for "
+            f"{len(direct_test_gate['exploratory']) + len(direct_test_gate['uncovered'])}"
+            " function(s)"
+        )
     return _build_agent_envelope_from_report(
         report,
-        status="findings" if details else "ok",
+        status=(
+            "blocked"
+            if blocking_reason is not None
+            else ("findings" if details else ("exploratory" if exploratory_count else "ok"))
+        ),
         confidence=verified_measurements / total_measurements,
         confidence_basis=(
             (
@@ -3801,6 +4094,7 @@ def _build_audit_agent_envelope(
             ),
             f"fixture completeness: {evidence['fixture_completeness']:.0%}",
         ),
+        blocking_reason=blocking_reason,
         artifacts=artifacts,
         raw_details={
             "report": report,
@@ -3811,6 +4105,11 @@ def _build_audit_agent_envelope(
                 for item in _module_audit_to_dict(result).get("function_audits", [])
             ],
             "gap_stub_files": [dict(item) for item in written_gap_files],
+            "direct_test_gate": (
+                {"required": True, **direct_test_gate}
+                if direct_test_gate is not None
+                else None
+            ),
             "evidence_dimensions": evidence,
         },
         suggested_test_file=(
@@ -4842,6 +5141,20 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     default=None,
                     metavar="PATH",
                     help="Write draft audit gap stubs to PATH",
+                ),
+                _arg(
+                    "--include-exploratory-function-gaps",
+                    action="store_true",
+                    help=(
+                        "Include exploratory function gaps in audit findings and draft stubs"
+                    ),
+                ),
+                _arg(
+                    "--require-direct-tests",
+                    action="store_true",
+                    help=(
+                        "Return exit code 1 when exploratory function coverage is all indirect"
+                    ),
                 ),
                 _arg("--json", action="store_true", help="Output agent-facing JSON"),
             ),

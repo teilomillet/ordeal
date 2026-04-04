@@ -64,7 +64,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Literal, Union, get_args, get_origin
+from typing import Any, Literal, Sequence, Union, get_args, get_origin
 
 from ordeal.auto import (
     _get_public_functions,
@@ -696,6 +696,25 @@ class ModuleAudit:
             counts[item.status] = counts.get(item.status, 0) + 1
         return counts
 
+    @property
+    def direct_test_gap_counts(self) -> dict[str, int]:
+        """Count function audits that do not satisfy the direct-test gate."""
+        counts = {"exploratory": 0, "uncovered": 0}
+        for item in self.function_audits:
+            if item.status in counts:
+                counts[item.status] += 1
+        return counts
+
+    @property
+    def direct_test_gaps(self) -> list[FunctionAudit]:
+        """Return functions that still lack direct verified tests."""
+        return [item for item in self.function_audits if item.status != "exercised"]
+
+    @property
+    def has_direct_test_gaps(self) -> bool:
+        """True when any function is only exploratory or fully uncovered."""
+        return bool(self.direct_test_gaps)
+
 
 def _coverage_result_to_dict(result: CoverageResult | None) -> dict[str, object] | None:
     """Serialize a coverage result for the audit cache."""
@@ -819,6 +838,41 @@ def _module_audit_from_dict(data: dict[str, object]) -> ModuleAudit:
         warnings=list(data.get("warnings", [])),
         generated_test=str(data.get("generated_test", "")),
     )
+
+
+def _render_audit_results(results: Sequence[ModuleAudit]) -> str:
+    """Render a human-readable audit report from precomputed results."""
+    lines = ["ordeal audit"]
+    total_cur_tests = 0
+    total_cur_lines = 0
+    total_mig_tests = 0
+    total_mig_lines = 0
+    total_warnings = 0
+
+    for result in results:
+        lines.append(result.summary())
+        total_cur_tests += result.current_test_count
+        total_cur_lines += result.current_test_lines
+        total_mig_tests += result.migrated_test_count
+        total_mig_lines += result.migrated_lines
+        total_warnings += len(result.warnings)
+
+    if len(results) > 1:
+        lines.append("\n  total:")
+        lines.append(f"    current:  {total_cur_tests} tests | {total_cur_lines} lines")
+        lines.append(f"    migrated: {total_mig_tests} tests | {total_mig_lines} lines")
+        if total_cur_tests > 0:
+            label, summary = _format_change_summary(
+                total_cur_tests,
+                total_mig_tests,
+                total_cur_lines,
+                total_mig_lines,
+            )
+            lines.append(f"    {label}:   {summary}")
+        if total_warnings > 0:
+            lines.append(f"    warnings: {total_warnings} (run with --verbose)")
+
+    return "\n".join(lines)
 
 
 # ============================================================================
@@ -3200,46 +3254,14 @@ def audit_report(
         validation_mode: ``"fast"`` replay or ``"deep"`` replay + re-mining.
     """
     validation_mode = _normalize_validation_mode(validation_mode)
-    results = []
-    for mod in modules:
-        results.append(
-            audit(
-                mod,
-                test_dir=test_dir,
-                max_examples=max_examples,
-                workers=workers,
-                validation_mode=validation_mode,
-            )
+    results = [
+        audit(
+            mod,
+            test_dir=test_dir,
+            max_examples=max_examples,
+            workers=workers,
+            validation_mode=validation_mode,
         )
-
-    lines = ["ordeal audit"]
-    total_cur_tests = 0
-    total_cur_lines = 0
-    total_mig_tests = 0
-    total_mig_lines = 0
-    total_warnings = 0
-
-    for r in results:
-        lines.append(r.summary())
-        total_cur_tests += r.current_test_count
-        total_cur_lines += r.current_test_lines
-        total_mig_tests += r.migrated_test_count
-        total_mig_lines += r.migrated_lines
-        total_warnings += len(r.warnings)
-
-    if len(results) > 1:
-        lines.append("\n  total:")
-        lines.append(f"    current:  {total_cur_tests} tests | {total_cur_lines} lines")
-        lines.append(f"    migrated: {total_mig_tests} tests | {total_mig_lines} lines")
-        if total_cur_tests > 0:
-            label, summary = _format_change_summary(
-                total_cur_tests,
-                total_mig_tests,
-                total_cur_lines,
-                total_mig_lines,
-            )
-            lines.append(f"    {label}:   {summary}")
-        if total_warnings > 0:
-            lines.append(f"    warnings: {total_warnings} (run with --verbose)")
-
-    return "\n".join(lines)
+        for mod in modules
+    ]
+    return _render_audit_results(results)

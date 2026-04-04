@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import typing
 from dataclasses import dataclass
+from typing import NewType, Required, TypedDict
 
 import hypothesis.strategies as st
 from hypothesis import find, given, settings
 
 from ordeal.quickcheck import biased, quickcheck, strategy_for_type
 
-
 # Module-level dataclasses (must be here so get_type_hints can resolve them)
+UserId = NewType("UserId", int)
+UserIdAlias = typing.TypeAliasType("UserIdAlias", int)
+
+
 @dataclass
 class _Point:
     x: int
@@ -26,6 +31,16 @@ class _Inner:
 class _Outer:
     name: str
     inner: _Inner
+
+
+class _Profile(TypedDict):
+    user_id: UserId
+    name: str
+
+
+class _PartialProfile(TypedDict, total=False):
+    required_id: Required[int]
+    nickname: str
 
 
 # ============================================================================
@@ -202,6 +217,16 @@ class TestStrategyForType:
         result = find(strategy_for_type(int | None), lambda x: x is None)
         assert result is None
 
+    def test_newtype_alias(self):
+        result = find(strategy_for_type(UserId), lambda x: x == 0)
+        assert result == 0
+        assert type(result) is int
+
+    def test_type_alias_type(self):
+        result = find(strategy_for_type(UserIdAlias), lambda x: x == 0)
+        assert result == 0
+        assert type(result) is int
+
     def test_union(self):
         strat = strategy_for_type(int | str)
 
@@ -228,6 +253,18 @@ class TestStrategyForType:
             assert isinstance(x.inner.value, int)
 
         check()
+
+    def test_typed_dict_required_keys(self):
+        result = find(strategy_for_type(_Profile), lambda d: d["user_id"] == 0 and d["name"] == "")
+        assert result == {"user_id": 0, "name": ""}
+
+    def test_typed_dict_optional_keys(self):
+        result = find(
+            strategy_for_type(_PartialProfile),
+            lambda d: d["required_id"] == 0 and "nickname" not in d,
+        )
+        assert result["required_id"] == 0
+        assert "nickname" not in result
 
     def test_literal_type(self):
         """Literal types generate sampled_from strategy."""

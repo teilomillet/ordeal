@@ -37,6 +37,7 @@ import functools
 import inspect
 import math
 import types as pytypes
+import typing
 from typing import Any, Callable, Literal, Union, get_args, get_origin, get_type_hints
 
 import hypothesis.strategies as st
@@ -196,19 +197,98 @@ class biased:
 # ============================================================================
 
 
+def _unwrap_type_hint(tp: Any) -> Any:
+    """Strip alias and wrapper layers before strategy inference."""
+    read_only = getattr(typing, "ReadOnly", None)
+
+    while True:
+        if isinstance(tp, typing.TypeAliasType):
+            tp = tp.__value__
+            continue
+
+        supertype = getattr(tp, "__supertype__", None)
+        if supertype is not None:
+            tp = supertype
+            continue
+
+        origin = get_origin(tp)
+        if origin is typing.Annotated:
+            tp = get_args(tp)[0]
+            continue
+        if origin is typing.Required or origin is typing.NotRequired:
+            tp = get_args(tp)[0]
+            continue
+        if read_only is not None and origin is read_only:
+            tp = get_args(tp)[0]
+            continue
+
+        return tp
+
+
+def _is_typed_dict_type(tp: Any) -> bool:
+    """Return True when *tp* is a TypedDict class."""
+    is_typed_dict = getattr(typing, "is_typeddict", None)
+    return bool(is_typed_dict and isinstance(tp, type) and is_typed_dict(tp))
+
+
+def _strategy_for_typed_dict(tp: type, *, _depth: int = 0) -> st.SearchStrategy[Any]:
+    """Build a dictionary strategy for a TypedDict definition."""
+    next_depth = _depth + 1
+    try:
+        hints = get_type_hints(tp, include_extras=True)
+    except Exception:
+        hints = dict(getattr(tp, "__annotations__", {}))
+
+    annotations = dict(getattr(tp, "__annotations__", {}))
+    required_keys = set(getattr(tp, "__required_keys__", frozenset()))
+    optional_keys = set(getattr(tp, "__optional_keys__", frozenset()))
+    if not required_keys and not optional_keys:
+        if bool(getattr(tp, "__total__", True)):
+            required_keys = set(annotations)
+        else:
+            optional_keys = set(annotations)
+
+    required: dict[str, st.SearchStrategy[Any]] = {}
+    optional: dict[str, st.SearchStrategy[Any]] = {}
+    for name in sorted(annotations):
+        raw_annotation = hints.get(name, annotations[name])
+        origin = get_origin(raw_annotation)
+        is_required = name in required_keys
+        is_optional = name in optional_keys
+        if origin is typing.Required:
+            is_required = True
+            is_optional = False
+        elif origin is typing.NotRequired:
+            is_required = False
+            is_optional = True
+
+        annotation = _unwrap_type_hint(raw_annotation)
+        if is_required:
+            required[name] = strategy_for_type(annotation, _depth=next_depth)
+        elif is_optional:
+            optional[name] = strategy_for_type(annotation, _depth=next_depth)
+
+    if optional:
+        return st.fixed_dictionaries(required, optional=optional)
+    return st.fixed_dictionaries(required)
+
+
 @functools.lru_cache(maxsize=256)
-def strategy_for_type(tp: type, *, _depth: int = 0) -> st.SearchStrategy:
+def strategy_for_type(tp: Any, *, _depth: int = 0) -> st.SearchStrategy:
     """Derive a boundary-biased strategy from a type hint.
 
     Handles: int, float, str, bool, bytes, None, list[T], dict[K,V],
-    tuple[T,...], set[T], Optional[T], Union[T,U], dataclasses, and
-    falls back to ``hypothesis.strategies.from_type()`` for the rest.
+    tuple[T,...], set[T], Optional[T], Union[T,U], dataclasses,
+    TypedDict, NewType/type aliases, and falls back to
+    ``hypothesis.strategies.from_type()`` for the rest.
 
     Results are cached by ``(tp, _depth)`` — the same type at the same
     recursion depth always returns the same strategy object.
     """
     if _depth > 5:
         return st.just(None)
+
+    tp = _unwrap_type_hint(tp)
 
     # Any — generate a mix of common Python types.
     # This is critical for Dict[str, Any] and List[Any] which are
@@ -237,6 +317,9 @@ def strategy_for_type(tp: type, *, _depth: int = 0) -> st.SearchStrategy:
         return st.booleans()
     if tp is bytes:
         return biased.bytes_()
+
+    if _is_typed_dict_type(tp):
+        return _strategy_for_typed_dict(tp, _depth=_depth)
 
     origin = get_origin(tp)
     args = get_args(tp)
@@ -420,10 +503,14 @@ def _strategy_for_pydantic(tp: type, *, _depth: int = 0) -> st.SearchStrategy:
     from pydantic.fields import FieldInfo
 
     model_fields: dict[str, FieldInfo] = tp.model_fields  # type: ignore[attr-defined]
+    try:
+        model_hints = get_type_hints(tp, include_extras=True)
+    except Exception:
+        model_hints = {}
     field_strats: dict[str, st.SearchStrategy] = {}
 
     for fname, field_info in model_fields.items():
-        annotation = field_info.annotation
+        annotation = model_hints.get(fname, field_info.annotation)
         if annotation is None:
             field_strats[fname] = st.just(None)
             continue

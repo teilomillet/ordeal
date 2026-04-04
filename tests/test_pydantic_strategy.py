@@ -1,5 +1,7 @@
 """Tests for Pydantic model strategy support in ordeal.quickcheck."""
 
+from typing import NewType, TypedDict
+
 import pytest
 
 from ordeal.quickcheck import strategy_for_type
@@ -9,6 +11,14 @@ pydantic = pytest.importorskip("pydantic")
 from pydantic import BaseModel, Field  # noqa: E402
 
 # -- Test models -----------------------------------------------------------
+
+
+UserId = NewType("UserId", int)
+
+
+class Address(TypedDict):
+    city: str
+    zip_code: int
 
 
 class SimpleModel(BaseModel):
@@ -37,6 +47,11 @@ class ConstrainedModel(BaseModel):
 class NestedModel(BaseModel):
     inner: SimpleModel
     tag: str = "nested"
+
+
+class WrappedModel(BaseModel):
+    user_id: UserId
+    address: Address
 
 
 # -- Tests -----------------------------------------------------------------
@@ -125,6 +140,22 @@ class TestPydanticStrategy:
             assert isinstance(instance, NestedModel)
             assert isinstance(instance.inner, SimpleModel)
             assert isinstance(instance.tag, str)
+
+        check()
+
+    def test_wrapped_model(self):
+        strat = strategy_for_type(WrappedModel)
+
+        from hypothesis import given, settings
+
+        @given(instance=strat)
+        @settings(max_examples=20)
+        def check(instance):
+            assert isinstance(instance, WrappedModel)
+            assert isinstance(instance.user_id, int)
+            assert isinstance(instance.address, dict)
+            assert isinstance(instance.address["city"], str)
+            assert isinstance(instance.address["zip_code"], int)
 
         check()
 

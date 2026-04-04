@@ -123,9 +123,13 @@ uvx ordeal explore             # ephemeral, no install
 
 # Development
 git clone https://github.com/teilomillet/ordeal
-cd ordeal && uv sync
+cd ordeal && uv sync --locked --extra dev
 uv run pytest                  # run the full test suite
 ```
+
+When dependency metadata changes, run `uv lock` and commit `uv.lock` in the
+same change. Normal development should use `uv sync --locked` so lock drift
+fails early instead of rewriting the lockfile locally.
 
 ## What's in the box
 

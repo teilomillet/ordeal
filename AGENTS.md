@@ -104,7 +104,8 @@ Conventions for AI agents working on ordeal.
 ## Build & test
 
 ```bash
-uv sync                          # install deps
+uv lock --check                  # fail fast if uv.lock drifted
+uv sync --locked --extra dev     # install deps without rewriting uv.lock
 uv run pytest                    # run all tests (parallel via xdist, ~40s)
 uv run pytest -m "not slow"      # fast loop — skip ablation tests (~15s)
 uv run pytest --chaos            # with property reporting

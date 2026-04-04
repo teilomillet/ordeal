@@ -23,7 +23,8 @@ class TestGenerateCIWorkflow:
         lock.write_text("")
         with patch.object(Path, "exists", return_value=True):
             yml = _generate_ci_workflow("myapp")
-        assert "uv sync" in yml
+        assert "uv lock --check" in yml
+        assert "uv sync --locked --extra dev" in yml
         assert "uv run pytest" in yml
         assert "uv run ordeal" in yml
 
@@ -35,7 +36,7 @@ class TestGenerateCIWorkflow:
         finally:
             os.chdir(orig_cwd)
         assert "pip install" in yml
-        assert "uv sync" not in yml
+        assert "uv sync --locked" not in yml
 
     def test_package_name_in_mutate(self):
         yml = _generate_ci_workflow("my_special_lib")

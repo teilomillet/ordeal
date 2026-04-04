@@ -2332,7 +2332,8 @@ def _generate_ci_workflow(pkg: str) -> str:
     if has_uv_lock:
         install_steps = """\
       - uses: astral-sh/setup-uv@v4
-      - run: uv sync"""
+      - run: uv lock --check
+      - run: uv sync --locked --extra dev"""
         run_prefix = "uv run "
     else:
         install_steps = """\

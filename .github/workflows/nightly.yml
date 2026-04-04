@@ -18,7 +18,9 @@ jobs:
 
       - run: uv python install 3.12
 
-      - run: uv sync --extra dev
+      - run: uv lock --check
+
+      - run: uv sync --locked --extra dev
 
       - name: Run full perf contract (all tiers)
         run: |

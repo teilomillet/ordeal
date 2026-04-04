@@ -495,10 +495,9 @@ def _function_gap_detail_items(
     include_exploratory_function_gaps: bool,
 ) -> list[dict[str, Any]]:
     """Normalize function audits into finding-style detail items."""
-    fixture_completeness = (
-        max(getattr(result, "total_functions", 0) - len(getattr(result, "gap_functions", [])), 0)
-        / max(getattr(result, "total_functions", 0), 1)
-    )
+    fixture_completeness = max(
+        getattr(result, "total_functions", 0) - len(getattr(result, "gap_functions", [])), 0
+    ) / max(getattr(result, "total_functions", 0), 1)
     function_audits = [
         item
         for item in getattr(result, "function_audits", [])
@@ -1281,10 +1280,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         gate_suffix = _direct_test_gate_summary(direct_test_gate).removeprefix(
             "Direct test gate: "
         )
-        _stderr(
-            "  Direct tests required:"
-            f" {gate_suffix.lower()}\n"
-        )
+        _stderr(f"  Direct tests required: {gate_suffix.lower()}\n")
         return 1
     return 0
 
@@ -4106,9 +4102,7 @@ def _build_audit_agent_envelope(
             ],
             "gap_stub_files": [dict(item) for item in written_gap_files],
             "direct_test_gate": (
-                {"required": True, **direct_test_gate}
-                if direct_test_gate is not None
-                else None
+                {"required": True, **direct_test_gate} if direct_test_gate is not None else None
             ),
             "evidence_dimensions": evidence,
         },
@@ -5145,16 +5139,12 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                 _arg(
                     "--include-exploratory-function-gaps",
                     action="store_true",
-                    help=(
-                        "Include exploratory function gaps in audit findings and draft stubs"
-                    ),
+                    help=("Include exploratory function gaps in audit findings and draft stubs"),
                 ),
                 _arg(
                     "--require-direct-tests",
                     action="store_true",
-                    help=(
-                        "Return exit code 1 when exploratory function coverage is all indirect"
-                    ),
+                    help=("Return exit code 1 when exploratory function coverage is all indirect"),
                 ),
                 _arg("--json", action="store_true", help="Output agent-facing JSON"),
             ),

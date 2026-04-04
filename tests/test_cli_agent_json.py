@@ -197,9 +197,11 @@ class TestCLIAgentJson:
         assert "Function evidence:" in payload["summary"]
         assert "hidden by default" in payload["summary"]
         assert payload["raw_details"]["function_audits"][0]["module"] == "ordeal.demo"
-        assert {
-            item["status"] for item in payload["raw_details"]["function_audits"]
-        } == {"uncovered", "exploratory", "exercised"}
+        assert {item["status"] for item in payload["raw_details"]["function_audits"]} == {
+            "uncovered",
+            "exploratory",
+            "exercised",
+        }
         assert (
             payload["raw_details"]["report"]["extra_sections"][0][0] == "Function-Level Evidence"
         )

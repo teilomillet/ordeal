@@ -325,16 +325,13 @@ class TestCLI:
             in parse_stub
         )
         assert (
-            "# TODO: assert the intended contract, not just that the call succeeds."
-            in parse_stub
+            "# TODO: assert the intended contract, not just that the call succeeds." in parse_stub
         )
         assert "exploratory gaps hidden by default" in captured.out
         assert "score is only indirectly exercised" not in captured.out
         assert "Wrote 2 draft gap stub file(s) to" in captured.err
 
-    def test_audit_require_direct_tests_fails_on_exploratory_coverage(
-        self, monkeypatch, capsys
-    ):
+    def test_audit_require_direct_tests_fails_on_exploratory_coverage(self, monkeypatch, capsys):
         import ordeal.audit as audit_mod
         from ordeal.audit import (
             CoverageMeasurement,

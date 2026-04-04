@@ -183,6 +183,84 @@ class TestCLIAgentJson:
             payload["raw_details"]["report"]["extra_sections"][0][0] == "Function-Level Evidence"
         )
 
+    def test_audit_json_write_gaps_outputs_gap_stub_artifacts(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        verified = CoverageMeasurement(
+            Status.VERIFIED,
+            CoverageResult(
+                percent=82.0,
+                total_statements=100,
+                missing_count=18,
+                missing_lines=frozenset({10, 11}),
+                source="coverage.py",
+            ),
+        )
+        result = ModuleAudit(
+            module="ordeal.demo",
+            current_test_count=4,
+            current_test_lines=40,
+            current_coverage=verified,
+            migrated_test_count=3,
+            migrated_lines=30,
+            migrated_coverage=verified,
+            mutation_score="8/10 (80%)",
+            validation_mode="fast",
+            mutation_gap_stubs=[
+                {
+                    "target": "ordeal.demo.value",
+                    "content": '"""Draft review stubs for audit gaps.\n"""',
+                }
+            ],
+            function_audits=[
+                FunctionAudit(
+                    name="parse",
+                    status="uncovered",
+                    epistemic="none",
+                    evidence=[
+                        {
+                            "kind": "no_tests",
+                            "detail": "no matching pytest files or collected nodeids",
+                        }
+                    ],
+                )
+            ],
+            suggestions=["L42 in normalize(): test when x < 0"],
+        )
+        monkeypatch.setattr(audit_mod, "audit", lambda *args, **kwargs: result)
+
+        gap_dir = tmp_path / "audit-gaps"
+        rc = main(["audit", "ordeal.demo", "--json", "--write-gaps", str(gap_dir)])
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert (gap_dir / "test_ordeal_demo_value_gaps.py").exists()
+        assert (gap_dir / "test_ordeal_demo_parse_gaps.py").exists()
+        assert payload["raw_details"]["gap_stub_files"] == [
+            {
+                "module": "ordeal.demo",
+                "target": "ordeal.demo.value",
+                "path": str(gap_dir / "test_ordeal_demo_value_gaps.py"),
+                "source": "mutation_gap",
+            },
+            {
+                "module": "ordeal.demo",
+                "target": "ordeal.demo.parse",
+                "path": str(gap_dir / "test_ordeal_demo_parse_gaps.py"),
+                "source": "function_audit",
+                "status": "uncovered",
+                "epistemic": "none",
+            },
+        ]
+        assert any(artifact["kind"] == "gap-stub" for artifact in payload["artifacts"])
+        assert any(
+            artifact["kind"] == "gap-stub"
+            and artifact["uri"] == str(gap_dir / "test_ordeal_demo_value_gaps.py").replace(
+                "\\", "/"
+            )
+            for artifact in payload["artifacts"]
+        )
+
     def test_mutate_json_outputs_agent_envelope(self, monkeypatch, capsys):
         result = MutationResult(
             target="ordeal.demo.normalize",

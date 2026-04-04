@@ -224,7 +224,7 @@ class TestCLI:
                         "#     # TODO: replace placeholder with concrete inputs.\n"
                         "#     result = _ordeal_target.value()\n"
                         "#     assert ...\n"
-                    )
+                    ),
                 }
             ],
             function_audits=[

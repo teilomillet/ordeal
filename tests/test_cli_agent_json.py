@@ -183,9 +183,7 @@ class TestCLIAgentJson:
             payload["raw_details"]["report"]["extra_sections"][0][0] == "Function-Level Evidence"
         )
 
-    def test_audit_json_write_gaps_outputs_gap_stub_artifacts(
-        self, monkeypatch, tmp_path, capsys
-    ):
+    def test_audit_json_write_gaps_outputs_gap_stub_artifacts(self, monkeypatch, tmp_path, capsys):
         verified = CoverageMeasurement(
             Status.VERIFIED,
             CoverageResult(
@@ -255,9 +253,8 @@ class TestCLIAgentJson:
         assert any(artifact["kind"] == "gap-stub" for artifact in payload["artifacts"])
         assert any(
             artifact["kind"] == "gap-stub"
-            and artifact["uri"] == str(gap_dir / "test_ordeal_demo_value_gaps.py").replace(
-                "\\", "/"
-            )
+            and artifact["uri"]
+            == str(gap_dir / "test_ordeal_demo_value_gaps.py").replace("\\", "/")
             for artifact in payload["artifacts"]
         )
 

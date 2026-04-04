@@ -10,7 +10,7 @@ import ordeal.mine as mine_mod
 import ordeal.mutations as mutations_mod
 import ordeal.state as ordeal_state
 import ordeal.trace as trace_mod
-from ordeal.audit import CoverageMeasurement, CoverageResult, ModuleAudit, Status
+from ordeal.audit import CoverageMeasurement, CoverageResult, FunctionAudit, ModuleAudit, Status
 from ordeal.cli import main
 from ordeal.mine import MinedProperty, MineResult
 from ordeal.mutations import Mutant, MutationResult, NoTestsFoundError
@@ -141,6 +141,26 @@ class TestCLIAgentJson:
                 mutation_score="8/10 (80%)",
                 validation_mode="fast",
                 gap_functions=["normalize"],
+                function_audits=[
+                    FunctionAudit(
+                        name="normalize",
+                        status="uncovered",
+                        epistemic="none",
+                        evidence=[
+                            {
+                                "kind": "no_tests",
+                                "detail": "no matching pytest files or collected nodeids",
+                            }
+                        ],
+                    ),
+                    FunctionAudit(
+                        name="score",
+                        status="exercised",
+                        epistemic="verified",
+                        covered_body_lines=2,
+                        total_body_lines=2,
+                    ),
+                ],
                 suggestions=["L42 in normalize(): test when x < 0"],
             )
 
@@ -154,7 +174,15 @@ class TestCLIAgentJson:
         assert payload["status"] == "findings"
         assert payload["findings"]
         assert payload["confidence"] == 1.0
+        kinds = {item["kind"] for item in payload["findings"]}
+        assert "function_gap" in kinds
         assert payload["suggested_commands"][0] == "ordeal audit ordeal.demo --show-generated"
+        assert "Function evidence:" in payload["summary"]
+        assert payload["raw_details"]["function_audits"][0]["module"] == "ordeal.demo"
+        assert (
+            payload["raw_details"]["report"]["extra_sections"][0][0]
+            == "Function-Level Evidence"
+        )
 
     def test_mutate_json_outputs_agent_envelope(self, monkeypatch, capsys):
         result = MutationResult(

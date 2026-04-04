@@ -632,6 +632,69 @@ class TestChangeSummary:
         assert "more code" in summary
 
 
+class TestPytestNodeidCollection:
+    def test_skips_nodeid_collection_when_verified_coverage_already_exercises_all_functions(self):
+        from tests._auto_target import add
+
+        covered_lines = audit_mod._function_body_line_numbers(add)
+        assert covered_lines is not None
+        current = CoverageMeasurement(
+            Status.VERIFIED,
+            CoverageResult(
+                percent=100.0,
+                total_statements=len(covered_lines),
+                missing_count=0,
+                missing_lines=frozenset(),
+                source="coverage.py",
+            ),
+        )
+        evidence = [
+            audit_mod.TestFileEvidence(
+                path="tests/test__auto_target.py",
+                basis="filename",
+                epistemic="inferred",
+            )
+        ]
+
+        assert (
+            audit_mod._should_collect_pytest_nodeids(
+                [("add", add)],
+                current_coverage=current,
+                test_file_evidence=evidence,
+            )
+            is False
+        )
+
+    def test_keeps_nodeid_collection_for_functions_without_verified_coverage(self):
+        from tests._auto_target import divide
+
+        body_lines = audit_mod._function_body_line_numbers(divide)
+        assert body_lines is not None
+        current = CoverageMeasurement(
+            Status.VERIFIED,
+            CoverageResult(
+                percent=0.0,
+                total_statements=len(body_lines),
+                missing_count=len(body_lines),
+                missing_lines=frozenset(body_lines),
+                source="coverage.py",
+            ),
+        )
+        evidence = [
+            audit_mod.TestFileEvidence(
+                path="tests/test__auto_target.py",
+                basis="filename",
+                epistemic="inferred",
+            )
+        ]
+
+        assert audit_mod._should_collect_pytest_nodeids(
+            [("divide", divide)],
+            current_coverage=current,
+            test_file_evidence=evidence,
+        )
+
+
 # ============================================================================
 # Suggestion generation
 # ============================================================================

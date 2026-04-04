@@ -1275,6 +1275,26 @@ def _function_name_in_nodeid(function_name: str, nodeid: str) -> bool:
     return function_name in tail or function_name in nodeid
 
 
+def _should_collect_pytest_nodeids(
+    functions: list[tuple[str, object]],
+    *,
+    current_coverage: CoverageMeasurement,
+    test_file_evidence: list[TestFileEvidence],
+) -> bool:
+    """Return True when pytest node IDs add signal beyond verified coverage."""
+    if not functions or not test_file_evidence:
+        return False
+    if current_coverage.status != Status.VERIFIED:
+        return True
+    for _name, func in functions:
+        body_lines = _function_body_line_numbers(func)
+        if not body_lines:
+            return True
+        if body_lines.issubset(current_coverage.missing_lines):
+            return True
+    return False
+
+
 def _build_function_audits(
     functions: list[tuple[str, object]],
     *,
@@ -3096,11 +3116,20 @@ def audit(
         module,
     )
 
+    collected_nodeids = (
+        _collect_pytest_nodeids(test_files)
+        if _should_collect_pytest_nodeids(
+            scannable,
+            current_coverage=result.current_coverage,
+            test_file_evidence=test_file_evidence,
+        )
+        else {}
+    )
     result.function_audits = _build_function_audits(
         scannable,
         current_coverage=result.current_coverage,
         test_file_evidence=test_file_evidence,
-        collected_nodeids=_collect_pytest_nodeids(test_files),
+        collected_nodeids=collected_nodeids,
     )
 
     # -- 4. Suggest tests to close the gap --

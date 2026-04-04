@@ -848,8 +848,7 @@ class TestAuditIntegration:
         assert audits["divide"].status in {"exploratory", "uncovered"}
         assert audits["divide"].epistemic in {"inferred", "none"}
         assert (
-            result.function_audit_counts["exercised"]
-            + result.function_audit_counts["exploratory"]
+            result.function_audit_counts["exercised"] + result.function_audit_counts["exploratory"]
             >= 1
         )
 

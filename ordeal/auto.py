@@ -733,6 +733,7 @@ def _test_one_function(
     ignore_properties: list[str] | None = None,
 ) -> FunctionResult:
     """Run no-crash + return-type + mined-property checks on a single function."""
+
     def _replay_failure(exc: Exception) -> tuple[bool, int, int]:
         if not last_kwargs:
             return False, 0, 0

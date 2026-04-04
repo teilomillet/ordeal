@@ -70,9 +70,7 @@ class TestScanModule:
 
         mod = types.ModuleType("_test_imported_helpers")
         exec(
-            "from typing import cast\n"
-            "def real(x: int) -> int:\n"
-            "    return x\n",
+            "from typing import cast\ndef real(x: int) -> int:\n    return x\n",
             mod.__dict__,
         )
         sys.modules["_test_imported_helpers"] = mod

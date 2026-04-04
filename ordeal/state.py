@@ -510,9 +510,7 @@ def explore_scan(
             for v in fr.property_violations:
                 if v not in existing:
                     fs.property_violations.append(v)
-            existing_details = {
-                detail.get("summary") for detail in fs.property_violation_details
-            }
+            existing_details = {detail.get("summary") for detail in fs.property_violation_details}
             for detail in fr.property_violation_details:
                 if detail.get("summary") not in existing_details:
                     fs.property_violation_details.append(detail)

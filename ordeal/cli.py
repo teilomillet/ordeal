@@ -2011,9 +2011,7 @@ def _format_scan_summary(state: Any) -> str:
         detail for detail in details if detail.get("category") == "speculative_property"
     ]
     expected = [
-        detail
-        for detail in details
-        if detail.get("category") == "expected_precondition_failure"
+        detail for detail in details if detail.get("category") == "expected_precondition_failure"
     ]
     if state.findings:
         status = "findings found"
@@ -2111,9 +2109,7 @@ def _scan_evidence_dimensions(state: Any) -> dict[str, Any]:
         "mutation_strength": (
             sum(mutation_scores) / len(mutation_scores) if mutation_scores else None
         ),
-        "fixture_completeness": (
-            len(functions) / total_functions if total_functions > 0 else 1.0
-        ),
+        "fixture_completeness": (len(functions) / total_functions if total_functions > 0 else 1.0),
     }
 
 

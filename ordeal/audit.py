@@ -519,18 +519,13 @@ class ModuleAudit:
         if self.mutation_gaps:
             lines.append("    surviving mutants:")
             for gap in self.mutation_gaps[:DISPLAY_CAP]:
-                lines.append(
-                    "      - "
-                    f"{gap['target']}: {gap['location']} {gap['description']}"
-                )
+                lines.append(f"      - {gap['target']}: {gap['location']} {gap['description']}")
         if self.weakest_tests:
             lines.append("    weakest killers:")
             for item in self.weakest_tests[:DISPLAY_CAP]:
                 lines.append(f"      - {item['test']}: {item['kills']} kill(s)")
         if self.mutation_gap_stubs:
-            lines.append(
-                f"    stubs:    {len(self.mutation_gap_stubs)} gap-closing stub file(s)"
-            )
+            lines.append(f"    stubs:    {len(self.mutation_gap_stubs)} gap-closing stub file(s)")
 
         if self.gap_functions:
             lines.append(
@@ -2153,9 +2148,7 @@ def _type_expr(
         imports.add("from typing import Literal")
         return f"Literal[{', '.join(repr(arg) for arg in get_args(tp))}]"
 
-    if origin is Union or (
-        hasattr(pytypes, "UnionType") and origin is pytypes.UnionType
-    ):
+    if origin is Union or (hasattr(pytypes, "UnionType") and origin is pytypes.UnionType):
         parts = []
         for arg in get_args(tp):
             part = _type_expr(arg, current_module=current_module, imports=imports)
@@ -2690,8 +2683,7 @@ def audit(
     if kill_counts:
         weakest = sorted(kill_counts.items(), key=lambda item: (item[1], item[0]))
         result.weakest_tests = [
-            {"test": test_name, "kills": count}
-            for test_name, count in weakest[:DISPLAY_CAP]
+            {"test": test_name, "kills": count} for test_name, count in weakest[:DISPLAY_CAP]
         ]
 
     # -- 3. Measure migrated test coverage --

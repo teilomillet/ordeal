@@ -1279,9 +1279,7 @@ def mine(
     # Separate applicable (total > 0) from not-applicable (total == 0)
     suppressed = _suppressed_names(list(ignore_properties))
     props = [
-        p
-        for p in all_props
-        if p.total > 0 and _normalize_property_token(p.name) not in suppressed
+        p for p in all_props if p.total > 0 and _normalize_property_token(p.name) not in suppressed
     ]
     not_applicable = [
         p.name

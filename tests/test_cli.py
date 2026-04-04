@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
@@ -180,6 +181,47 @@ class TestCLI:
         for entry in cli.command_catalog():
             assert entry["name"] in out
             assert entry["doc"] in out
+
+    def test_command_catalog_matches_parser_choices(self):
+        parser = cli._build_parser()
+        subparsers = next(
+            action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+        )
+        assert sorted(subparsers.choices) == [entry["name"] for entry in cli.command_catalog()]
+
+    def test_all_subparsers_bind_a_handler(self):
+        parser = cli._build_parser()
+        subparsers = next(
+            action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+        )
+        for subparser in subparsers.choices.values():
+            assert callable(subparser.get_default("_handler"))
+
+    def test_command_catalog_exposes_rich_argument_metadata(self):
+        entries = {entry["name"]: entry for entry in cli.command_catalog()}
+
+        scan = entries["scan"]
+        assert scan["schema_version"] == cli.CLI_CATALOG_SCHEMA_VERSION
+        seed = next(arg for arg in scan["arguments"] if arg["name"] == "seed")
+        assert seed["value_type"] == "int"
+        assert seed["accepts_value"] is True
+        assert seed["semantics"] == "value"
+
+        save_artifacts = next(arg for arg in scan["arguments"] if arg["name"] == "save_artifacts")
+        assert save_artifacts["value_type"] == "bool"
+        assert save_artifacts["kind"] == "flag"
+        assert save_artifacts["semantics"] == "flag"
+
+        benchmark = entries["benchmark"]
+        args = benchmark["arguments"]
+        mutate_target = next(a for a in args if a["name"] == "mutate_targets")
+        assert mutate_target["repeatable"] is True
+        assert mutate_target["semantics"] == "repeatable"
+
+        mutate = entries["mutate"]
+        targets = next(arg for arg in mutate["arguments"] if arg["name"] == "targets")
+        assert targets["variadic"] is True
+        assert targets["semantics"] == "variadic"
 
     def test_explore_missing_config(self):
         assert main(["explore", "--config", "/nonexistent.toml"]) == 1

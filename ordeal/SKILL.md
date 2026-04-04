@@ -1,50 +1,36 @@
 ---
 name: ordeal
-description: Automated chaos testing for Python — discovers properties, injects faults, mutates code, explores state space. TRIGGER when: code imports `ordeal`, user asks to test/audit/fuzz Python code, or check test quality.
+description: Use when working with Python reliability through ordeal: finding missed bugs, assessing existing tests, bootstrapping starter tests, saving regressions or findings, verifying saved findings, or exploring code that imports `ordeal`.
 user_invocable: true
 ---
 
 # ordeal
 
-Automated chaos testing for Python. Discovers properties, injects faults, runs mutation testing, explores reachable states.
+Use this file as a capability map, not a workflow guide.
 
-Install: `pip install ordeal`
+Read-first CLI:
+- `ordeal scan <target>`: unified bug discovery; `--save-artifacts` writes report, JSON bundle, regressions, and index entries
+- `ordeal mine <target>`: discover suspicious properties
+- `ordeal audit <target>`: measure gaps in existing tests
+- `ordeal verify <finding-id>`: re-run one saved regression from `.ordeal/findings/index.json`
+- `ordeal explore -c ordeal.toml`: deeper coverage-guided exploration
 
-## Discovery
+Write-producing CLI:
+- `ordeal init [target]`: starter tests plus `ordeal.toml`; `--install-skill`, `--close-gaps`, and `--ci` add extra writes
+- `ordeal mutate <target> --generate-stubs PATH`: writes suggested test stubs
+- `ordeal replay trace.json --output PATH`: writes replay artifacts
 
-`catalog()` returns every capability at runtime — faults, invariants, strategies, mutations, and more. Always up-to-date.
+Artifacts:
+- `.ordeal/findings/`: Markdown reports, JSON bundles, and `index.json`
+- `tests/test_ordeal_regressions.py`: default regression path
+- `ordeal.toml`: explorer configuration
 
-```python
-from ordeal import catalog
-c = catalog()
-for key in sorted(c):
-    print(f"\n{key}:")
-    for item in c[key]:
-        print(f"  {item['qualname']}  -- {item['doc']}")
-```
+Discovery:
+- `ordeal --help`
+- `ordeal <command> --help`
+- `from ordeal import catalog; catalog()`
+- https://docs.byordeal.com/
 
-`ordeal --help` shows all CLI commands. Full docs at https://docs.byordeal.com/
-
-## Reading ordeal's output
-
-ordeal's output is self-describing. When it finds something actionable, it tells you what to fix:
-
-- **Surviving mutants** include `.remediation` — the specific test to write
-- **Coverage gaps** include `.reachability_suggestions()` — branches not reached
-- **`generate_test_stubs()`** returns ready-to-use Python test code
-- **JSON to stdout** is structured for programmatic consumption; human reports go to stderr
-
-## Vocabulary
-
-- **Mutation score** — ratio of mutants killed by tests (0.0–1.0). A surviving mutant is a code change your tests didn't catch.
-- **Fault injection** — simulate failures (timeouts, disk errors, network resets) during tests. Active under `--chaos`.
-- **Property** — something ordeal discovered is true about a function (e.g., "output is bounded 0–1", "commutative", "deterministic").
-- **Seed corpus** — failing inputs in `.ordeal/seeds/`, replayed automatically on every `pytest` run.
-- **Fault ablation** — after a bug, replay without each fault to find which ones were necessary.
-- **Chaos mode** (`--chaos`) — activates fault injection, buggify(), and property tracking.
-- **Rule timeout** (`rule_timeout`, default 30s) — per-rule SIGALRM guard in ChaosTest. Raises `RuleTimeoutError` if a rule hangs (e.g. buggify-induced deadlock). Override per class, via `--rule-timeout`, or in `ordeal.toml` `[explorer]`. Set 0 to disable.
-
-## Guardrails
-
-- If a test exposes a bug, fix the source — never weaken the test
-- Heavy frameworks (numpy/torch): use `--mutant-timeout` with `mutate()`
+Machine surfaces:
+- `--json` prints stable agent-facing envelopes
+- saved scan bundles include stable `finding_id`

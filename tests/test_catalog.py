@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from ordeal import catalog
 from ordeal.assertions import always
+from ordeal.cli import CLI_CATALOG_SCHEMA_VERSION
 
 
 class TestTopLevelCatalog:
@@ -62,9 +63,24 @@ class TestTopLevelCatalog:
     def test_cli_entries_include_structured_arguments(self):
         c = catalog()
         scan = next(entry for entry in c["cli"] if entry["name"] == "scan")
+        always(
+            scan["schema_version"] == CLI_CATALOG_SCHEMA_VERSION,
+            "scan cli catalog entry exposes a stable schema version",
+        )
         arg_names = {arg["name"] for arg in scan["arguments"]}
         always("target" in arg_names, "scan catalog includes target positional")
         always("seed" in arg_names, "scan catalog includes seed option")
+
+    def test_cli_argument_metadata_is_descriptive(self):
+        c = catalog()
+        benchmark = next(entry for entry in c["cli"] if entry["name"] == "benchmark")
+        args = benchmark["arguments"]
+        mutate_target = next(a for a in args if a["name"] == "mutate_targets")
+        always(mutate_target["repeatable"], "benchmark mutate target is marked repeatable")
+        always(
+            mutate_target["semantics"] == "repeatable",
+            "benchmark mutate target records repeatable semantics",
+        )
 
 
 class TestFaultsCatalog:

@@ -146,8 +146,9 @@ def catalog() -> dict[str, list]:
     ``diff``, ``scaling``, ``exploration``, ``trace``, ``supervisor``,
     ``mutagen``, ``cmplog``, ``concolic``, ``grammar``, ``equivalence``.
 
-    Everything is derived from the source code via ``inspect``; adding a new
-    fault, invariant, or capability makes it appear here automatically.
+    Everything is derived from live runtime structures — source introspection
+    for Python APIs and the argparse command registry for the CLI. Adding a
+    new fault, invariant, or command makes it appear here automatically.
 
     Example::
 
@@ -246,7 +247,7 @@ def catalog() -> dict[str, list]:
             {
                 "name": "SKILL.md",
                 "qualname": "ordeal.SKILL.md",
-                "doc": "AI agent skill — teaches coding agents how to use ordeal",
+                "doc": "AI agent skill — local capability map for using ordeal",
                 "installed": installed,
                 "install": "ordeal skill" if not installed else None,
                 "bundled_path": str(skill_path),

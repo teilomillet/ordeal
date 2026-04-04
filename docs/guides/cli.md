@@ -409,7 +409,7 @@ The payload is a stable envelope with top-level keys like `schema_version`, `too
 
 ### `ordeal skill`
 
-Install ordeal's bundled `SKILL.md` into `.claude/skills/ordeal/` so an AI coding agent has the local usage guide in-repo.
+Install ordeal's bundled `SKILL.md` into `.claude/skills/ordeal/` so an AI coding agent has the local capability map in-repo.
 
 ```bash
 ordeal skill

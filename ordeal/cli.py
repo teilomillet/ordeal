@@ -3653,6 +3653,643 @@ def _write_json_report(
 # ============================================================================
 
 
+def _scan_command_description() -> str:
+    """Return the long-form `ordeal scan` help description."""
+    from ordeal.state import explore as _explore_fn
+
+    scan_desc = (_explore_fn.__doc__ or "").strip().split("\n\n")[0]
+    return (
+        f"{scan_desc}\n\n"
+        f"Use --save-artifacts to save both {_default_scan_report_path('mymod')} and"
+        f" {_default_scan_bundle_path('mymod')} + {_DEFAULT_REGRESSION_PATH},"
+        f" then update {_default_artifact_index_path()}.\n"
+        "When one finding is saved, the workflow prints an exact"
+        " `ordeal verify <finding-id>` follow-up command.\n"
+        "Use --report-file report.md to save a shareable Markdown bug report.\n"
+        f"Use --write-regression or --write-regression PATH to save runnable pytest"
+        f" regressions (default: {_DEFAULT_REGRESSION_PATH})."
+    )
+
+
+def _verify_command_description() -> str:
+    """Return the long-form `ordeal verify` help description."""
+    return (
+        "Re-run a saved regression from `.ordeal/findings/index.json`.\n\n"
+        "Use the stable `finding_id` from a JSON bug bundle or index entry.\n"
+        "Verification updates the bundle status and appends a verification event"
+        " to the artifact index."
+    )
+
+
+def _audit_command_description() -> str:
+    """Return the long-form `ordeal audit` help description."""
+    return (
+        "Compare your current tests with ordeal-generated tests.\n\n"
+        "Validation modes:\n"
+        "  fast  replay mined inputs against mutants (default, faster)\n"
+        "  deep  replay mined inputs, then re-mine mutants for extra search depth"
+    )
+
+
+def _mine_command_description() -> str:
+    """Return the long-form `ordeal mine` help description."""
+    return (
+        "Discover properties of a function or module.\n\n"
+        "Use --report-file report.md to save a shareable Markdown finding report.\n"
+        f"Use --write-regression or --write-regression PATH to save runnable pytest"
+        f" regressions (default: {_DEFAULT_REGRESSION_PATH})."
+    )
+
+
+def _init_command_description() -> str:
+    """Return the long-form `ordeal init` help description."""
+    return (
+        "Bootstrap starter tests and ordeal.toml. By default this writes only the "
+        "starter files, validates them, and prints a lightweight read-only scan "
+        "summary. Use --install-skill and --close-gaps to opt into extra writes."
+    )
+
+
+def _command_specs() -> tuple[CommandSpec, ...]:
+    """Return the declarative registry for CLI commands."""
+    return (
+        CommandSpec(
+            name="catalog",
+            handler=_cmd_catalog,
+            help="Show all capabilities — faults, mining, mutations, exploration, ...",
+            arguments=(
+                _arg("--detail", action="store_true", help="Show full signatures and docstrings"),
+            ),
+        ),
+        CommandSpec(
+            name="check",
+            handler=_cmd_check,
+            help="Verify a specific property on a function (mine + assert in one step)",
+            arguments=(
+                _arg("target", help="Dotted path: mymod.func"),
+                _arg(
+                    "--property",
+                    "-p",
+                    default=None,
+                    help="Property to verify. Omit to check all standard contracts.",
+                ),
+                _arg(
+                    "--max-examples",
+                    "-n",
+                    type=int,
+                    default=200,
+                    help="Examples to test (default: 200)",
+                ),
+            ),
+        ),
+        CommandSpec(
+            name="scan",
+            handler=_cmd_scan,
+            help="Explore a module and optionally write reports or pytest regressions",
+            description=_scan_command_description,
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            arguments=(
+                _arg("target", help="Module path (e.g. myapp.scoring)"),
+                _arg(
+                    "--seed",
+                    type=int,
+                    default=42,
+                    help="RNG seed for reproducibility (default: 42)",
+                ),
+                _arg(
+                    "--max-examples",
+                    "-n",
+                    type=int,
+                    default=50,
+                    help="Examples per function (default: 50)",
+                ),
+                _arg(
+                    "--workers",
+                    "-w",
+                    type=int,
+                    default=1,
+                    help="Parallel workers for mutation testing",
+                ),
+                _arg(
+                    "--time-limit",
+                    "-t",
+                    type=float,
+                    default=None,
+                    help="Time budget in seconds",
+                ),
+                _arg("--json", action="store_true", help="Output JSON instead of text"),
+                _arg(
+                    "--save-artifacts",
+                    action="store_true",
+                    help=(
+                        "When findings exist, write the default Markdown dossier, JSON bundle,"
+                        f" and regression file ({_default_scan_report_path('mymod')},"
+                        f" {_default_scan_bundle_path('mymod')}, {_DEFAULT_REGRESSION_PATH})"
+                        f" and update {_default_artifact_index_path()}"
+                    ),
+                ),
+                _arg(
+                    "--report-file",
+                    type=str,
+                    default=None,
+                    metavar="PATH",
+                    help="Write a shareable Markdown finding report to PATH",
+                ),
+                _arg(
+                    "--write-regression",
+                    type=str,
+                    default=None,
+                    nargs="?",
+                    const=_DEFAULT_REGRESSION_PATH,
+                    metavar="PATH",
+                    help=(
+                        "Write runnable pytest regressions for replayable findings"
+                        f" (default: {_DEFAULT_REGRESSION_PATH})"
+                    ),
+                ),
+                _arg(
+                    "--include-private",
+                    action="store_true",
+                    help="Include _private functions (many codebases have logic there)",
+                ),
+            ),
+        ),
+        CommandSpec(
+            name="verify",
+            handler=_cmd_verify,
+            help="Re-run the saved regression for one finding ID",
+            description=_verify_command_description,
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            arguments=(
+                _arg("finding_id", help="Stable finding ID (e.g. fnd_dcb0fc0808d3)"),
+                _arg(
+                    "--index",
+                    default=_default_artifact_index_path(),
+                    metavar="PATH",
+                    help=f"Artifact index path (default: {_default_artifact_index_path()})",
+                ),
+            ),
+        ),
+        CommandSpec(
+            name="explore",
+            handler=_cmd_explore,
+            help="Coverage-guided state exploration (reads ordeal.toml)",
+            arguments=(
+                _arg(
+                    "--config",
+                    "-c",
+                    default="ordeal.toml",
+                    help="Config file (default: ordeal.toml)",
+                ),
+                _arg("--seed", type=int, help="Override RNG seed"),
+                _arg("--max-time", type=float, help="Override max_time (seconds)"),
+                _arg("--verbose", "-v", action="store_true", help="Live progress"),
+                _arg("--no-shrink", action="store_true", help="Skip shrinking"),
+                _arg("--no-seeds", action="store_true", help="Skip seed corpus replay"),
+                _arg(
+                    "--workers",
+                    "-w",
+                    type=int,
+                    help="Parallel worker processes (default: 1)",
+                ),
+                _arg(
+                    "--generate-tests",
+                    type=str,
+                    default=None,
+                    metavar="PATH",
+                    help=(
+                        "Generate pytest tests from exploration traces"
+                        " (e.g. tests/test_generated.py)"
+                    ),
+                ),
+                _arg(
+                    "--resume",
+                    type=str,
+                    default=None,
+                    metavar="PATH",
+                    help="Resume from a saved state file (e.g. .ordeal/state.pkl)",
+                ),
+                _arg(
+                    "--save-state",
+                    type=str,
+                    default=None,
+                    metavar="PATH",
+                    help="Save exploration state on completion (e.g. .ordeal/state.pkl)",
+                ),
+            ),
+        ),
+        CommandSpec(
+            name="replay",
+            handler=_cmd_replay,
+            help="Replay a saved trace",
+            arguments=(
+                _arg("trace_file", help="Path to trace JSON file"),
+                _arg("--shrink", action="store_true", help="Shrink the trace"),
+                _arg(
+                    "--ablate",
+                    action="store_true",
+                    help="Ablate faults to find necessary ones",
+                ),
+                _arg("--output", "-o", help="Save shrunk trace to this path"),
+                _arg("--json", action="store_true", help="Output agent-facing JSON"),
+            ),
+        ),
+        CommandSpec(
+            name="seeds",
+            handler=_cmd_seeds,
+            help="List or manage the persistent seed corpus",
+            arguments=(
+                _arg(
+                    "--dir",
+                    default=".ordeal/seeds",
+                    help="Seed corpus directory (default: .ordeal/seeds)",
+                ),
+                _arg(
+                    "--prune-fixed",
+                    action="store_true",
+                    help="Remove seeds that no longer reproduce",
+                ),
+            ),
+        ),
+        CommandSpec(
+            name="audit",
+            handler=_cmd_audit,
+            help="Audit test coverage vs ordeal migration",
+            description=_audit_command_description,
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            arguments=(
+                _arg("modules", nargs="+", help="Module paths to audit"),
+                _arg(
+                    "--test-dir",
+                    "-t",
+                    default="tests",
+                    help="Test directory (default: tests)",
+                ),
+                _arg(
+                    "--max-examples",
+                    type=int,
+                    default=20,
+                    help="Examples per function (default: 20)",
+                ),
+                _arg(
+                    "--workers",
+                    type=int,
+                    default=1,
+                    help="Parallel workers for mutation validation (default: 1)",
+                ),
+                _arg(
+                    "--validation-mode",
+                    choices=("fast", "deep"),
+                    default="fast",
+                    help="Validation mode: fast replay (default) or deep re-mine",
+                ),
+                _arg(
+                    "--show-generated",
+                    action="store_true",
+                    help="Print the generated test file for inspection/debugging",
+                ),
+                _arg(
+                    "--save-generated",
+                    type=str,
+                    default=None,
+                    help="Save generated test file to this path",
+                ),
+                _arg("--json", action="store_true", help="Output agent-facing JSON"),
+            ),
+        ),
+        CommandSpec(
+            name="mine",
+            handler=_cmd_mine,
+            help="Discover properties and optionally write reports or pytest regressions",
+            description=_mine_command_description,
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            arguments=(
+                _arg("target", help="Dotted path: mymod.func or mymod"),
+                _arg(
+                    "--max-examples",
+                    "-n",
+                    type=int,
+                    default=500,
+                    help="Examples to sample (default: 500)",
+                ),
+                _arg(
+                    "--verbose",
+                    "-v",
+                    action="store_true",
+                    help="Show n/a properties and extra detail",
+                ),
+                _arg(
+                    "--include-private",
+                    action="store_true",
+                    help="Include _private functions (many codebases have logic there)",
+                ),
+                _arg(
+                    "--report-file",
+                    type=str,
+                    default=None,
+                    metavar="PATH",
+                    help="Write a shareable Markdown finding report to PATH",
+                ),
+                _arg(
+                    "--write-regression",
+                    type=str,
+                    default=None,
+                    nargs="?",
+                    const=_DEFAULT_REGRESSION_PATH,
+                    metavar="PATH",
+                    help=(
+                        "Write runnable pytest regressions for suspicious findings"
+                        f" (default: {_DEFAULT_REGRESSION_PATH})"
+                    ),
+                ),
+                _arg("--json", action="store_true", help="Output agent-facing JSON"),
+            ),
+        ),
+        CommandSpec(
+            name="mine-pair",
+            handler=_cmd_mine_pair,
+            help="Discover relational properties between two functions",
+            arguments=(
+                _arg("f", help="First function: mymod.func_a"),
+                _arg("g", help="Second function: mymod.func_b"),
+                _arg(
+                    "--max-examples",
+                    "-n",
+                    type=int,
+                    default=200,
+                    help="Examples to sample (default: 200)",
+                ),
+            ),
+        ),
+        CommandSpec(
+            name="benchmark",
+            handler=_cmd_benchmark,
+            help="Measure scaling, mutation latency, or a checked-in perf/quality contract",
+            defaults={"filter_equivalent": True},
+            arguments=(
+                _arg(
+                    "--config",
+                    "-c",
+                    default="ordeal.toml",
+                    help="Config file (default: ordeal.toml)",
+                ),
+                _arg(
+                    "--max-workers",
+                    type=int,
+                    default=None,
+                    help="Max workers to test (default: CPU count)",
+                ),
+                _arg(
+                    "--time",
+                    type=float,
+                    default=10.0,
+                    help="Seconds per trial (default: 10)",
+                ),
+                _arg(
+                    "--metric",
+                    choices=["runs", "steps", "edges"],
+                    default="runs",
+                    help="Throughput metric to fit (default: runs)",
+                ),
+                _arg(
+                    "--perf-contract",
+                    default=None,
+                    help="Run a perf/quality contract TOML instead of scaling analysis",
+                ),
+                _arg(
+                    "--check",
+                    action="store_true",
+                    help=(
+                        "Return exit code 1 when a perf-contract case exceeds a time"
+                        " or score-gap budget"
+                    ),
+                ),
+                _arg(
+                    "--output-json",
+                    default=None,
+                    metavar="PATH",
+                    help="Write perf/quality contract results as JSON to PATH",
+                ),
+                _arg(
+                    "--json",
+                    action="store_true",
+                    help="Print perf/quality contract results as JSON to stdout",
+                ),
+                _arg(
+                    "--tier",
+                    default=None,
+                    choices=["pr", "nightly"],
+                    help="Only run perf-contract cases matching this tier (default: all)",
+                ),
+                _arg(
+                    "--mutate",
+                    dest="mutate_targets",
+                    action="append",
+                    default=[],
+                    help="Benchmark mutation latency for this target (repeatable)",
+                ),
+                _arg(
+                    "--repeat",
+                    type=int,
+                    default=5,
+                    help="Fresh subprocess runs per mutation target (default: 5)",
+                ),
+                _arg(
+                    "--workers",
+                    type=int,
+                    default=1,
+                    help="Workers to use for mutation benchmarks (default: 1)",
+                ),
+                _arg(
+                    "--preset",
+                    choices=["essential", "standard", "thorough"],
+                    default="standard",
+                    help="Mutation preset for mutation benchmarks (default: standard)",
+                ),
+                _arg(
+                    "--test-filter",
+                    default=None,
+                    help="Pytest -k filter for mutation benchmarks",
+                ),
+                _arg(
+                    "--no-filter-equivalent",
+                    dest="filter_equivalent",
+                    action="store_false",
+                    help="Disable equivalence filtering during mutation benchmarks",
+                ),
+            ),
+        ),
+        CommandSpec(
+            name="skill",
+            handler=_cmd_skill,
+            help="Install ordeal skill for AI coding agents",
+            arguments=(
+                _arg(
+                    "--dry-run",
+                    action="store_true",
+                    help="Show what would be written without writing",
+                ),
+            ),
+        ),
+        CommandSpec(
+            name="init",
+            handler=_cmd_init,
+            help="Bootstrap test files for untested modules",
+            description=_init_command_description,
+            arguments=(
+                _arg(
+                    "target",
+                    nargs="?",
+                    default=None,
+                    help="Package path (e.g. myapp); auto-detects if omitted",
+                ),
+                _arg(
+                    "--output-dir",
+                    "-o",
+                    default="tests",
+                    help="Directory to write test files (default: tests)",
+                ),
+                _arg(
+                    "--dry-run",
+                    action="store_true",
+                    help=(
+                        "Preview without side effects — no files written, no functions executed. "
+                        "Generates stub tests from signatures only."
+                    ),
+                ),
+                _arg(
+                    "--ci",
+                    action="store_true",
+                    help="Generate a GitHub Actions workflow (.github/workflows/<name>.yml)",
+                ),
+                _arg(
+                    "--ci-name",
+                    default="ordeal",
+                    metavar="NAME",
+                    help="Workflow filename (default: ordeal → .github/workflows/ordeal.yml)",
+                ),
+                _arg(
+                    "--install-skill",
+                    action="store_true",
+                    help="Also install the bundled AI-agent skill into .claude/skills/ordeal/",
+                ),
+                _arg(
+                    "--close-gaps",
+                    action="store_true",
+                    help="Append suggested mutation-gap stubs into a generated test file",
+                ),
+            ),
+        ),
+        CommandSpec(
+            name="mutate",
+            handler=_cmd_mutate,
+            help="Test whether your tests catch code changes",
+            arguments=(
+                _arg(
+                    "targets",
+                    nargs="*",
+                    help="Dotted paths: myapp.scoring.compute or myapp.scoring",
+                ),
+                _arg(
+                    "--config",
+                    "-c",
+                    default=None,
+                    help="Config file with [mutations] section (used when no targets given)",
+                ),
+                _arg(
+                    "--preset",
+                    "-p",
+                    choices=["essential", "standard", "thorough"],
+                    default=None,
+                    help="Operator preset (default: standard)",
+                ),
+                _arg(
+                    "--workers",
+                    "-w",
+                    type=int,
+                    default=1,
+                    help="Parallel workers (default: 1)",
+                ),
+                _arg(
+                    "--threshold",
+                    "-t",
+                    type=float,
+                    default=0.0,
+                    help="Minimum mutation score; exit 1 if below (e.g. 0.8 for 80%%)",
+                ),
+                _arg(
+                    "--no-filter",
+                    action="store_true",
+                    help="Disable equivalent mutant filtering",
+                ),
+                _arg(
+                    "--equivalence-samples",
+                    type=int,
+                    default=10,
+                    help="Samples for equivalence filtering (default: 10)",
+                ),
+                _arg(
+                    "--test-filter",
+                    "-k",
+                    type=str,
+                    default=None,
+                    metavar="EXPR",
+                    help=(
+                        "Pytest -k expression to select tests"
+                        " (avoids running full suite per mutant)"
+                    ),
+                ),
+                _arg(
+                    "--mutant-timeout",
+                    type=float,
+                    default=None,
+                    metavar="SECS",
+                    help="Timeout in seconds for mutant generation (skip hangs)",
+                ),
+                _arg(
+                    "--disk-mutation",
+                    action="store_true",
+                    default=None,
+                    help=(
+                        "Write mutations to disk so subprocesses (Ray, multiprocessing) see them. "
+                        "Auto-detected when omitted."
+                    ),
+                ),
+                _arg(
+                    "--resume",
+                    action="store_true",
+                    default=False,
+                    help=(
+                        "Reuse cached results for unchanged targets (cache: .ordeal/mutate/). "
+                        "Invalidated when module source, test files (test_<module>*.py), "
+                        "conftest.py, lockfile, or preset/operators change. "
+                        "Mine oracle results are never cached. "
+                        "Note: test files not matching test_<module>*.py are not tracked; "
+                        "use --no-resume or delete .ordeal/mutate/ if using test_filter "
+                        "with non-standard test names."
+                    ),
+                ),
+                _arg(
+                    "--generate-stubs",
+                    type=str,
+                    default=None,
+                    metavar="PATH",
+                    help="Write test stubs for surviving mutants to PATH",
+                ),
+                _arg("--json", action="store_true", help="Output agent-facing JSON"),
+            ),
+        ),
+    )
+
+
+def _resolve_command_description(spec: CommandSpec) -> str | None:
+    """Resolve a command description from a static string or callable."""
+    description = spec.description
+    if callable(description):
+        return description()
+    return description
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the top-level argparse parser for ``ordeal``."""
     parser = argparse.ArgumentParser(
@@ -3668,506 +4305,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command")
 
-    # -- ordeal catalog --
-    cat_p = sub.add_parser(
-        "catalog",
-        help="Show all capabilities — faults, mining, mutations, exploration, ...",
-    )
-    cat_p.add_argument("--detail", action="store_true", help="Show full signatures and docstrings")
-
-    # -- ordeal check (targeted property verification) --
-    check_p = sub.add_parser(
-        "check",
-        help="Verify a specific property on a function (mine + assert in one step)",
-    )
-    check_p.add_argument("target", help="Dotted path: mymod.func")
-    check_p.add_argument(
-        "--property",
-        "-p",
-        default=None,
-        help="Property to verify. Omit to check all standard contracts.",
-    )
-    check_p.add_argument(
-        "--max-examples",
-        "-n",
-        type=int,
-        default=200,
-        help="Examples to test (default: 200)",
-    )
-
-    # -- ordeal scan (unified explore) --
-    # Description auto-derived from explore().__doc__
-    from ordeal.state import explore as _explore_fn
-
-    scan_desc = (_explore_fn.__doc__ or "").strip().split("\n\n")[0]
-    scan_p = sub.add_parser(
-        "scan",
-        help="Explore a module and optionally write reports or pytest regressions",
-        description=(
-            f"{scan_desc}\n\n"
-            f"Use --save-artifacts to save both {_default_scan_report_path('mymod')} and"
-            f" {_default_scan_bundle_path('mymod')} + {_DEFAULT_REGRESSION_PATH},"
-            f" then update {_default_artifact_index_path()}.\n"
-            "When one finding is saved, the workflow prints an exact"
-            " `ordeal verify <finding-id>` follow-up command.\n"
-            "Use --report-file report.md to save a shareable Markdown bug report.\n"
-            f"Use --write-regression or --write-regression PATH to save runnable pytest"
-            f" regressions (default: {_DEFAULT_REGRESSION_PATH})."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    scan_p.add_argument("target", help="Module path (e.g. myapp.scoring)")
-    scan_p.add_argument(
-        "--seed", type=int, default=42, help="RNG seed for reproducibility (default: 42)"
-    )
-    scan_p.add_argument(
-        "--max-examples", "-n", type=int, default=50, help="Examples per function (default: 50)"
-    )
-    scan_p.add_argument(
-        "--workers", "-w", type=int, default=1, help="Parallel workers for mutation testing"
-    )
-    scan_p.add_argument(
-        "--time-limit", "-t", type=float, default=None, help="Time budget in seconds"
-    )
-    scan_p.add_argument("--json", action="store_true", help="Output JSON instead of text")
-    scan_p.add_argument(
-        "--save-artifacts",
-        action="store_true",
-        help=(
-            "When findings exist, write the default Markdown dossier, JSON bundle,"
-            f" and regression file ({_default_scan_report_path('mymod')},"
-            f" {_default_scan_bundle_path('mymod')}, {_DEFAULT_REGRESSION_PATH})"
-            f" and update {_default_artifact_index_path()}"
-        ),
-    )
-    scan_p.add_argument(
-        "--report-file",
-        type=str,
-        default=None,
-        metavar="PATH",
-        help="Write a shareable Markdown finding report to PATH",
-    )
-    scan_p.add_argument(
-        "--write-regression",
-        type=str,
-        default=None,
-        nargs="?",
-        const=_DEFAULT_REGRESSION_PATH,
-        metavar="PATH",
-        help=(
-            "Write runnable pytest regressions for replayable findings"
-            f" (default: {_DEFAULT_REGRESSION_PATH})"
-        ),
-    )
-    scan_p.add_argument(
-        "--include-private",
-        action="store_true",
-        help="Include _private functions (many codebases have logic there)",
-    )
-
-    # -- ordeal verify --
-    verify_p = sub.add_parser(
-        "verify",
-        help="Re-run the saved regression for one finding ID",
-        description=(
-            "Re-run a saved regression from `.ordeal/findings/index.json`.\n\n"
-            "Use the stable `finding_id` from a JSON bug bundle or index entry.\n"
-            "Verification updates the bundle status and appends a verification event"
-            " to the artifact index."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    verify_p.add_argument("finding_id", help="Stable finding ID (e.g. fnd_dcb0fc0808d3)")
-    verify_p.add_argument(
-        "--index",
-        default=_default_artifact_index_path(),
-        metavar="PATH",
-        help=f"Artifact index path (default: {_default_artifact_index_path()})",
-    )
-
-    # -- ordeal explore --
-    explore_p = sub.add_parser(
-        "explore",
-        help="Coverage-guided state exploration (reads ordeal.toml)",
-    )
-    explore_p.add_argument(
-        "--config", "-c", default="ordeal.toml", help="Config file (default: ordeal.toml)"
-    )
-    explore_p.add_argument("--seed", type=int, help="Override RNG seed")
-    explore_p.add_argument("--max-time", type=float, help="Override max_time (seconds)")
-    explore_p.add_argument("--verbose", "-v", action="store_true", help="Live progress")
-    explore_p.add_argument("--no-shrink", action="store_true", help="Skip shrinking")
-    explore_p.add_argument("--no-seeds", action="store_true", help="Skip seed corpus replay")
-    explore_p.add_argument(
-        "--workers", "-w", type=int, help="Parallel worker processes (default: 1)"
-    )
-    explore_p.add_argument(
-        "--generate-tests",
-        type=str,
-        default=None,
-        metavar="PATH",
-        help="Generate pytest tests from exploration traces (e.g. tests/test_generated.py)",
-    )
-    explore_p.add_argument(
-        "--resume",
-        type=str,
-        default=None,
-        metavar="PATH",
-        help="Resume from a saved state file (e.g. .ordeal/state.pkl)",
-    )
-    explore_p.add_argument(
-        "--save-state",
-        type=str,
-        default=None,
-        metavar="PATH",
-        help="Save exploration state on completion (e.g. .ordeal/state.pkl)",
-    )
-
-    # -- ordeal replay --
-    replay_p = sub.add_parser("replay", help="Replay a saved trace")
-    replay_p.add_argument("trace_file", help="Path to trace JSON file")
-    replay_p.add_argument("--shrink", action="store_true", help="Shrink the trace")
-    replay_p.add_argument(
-        "--ablate", action="store_true", help="Ablate faults to find necessary ones"
-    )
-    replay_p.add_argument("--output", "-o", help="Save shrunk trace to this path")
-    replay_p.add_argument("--json", action="store_true", help="Output agent-facing JSON")
-
-    # -- ordeal seeds --
-    seeds_p = sub.add_parser("seeds", help="List or manage the persistent seed corpus")
-    seeds_p.add_argument(
-        "--dir", default=".ordeal/seeds", help="Seed corpus directory (default: .ordeal/seeds)"
-    )
-    seeds_p.add_argument(
-        "--prune-fixed", action="store_true", help="Remove seeds that no longer reproduce"
-    )
-
-    # -- ordeal audit --
-    audit_p = sub.add_parser(
-        "audit",
-        help="Audit test coverage vs ordeal migration",
-        description=(
-            "Compare your current tests with ordeal-generated tests.\n\n"
-            "Validation modes:\n"
-            "  fast  replay mined inputs against mutants (default, faster)\n"
-            "  deep  replay mined inputs, then re-mine mutants for extra search depth"
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    audit_p.add_argument("modules", nargs="+", help="Module paths to audit")
-    audit_p.add_argument(
-        "--test-dir", "-t", default="tests", help="Test directory (default: tests)"
-    )
-    audit_p.add_argument(
-        "--max-examples", type=int, default=20, help="Examples per function (default: 20)"
-    )
-    audit_p.add_argument(
-        "--workers",
-        type=int,
-        default=1,
-        help="Parallel workers for mutation validation (default: 1)",
-    )
-    audit_p.add_argument(
-        "--validation-mode",
-        choices=("fast", "deep"),
-        default="fast",
-        help="Mutation validation mode: fast replay (default) or deep replay + re-mine",
-    )
-    audit_p.add_argument(
-        "--show-generated",
-        action="store_true",
-        help="Print the generated test file for inspection/debugging",
-    )
-    audit_p.add_argument(
-        "--save-generated",
-        type=str,
-        default=None,
-        help="Save generated test file to this path",
-    )
-    audit_p.add_argument("--json", action="store_true", help="Output agent-facing JSON")
-
-    # -- ordeal mine --
-    mine_p = sub.add_parser(
-        "mine",
-        help="Discover properties and optionally write reports or pytest regressions",
-        description=(
-            "Discover properties of a function or module.\n\n"
-            "Use --report-file report.md to save a shareable Markdown finding report.\n"
-            f"Use --write-regression or --write-regression PATH to save runnable pytest"
-            f" regressions (default: {_DEFAULT_REGRESSION_PATH})."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    mine_p.add_argument("target", help="Dotted path: mymod.func or mymod")
-    mine_p.add_argument(
-        "--max-examples", "-n", type=int, default=500, help="Examples to sample (default: 500)"
-    )
-    mine_p.add_argument(
-        "--verbose", "-v", action="store_true", help="Show n/a properties and extra detail"
-    )
-    mine_p.add_argument(
-        "--include-private",
-        action="store_true",
-        help="Include _private functions (many codebases have logic there)",
-    )
-    mine_p.add_argument(
-        "--report-file",
-        type=str,
-        default=None,
-        metavar="PATH",
-        help="Write a shareable Markdown finding report to PATH",
-    )
-    mine_p.add_argument(
-        "--write-regression",
-        type=str,
-        default=None,
-        nargs="?",
-        const=_DEFAULT_REGRESSION_PATH,
-        metavar="PATH",
-        help=(
-            "Write runnable pytest regressions for suspicious findings"
-            f" (default: {_DEFAULT_REGRESSION_PATH})"
-        ),
-    )
-    mine_p.add_argument("--json", action="store_true", help="Output agent-facing JSON")
-
-    # -- ordeal mine-pair --
-    mp_p = sub.add_parser("mine-pair", help="Discover relational properties between two functions")
-    mp_p.add_argument("f", help="First function: mymod.func_a")
-    mp_p.add_argument("g", help="Second function: mymod.func_b")
-    mp_p.add_argument(
-        "--max-examples", "-n", type=int, default=200, help="Examples to sample (default: 200)"
-    )
-
-    # -- ordeal benchmark --
-    bench_p = sub.add_parser(
-        "benchmark",
-        help="Measure scaling, mutation latency, or a checked-in perf/quality contract",
-    )
-    bench_p.add_argument(
-        "--config", "-c", default="ordeal.toml", help="Config file (default: ordeal.toml)"
-    )
-    bench_p.add_argument(
-        "--max-workers", type=int, default=None, help="Max workers to test (default: CPU count)"
-    )
-    bench_p.add_argument(
-        "--time", type=float, default=10.0, help="Seconds per trial (default: 10)"
-    )
-    bench_p.add_argument(
-        "--metric",
-        choices=["runs", "steps", "edges"],
-        default="runs",
-        help="Throughput metric to fit (default: runs)",
-    )
-    bench_p.add_argument(
-        "--perf-contract",
-        default=None,
-        help="Run a checked-in perf/quality contract TOML file instead of scaling analysis",
-    )
-    bench_p.add_argument(
-        "--check",
-        action="store_true",
-        help="Return exit code 1 when a perf-contract case exceeds a time or score-gap budget",
-    )
-    bench_p.add_argument(
-        "--output-json",
-        default=None,
-        metavar="PATH",
-        help="Write perf/quality contract results as JSON to PATH",
-    )
-    bench_p.add_argument(
-        "--json",
-        action="store_true",
-        help="Print perf/quality contract results as JSON to stdout",
-    )
-    bench_p.add_argument(
-        "--tier",
-        default=None,
-        choices=["pr", "nightly"],
-        help="Only run perf-contract cases matching this tier (default: all)",
-    )
-    bench_p.add_argument(
-        "--mutate",
-        dest="mutate_targets",
-        action="append",
-        default=[],
-        help="Benchmark mutation latency for this target (repeat for multiple targets)",
-    )
-    bench_p.add_argument(
-        "--repeat",
-        type=int,
-        default=5,
-        help="Fresh subprocess runs per mutation target (default: 5)",
-    )
-    bench_p.add_argument(
-        "--workers",
-        type=int,
-        default=1,
-        help="Workers to use for mutation benchmarks (default: 1)",
-    )
-    bench_p.add_argument(
-        "--preset",
-        choices=["essential", "standard", "thorough"],
-        default="standard",
-        help="Mutation preset for mutation benchmarks (default: standard)",
-    )
-    bench_p.add_argument(
-        "--test-filter",
-        default=None,
-        help="Pytest -k filter for mutation benchmarks",
-    )
-    bench_p.add_argument(
-        "--no-filter-equivalent",
-        dest="filter_equivalent",
-        action="store_false",
-        help="Disable equivalence filtering during mutation benchmarks",
-    )
-    bench_p.set_defaults(filter_equivalent=True)
-
-    # -- ordeal skill --
-    skill_p = sub.add_parser("skill", help="Install ordeal skill for AI coding agents")
-    skill_p.add_argument(
-        "--dry-run", action="store_true", help="Show what would be written without writing"
-    )
-
-    # -- ordeal init --
-    init_p = sub.add_parser(
-        "init",
-        help="Bootstrap test files for untested modules",
-        description=(
-            "Bootstrap starter tests and ordeal.toml. By default this writes only the "
-            "starter files, validates them, and prints a lightweight read-only scan "
-            "summary. Use --install-skill and --close-gaps to opt into extra writes."
-        ),
-    )
-    init_p.add_argument(
-        "target",
-        nargs="?",
-        default=None,
-        help="Package path (e.g. myapp); auto-detects if omitted",
-    )
-    init_p.add_argument(
-        "--output-dir",
-        "-o",
-        default="tests",
-        help="Directory to write test files (default: tests)",
-    )
-    init_p.add_argument(
-        "--dry-run",
-        action="store_true",
-        help=(
-            "Preview without side effects — no files written, no functions executed. "
-            "Generates stub tests from signatures only."
-        ),
-    )
-    init_p.add_argument(
-        "--ci",
-        action="store_true",
-        help="Generate a GitHub Actions workflow (.github/workflows/<name>.yml)",
-    )
-    init_p.add_argument(
-        "--ci-name",
-        default="ordeal",
-        metavar="NAME",
-        help="Workflow filename (default: ordeal → .github/workflows/ordeal.yml)",
-    )
-    init_p.add_argument(
-        "--install-skill",
-        action="store_true",
-        help="Also install the bundled AI-agent skill into .claude/skills/ordeal/",
-    )
-    init_p.add_argument(
-        "--close-gaps",
-        action="store_true",
-        help="Append suggested mutation-gap stubs into a generated test file",
-    )
-
-    # -- ordeal mutate --
-    mutate_p = sub.add_parser(
-        "mutate",
-        help="Test whether your tests catch code changes",
-    )
-    mutate_p.add_argument(
-        "targets", nargs="*", help="Dotted paths: myapp.scoring.compute or myapp.scoring"
-    )
-    mutate_p.add_argument(
-        "--config",
-        "-c",
-        default=None,
-        help="Config file with [mutations] section (used when no targets given)",
-    )
-    mutate_p.add_argument(
-        "--preset",
-        "-p",
-        choices=["essential", "standard", "thorough"],
-        default=None,
-        help="Operator preset (default: standard)",
-    )
-    mutate_p.add_argument(
-        "--workers", "-w", type=int, default=1, help="Parallel workers (default: 1)"
-    )
-    mutate_p.add_argument(
-        "--threshold",
-        "-t",
-        type=float,
-        default=0.0,
-        help="Minimum mutation score; exit 1 if below (e.g. 0.8 for 80%%)",
-    )
-    mutate_p.add_argument(
-        "--no-filter", action="store_true", help="Disable equivalent mutant filtering"
-    )
-    mutate_p.add_argument(
-        "--equivalence-samples",
-        type=int,
-        default=10,
-        help="Samples for equivalence filtering (default: 10)",
-    )
-    mutate_p.add_argument(
-        "--test-filter",
-        "-k",
-        type=str,
-        default=None,
-        metavar="EXPR",
-        help="Pytest -k expression to select tests (avoids running full suite per mutant)",
-    )
-    mutate_p.add_argument(
-        "--mutant-timeout",
-        type=float,
-        default=None,
-        metavar="SECS",
-        help="Timeout for mutant generation step in seconds (skip functions that hang)",
-    )
-    mutate_p.add_argument(
-        "--disk-mutation",
-        action="store_true",
-        default=None,
-        help=(
-            "Write mutations to disk so subprocesses (Ray, multiprocessing) see them. "
-            "Auto-detected when omitted."
-        ),
-    )
-    mutate_p.add_argument(
-        "--resume",
-        action="store_true",
-        default=False,
-        help=(
-            "Reuse cached results for unchanged targets (cache: .ordeal/mutate/). "
-            "Invalidated when module source, test files (test_<module>*.py), "
-            "conftest.py, lockfile, or preset/operators change. "
-            "Mine oracle results are never cached. "
-            "Note: test files not matching test_<module>*.py are not tracked; "
-            "use --no-resume or delete .ordeal/mutate/ if using test_filter "
-            "with non-standard test names."
-        ),
-    )
-    mutate_p.add_argument(
-        "--generate-stubs",
-        type=str,
-        default=None,
-        metavar="PATH",
-        help="Write test stubs for surviving mutants to PATH",
-    )
-    mutate_p.add_argument("--json", action="store_true", help="Output agent-facing JSON")
+    for spec in _command_specs():
+        add_parser_kwargs: dict[str, Any] = {"help": spec.help}
+        description = _resolve_command_description(spec)
+        if description is not None:
+            add_parser_kwargs["description"] = description
+        if spec.formatter_class is not None:
+            add_parser_kwargs["formatter_class"] = spec.formatter_class
+        subparser = sub.add_parser(spec.name, **add_parser_kwargs)
+        for argument in spec.arguments:
+            subparser.add_argument(*argument.tokens, **argument.kwargs)
+        subparser.set_defaults(_handler=spec.handler, **spec.defaults)
 
     return parser
 
@@ -4191,11 +4339,56 @@ def _catalog_argument(action: argparse.Action) -> dict[str, Any]:
     ):
         kind = "flag"
 
+    accepts_value = not isinstance(
+        action,
+        (
+            argparse._StoreTrueAction,
+            argparse._StoreFalseAction,
+            argparse._CountAction,
+        ),
+    )
+    repeatable = isinstance(action, argparse._AppendAction)
+    variadic = nargs in ("*", "+")
+    value_optional = nargs == "?"
+
+    value_type: str | None
+    if isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction)):
+        value_type = "bool"
+    elif isinstance(action, argparse._CountAction):
+        value_type = "int"
+    elif action.type is not None:
+        value_type = getattr(action.type, "__name__", str(action.type))
+    elif action.choices:
+        sample = next(iter(action.choices), None)
+        value_type = type(sample).__name__ if sample is not None else "str"
+    elif accepts_value:
+        value_type = "str"
+    else:
+        value_type = None
+
+    semantics = "flag"
+    if isinstance(action, argparse._CountAction):
+        semantics = "counter"
+    elif repeatable:
+        semantics = "repeatable"
+    elif variadic:
+        semantics = "variadic"
+    elif value_optional:
+        semantics = "optional_value"
+    elif accepts_value:
+        semantics = "value"
+
     entry: dict[str, Any] = {
         "name": action.dest,
+        "schema_version": CLI_CATALOG_SCHEMA_VERSION,
         "kind": kind,
         "required": required,
         "help": action.help or "",
+        "accepts_value": accepts_value,
+        "repeatable": repeatable,
+        "variadic": variadic,
+        "value_optional": value_optional,
+        "semantics": semantics,
     }
     if action.option_strings:
         entry["flags"] = list(action.option_strings)
@@ -4207,6 +4400,8 @@ def _catalog_argument(action: argparse.Action) -> dict[str, Any]:
         entry["default"] = action.default
     if action.choices is not None and not isinstance(action.choices, dict):
         entry["choices"] = list(action.choices)
+    if value_type is not None:
+        entry["value_type"] = value_type
     return entry
 
 
@@ -4230,6 +4425,7 @@ def command_catalog() -> list[dict[str, Any]]:
             entries.append(
                 {
                     "name": name,
+                    "schema_version": CLI_CATALOG_SCHEMA_VERSION,
                     "qualname": f"ordeal.cli.{name}",
                     "doc": choice_help.get(name, ""),
                     "usage": usage,
@@ -4250,38 +4446,11 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = _build_parser()
     args = parser.parse_args(argv)
-
-    if args.command == "catalog":
-        return _cmd_catalog(args)
-    elif args.command == "check":
-        return _cmd_check(args)
-    elif args.command == "scan":
-        return _cmd_scan(args)
-    elif args.command == "verify":
-        return _cmd_verify(args)
-    elif args.command == "explore":
-        return _cmd_explore(args)
-    elif args.command == "replay":
-        return _cmd_replay(args)
-    elif args.command == "seeds":
-        return _cmd_seeds(args)
-    elif args.command == "audit":
-        return _cmd_audit(args)
-    elif args.command == "mine":
-        return _cmd_mine(args)
-    elif args.command == "mine-pair":
-        return _cmd_mine_pair(args)
-    elif args.command == "benchmark":
-        return _cmd_benchmark(args)
-    elif args.command == "skill":
-        return _cmd_skill(args)
-    elif args.command == "init":
-        return _cmd_init(args)
-    elif args.command == "mutate":
-        return _cmd_mutate(args)
-    else:
+    handler = getattr(args, "_handler", None)
+    if handler is None:
         parser.print_help()
         return 0
+    return handler(args)
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised via subprocess

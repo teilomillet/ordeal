@@ -12,6 +12,7 @@ import hypothesis.strategies as st
 import pytest
 from hypothesis import settings as hsettings
 
+import ordeal.auto as ordeal_auto
 import ordeal.cli as cli
 import ordeal.scaling as scaling
 import ordeal.state as ordeal_state
@@ -397,6 +398,8 @@ class TestCLI:
         out = capsys.readouterr().out
         assert "--install-skill" in out
         assert "--close-gaps" in out
+        assert "lightweight read-only scan" in out
+        assert "summary" in out
 
     def test_scan_suppresses_inner_noise_and_formats_summary(self, monkeypatch, capsys):
         class _FakeTree:
@@ -886,6 +889,7 @@ class TestCLI:
 
     def test_init_default_is_minimal(self, monkeypatch, tmp_path, capsys):
         import ordeal.mutations as mutations
+        from ordeal.auto import FunctionResult, ScanResult
 
         monkeypatch.chdir(tmp_path)
         test_file = tmp_path / "tests" / "test_pkg.py"
@@ -915,6 +919,24 @@ class TestCLI:
 
         monkeypatch.setattr(cli, "_install_skill", fake_install_skill)
 
+        scan_calls: list[tuple[str, int]] = []
+
+        def fake_scan_module(
+            module,
+            *,
+            max_examples=50,
+            check_return_type=True,
+            fixtures=None,
+            expected_failures=None,
+        ):
+            scan_calls.append((str(module), max_examples))
+            return ScanResult(
+                module=str(module),
+                functions=[FunctionResult(name="value", passed=True)],
+            )
+
+        monkeypatch.setattr(ordeal_auto, "scan_module", fake_scan_module)
+
         mutate_scripts: list[str] = []
 
         def fake_run(cmd, capture_output=None, text=None, env=None, cwd=None, check=False):
@@ -938,18 +960,24 @@ class TestCLI:
         assert rc == 0
         assert not skill_called
         assert mutate_scripts
+        assert scan_calls == [("pkg", 10)]
         assert test_file.read_text(encoding="utf-8") == original
         assert not (tmp_path / ".claude").exists()
         assert "Gaps:       report-only" in captured.err
+        assert "Initial scan: no findings yet (1 function(s) checked)" in captured.err
 
         report = json.loads(captured.out)
         assert report["install_skill"] is False
         assert report["close_gaps"] is False
         assert report["skill"] is None
+        assert report["initial_scan"]["status"] == "no findings yet"
+        assert report["initial_scan"]["functions_checked"] == 1
+        assert report["initial_scan"]["available_commands"] == ["ordeal scan pkg --save-artifacts"]
         assert ".claude/skills/ordeal/SKILL.md" not in report["files"]
 
     def test_init_opt_in_installs_skill_and_appends_gap_stubs(self, monkeypatch, tmp_path, capsys):
         import ordeal.mutations as mutations
+        from ordeal.auto import FunctionResult, ScanResult
 
         monkeypatch.chdir(tmp_path)
         test_file = tmp_path / "tests" / "test_pkg.py"
@@ -977,6 +1005,14 @@ class TestCLI:
             return ".claude/skills/ordeal/SKILL.md"
 
         monkeypatch.setattr(cli, "_install_skill", fake_install_skill)
+
+        monkeypatch.setattr(
+            ordeal_auto,
+            "scan_module",
+            lambda module, **kwargs: ScanResult(
+                module=str(module), functions=[FunctionResult(name="value", passed=True)]
+            ),
+        )
 
         mutate_calls = 0
 
@@ -1019,7 +1055,105 @@ class TestCLI:
         assert report["install_skill"] is True
         assert report["close_gaps"] is True
         assert report["skill"] == ".claude/skills/ordeal/SKILL.md"
+        assert report["initial_scan"]["status"] == "no findings yet"
         assert ".claude/skills/ordeal/SKILL.md" in report["files"]
+
+    def test_init_dry_run_skips_validation_scan(self, monkeypatch, tmp_path, capsys):
+        import ordeal.mutations as mutations
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            mutations,
+            "init_project",
+            lambda target=None, output_dir="tests", dry_run=False: [
+                {
+                    "module": "pkg",
+                    "status": "generated",
+                    "path": str(tmp_path / "tests" / "test_pkg.py"),
+                    "content": "def test_pkg_value_pinned() -> None:\n    assert 1 == 1\n",
+                }
+            ],
+        )
+
+        def fail_scan(*args, **kwargs):
+            raise AssertionError("scan_module should not run during --dry-run")
+
+        monkeypatch.setattr(ordeal_auto, "scan_module", fail_scan)
+
+        rc = main(["init", "pkg", "--dry-run"])
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert "DRY RUN" in captured.err
+        assert "Initial scan:" not in captured.err
+
+    def test_init_reports_lightweight_scan_findings(self, monkeypatch, tmp_path, capsys):
+        import ordeal.mutations as mutations
+        from ordeal.auto import FunctionResult, ScanResult
+
+        monkeypatch.chdir(tmp_path)
+        test_file = tmp_path / "tests" / "test_pkg.py"
+        test_file.parent.mkdir(parents=True, exist_ok=True)
+        original = "def test_pkg_value_pinned() -> None:\n    assert 1 == 1\n"
+        test_file.write_text(original, encoding="utf-8")
+
+        monkeypatch.setattr(
+            mutations,
+            "init_project",
+            lambda target=None, output_dir="tests", dry_run=False: [
+                {
+                    "module": "pkg",
+                    "status": "generated",
+                    "path": str(test_file),
+                    "content": original,
+                }
+            ],
+        )
+        monkeypatch.setattr(cli, "_install_skill", lambda *, dry_run=False: None)
+        monkeypatch.setattr(
+            ordeal_auto,
+            "scan_module",
+            lambda module, **kwargs: ScanResult(
+                module=str(module),
+                functions=[
+                    FunctionResult(
+                        name="normalize",
+                        passed=True,
+                        property_violations=["idempotent (92%)"],
+                    ),
+                    FunctionResult(
+                        name="score",
+                        passed=False,
+                        error="boom",
+                        failing_args={"x": -1},
+                    ),
+                ],
+            ),
+        )
+
+        def fake_run(cmd, capture_output=None, text=None, env=None, cwd=None, check=False):
+            if cmd[:3] == [sys.executable, "-m", "pytest"]:
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            if cmd[:2] == [sys.executable, "-c"] and "'mutate'" in cmd[2]:
+                return SimpleNamespace(returncode=0, stdout="Score: 2/2 (100%)\n", stderr="")
+            raise AssertionError(f"Unexpected subprocess call: {cmd}")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        rc = main(["init", "pkg"])
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert "Initial scan: 2 finding(s) across 1 module(s)" in captured.err
+        assert "pkg.normalize: idempotent (92%)" in captured.err
+        assert "pkg.score: crash safety failed" in captured.err
+
+        report = json.loads(captured.out)
+        assert report["initial_scan"]["status"] == "findings found"
+        finding = report["initial_scan"]["findings"][0]["summary"]
+        assert finding == "pkg.normalize: idempotent (92%)"
+        assert report["initial_scan"]["findings"][1]["error"] == "boom"
+        assert report["initial_scan"]["available_commands"] == ["ordeal scan pkg --save-artifacts"]
 
     def test_scan_write_regression_defaults_and_dedupes(self, monkeypatch, tmp_path, capsys):
         monkeypatch.chdir(tmp_path)

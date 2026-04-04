@@ -6,15 +6,24 @@ When a user asks you to run ordeal on their code — not to develop ordeal itsel
 
 **What ordeal does:** Finds bugs your tests miss by exploring thousands of scenarios with realistic failures (timeouts, corrupted data, crashes). When something breaks, it shows the shortest sequence that reproduces the failure.
 
-**Start here — bootstrap tests for any project:**
+**Read-only first signal:**
 
 ```bash
-ordeal init                      # auto-detect package, generate tests, validate with mutations
-ordeal init mypackage            # explicit target
-ordeal init --dry-run            # preview without writing
+ordeal scan mypackage                    # assess code without writing files
+ordeal scan mypackage --save-artifacts   # save report + JSON bundle + regressions
 ```
 
-This generates tests with pinned values (machine-discovered via mine/Hypothesis), property assertions, a stateful ChaosTest, and an ordeal.toml — then validates with mutation testing.
+**When you want files in the repo:**
+
+```bash
+ordeal init                      # auto-detect package, generate starter tests + scan summary
+ordeal init mypackage            # explicit target
+ordeal init --dry-run            # preview without writing
+ordeal init mypackage --install-skill   # opt in to writing the bundled skill
+ordeal init mypackage --close-gaps      # opt in to appending mutation-gap stubs
+```
+
+By default, `init` writes starter tests and `ordeal.toml`, validates them, and prints a lightweight read-only scan summary. It does not install the bundled skill or append gap-closing stubs unless you ask for those extra writes.
 
 **Other commands:**
 

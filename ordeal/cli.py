@@ -21,6 +21,7 @@ import re
 import shlex
 import sys
 import time as _time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from pprint import pformat
@@ -89,6 +90,33 @@ class _ProgressPrinter:
 _BENCHMARK_SIGNAL_CHECKPOINTS: tuple[float, ...] = (5.0, 10.0, 30.0)
 _DEFAULT_REGRESSION_PATH = "tests/test_ordeal_regressions.py"
 _DEFAULT_FINDINGS_DIR = ".ordeal/findings"
+CLI_CATALOG_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class ArgumentSpec:
+    """Declarative definition of one CLI argument."""
+
+    tokens: tuple[str, ...]
+    kwargs: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class CommandSpec:
+    """Declarative definition of one CLI command."""
+
+    name: str
+    handler: Callable[[argparse.Namespace], int]
+    help: str
+    arguments: tuple[ArgumentSpec, ...] = ()
+    description: str | Callable[[], str] | None = None
+    formatter_class: type[argparse.HelpFormatter] | None = None
+    defaults: dict[str, Any] = field(default_factory=dict)
+
+
+def _arg(*tokens: str, **kwargs: Any) -> ArgumentSpec:
+    """Create a declarative CLI argument spec."""
+    return ArgumentSpec(tokens=tokens, kwargs=dict(kwargs))
 
 
 def _make_signal_profiler(
@@ -1121,6 +1149,74 @@ def _cmd_skill(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[str, Any]:
+    """Run a bounded, read-only scan over freshly bootstrapped modules."""
+    from ordeal.auto import scan_module
+
+    deduped_modules = [module for module in dict.fromkeys(modules) if module]
+    findings: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    scanned_modules: list[str] = []
+    functions_checked = 0
+    skipped_functions = 0
+
+    for module in deduped_modules:
+        try:
+            result = scan_module(module, max_examples=max_examples)
+        except Exception as exc:
+            errors.append({"module": module, "error": str(exc)})
+            continue
+
+        scanned_modules.append(module)
+        functions_checked += len(result.functions)
+        skipped_functions += len(result.skipped)
+
+        for function in result.functions:
+            qualname = f"{module}.{function.name}"
+            if not function.passed:
+                findings.append(
+                    {
+                        "kind": "crash",
+                        "module": module,
+                        "function": function.name,
+                        "qualname": qualname,
+                        "summary": f"{qualname}: crash safety failed",
+                        "error": function.error,
+                        "failing_args": function.failing_args,
+                    }
+                )
+            for violation in function.property_violations:
+                findings.append(
+                    {
+                        "kind": "property",
+                        "module": module,
+                        "function": function.name,
+                        "qualname": qualname,
+                        "summary": f"{qualname}: {violation}",
+                    }
+                )
+
+    if findings:
+        status = "findings found"
+    elif scanned_modules or not errors:
+        status = "no findings yet"
+    else:
+        status = "scan unavailable"
+
+    return {
+        "status": status,
+        "modules": scanned_modules,
+        "functions_checked": functions_checked,
+        "skipped_functions": skipped_functions,
+        "findings": findings,
+        "errors": errors,
+        "max_examples": max_examples,
+        "available_commands": [
+            f"ordeal scan {module} --save-artifacts" for module in deduped_modules
+        ],
+    }
+
+
 def _cmd_init(args: argparse.Namespace) -> int:
     """Bootstrap test files for untested modules."""
     import re
@@ -1265,14 +1361,8 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
     Path(".ordeal_stubs_tmp.py").unlink(missing_ok=True)
 
-    # --- Phase 3: Brief explore ---
-    explore_summary = ""
-    if Path("ordeal.toml").exists():
-        ep = _run_ordeal(["explore", "--max-time", "10", "-c", "ordeal.toml"])
-        for line in (ep.stderr + ep.stdout).splitlines():
-            if "edge" in line.lower() or "runs:" in line.lower():
-                explore_summary = line.strip()
-                break
+    # --- Phase 3: Lightweight read-only scan ---
+    initial_scan = _run_init_scan([r["module"] for r in generated], max_examples=10)
 
     # --- Count what was generated ---
     n_tests = 0
@@ -1371,8 +1461,30 @@ def _cmd_init(args: argparse.Namespace) -> int:
         if not close_gaps:
             _stderr("  Gaps:       report-only (use --close-gaps to append suggested stubs)\n")
 
-    if explore_summary:
-        _stderr(f"  Explored:   {explore_summary}\n")
+    if initial_scan["status"] == "findings found":
+        _stderr(
+            "  Initial scan:"
+            f" {len(initial_scan['findings'])} finding(s)"
+            f" across {len(initial_scan['modules'])} module(s)\n"
+        )
+        for finding in initial_scan["findings"][:3]:
+            _stderr(f"    {finding['summary']}\n")
+        remaining = len(initial_scan["findings"]) - 3
+        if remaining > 0:
+            _stderr(f"    ... {remaining} more finding(s)\n")
+    elif initial_scan["status"] == "scan unavailable":
+        _stderr(f"  Initial scan: unavailable ({len(initial_scan['errors'])} module error(s))\n")
+        for error in initial_scan["errors"][:2]:
+            _stderr(f"    {error['module']}: {error['error']}\n")
+    else:
+        summary = (
+            "  Initial scan:"
+            f" no findings yet ({initial_scan['functions_checked']} function(s) checked"
+        )
+        if initial_scan["skipped_functions"]:
+            summary += f", {initial_scan['skipped_functions']} skipped"
+        summary += ")\n"
+        _stderr(summary)
 
     _stderr("\n  Files:\n")
     for r in generated:
@@ -1403,6 +1515,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         "properties_discovered": unique_props,
         "tests_pass": tests_pass,
         "mutation_score": mutation_score.removeprefix("Score: ") if mutation_score else None,
+        "initial_scan": initial_scan,
         "close_gaps": close_gaps,
         "ci_workflow": ci_path,
         "install_skill": install_skill,
@@ -3918,7 +4031,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     # -- ordeal init --
-    init_p = sub.add_parser("init", help="Bootstrap test files for untested modules")
+    init_p = sub.add_parser(
+        "init",
+        help="Bootstrap test files for untested modules",
+        description=(
+            "Bootstrap starter tests and ordeal.toml. By default this writes only the "
+            "starter files, validates them, and prints a lightweight read-only scan "
+            "summary. Use --install-skill and --close-gaps to opt into extra writes."
+        ),
+    )
     init_p.add_argument(
         "target",
         nargs="?",

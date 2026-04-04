@@ -85,16 +85,20 @@ Use `--save-artifacts` when you want the full handoff package: `.ordeal/findings
 
 ### `ordeal init`
 
-Bootstrap ordeal into an existing package. `init` generates starter tests for untested modules, writes `ordeal.toml` when missing, and can add both a CI workflow and the bundled AI-agent skill.
+Bootstrap ordeal into an existing package. `init` generates starter tests for untested modules, writes `ordeal.toml` when missing, validates the generated tests, and prints a lightweight read-only scan summary for the modules it just bootstrapped.
 
 ```bash
 ordeal init
 ordeal init myapp
 ordeal init myapp --dry-run
+ordeal init myapp --install-skill
+ordeal init myapp --close-gaps
 ordeal init myapp --ci
 ```
 
 `--dry-run` is the safe preview mode: it discovers modules from the filesystem and signatures from AST only, without importing the target package, executing functions, or writing files.
+
+By default, `init` does not install the bundled skill and does not append mutation-gap stubs back into your test files. Those extra writes are explicit opt-ins.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -103,6 +107,8 @@ ordeal init myapp --ci
 | `--dry-run` | off | Preview generated files without imports or writes |
 | `--ci` | off | Generate `.github/workflows/<name>.yml` |
 | `--ci-name` | `ordeal` | Workflow filename stem |
+| `--install-skill` | off | Also install the bundled AI-agent skill into `.claude/skills/ordeal/` |
+| `--close-gaps` | off | Append suggested mutation-gap stubs into a generated test file |
 
 ### `ordeal mutate`
 
@@ -410,7 +416,7 @@ ordeal skill
 ordeal skill --dry-run
 ```
 
-Run this directly when you want to refresh the skill file without re-running `ordeal init`. `init` already installs the same skill as part of bootstrapping.
+Run this directly when you want to refresh the skill file without re-running `ordeal init`. If you want `init` to install the same skill during bootstrap, pass `--install-skill`.
 
 | Flag | Default | Description |
 |---|---|---|

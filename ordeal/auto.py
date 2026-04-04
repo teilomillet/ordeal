@@ -670,6 +670,15 @@ def _tracked_string_args(
     return tracked
 
 
+def _tracked_token_count(tokens: Sequence[str], raw: str) -> int:
+    """Count occurrences of a tracked argument, allowing slash normalization."""
+    variants = {raw}
+    if "/" in raw or "\\" in raw:
+        variants.add(raw.replace("\\", "/"))
+        variants.add(raw.replace("/", "\\"))
+    return sum(1 for token in tokens if token in variants)
+
+
 def shell_safe_contract(
     *,
     kwargs: dict[str, Any],
@@ -682,8 +691,8 @@ def shell_safe_contract(
         if tokens is None:
             return False
         for raw in _tracked_string_args(kwargs, tracked_params):
-            if any(ch in raw for ch in " \t;&|`$><()[]{}*?"):
-                if tokens.count(raw) != 1:
+            if any(ch in raw for ch in ' \t;&|`$><()[]{}*?'):
+                if _tracked_token_count(tokens, raw) != 1:
                     return False
         return True
 
@@ -708,7 +717,7 @@ def quoted_paths_contract(
             return False
         for raw in _tracked_string_args(kwargs, tracked_params):
             if "/" in raw or "\\" in raw or " " in raw:
-                if tokens.count(raw) != 1:
+                if _tracked_token_count(tokens, raw) != 1:
                     return False
         return True
 
@@ -732,7 +741,7 @@ def command_arg_stability_contract(
         if tokens is None:
             return False
         for raw in _tracked_string_args(kwargs, tracked_params):
-            if tokens.count(raw) != 1:
+            if _tracked_token_count(tokens, raw) != 1:
                 return False
         return True
 

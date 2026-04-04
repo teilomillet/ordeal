@@ -72,6 +72,7 @@ import copy
 import functools
 import hashlib
 import importlib
+import importlib.machinery
 import inspect
 import json
 import pkgutil
@@ -93,7 +94,6 @@ from typing import (
 )
 
 from ordeal.faults import PatchFault
-from ordeal.faults import _resolve_target as _resolve_fault_target
 from ordeal.introspection import annotation_is_none, safe_get_annotations
 
 if TYPE_CHECKING:
@@ -201,13 +201,93 @@ def _local_module_exists(module_name: str) -> bool:
     return False
 
 
+def _find_spec_from_sys_path(module_name: str) -> importlib.machinery.ModuleSpec | None:
+    """Resolve a module spec from ``sys.path`` without trusting ``sys.modules``."""
+    parts = [part for part in module_name.split(".") if part]
+    if not parts:
+        return None
+
+    fullname = parts[0]
+    spec = importlib.machinery.PathFinder.find_spec(fullname)
+    for part in parts[1:]:
+        if spec is None or spec.submodule_search_locations is None:
+            return None
+        fullname = f"{fullname}.{part}"
+        spec = importlib.machinery.PathFinder.find_spec(
+            fullname,
+            spec.submodule_search_locations,
+        )
+    return spec
+
+
+def _normalized_module_origin(origin: object) -> Path | None:
+    """Return a normalized module origin path when available."""
+    if not isinstance(origin, str) or origin in {"built-in", "frozen"}:
+        return None
+    try:
+        return Path(origin).resolve()
+    except OSError:
+        return None
+
+
+def _purge_module_family(module_name: str) -> None:
+    """Drop a module and its package family from ``sys.modules``."""
+    parts = [part for part in module_name.split(".") if part]
+    prefixes = [".".join(parts[:idx]) for idx in range(1, len(parts) + 1)]
+    for name in list(sys.modules):
+        if any(name == prefix or name.startswith(f"{prefix}.") for prefix in prefixes):
+            sys.modules.pop(name, None)
+
+
+def _import_module_current(module_name: str) -> types.ModuleType:
+    """Import a module, refreshing stale local modules shadowed on ``sys.path``."""
+    importlib.invalidate_caches()
+    cached = sys.modules.get(module_name)
+    spec = _find_spec_from_sys_path(module_name)
+    desired_origin = _normalized_module_origin(getattr(spec, "origin", None))
+    cached_origin = _normalized_module_origin(getattr(cached, "__file__", None))
+
+    if cached is not None and desired_origin is not None and cached_origin != desired_origin:
+        _purge_module_family(module_name)
+        cached = None
+
+    if cached is not None:
+        return cached
+    return importlib.import_module(module_name)
+
+
+def _resolve_mutation_owner(target: str) -> tuple[Any, str]:
+    """Resolve the owner object for a function or method mutation target."""
+    if "." not in target:
+        raise ValueError(f"Mutation target must be dotted, got {target!r}")
+
+    parent_path, attr_name = target.rsplit(".", 1)
+    try:
+        parent = _import_module_current(parent_path)
+        return parent, attr_name
+    except ImportError:
+        pass
+
+    parts = parent_path.split(".")
+    for idx in range(len(parts), 0, -1):
+        try:
+            obj: Any = _import_module_current(".".join(parts[:idx]))
+            for part in parts[idx:]:
+                obj = getattr(obj, part)
+            return obj, attr_name
+        except (ImportError, AttributeError):
+            continue
+
+    raise ImportError(f"Cannot resolve target: {target!r}")
+
+
 def _resolve_mutation_target(target: str) -> _ResolvedMutationTarget:
     """Resolve a module, function, or method mutation target explicitly."""
     normalized = _target_to_normalized_dotted(target)
     try:
-        module = importlib.import_module(normalized)
+        module = _import_module_current(normalized)
     except ImportError:
-        parent, attr_name = _resolve_fault_target(normalized)
+        parent, attr_name = _resolve_mutation_owner(normalized)
         if isinstance(parent, types.ModuleType):
             return _ResolvedMutationTarget(target, parent, parent, attr_name)
 

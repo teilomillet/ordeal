@@ -299,9 +299,7 @@ def _callable_listing_rows(
             and owner is not None
             and _resolve_object_hook(owner, merged_factories)
         )
-        setup_configured = bool(
-            owner is not None and _resolve_object_hook(owner, merged_setups)
-        )
+        setup_configured = bool(owner is not None and _resolve_object_hook(owner, merged_setups))
         resolved_scenario = (
             _resolve_object_hook(owner, merged_scenarios) if owner is not None else None
         )
@@ -388,11 +386,7 @@ def _build_target_listing_envelope(
     """Build the agent envelope for callable discovery output."""
     from ordeal.agent_schema import build_agent_envelope
 
-    flat_targets = [
-        row
-        for group in groups
-        for row in list(group.get("targets", []))
-    ]
+    flat_targets = [row for group in groups for row in list(group.get("targets", []))]
     runnable_count = sum(1 for row in flat_targets if row.get("runnable"))
     skip_count = len(flat_targets) - runnable_count
     status = "exploratory" if skip_count else "ok"
@@ -1810,9 +1804,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
 
     if getattr(args, "list_targets", False):
         try:
-            object_factories, object_setups, object_scenarios = _object_runtime_maps(
-                object_specs
-            )
+            object_factories, object_setups, object_scenarios = _object_runtime_maps(object_specs)
         except Exception as exc:
             if args.json:
                 print(

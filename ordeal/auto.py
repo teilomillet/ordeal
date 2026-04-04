@@ -658,11 +658,7 @@ def _tracked_string_args(
     """Return the string argument values tracked by a semantic contract."""
     names = list(
         tracked_params
-        or [
-            name
-            for name, value in kwargs.items()
-            if isinstance(value, (str, os.PathLike))
-        ]
+        or [name for name, value in kwargs.items() if isinstance(value, (str, os.PathLike))]
     )
     tracked: list[str] = []
     for name in names:

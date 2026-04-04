@@ -233,9 +233,7 @@ class TestCLIAgentJson:
             payload["raw_details"]["report"]["extra_sections"][0][0] == "Function-Level Evidence"
         )
 
-    def test_scan_json_list_targets_outputs_callable_metadata(
-        self, monkeypatch, tmp_path, capsys
-    ):
+    def test_scan_json_list_targets_outputs_callable_metadata(self, monkeypatch, tmp_path, capsys):
         mod = _make_target_listing_module()
         monkeypatch.chdir(tmp_path)
         monkeypatch.setitem(sys.modules, mod.__name__, mod)

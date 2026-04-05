@@ -13,6 +13,7 @@ class TestGenerateCIWorkflow:
     def test_basic_structure(self):
         yml = _generate_ci_workflow("myapp")
         assert "name: ordeal" in yml
+        assert "\njobs:\n  ordeal:\n    runs-on: ubuntu-latest\n    steps:\n" in yml
         assert "pytest --chaos" in yml
         assert "ordeal mutate myapp" in yml
         assert "--preset standard" in yml
@@ -44,8 +45,9 @@ class TestGenerateCIWorkflow:
 
     def test_checkout_and_python_setup(self):
         yml = _generate_ci_workflow("pkg")
-        assert "actions/checkout@v4" in yml
-        assert "actions/setup-python@v5" in yml
+        assert "actions/checkout@v6" in yml
+        assert "actions/setup-python@v6" in yml
+        assert "astral-sh/setup-uv@v7" in yml
 
     def test_triggers(self):
         yml = _generate_ci_workflow("pkg")
@@ -54,6 +56,12 @@ class TestGenerateCIWorkflow:
 
 
 class TestCheckedInCIWorkflow:
+    def test_checked_in_workflows_use_node24_safe_artifact_actions(self):
+        workflows = Path(".github/workflows").glob("*.yml")
+        for path in workflows:
+            yml = path.read_text(encoding="utf-8")
+            assert "actions/upload-artifact@v4" not in yml, path
+
     def test_bump_and_publish_refreshes_lockfile(self):
         yml = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
         assert "bump-and-publish:" in yml
@@ -61,3 +69,11 @@ class TestCheckedInCIWorkflow:
         assert "- name: Refresh lockfile" in yml
         assert "run: uv lock" in yml
         assert "git add pyproject.toml uv.lock CHANGELOG.md" in yml
+
+    def test_bump_and_publish_refreshes_lockfile_before_commit(self):
+        yml = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+        refresh_idx = yml.index("- name: Refresh lockfile")
+        changelog_idx = yml.index("- name: Update changelog")
+        commit_idx = yml.index("- name: Commit and tag")
+        assert refresh_idx < changelog_idx < commit_idx
+        assert yml.index("run: uv lock", refresh_idx) < commit_idx

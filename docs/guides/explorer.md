@@ -698,7 +698,7 @@ traces_dir = ".ordeal/traces"
 
 - name: Upload failure traces
   if: failure()
-  uses: actions/upload-artifact@v4
+  uses: actions/upload-artifact@v6
   with:
     name: ordeal-traces
     path: .ordeal/traces/
@@ -706,7 +706,7 @@ traces_dir = ".ordeal/traces"
 
 - name: Upload exploration report
   if: always()
-  uses: actions/upload-artifact@v4
+  uses: actions/upload-artifact@v6
   with:
     name: ordeal-report
     path: ordeal-report.json

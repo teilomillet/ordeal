@@ -3247,7 +3247,7 @@ def _generate_ci_workflow(pkg: str) -> str:
 
     if has_uv_lock:
         install_steps = """\
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@v7
       - run: uv lock --check
       - run: uv sync --locked --extra dev"""
         run_prefix = "uv run "
@@ -3267,8 +3267,8 @@ jobs:
   ordeal:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 {install_steps}

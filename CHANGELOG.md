@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.14
+
+**Features:**
+
+- add lifecycle harness support to audit and scan
+
+
 ## 0.3.13
 
 **Features:**

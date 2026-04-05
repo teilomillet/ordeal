@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.16
+
+**Features:**
+
+- add first-class scan target selectors
+
+
 ## 0.3.15
 
 **Features:**

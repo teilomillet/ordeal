@@ -356,16 +356,20 @@ def _literal_ast_value(node: ast.AST) -> Any:
         return operand if isinstance(node.op, ast.UAdd) else -operand
     if isinstance(node, ast.Call):
         func_name = _call_name(node.func)
-        if func_name in {
-            "Path",
-            "PurePath",
-            "PosixPath",
-            "WindowsPath",
-            "pathlib.Path",
-            "pathlib.PurePath",
-            "pathlib.PosixPath",
-            "pathlib.WindowsPath",
-        } and len(node.args) == 1:
+        if (
+            func_name
+            in {
+                "Path",
+                "PurePath",
+                "PosixPath",
+                "WindowsPath",
+                "pathlib.Path",
+                "pathlib.PurePath",
+                "pathlib.PosixPath",
+                "pathlib.WindowsPath",
+            }
+            and len(node.args) == 1
+        ):
             value = _literal_ast_value(node.args[0])
             if isinstance(value, str):
                 return Path(value)
@@ -723,11 +727,7 @@ def _seed_examples_for_callable(
 
     try:
         sig = inspect.signature(target)
-        param_names = {
-            name
-            for name in sig.parameters
-            if name not in {"self", "cls"}
-        }
+        param_names = {name for name in sig.parameters if name not in {"self", "cls"}}
     except Exception:
         param_names = set()
 
@@ -1632,11 +1632,7 @@ def _auto_contract_checks(
     probe_kwargs = dict(seed_examples[0].kwargs) if seed_examples else {}
     tracked_params = list(probe_kwargs)
     env_param = next(
-        (
-            name
-            for name, value in probe_kwargs.items()
-            if isinstance(value, Mapping)
-        ),
+        (name for name, value in probe_kwargs.items() if isinstance(value, Mapping)),
         None,
     )
     protected_keys = [
@@ -2003,9 +1999,7 @@ def _call_kwargs_from_ast(
 ) -> dict[str, Any] | None:
     """Convert a literal call site into concrete kwargs."""
     params = [
-        param
-        for param in signature.parameters.values()
-        if param.name not in {"self", "cls"}
+        param for param in signature.parameters.values() if param.name not in {"self", "cls"}
     ]
     positional_params = [
         param

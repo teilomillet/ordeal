@@ -890,8 +890,7 @@ class MutationResult:
             for cluster in promoted_clusters:
                 ops = ", ".join(cluster["operators"])
                 lines.append(
-                    f"    cluster: {cluster['label']} "
-                    f"({cluster['size']} survivor(s), ops: {ops})"
+                    f"    cluster: {cluster['label']} ({cluster['size']} survivor(s), ops: {ops})"
                 )
         elif self.survived:
             lines.append(

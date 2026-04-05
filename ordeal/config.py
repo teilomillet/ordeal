@@ -468,8 +468,7 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
             )
         if not (0.0 <= scan_cfg.min_realism <= 1.0):
             raise ConfigError(
-                f"scan.{i}.min_realism must be between 0.0 and 1.0, "
-                f"got {scan_cfg.min_realism}"
+                f"scan.{i}.min_realism must be between 0.0 and 1.0, got {scan_cfg.min_realism}"
             )
 
     # -- Objects --
@@ -584,8 +583,7 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
         )
         if mutations_cfg.cluster_min_size < 1:
             raise ConfigError(
-                "mutations.cluster_min_size must be >= 1, "
-                f"got {mutations_cfg.cluster_min_size}"
+                f"mutations.cluster_min_size must be >= 1, got {mutations_cfg.cluster_min_size}"
             )
 
     # -- Audit --

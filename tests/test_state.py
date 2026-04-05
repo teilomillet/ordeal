@@ -80,8 +80,7 @@ class TestExplorationStateSerialization:
         assert detail["sink_categories"] == ["shell", "path"]
         assert detail["input_sources"] == [{"source": "test", "evidence": "test_mod.py:10"}]
         assert (
-            detail["proof_bundle"]["likely_impact"]
-            == "command construction may break execution"
+            detail["proof_bundle"]["likely_impact"] == "command construction may break execution"
         )
 
     def test_explore_scan_surfaces_contract_violations(self, monkeypatch):

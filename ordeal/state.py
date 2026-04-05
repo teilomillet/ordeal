@@ -45,6 +45,19 @@ def _source_hash(func: Any) -> str | None:
         return None
 
 
+def _json_ready(value: Any) -> Any:
+    """Convert nested state values into JSON-friendly structures."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, type):
+        return f"{value.__module__}.{value.__qualname__}"
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_json_ready(item) for item in value]
+    return repr(value)
+
+
 @dataclass
 class FunctionState:
     """Exploration state for a single function."""
@@ -79,6 +92,14 @@ class FunctionState:
     scan_replayable: bool | None = None
     scan_replay_attempts: int = 0
     scan_replay_matches: int = 0
+    scan_contract_fit: float | None = None
+    scan_reachability: float | None = None
+    scan_realism: float | None = None
+    scan_sink_signal: float | None = None
+    scan_sink_categories: list[str] = field(default_factory=list)
+    scan_input_sources: list[dict[str, str]] = field(default_factory=list)
+    scan_input_source: str | None = None
+    scan_proof_bundle: dict[str, Any] | None = None
     fuzz_examples: int = 0
     contract_violations: list[str] = field(default_factory=list)
     contract_violation_details: list[dict[str, Any]] = field(default_factory=list)
@@ -137,6 +158,14 @@ class FunctionState:
         self.scan_replayable = None
         self.scan_replay_attempts = 0
         self.scan_replay_matches = 0
+        self.scan_contract_fit = None
+        self.scan_reachability = None
+        self.scan_realism = None
+        self.scan_sink_signal = None
+        self.scan_sink_categories = []
+        self.scan_input_sources = []
+        self.scan_input_source = None
+        self.scan_proof_bundle = None
         self.fuzz_examples = 0
         self.contract_violations = []
         self.contract_violation_details = []
@@ -187,6 +216,7 @@ class ExplorationState:
     exploration_time: float = 0.0
     supervisor_info: dict[str, Any] = field(default_factory=dict)
     tree: Any = field(default=None, repr=False)
+    scan_mode: str = "coverage_gap"
 
     def function(self, name: str) -> FunctionState:
         """Get or create state for a function."""
@@ -247,13 +277,19 @@ class ExplorationState:
         """Promoted findings worth treating as primary scan output."""
         results: list[str] = []
         for name, fs in self.functions.items():
+            if any(
+                detail.get("category") == "semantic_contract"
+                for detail in fs.contract_violation_details
+            ):
+                results.append(f"{name}: violates an explicit semantic contract")
             if fs.crash_free is False and (
                 fs.scan_crash_category == "likely_bug"
-                or (fs.scan_crash_category is None and fs.scan_replayable)
+                or (self.scan_mode != "real_bug" and fs.scan_crash_category == "coverage_gap")
             ):
-                results.append(f"{name}: crashes on random inputs")
-            if fs.mutation_score is not None and fs.mutation_score < 0.5:
-                results.append(f"{name}: mutation score {fs.mutation_score:.0%}")
+                if fs.scan_crash_category == "coverage_gap":
+                    results.append(f"{name}: crashes on plausible but under-verified inputs")
+                else:
+                    results.append(f"{name}: crashes on realistic inputs")
         return results
 
     @property
@@ -261,11 +297,20 @@ class ExplorationState:
         """Exploratory scan output that should not fail the run by default."""
         results: list[str] = []
         for name, fs in self.functions.items():
+            category = fs.scan_crash_category or "speculative_crash"
             if fs.crash_free is False and (
-                fs.scan_crash_category == "speculative_crash"
-                or (fs.scan_crash_category is None and not fs.scan_replayable)
+                category == "speculative_crash"
+                or category == "coverage_gap"
+                or category == "invalid_input_crash"
             ):
-                results.append(f"{name}: unreplayed crash on random inputs")
+                if category == "coverage_gap":
+                    results.append(
+                        f"{name}: plausible crash but current evidence still looks like a gap"
+                    )
+                elif category == "invalid_input_crash":
+                    results.append(f"{name}: crash currently looks driven by invalid input")
+                else:
+                    results.append(f"{name}: unreplayed crash on random inputs")
             for v in fs.property_violations:
                 results.append(f"{name}: {v}")
             for note in fs.contract_violations:
@@ -278,26 +323,38 @@ class ExplorationState:
         details: list[dict[str, Any]] = []
         for name, fs in self.functions.items():
             if fs.crash_free is False:
-                category = (
-                    fs.scan_crash_category
-                    if fs.scan_crash_category is not None
-                    else ("likely_bug" if fs.scan_replayable else "speculative_crash")
-                )
+                category = fs.scan_crash_category or "speculative_crash"
                 details.append(
                     {
                         "kind": "crash",
                         "category": category,
                         "function": name,
                         "summary": (
-                            f"{name}: crashes on random inputs"
+                            f"{name}: crashes on realistic inputs"
                             if category == "likely_bug"
-                            else f"{name}: unreplayed crash on random inputs"
+                            else (
+                                f"{name}: plausible crash but evidence still looks like a gap"
+                                if category == "coverage_gap"
+                                else (
+                                    f"{name}: crash currently looks driven by invalid input"
+                                    if category == "invalid_input_crash"
+                                    else f"{name}: unreplayed crash on random inputs"
+                                )
+                            )
                         ),
                         "error": fs.scan_error,
                         "failing_args": fs.failing_args,
                         "replayable": fs.scan_replayable,
                         "replay_attempts": fs.scan_replay_attempts,
                         "replay_matches": fs.scan_replay_matches,
+                        "contract_fit": fs.scan_contract_fit,
+                        "reachability": fs.scan_reachability,
+                        "realism": fs.scan_realism,
+                        "sink_signal": fs.scan_sink_signal,
+                        "sink_categories": fs.scan_sink_categories,
+                        "input_sources": fs.scan_input_sources,
+                        "input_source": fs.scan_input_source,
+                        "proof_bundle": fs.scan_proof_bundle,
                     }
                 )
             for item in fs.contract_violation_details:
@@ -327,7 +384,26 @@ class ExplorationState:
                         "survived_mutants": fs.survived_mutants,
                     }
                 )
-        return details
+        category_rank = {
+            "likely_bug": 0,
+            "semantic_contract": 1,
+            "coverage_gap": 2,
+            "speculative_crash": 3,
+            "invalid_input_crash": 4,
+            "speculative_property": 5,
+            "test_strength_gap": 6,
+            "verification_warning": 7,
+        }
+        return sorted(
+            details,
+            key=lambda detail: (
+                category_rank.get(str(detail.get("category")), 99),
+                -float(detail.get("sink_signal") or 0.0),
+                -float(detail.get("contract_fit") or 0.0),
+                -float(detail.get("reachability") or 0.0),
+                str(detail.get("function") or detail.get("qualname") or ""),
+            ),
+        )
 
     def summary(self) -> str:
         """Human-readable exploration report."""
@@ -382,16 +458,17 @@ class ExplorationState:
         return {
             "module": self.module,
             "confidence": round(self.confidence, 4),
-            "functions": {name: asdict(fs) for name, fs in self.functions.items()},
+            "functions": {name: _json_ready(asdict(fs)) for name, fs in self.functions.items()},
             "findings": self.findings,
             "exploratory_findings": self.exploratory_findings,
-            "finding_details": self.finding_details,
+            "finding_details": _json_ready(self.finding_details),
             "frontier": self.frontier,
             "suggestions": suggest(self),
             "skipped": self.skipped,
             "exploration_time": round(self.exploration_time, 2),
             "seed": self.supervisor_info.get("seed"),
-            "supervisor_info": self.supervisor_info,
+            "scan_mode": self.scan_mode,
+            "supervisor_info": _json_ready(self.supervisor_info),
         }
 
     @classmethod
@@ -401,6 +478,7 @@ class ExplorationState:
         state = cls(module=raw["module"])
         state.edge_coverage = raw.get("edge_coverage")
         state.exploration_time = raw.get("exploration_time", 0.0)
+        state.scan_mode = raw.get("scan_mode", "coverage_gap")
         state.supervisor_info = raw.get("supervisor_info", {})
         for name, fdata in raw.get("functions", {}).items():
             fs = FunctionState(**fdata)
@@ -521,6 +599,19 @@ def explore_scan(
     property_overrides: dict[str, list[str]] | None = None,
     relation_overrides: dict[str, list[str]] | None = None,
     contract_checks: dict[str, list[Any]] | None = None,
+    mode: str = "coverage_gap",
+    seed_from_tests: bool = True,
+    seed_from_fixtures: bool = True,
+    seed_from_docstrings: bool = True,
+    seed_from_code: bool = True,
+    seed_from_call_sites: bool = True,
+    treat_any_as_weak: bool = True,
+    proof_bundles: bool = True,
+    auto_contracts: list[str] | None = None,
+    require_replayable: bool = True,
+    min_contract_fit: float = 0.6,
+    min_reachability: float = 0.5,
+    min_realism: float = 0.55,
 ) -> ExplorationState:
     """Scan module for crashes and update state."""
     from ordeal.auto import scan_module
@@ -539,7 +630,21 @@ def explore_scan(
         property_overrides=property_overrides,
         relation_overrides=relation_overrides,
         contract_checks=contract_checks,
+        mode=mode,
+        seed_from_tests=seed_from_tests,
+        seed_from_fixtures=seed_from_fixtures,
+        seed_from_docstrings=seed_from_docstrings,
+        seed_from_code=seed_from_code,
+        seed_from_call_sites=seed_from_call_sites,
+        treat_any_as_weak=treat_any_as_weak,
+        proof_bundles=proof_bundles,
+        auto_contracts=auto_contracts,
+        require_replayable=require_replayable,
+        min_contract_fit=min_contract_fit,
+        min_reachability=min_reachability,
+        min_realism=min_realism,
     )
+    state.scan_mode = mode
     for fr in result.functions:
         fs = state.function(fr.name)
         fs.scanned = True
@@ -550,6 +655,14 @@ def explore_scan(
         fs.scan_replayable = fr.replayable
         fs.scan_replay_attempts = fr.replay_attempts
         fs.scan_replay_matches = fr.replay_matches
+        fs.scan_contract_fit = fr.contract_fit
+        fs.scan_reachability = fr.reachability
+        fs.scan_realism = fr.realism
+        fs.scan_sink_signal = fr.sink_signal
+        fs.scan_sink_categories = list(fr.sink_categories)
+        fs.scan_input_sources = list(fr.input_sources)
+        fs.scan_input_source = fr.input_source
+        fs.scan_proof_bundle = fr.proof_bundle
         if fr.contract_violations:
             fs.contract_violations = list(fr.contract_violations)
             fs.contract_violation_details = list(fr.contract_violation_details)
@@ -708,6 +821,19 @@ def explore(
     scan_property_overrides: dict[str, list[str]] | None = None,
     scan_relation_overrides: dict[str, list[str]] | None = None,
     scan_contract_checks: dict[str, list[Any]] | None = None,
+    scan_mode: str = "coverage_gap",
+    scan_seed_from_tests: bool = True,
+    scan_seed_from_fixtures: bool = True,
+    scan_seed_from_docstrings: bool = True,
+    scan_seed_from_code: bool = True,
+    scan_seed_from_call_sites: bool = True,
+    scan_treat_any_as_weak: bool = True,
+    scan_proof_bundles: bool = True,
+    scan_auto_contracts: list[str] | None = None,
+    scan_require_replayable: bool = True,
+    scan_min_contract_fit: float = 0.6,
+    scan_min_reachability: float = 0.5,
+    scan_min_realism: float = 0.55,
 ) -> ExplorationState:
     """Run all exploration strategies on a module.
 
@@ -813,6 +939,19 @@ def explore(
                 property_overrides=scan_property_overrides,
                 relation_overrides=scan_relation_overrides,
                 contract_checks=scan_contract_checks,
+                mode=scan_mode,
+                seed_from_tests=scan_seed_from_tests,
+                seed_from_fixtures=scan_seed_from_fixtures,
+                seed_from_docstrings=scan_seed_from_docstrings,
+                seed_from_code=scan_seed_from_code,
+                seed_from_call_sites=scan_seed_from_call_sites,
+                treat_any_as_weak=scan_treat_any_as_weak,
+                proof_bundles=scan_proof_bundles,
+                auto_contracts=scan_auto_contracts,
+                require_replayable=scan_require_replayable,
+                min_contract_fit=scan_min_contract_fit,
+                min_reachability=scan_min_reachability,
+                min_realism=scan_min_realism,
             )
             scan_hash = hash(("scanned", state.confidence))
             state.tree.checkpoint(

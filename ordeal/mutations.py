@@ -544,6 +544,50 @@ class Mutant:
         return advice
 
 
+def _mutant_semantic_tags(mutant: Mutant) -> list[str]:
+    """Infer coarse semantic tags for a surviving mutant."""
+    lowered = f"{mutant.description} {mutant.source_line}".lower()
+    tags: list[str] = []
+    if any(token in lowered for token in {"shell", "argv", "execute_command", "subprocess"}):
+        tags.append("shell")
+    if any(token in lowered for token in {"path", "quote", "cwd", "workdir", "upload"}):
+        tags.append("path")
+    if any(token in lowered for token in {"env", "environ", "setdefault", "home", "path="}):
+        tags.append("env")
+    if any(token in lowered for token in {"json", "payload", "tool_call", "normalize"}):
+        tags.append("json")
+    if any(token in lowered for token in {"http", "headers", "request", "response", "body"}):
+        tags.append("http")
+    if any(token in lowered for token in {"sql", "select ", "insert ", "update ", "delete "}):
+        tags.append("sql")
+    if mutant.operator in {"boundary", "comparison", "constant"} or any(
+        token in lowered for token in {"<", ">", "<=", ">=", "timeout", "limit", "count", "size"}
+    ):
+        tags.append("boundary")
+    if mutant.operator in {"logical", "negate", "remove_not", "swap_if_else"}:
+        tags.append("control_flow")
+    if mutant.operator in {"return_none", "delete_statement"}:
+        tags.append("behavior")
+    if not tags:
+        tags.append(mutant.operator)
+    return list(dict.fromkeys(tags))
+
+
+def _semantic_cluster_label(tag: str) -> str:
+    """Render one semantic survivor-cluster label."""
+    return {
+        "shell": "shell/argv construction",
+        "path": "path quoting or normalization",
+        "env": "environment shaping",
+        "json": "JSON/tool-call normalization",
+        "http": "HTTP request shaping",
+        "sql": "SQL construction",
+        "boundary": "boundary handling",
+        "control_flow": "control-flow behavior",
+        "behavior": "observable behavior",
+    }.get(tag, tag.replace("_", " "))
+
+
 # Multiple candidate values per type — distinct values so that a != b.
 # Each list is ordered: [interior, interior, interior, boundary].
 # Consecutive params get different values via index offset.
@@ -660,6 +704,8 @@ class MutationResult:
     preset_used: str | None = None
     concern: str | None = None
     timings: dict[str, float] = field(default_factory=dict)
+    promote_clusters_only: bool = True
+    cluster_min_size: int = 2
     diagnostics: dict[str, int] = field(
         default_factory=lambda: {
             "generated": 0,
@@ -707,6 +753,47 @@ class MutationResult:
     def score(self) -> float:
         """Kill ratio: 1.0 means every mutant was caught."""
         return self.killed / self.total if self.total > 0 else 1.0
+
+    def semantic_survivor_clusters(self) -> list[dict[str, Any]]:
+        """Group surviving mutants by coarse semantic boundary or sink."""
+        groups: dict[str, dict[str, Any]] = {}
+        for mutant in self.survived:
+            tags = _mutant_semantic_tags(mutant)
+            key = tags[0]
+            bucket = groups.setdefault(
+                key,
+                {
+                    "tag": key,
+                    "label": _semantic_cluster_label(key),
+                    "mutants": [],
+                    "operators": set(),
+                    "lines": set(),
+                },
+            )
+            bucket["mutants"].append(mutant)
+            bucket["operators"].add(mutant.operator)
+            bucket["lines"].add(mutant.line)
+
+        clusters = []
+        for bucket in groups.values():
+            clusters.append(
+                {
+                    "tag": bucket["tag"],
+                    "label": bucket["label"],
+                    "size": len(bucket["mutants"]),
+                    "operators": sorted(bucket["operators"]),
+                    "lines": sorted(bucket["lines"]),
+                    "mutants": list(bucket["mutants"]),
+                }
+            )
+        return sorted(clusters, key=lambda item: (-int(item["size"]), str(item["tag"])))
+
+    def promoted_survivor_clusters(self) -> list[dict[str, Any]]:
+        """Return survivor clusters strong enough to surface as main gaps."""
+        clusters = self.semantic_survivor_clusters()
+        if not self.promote_clusters_only:
+            return clusters
+        return [cluster for cluster in clusters if int(cluster["size"]) >= self.cluster_min_size]
 
     def filter_report(self) -> str:
         """Structured breakdown of the mutation pipeline for AI assistants.
@@ -794,10 +881,23 @@ class MutationResult:
         lines = [f"Mutation score: {self.killed}/{self.total} ({self.score:.0%})  [{meta}]"]
         if is_method:
             lines.append(f"  method target: {target_label}")
-        if self.survived:
+        promoted_clusters = self.promoted_survivor_clusters()
+        if self.survived and promoted_clusters:
             lines.append(
-                f"  {len(self.survived)} test gap(s) — "
-                "each is a code change your tests fail to catch:"
+                f"  {len(self.survived)} test gap(s); "
+                "promoted clusters highlight recurring weak boundaries:"
+            )
+            for cluster in promoted_clusters:
+                ops = ", ".join(cluster["operators"])
+                lines.append(
+                    f"    cluster: {cluster['label']} "
+                    f"({cluster['size']} survivor(s), ops: {ops})"
+                )
+        elif self.survived:
+            lines.append(
+                f"  {len(self.survived)} test gap(s) remain, "
+                "they are exploratory survivors, "
+                "but none cluster strongly enough to promote beyond test-gap guidance."
             )
         for m in self.survived:
             header = f"  GAP {m.location} [{m.operator}] {m.description}"
@@ -5088,6 +5188,8 @@ def mutate_and_test(
     test_filter: str | None = None,
     mutant_timeout: float | None = None,
     disk_mutation: bool | None = None,
+    promote_clusters_only: bool = True,
+    cluster_min_size: int = 2,
 ) -> MutationResult:
     """Apply mutations to an entire module and run *test_fn* against each.
 
@@ -5165,7 +5267,12 @@ def mutate_and_test(
             mutant_pairs = filtered
 
     result = MutationResult(
-        target=target, operators_used=operators, preset_used=used_preset, concern=concern
+        target=target,
+        operators_used=operators,
+        preset_used=used_preset,
+        concern=concern,
+        promote_clusters_only=promote_clusters_only,
+        cluster_min_size=cluster_min_size,
     )
 
     # Batch mode: single pytest session for all mutants (much faster)
@@ -5592,6 +5699,8 @@ def mutate_function_and_test(
     test_filter: str | None = None,
     mutant_timeout: float | None = None,
     disk_mutation: bool | None = None,
+    promote_clusters_only: bool = True,
+    cluster_min_size: int = 2,
 ) -> MutationResult:
     """Mutate a single function and run tests against each mutant.
 
@@ -5707,7 +5816,12 @@ def mutate_function_and_test(
 
     assert test_fn is not None
     result = MutationResult(
-        target=target, operators_used=operators, preset_used=used_preset, concern=concern
+        target=target,
+        operators_used=operators,
+        preset_used=used_preset,
+        concern=concern,
+        promote_clusters_only=promote_clusters_only,
+        cluster_min_size=cluster_min_size,
     )
 
     if auto_discovered_tests and mutant_pairs:
@@ -6085,6 +6199,8 @@ def mutate(
     test_filter: str | None = None,
     mutant_timeout: float | None = None,
     disk_mutation: bool | None = None,
+    promote_clusters_only: bool = True,
+    cluster_min_size: int = 2,
     resume: bool = False,
 ) -> MutationResult:
     """Unified mutation testing entry point — auto-detects function vs module.
@@ -6201,6 +6317,8 @@ def mutate(
         test_filter=test_filter,
         mutant_timeout=mutant_timeout,
         disk_mutation=resolved_disk_mutation,
+        promote_clusters_only=promote_clusters_only,
+        cluster_min_size=cluster_min_size,
     )
 
     # Save cache after fresh run — but NOT if the result came from the

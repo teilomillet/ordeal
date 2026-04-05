@@ -430,6 +430,9 @@ class TestScanModule:
         assert divide_result.replay_attempts == 2
         assert divide_result.replay_matches == 2
         assert divide_result.crash_category == "likely_bug"
+        assert divide_result.proof_bundle is not None
+        assert divide_result.proof_bundle["valid_input_witness"]["source"] == "boundary"
+        assert divide_result.proof_bundle["reproduction"]["replay_matches"] == 2
 
     def test_marks_unreplayed_crashes_as_speculative(self):
         calls = iter(range(10_000))
@@ -450,6 +453,25 @@ class TestScanModule:
         assert result.crash_category == "speculative_crash"
         assert result.replayable is False
         assert "WARN  flaky" in str(result)
+
+    def test_real_bug_mode_demotes_invalid_input_crashes(self):
+        def only_text(value: object) -> int:
+            return len(value.strip())  # type: ignore[union-attr]
+
+        result = _test_one_function(
+            "only_text",
+            only_text,
+            {"value": st.just(None)},
+            None,
+            max_examples=1,
+            check_return_type=False,
+            mode="real_bug",
+        )
+
+        assert result.passed is False
+        assert result.crash_category == "invalid_input_crash"
+        assert result.proof_bundle is not None
+        assert result.proof_bundle["contract_validity"]["category"] == "invalid_input_crash"
 
     def test_ignore_properties_suppresses_noisy_scan_warnings(self, monkeypatch):
         import ordeal.mine as mine_mod

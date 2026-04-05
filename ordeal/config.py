@@ -94,6 +94,19 @@ class ScanConfig:
 
     module: str
     max_examples: int = 50
+    mode: str = "coverage_gap"
+    min_contract_fit: float = 0.55
+    min_reachability: float = 0.45
+    min_realism: float = 0.55
+    require_replayable: bool = True
+    proof_bundles: bool = True
+    seed_from_tests: bool = True
+    seed_from_fixtures: bool = True
+    seed_from_docstrings: bool = True
+    seed_from_code: bool = True
+    seed_from_call_sites: bool = True
+    treat_any_as_weak: bool = True
+    auto_contracts: list[str] = field(default_factory=list)
     targets: list[str] = field(default_factory=list)
     include_private: bool = False
     fixtures: dict[str, str] = field(default_factory=dict)
@@ -163,6 +176,8 @@ class MutationConfig:
     equivalence_samples: int = 10
     test_filter: str | None = None  # pytest -k expression
     mutant_timeout: float | None = None  # seconds; abort generation if exceeded
+    promote_clusters_only: bool = True
+    cluster_min_size: int = 2
 
 
 @dataclass
@@ -257,6 +272,7 @@ class OrdealConfig:
 _VALID_CHECKPOINT_STRATEGIES = {"energy", "uniform", "recent"}
 _VALID_REPORT_FORMATS = {"json", "text", "both"}
 _VALID_AUDIT_VALIDATION_MODES = {"fast", "deep"}
+_VALID_SCAN_MODES = {"coverage_gap", "real_bug"}
 
 
 def _valid_presets() -> frozenset[str]:
@@ -411,6 +427,19 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
             ScanConfig(
                 module=s["module"],
                 max_examples=int(s.get("max_examples", 50)),
+                mode=str(s.get("mode", "coverage_gap")),
+                min_contract_fit=float(s.get("min_contract_fit", 0.55)),
+                min_reachability=float(s.get("min_reachability", 0.45)),
+                min_realism=float(s.get("min_realism", 0.55)),
+                require_replayable=bool(s.get("require_replayable", True)),
+                proof_bundles=bool(s.get("proof_bundles", True)),
+                seed_from_tests=bool(s.get("seed_from_tests", True)),
+                seed_from_fixtures=bool(s.get("seed_from_fixtures", True)),
+                seed_from_docstrings=bool(s.get("seed_from_docstrings", True)),
+                seed_from_code=bool(s.get("seed_from_code", True)),
+                seed_from_call_sites=bool(s.get("seed_from_call_sites", True)),
+                treat_any_as_weak=bool(s.get("treat_any_as_weak", True)),
+                auto_contracts=list(s.get("auto_contracts", [])),
                 targets=list(s.get("targets", [])),
                 include_private=bool(s.get("include_private", False)),
                 fixtures=s.get("fixtures", {}),
@@ -422,6 +451,26 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
                 relation_overrides=dict(s.get("relation_overrides", {})),
             )
         )
+        scan_cfg = scans[-1]
+        if scan_cfg.mode not in _VALID_SCAN_MODES:
+            raise ConfigError(
+                f"Invalid scan.{i}.mode: {scan_cfg.mode!r}. Must be one of: {_VALID_SCAN_MODES}"
+            )
+        if not (0.0 <= scan_cfg.min_contract_fit <= 1.0):
+            raise ConfigError(
+                f"scan.{i}.min_contract_fit must be between 0.0 and 1.0, "
+                f"got {scan_cfg.min_contract_fit}"
+            )
+        if not (0.0 <= scan_cfg.min_reachability <= 1.0):
+            raise ConfigError(
+                f"scan.{i}.min_reachability must be between 0.0 and 1.0, "
+                f"got {scan_cfg.min_reachability}"
+            )
+        if not (0.0 <= scan_cfg.min_realism <= 1.0):
+            raise ConfigError(
+                f"scan.{i}.min_realism must be between 0.0 and 1.0, "
+                f"got {scan_cfg.min_realism}"
+            )
 
     # -- Objects --
     object_cfgs: list[ObjectConfig] = []
@@ -530,7 +579,14 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
             equivalence_samples=int(m_raw.get("equivalence_samples", 10)),
             test_filter=m_raw.get("test_filter"),
             mutant_timeout=float(mt) if (mt := m_raw.get("mutant_timeout")) is not None else None,
+            promote_clusters_only=bool(m_raw.get("promote_clusters_only", True)),
+            cluster_min_size=int(m_raw.get("cluster_min_size", 2)),
         )
+        if mutations_cfg.cluster_min_size < 1:
+            raise ConfigError(
+                "mutations.cluster_min_size must be >= 1, "
+                f"got {mutations_cfg.cluster_min_size}"
+            )
 
     # -- Audit --
     audit_raw = raw.get("audit", {})

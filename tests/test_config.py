@@ -124,6 +124,74 @@ relation_overrides = { normalize = ["equivalent"] }
         assert scan.property_overrides == {"score": ["idempotent"]}
         assert scan.relation_overrides == {"normalize": ["equivalent"]}
 
+    def test_scan_config_supports_precision_controls(self, tmp_toml):
+        cfg = load_config(
+            tmp_toml(
+                """
+[[scan]]
+module = "myapp.scoring"
+mode = "real_bug"
+min_contract_fit = 0.8
+min_reachability = 0.7
+min_realism = 0.9
+require_replayable = true
+proof_bundles = true
+seed_from_tests = true
+seed_from_fixtures = false
+seed_from_docstrings = false
+seed_from_code = true
+seed_from_call_sites = true
+treat_any_as_weak = true
+auto_contracts = ["shell_safe", "json_roundtrip"]
+"""
+            )
+        )
+        scan = cfg.scan[0]
+        assert scan.mode == "real_bug"
+        assert scan.min_contract_fit == pytest.approx(0.8)
+        assert scan.min_reachability == pytest.approx(0.7)
+        assert scan.min_realism == pytest.approx(0.9)
+        assert scan.seed_from_fixtures is False
+        assert scan.seed_from_docstrings is False
+        assert scan.auto_contracts == ["shell_safe", "json_roundtrip"]
+
+    def test_invalid_scan_precision_controls(self, tmp_toml):
+        with pytest.raises(ConfigError, match="scan.0.mode"):
+            load_config(
+                tmp_toml(
+                    """
+[[scan]]
+module = "myapp.scoring"
+mode = "bogus"
+"""
+                )
+            )
+        with pytest.raises(ConfigError, match="scan.0.min_contract_fit"):
+            load_config(
+                tmp_toml(
+                    """
+[[scan]]
+module = "myapp.scoring"
+min_contract_fit = 1.5
+"""
+                )
+            )
+
+    def test_mutation_config_supports_cluster_promotion(self, tmp_toml):
+        cfg = load_config(
+            tmp_toml(
+                """
+[mutations]
+targets = ["myapp.scoring.compute"]
+promote_clusters_only = false
+cluster_min_size = 3
+"""
+            )
+        )
+        assert cfg.mutations is not None
+        assert cfg.mutations.promote_clusters_only is False
+        assert cfg.mutations.cluster_min_size == 3
+
     def test_object_and_contract_config_sections(self, tmp_toml):
         cfg = load_config(
             tmp_toml(

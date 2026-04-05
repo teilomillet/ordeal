@@ -29,7 +29,7 @@ from typing import Any, get_args, get_origin
 import hypothesis.strategies as st
 from hypothesis import given, settings
 
-from ordeal.auto import _get_public_functions, _infer_strategies
+from ordeal.auto import _call_sync, _get_public_functions, _infer_strategies
 from ordeal.introspection import safe_get_annotations
 
 _REL_TOL = 1e-9
@@ -501,8 +501,8 @@ def _check_deterministic(
     ce = None
     for kwargs in inputs[:50]:  # cap at 50 to keep runtime sane
         try:
-            out1 = fn(**kwargs)
-            out2 = fn(**kwargs)
+            out1 = _call_sync(fn, **kwargs)
+            out2 = _call_sync(fn, **kwargs)
             total += 1
             if _approx_equal(out1, out2):
                 holds += 1
@@ -542,7 +542,7 @@ def _check_idempotent(
         try:
             kwargs2 = dict(kwargs)
             kwargs2[first_param] = output
-            out2 = fn(**kwargs2)
+            out2 = _call_sync(fn, **kwargs2)
             total += 1
             if _approx_equal(out2, output):
                 holds += 1
@@ -581,7 +581,7 @@ def _check_involution(
         try:
             kwargs2 = dict(kwargs)
             kwargs2[first_param] = output
-            out2 = fn(**kwargs2)
+            out2 = _call_sync(fn, **kwargs2)
             total += 1
             if _approx_equal(out2, kwargs[first_param]):
                 holds += 1
@@ -749,7 +749,7 @@ def _check_commutative(
     for kwargs, out in zip(inputs[:50], outputs[:50]):
         try:
             swapped = {a_name: kwargs[b_name], b_name: kwargs[a_name]}
-            out_swapped = fn(**swapped)
+            out_swapped = _call_sync(fn, **swapped)
             total += 1
             if _approx_equal(out, out_swapped):
                 holds += 1
@@ -789,10 +789,10 @@ def _check_associative(
         b = inputs[i + 1][a_name]
         c = inputs[i + 2][a_name]
         try:
-            bc = fn(**{a_name: b, b_name: c})
-            left = fn(**{a_name: a, b_name: bc})
-            ab = fn(**{a_name: a, b_name: b})
-            right = fn(**{a_name: ab, b_name: c})
+            bc = _call_sync(fn, **{a_name: b, b_name: c})
+            left = _call_sync(fn, **{a_name: a, b_name: bc})
+            ab = _call_sync(fn, **{a_name: a, b_name: b})
+            right = _call_sync(fn, **{a_name: ab, b_name: c})
             total += 1
             if _approx_equal(left, right):
                 holds += 1
@@ -1073,7 +1073,7 @@ def _check_null_on_null(
         base_kwargs = dict(inputs[0])
         base_kwargs[param_name] = None
         try:
-            result = fn(**base_kwargs)
+            result = _call_sync(fn, **base_kwargs)
             total += 1
             if result is None:
                 holds += 1
@@ -1184,7 +1184,7 @@ def mine(
             if collector:
                 collector.start()
             try:
-                result = fn(**kwargs)
+                result = _call_sync(fn, **kwargs)
             finally:
                 if collector:
                     edges = collector.stop()
@@ -1231,7 +1231,7 @@ def mine(
                 mutated = mutate_inputs(seed_input, mutation_rng)
                 collector.start()
                 try:
-                    result = fn(**mutated)
+                    result = _call_sync(fn, **mutated)
                 except Exception:
                     collector.stop()
                     continue

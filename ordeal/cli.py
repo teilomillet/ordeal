@@ -120,6 +120,19 @@ class ScanRuntimeDefaults:
     """Resolved scan runtime config for one target module."""
 
     max_examples: int
+    mode: str = "coverage_gap"
+    seed_from_tests: bool = True
+    seed_from_fixtures: bool = True
+    seed_from_docstrings: bool = True
+    seed_from_code: bool = True
+    seed_from_call_sites: bool = True
+    treat_any_as_weak: bool = True
+    proof_bundles: bool = True
+    require_replayable: bool = True
+    auto_contracts: list[str] = field(default_factory=list)
+    min_contract_fit: float = 0.55
+    min_reachability: float = 0.45
+    min_realism: float = 0.55
     fixtures: dict[str, Any] | None = None
     targets: list[str] = field(default_factory=list)
     include_private: bool = False
@@ -1108,6 +1121,19 @@ def _resolve_scan_runtime_defaults(
     module_name = _scan_base_module(target)
     warnings = []
     effective_examples = requested_examples
+    mode = "coverage_gap"
+    seed_from_tests = True
+    seed_from_fixtures = True
+    seed_from_docstrings = True
+    seed_from_code = True
+    seed_from_call_sites = True
+    treat_any_as_weak = True
+    proof_bundles = True
+    require_replayable = True
+    auto_contracts: list[str] = []
+    min_contract_fit = 0.55
+    min_reachability = 0.45
+    min_realism = 0.55
     targets: list[str] = []
     include_private = False
     fixtures = None
@@ -1125,6 +1151,19 @@ def _resolve_scan_runtime_defaults(
     if not config_path.exists():
         return ScanRuntimeDefaults(
             max_examples=effective_examples,
+            mode=mode,
+            seed_from_tests=seed_from_tests,
+            seed_from_fixtures=seed_from_fixtures,
+            seed_from_docstrings=seed_from_docstrings,
+            seed_from_code=seed_from_code,
+            seed_from_call_sites=seed_from_call_sites,
+            treat_any_as_weak=treat_any_as_weak,
+            proof_bundles=proof_bundles,
+            require_replayable=require_replayable,
+            auto_contracts=list(auto_contracts),
+            min_contract_fit=min_contract_fit,
+            min_reachability=min_reachability,
+            min_realism=min_realism,
             targets=targets,
             include_private=include_private,
             fixtures=fixtures,
@@ -1142,6 +1181,19 @@ def _resolve_scan_runtime_defaults(
         warnings.extend(_load_fixture_registry_warnings())
         return ScanRuntimeDefaults(
             max_examples=effective_examples,
+            mode=mode,
+            seed_from_tests=seed_from_tests,
+            seed_from_fixtures=seed_from_fixtures,
+            seed_from_docstrings=seed_from_docstrings,
+            seed_from_code=seed_from_code,
+            seed_from_call_sites=seed_from_call_sites,
+            treat_any_as_weak=treat_any_as_weak,
+            proof_bundles=proof_bundles,
+            require_replayable=require_replayable,
+            auto_contracts=list(auto_contracts),
+            min_contract_fit=min_contract_fit,
+            min_reachability=min_reachability,
+            min_realism=min_realism,
             targets=targets,
             include_private=include_private,
             fixtures=fixtures,
@@ -1174,6 +1226,19 @@ def _resolve_scan_runtime_defaults(
     if match is None:
         return ScanRuntimeDefaults(
             max_examples=effective_examples,
+            mode=mode,
+            seed_from_tests=seed_from_tests,
+            seed_from_fixtures=seed_from_fixtures,
+            seed_from_docstrings=seed_from_docstrings,
+            seed_from_code=seed_from_code,
+            seed_from_call_sites=seed_from_call_sites,
+            treat_any_as_weak=treat_any_as_weak,
+            proof_bundles=proof_bundles,
+            require_replayable=require_replayable,
+            auto_contracts=list(auto_contracts),
+            min_contract_fit=min_contract_fit,
+            min_reachability=min_reachability,
+            min_realism=min_realism,
             targets=targets,
             include_private=include_private,
             fixtures=fixtures,
@@ -1187,6 +1252,19 @@ def _resolve_scan_runtime_defaults(
 
     if allow_config_override:
         effective_examples = match.max_examples
+    mode = match.mode
+    seed_from_tests = bool(match.seed_from_tests)
+    seed_from_fixtures = bool(match.seed_from_fixtures)
+    seed_from_docstrings = bool(match.seed_from_docstrings)
+    seed_from_code = bool(match.seed_from_code)
+    seed_from_call_sites = bool(match.seed_from_call_sites)
+    treat_any_as_weak = bool(match.treat_any_as_weak)
+    proof_bundles = bool(match.proof_bundles)
+    require_replayable = bool(match.require_replayable)
+    auto_contracts = list(match.auto_contracts)
+    min_contract_fit = float(match.min_contract_fit)
+    min_reachability = float(match.min_reachability)
+    min_realism = float(getattr(match, "min_realism", 0.55))
     targets = list(match.targets)
     include_private = bool(match.include_private)
     fixtures = _parse_scan_fixture_specs(match.fixtures)
@@ -1202,6 +1280,19 @@ def _resolve_scan_runtime_defaults(
     }
     return ScanRuntimeDefaults(
         max_examples=effective_examples,
+        mode=mode,
+        seed_from_tests=seed_from_tests,
+        seed_from_fixtures=seed_from_fixtures,
+        seed_from_docstrings=seed_from_docstrings,
+        seed_from_code=seed_from_code,
+        seed_from_call_sites=seed_from_call_sites,
+        treat_any_as_weak=treat_any_as_weak,
+        proof_bundles=proof_bundles,
+        require_replayable=require_replayable,
+        auto_contracts=list(auto_contracts),
+        min_contract_fit=min_contract_fit,
+        min_reachability=min_reachability,
+        min_realism=min_realism,
         targets=targets,
         include_private=include_private,
         fixtures=fixtures,
@@ -1255,6 +1346,19 @@ def _run_configured_scans(
                 _stderr(f"warning: contract config failed for {scan_cfg.module}: {exc}\n")
         scan_kwargs: dict[str, Any] = {
             "max_examples": scan_cfg.max_examples,
+            "mode": scan_cfg.mode,
+            "seed_from_tests": scan_cfg.seed_from_tests,
+            "seed_from_fixtures": scan_cfg.seed_from_fixtures,
+            "seed_from_docstrings": scan_cfg.seed_from_docstrings,
+            "seed_from_code": scan_cfg.seed_from_code,
+            "seed_from_call_sites": scan_cfg.seed_from_call_sites,
+            "treat_any_as_weak": scan_cfg.treat_any_as_weak,
+            "proof_bundles": scan_cfg.proof_bundles,
+            "auto_contracts": scan_cfg.auto_contracts,
+            "require_replayable": scan_cfg.require_replayable,
+            "min_contract_fit": scan_cfg.min_contract_fit,
+            "min_reachability": scan_cfg.min_reachability,
+            "min_realism": getattr(scan_cfg, "min_realism", 0.55),
             "targets": scan_cfg.targets,
             "include_private": scan_cfg.include_private,
             "fixtures": fixtures,
@@ -1286,6 +1390,27 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         scan_target,
         requested_examples=args.max_examples,
         allow_config_override=allow_config_override,
+    )
+    scan_mode = str(getattr(args, "mode", None) or runtime_defaults.mode)
+    scan_seed_from_tests = (
+        runtime_defaults.seed_from_tests
+        if getattr(args, "seed_from_tests", None) is None
+        else bool(args.seed_from_tests)
+    )
+    scan_min_contract_fit = float(
+        getattr(args, "min_contract_fit", None)
+        if getattr(args, "min_contract_fit", None) is not None
+        else runtime_defaults.min_contract_fit
+    )
+    scan_min_reachability = float(
+        getattr(args, "min_reachability", None)
+        if getattr(args, "min_reachability", None) is not None
+        else runtime_defaults.min_reachability
+    )
+    scan_min_realism = float(
+        getattr(args, "min_realism", None)
+        if getattr(args, "min_realism", None) is not None
+        else runtime_defaults.min_realism
     )
     explicit_target = ":" in scan_target
     scan_targets = [scan_target] if explicit_target else list(runtime_defaults.targets)
@@ -1359,6 +1484,19 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             scan_property_overrides=scan_property_overrides,
             scan_relation_overrides=scan_relation_overrides,
             scan_contract_checks=runtime_defaults.contract_checks,
+            scan_mode=scan_mode,
+            scan_seed_from_tests=scan_seed_from_tests,
+            scan_seed_from_fixtures=runtime_defaults.seed_from_fixtures,
+            scan_seed_from_docstrings=runtime_defaults.seed_from_docstrings,
+            scan_seed_from_code=runtime_defaults.seed_from_code,
+            scan_seed_from_call_sites=runtime_defaults.seed_from_call_sites,
+            scan_treat_any_as_weak=runtime_defaults.treat_any_as_weak,
+            scan_proof_bundles=runtime_defaults.proof_bundles,
+            scan_require_replayable=runtime_defaults.require_replayable,
+            scan_auto_contracts=runtime_defaults.auto_contracts,
+            scan_min_contract_fit=scan_min_contract_fit,
+            scan_min_reachability=scan_min_reachability,
+            scan_min_realism=scan_min_realism,
         )
 
     if not args.json:
@@ -2397,6 +2535,19 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
             )
             scan_kwargs: dict[str, Any] = {
                 "max_examples": runtime_defaults.max_examples,
+                "mode": runtime_defaults.mode,
+                "seed_from_tests": runtime_defaults.seed_from_tests,
+                "seed_from_fixtures": runtime_defaults.seed_from_fixtures,
+                "seed_from_docstrings": runtime_defaults.seed_from_docstrings,
+                "seed_from_code": runtime_defaults.seed_from_code,
+                "seed_from_call_sites": runtime_defaults.seed_from_call_sites,
+                "treat_any_as_weak": runtime_defaults.treat_any_as_weak,
+                "proof_bundles": runtime_defaults.proof_bundles,
+                "require_replayable": runtime_defaults.require_replayable,
+                "auto_contracts": runtime_defaults.auto_contracts,
+                "min_contract_fit": runtime_defaults.min_contract_fit,
+                "min_reachability": runtime_defaults.min_reachability,
+                "min_realism": runtime_defaults.min_realism,
                 "fixtures": runtime_defaults.fixtures,
                 "expected_failures": runtime_defaults.expected_failures,
             }
@@ -2427,11 +2578,7 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
 
         for function in result.functions:
             qualname = f"{module}.{function.name}"
-            crash_category = (
-                function.crash_category
-                if getattr(function, "crash_category", None) is not None
-                else ("likely_bug" if function.replayable else "speculative_crash")
-            )
+            crash_category = getattr(function, "crash_category", None) or "speculative_crash"
             if not function.passed and crash_category == "likely_bug":
                 findings.append(
                     {
@@ -2443,19 +2590,39 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
                         "summary": f"{qualname}: crash safety failed",
                         "error": function.error,
                         "failing_args": function.failing_args,
+                        "contract_fit": function.contract_fit,
+                        "reachability": function.reachability,
+                        "realism": function.realism,
+                        "sink_signal": function.sink_signal,
+                        "input_source": function.input_source,
+                        "proof_bundle": function.proof_bundle,
                     }
                 )
             elif not function.passed:
                 findings.append(
                     {
                         "kind": "crash",
-                        "category": "speculative_crash",
+                        "category": crash_category,
                         "module": module,
                         "function": function.name,
                         "qualname": qualname,
-                        "summary": f"{qualname}: unreplayed crash on random inputs",
+                        "summary": (
+                            f"{qualname}: crash still looks like a coverage gap"
+                            if crash_category == "coverage_gap"
+                            else (
+                                f"{qualname}: crash currently looks driven by invalid input"
+                                if crash_category == "invalid_input_crash"
+                                else f"{qualname}: unreplayed crash on random inputs"
+                            )
+                        ),
                         "error": function.error,
                         "failing_args": function.failing_args,
+                        "contract_fit": function.contract_fit,
+                        "reachability": function.reachability,
+                        "realism": function.realism,
+                        "sink_signal": function.sink_signal,
+                        "input_source": function.input_source,
+                        "proof_bundle": function.proof_bundle,
                     }
                 )
             for violation in function.property_violations:
@@ -2479,7 +2646,7 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
                     }
                 )
 
-    if any(item.get("category") == "likely_bug" for item in findings):
+    if any(item.get("category") in {"likely_bug", "semantic_contract"} for item in findings):
         status = "findings found"
     elif findings:
         status = "exploratory findings"
@@ -2953,6 +3120,8 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
     mutant_timeout: float | None = args.mutant_timeout
     disk_mutation: bool | None = args.disk_mutation
     resume: bool = args.resume
+    promote_clusters_only = True
+    cluster_min_size = 2
 
     # Fall back to config file if no targets given
     if not targets:
@@ -3044,6 +3213,8 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
             test_filter = cfg.mutations.test_filter
         if mutant_timeout is None and cfg.mutations.mutant_timeout is not None:
             mutant_timeout = cfg.mutations.mutant_timeout
+        promote_clusters_only = cfg.mutations.promote_clusters_only
+        cluster_min_size = cfg.mutations.cluster_min_size
 
     # Default preset when nothing specified
     if preset is None and operators is None:
@@ -3074,6 +3245,8 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
                         test_filter=test_filter,
                         mutant_timeout=mutant_timeout,
                         disk_mutation=disk_mutation,
+                        promote_clusters_only=promote_clusters_only,
+                        cluster_min_size=cluster_min_size,
                         resume=resume,
                     )
             else:
@@ -3087,6 +3260,8 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
                     test_filter=test_filter,
                     mutant_timeout=mutant_timeout,
                     disk_mutation=disk_mutation,
+                    promote_clusters_only=promote_clusters_only,
+                    cluster_min_size=cluster_min_size,
                     resume=resume,
                 )
         except NoTestsFoundError as e:
@@ -3218,6 +3393,10 @@ def _format_scan_summary(state: Any) -> str:
     """Render a concise, action-oriented summary for ``ordeal scan``."""
     lines = [f"ordeal scan: {state.module}"]
     details = _scan_report_details(state)
+    coverage_gaps = [detail for detail in details if detail.get("category") == "coverage_gap"]
+    invalid_inputs = [
+        detail for detail in details if detail.get("category") == "invalid_input_crash"
+    ]
     exploratory_crashes = [
         detail for detail in details if detail.get("category") == "speculative_crash"
     ]
@@ -3229,8 +3408,12 @@ def _format_scan_summary(state: Any) -> str:
     ]
     if state.findings:
         status = "findings found"
+    elif coverage_gaps:
+        status = "coverage gaps found"
     elif exploratory_crashes or exploratory_properties:
         status = "exploratory findings"
+    elif invalid_inputs:
+        status = "invalid-input crashes observed"
     elif expected:
         status = "expected preconditions observed"
     else:
@@ -3246,6 +3429,14 @@ def _format_scan_summary(state: Any) -> str:
             lines.append(f"    - {finding}")
     else:
         lines.append("  findings: none promoted")
+        if coverage_gaps:
+            lines.append("  coverage gaps:")
+            for detail in coverage_gaps[:5]:
+                lines.append(f"    - {detail.get('summary', detail.get('function', '?'))}")
+        if invalid_inputs:
+            lines.append("  invalid-input crashes:")
+            for detail in invalid_inputs[:5]:
+                lines.append(f"    - {detail.get('summary', detail.get('function', '?'))}")
         if exploratory_crashes:
             lines.append("  exploratory crashes:")
             for detail in exploratory_crashes[:5]:
@@ -3285,7 +3476,12 @@ def _scan_report_details(state: Any) -> list[dict[str, Any]]:
     return []
 
 
-_SPECULATIVE_SCAN_CATEGORIES = {"speculative_crash", "speculative_property"}
+_SPECULATIVE_SCAN_CATEGORIES = {
+    "speculative_crash",
+    "speculative_property",
+    "invalid_input_crash",
+    "coverage_gap",
+}
 
 
 def _is_speculative_scan_detail(detail: Mapping[str, Any]) -> bool:
@@ -3547,7 +3743,7 @@ def _render_regression_stub(
     raw_input = counterexample.get("input")
     input_args = raw_input if isinstance(raw_input, dict) else None
 
-    if kind == "crash" and isinstance(failing_args, dict):
+    if kind in {"crash", "coverage_gap", "contract"} and isinstance(failing_args, dict):
         lines.append(f"    args = {_python_literal(failing_args, trim=trim)}")
         lines.append(f"    {function}(**args)")
         return "\n".join(lines)
@@ -3596,6 +3792,24 @@ def _render_regression_stub(
     return None
 
 
+def _append_proof_bundle(lines: list[str], detail: dict[str, Any]) -> None:
+    """Render proof-bundle details when present."""
+    proof = detail.get("proof_bundle")
+    if not isinstance(proof, Mapping):
+        return
+    witness = proof.get("valid_input_witness")
+    failing_path = proof.get("failing_path")
+    impact = proof.get("likely_impact")
+    if witness:
+        lines.extend(["", "Proof bundle:"])
+        lines.extend(_json_block(witness))
+    if failing_path:
+        lines.extend(["", "Failing path:"])
+        lines.extend(_json_block(failing_path))
+    if impact:
+        lines.append(f"- Likely impact: {impact}")
+
+
 def _render_finding_section(detail: dict[str, Any]) -> list[str]:
     """Render one finding block for a Markdown dossier."""
     qualname = detail.get("qualname") or detail.get("function", "?")
@@ -3636,6 +3850,13 @@ def _render_finding_section(detail: dict[str, Any]) -> list[str]:
     if kind == "crash":
         error = detail.get("error") or "unknown error"
         lines.append(f"- Evidence: `{error}`")
+        if detail.get("contract_fit") is not None:
+            lines.append(
+                "- Ranking:"
+                f" contract fit={float(detail.get('contract_fit')):.0%},"
+                f" reachability={float(detail.get('reachability') or 0.0):.0%},"
+                f" realism={float(detail.get('realism') or 0.0):.0%}"
+            )
         if detail.get("replay_attempts"):
             lines.append(
                 "- Replay:"
@@ -3643,12 +3864,16 @@ def _render_finding_section(detail: dict[str, Any]) -> list[str]:
                 " matching replays"
             )
         lines.append(
-            "- Why this matters: the function crashes under generated inputs,"
-            " so basic robustness is not yet established."
+            "- Why this matters: "
+            + str(
+                detail.get("proof_bundle", {}).get("likely_impact")
+                or "the function crashes under generated inputs."
+            )
         )
         if detail.get("failing_args"):
             lines.extend(["", "Failing input:"])
             lines.extend(_json_block(detail["failing_args"]))
+        _append_proof_bundle(lines, detail)
         stub = _render_regression_stub(module, detail, trim=True)
         if stub:
             lines.extend(["", "Regression test stub:"])
@@ -3663,6 +3888,38 @@ def _render_finding_section(detail: dict[str, Any]) -> list[str]:
                     if detail.get("replayable")
                     else f"- Re-run `{qualname}` with the recorded input to confirm the failure"
                 ),
+            ]
+        )
+        return lines
+
+    if kind == "coverage_gap":
+        lines.append(f"- Evidence: `{detail.get('error') or 'gap-triggering crash'}`")
+        lines.append(
+            "- Ranking:"
+            f" contract fit={float(detail.get('contract_fit') or 0.0):.0%},"
+            f" reachability={float(detail.get('reachability') or 0.0):.0%},"
+            f" realism={float(detail.get('realism') or 0.0):.0%}"
+        )
+        _append_proof_bundle(lines, detail)
+        lines.extend(
+            [
+                "",
+                "Next steps:",
+                f"- Add direct tests or fixtures for `{qualname}`",
+                f"- Re-scan `{qualname}` in `--mode real_bug` once valid inputs are seeded",
+            ]
+        )
+        return lines
+
+    if kind == "contract":
+        lines.append(f"- Evidence: `{detail.get('summary', title)}`")
+        _append_proof_bundle(lines, detail)
+        lines.extend(
+            [
+                "",
+                "Next steps:",
+                f"- Add a direct regression for `{qualname}` around the semantic sink",
+                f"- Re-run `ordeal scan {module} --mode real_bug`",
             ]
         )
         return lines
@@ -3785,6 +4042,13 @@ def _build_scan_report(state: Any) -> dict[str, Any]:
         for detail in _scan_report_details(state)
     ]
     promoted_count = len(getattr(state, "findings", []))
+    semantic_contract_count = sum(
+        1 for detail in details if detail.get("category") == "semantic_contract"
+    )
+    coverage_gap_count = sum(1 for detail in details if detail.get("category") == "coverage_gap")
+    invalid_input_count = sum(
+        1 for detail in details if detail.get("category") == "invalid_input_crash"
+    )
     exploratory_crash_count = sum(
         1 for detail in details if detail.get("category") == "speculative_crash"
     )
@@ -3811,6 +4075,9 @@ def _build_scan_report(state: Any) -> dict[str, Any]:
         "summary": [
             f"Checked: {', '.join(_scan_checked_items(state))}",
             f"Promoted findings: {promoted_count}",
+            f"Semantic contracts: {semantic_contract_count}",
+            f"Coverage gaps: {coverage_gap_count}",
+            f"Invalid-input crashes: {invalid_input_count}",
             f"Exploratory crashes: {exploratory_crash_count}",
             f"Exploratory properties: {exploratory_property_count}",
             f"Expected precondition failures: {expected_count}",
@@ -4162,6 +4429,12 @@ def _detail_confidence(detail: Mapping[str, Any]) -> float | None:
         except (TypeError, ValueError):
             return None
     value = detail.get("mutation_score")
+    if value is not None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    value = detail.get("contract_fit")
     if value is not None:
         try:
             return float(value)
@@ -5684,6 +5957,36 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     type=int,
                     default=50,
                     help="Examples per function (default: 50)",
+                ),
+                _arg(
+                    "--mode",
+                    choices=("coverage_gap", "real_bug"),
+                    default=None,
+                    help="Promotion mode: gap-oriented or strict real-bug ranking",
+                ),
+                _arg(
+                    "--seed-from-tests",
+                    action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="Learn valid input shapes from adjacent pytest files before fuzzing",
+                ),
+                _arg(
+                    "--min-contract-fit",
+                    type=float,
+                    default=None,
+                    help="Minimum contract-fit score required for promotion",
+                ),
+                _arg(
+                    "--min-reachability",
+                    type=float,
+                    default=None,
+                    help="Minimum reachability score required for promotion",
+                ),
+                _arg(
+                    "--min-realism",
+                    type=float,
+                    default=None,
+                    help="Minimum semantic-realism score required for promotion",
                 ),
                 _arg(
                     "--workers",

@@ -1855,9 +1855,7 @@ scan_max_examples = 12
             module,
             *,
             max_examples=50,
-            check_return_type=True,
-            fixtures=None,
-            expected_failures=None,
+            **kwargs,
         ):
             scan_calls.append((str(module), max_examples))
             return ScanResult(
@@ -2136,6 +2134,7 @@ scan_max_examples = 12
                         passed=False,
                         error="boom",
                         failing_args={"x": -1},
+                        crash_category="likely_bug",
                         replayable=True,
                         replay_attempts=2,
                         replay_matches=2,

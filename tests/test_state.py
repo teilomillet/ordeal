@@ -44,7 +44,7 @@ class TestExplorationStateSerialization:
         unreplayed.scan_replayable = False
         unreplayed.scan_crash_category = "speculative_crash"
 
-        assert state.findings == ["normalize: crashes on random inputs"]
+        assert state.findings == ["normalize: crashes on realistic inputs"]
         assert "flaky: unreplayed crash on random inputs" in state.exploratory_findings
 
         categories = {
@@ -60,6 +60,29 @@ class TestExplorationStateSerialization:
         restored = ExplorationState.from_json(state.to_json())
         assert restored.functions["normalize"].scan_crash_category == "likely_bug"
         assert restored.functions["flaky"].scan_crash_category == "speculative_crash"
+
+    def test_finding_details_preserve_scan_evidence_payloads(self):
+        state = ExplorationState("pkg.mod")
+        fs = state.function("render")
+        fs.scanned = True
+        fs.crash_free = False
+        fs.scan_crash_category = "coverage_gap"
+        fs.scan_contract_fit = 0.72
+        fs.scan_reachability = 0.85
+        fs.scan_realism = 1.0
+        fs.scan_sink_signal = 1.0
+        fs.scan_sink_categories = ["shell", "path"]
+        fs.scan_input_sources = [{"source": "test", "evidence": "test_mod.py:10"}]
+        fs.scan_input_source = "test"
+        fs.scan_proof_bundle = {"likely_impact": "command construction may break execution"}
+
+        detail = next(item for item in state.finding_details if item["function"] == "render")
+        assert detail["sink_categories"] == ["shell", "path"]
+        assert detail["input_sources"] == [{"source": "test", "evidence": "test_mod.py:10"}]
+        assert (
+            detail["proof_bundle"]["likely_impact"]
+            == "command construction may break execution"
+        )
 
     def test_explore_scan_surfaces_contract_violations(self, monkeypatch):
         import ordeal.auto as auto_mod

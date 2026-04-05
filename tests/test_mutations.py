@@ -138,3 +138,59 @@ def test_review_signature_refreshes_shadowed_local_modules(tmp_path_factory, mon
         )
     finally:
         _clear_module_family("reviewpkg")
+
+
+def test_mutation_result_promotes_only_clustered_survivors_by_default():
+    result = mutations.MutationResult(
+        target="pkg.mod.build",
+        mutants=[
+            mutations.Mutant(
+                operator="comparison",
+                description="<= -> <",
+                line=10,
+                col=4,
+                source_line="if timeout <= limit:",
+            ),
+            mutations.Mutant(
+                operator="boundary",
+                description="10 -> 11",
+                line=12,
+                col=8,
+                source_line="timeout = min(timeout, 10)",
+            ),
+            mutations.Mutant(
+                operator="delete_statement",
+                description="remove assignment",
+                line=20,
+                col=2,
+                source_line="result = build_shell_command(path)",
+            ),
+        ],
+    )
+
+    promoted = result.promoted_survivor_clusters()
+    assert len(promoted) == 1
+    assert promoted[0]["tag"] == "boundary"
+    summary = result.summary()
+    assert "cluster: boundary handling (2 survivor(s)" in summary
+    assert "exploratory survivor(s) remain" not in summary
+
+
+def test_mutation_result_can_expose_single_survivors_when_cluster_gate_disabled():
+    result = mutations.MutationResult(
+        target="pkg.mod.build",
+        promote_clusters_only=False,
+        mutants=[
+            mutations.Mutant(
+                operator="delete_statement",
+                description="remove assignment",
+                line=20,
+                col=2,
+                source_line="result = build_shell_command(path)",
+            )
+        ],
+    )
+
+    promoted = result.promoted_survivor_clusters()
+    assert len(promoted) == 1
+    assert promoted[0]["tag"] in {"shell", "path", "behavior"}

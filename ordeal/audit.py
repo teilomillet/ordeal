@@ -2028,9 +2028,13 @@ def _measure_audit_coverages_with_coverage_py(
 
     script = """
 import importlib.util
+import contextlib
+import inspect
 import json
 import sys
 import tempfile
+from types import SimpleNamespace
+from typing import Literal, Union, get_args, get_origin
 from pathlib import Path
 
 import coverage
@@ -2071,7 +2075,88 @@ def run_generated_suite(test_files):
     payload = {"return_code": 0, "coverage": None, "error": None}
     cov_json = Path(tempfile.mkstemp(prefix="ordeal_cov_raw_", suffix=".json")[1])
     cov = coverage.Coverage(source=[module_name], config_file=False, data_file=None)
+    original_fuzz = None
+    original_auto_fuzz = None
+    original_quickcheck = None
+    ordeal = None
+    ordeal_auto = None
+    ordeal_quickcheck = None
     try:
+        import ordeal
+        import ordeal.auto as ordeal_auto
+        import ordeal.quickcheck as ordeal_quickcheck
+
+        original_fuzz = ordeal.fuzz
+        original_auto_fuzz = ordeal_auto.fuzz
+        original_quickcheck = ordeal_quickcheck.quickcheck
+
+        def example_value(annotation):
+            if annotation in {inspect._empty, None, object}:
+                return None
+            origin = get_origin(annotation)
+            if origin is Literal:
+                values = get_args(annotation)
+                return values[0] if values else None
+            if origin is Union:
+                for option in get_args(annotation):
+                    if option is type(None):
+                        continue
+                    return example_value(option)
+                return None
+            if origin is list:
+                return []
+            if origin is tuple:
+                return ()
+            if origin is dict:
+                return {}
+            if origin is set:
+                return set()
+            if annotation is int:
+                return 1
+            if annotation is float:
+                return 1.0
+            if annotation is str:
+                return "x"
+            if annotation is bool:
+                return True
+            if annotation is bytes:
+                return b"x"
+            return None
+
+        def call_kwargs(fn):
+            kwargs = {}
+            for name, param in inspect.signature(fn).parameters.items():
+                if param.default is not inspect._empty:
+                    kwargs[name] = param.default
+                else:
+                    kwargs[name] = example_value(param.annotation)
+            return kwargs
+
+        def fuzz_smoke(target, *args, **kwargs):
+            try:
+                target(**call_kwargs(target))
+            except Exception as exc:
+                return SimpleNamespace(
+                    passed=False,
+                    summary=lambda: f"{type(exc).__name__}: {exc}",
+                )
+            return SimpleNamespace(passed=True, summary=lambda: "smoke")
+
+        def quickcheck_smoke(*decorator_args, **decorator_kwargs):
+            def decorator(fn):
+                def wrapped(*args, **kwargs):
+                    return fn(**call_kwargs(fn))
+
+                return wrapped
+
+            if decorator_args and callable(decorator_args[0]) and not decorator_kwargs:
+                return decorator(decorator_args[0])
+            return decorator
+
+        ordeal.fuzz = fuzz_smoke
+        ordeal_auto.fuzz = fuzz_smoke
+        ordeal_quickcheck.quickcheck = quickcheck_smoke
+
         cov.start()
         for index, test_path in enumerate(test_files):
             spec = importlib.util.spec_from_file_location(f"_ordeal_generated_{index}", test_path)
@@ -2093,6 +2178,12 @@ def run_generated_suite(test_files):
             cov.stop()
         except Exception:
             pass
+        with contextlib.suppress(Exception):
+            ordeal.fuzz = original_fuzz
+        with contextlib.suppress(Exception):
+            ordeal_auto.fuzz = original_auto_fuzz
+        with contextlib.suppress(Exception):
+            ordeal_quickcheck.quickcheck = original_quickcheck
 
     try:
         cov.json_report(outfile=str(cov_json))

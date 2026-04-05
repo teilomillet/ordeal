@@ -98,6 +98,7 @@ class ScanConfig:
     min_contract_fit: float = 0.55
     min_reachability: float = 0.45
     min_realism: float = 0.55
+    min_fixture_completeness: float = 0.0
     require_replayable: bool = True
     proof_bundles: bool = True
     seed_from_tests: bool = True
@@ -187,6 +188,9 @@ class ObjectConfig:
     target: str
     factory: str | None = None
     setup: str | None = None
+    state_factory: str | None = None
+    teardown: str | None = None
+    harness: str = "fresh"
     scenarios: list[str] = field(default_factory=list)
     methods: list[str] = field(default_factory=list)
     include_private: bool = False
@@ -211,6 +215,9 @@ class AuditTargetConfig:
     target: str
     factory: str | None = None
     setup: str | None = None
+    state_factory: str | None = None
+    teardown: str | None = None
+    harness: str = "fresh"
     scenarios: list[str] = field(default_factory=list)
     methods: list[str] = field(default_factory=list)
     include_private: bool = False
@@ -226,6 +233,7 @@ class AuditConfig:
     max_examples: int = 20
     workers: int = 1
     validation_mode: str = "fast"
+    min_fixture_completeness: float = 0.0
     show_generated: bool = False
     save_generated: str | None = None
     write_gaps_dir: str | None = None
@@ -317,6 +325,7 @@ _KNOWN_INIT_KEYS = _fields_of(InitConfig)
 # API and Test configs have extra TOML-only keys not in the dataclass
 _KNOWN_API_KEYS = _fields_of(APIConfig) | {"stateful", "mutation_targets", "auto_discover"}
 _KNOWN_TEST_KEYS = (_fields_of(TestConfig) - {"class_path"}) | {"class"}
+_VALID_OBJECT_HARNESSES = {"fresh", "stateful"}
 
 
 class ConfigError(Exception):
@@ -431,6 +440,7 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
                 min_contract_fit=float(s.get("min_contract_fit", 0.55)),
                 min_reachability=float(s.get("min_reachability", 0.45)),
                 min_realism=float(s.get("min_realism", 0.55)),
+                min_fixture_completeness=float(s.get("min_fixture_completeness", 0.0)),
                 require_replayable=bool(s.get("require_replayable", True)),
                 proof_bundles=bool(s.get("proof_bundles", True)),
                 seed_from_tests=bool(s.get("seed_from_tests", True)),
@@ -470,6 +480,12 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
             raise ConfigError(
                 f"scan.{i}.min_realism must be between 0.0 and 1.0, got {scan_cfg.min_realism}"
             )
+        if not (0.0 <= scan_cfg.min_fixture_completeness <= 1.0):
+            raise ConfigError(
+                "scan."
+                f"{i}.min_fixture_completeness must be between 0.0 and 1.0, "
+                f"got {scan_cfg.min_fixture_completeness}"
+            )
 
     # -- Objects --
     object_cfgs: list[ObjectConfig] = []
@@ -482,11 +498,20 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
                 target=str(obj_raw["target"]),
                 factory=obj_raw.get("factory"),
                 setup=obj_raw.get("setup"),
+                state_factory=obj_raw.get("state_factory"),
+                teardown=obj_raw.get("teardown"),
+                harness=str(obj_raw.get("harness", "fresh")),
                 scenarios=list(obj_raw.get("scenarios", [])),
                 methods=list(obj_raw.get("methods", [])),
                 include_private=bool(obj_raw.get("include_private", False)),
             )
         )
+        object_cfg = object_cfgs[-1]
+        if object_cfg.harness not in _VALID_OBJECT_HARNESSES:
+            raise ConfigError(
+                f"Invalid objects.{i}.harness: {object_cfg.harness!r}. "
+                f"Must be one of: {_VALID_OBJECT_HARNESSES}"
+            )
 
     # -- Contracts --
     contract_cfgs: list[ContractConfig] = []
@@ -600,11 +625,20 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
                 target=str(target_raw["target"]),
                 factory=target_raw.get("factory"),
                 setup=target_raw.get("setup"),
+                state_factory=target_raw.get("state_factory"),
+                teardown=target_raw.get("teardown"),
+                harness=str(target_raw.get("harness", "fresh")),
                 scenarios=list(target_raw.get("scenarios", [])),
                 methods=list(target_raw.get("methods", [])),
                 include_private=bool(target_raw.get("include_private", False)),
             )
         )
+        target_cfg = audit_targets[-1]
+        if target_cfg.harness not in _VALID_OBJECT_HARNESSES:
+            raise ConfigError(
+                f"Invalid audit.targets.{i}.harness: {target_cfg.harness!r}. "
+                f"Must be one of: {_VALID_OBJECT_HARNESSES}"
+            )
     audit_cfg = AuditConfig(
         modules=list(audit_raw.get("modules", [])),
         targets=audit_targets,
@@ -612,6 +646,7 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
         max_examples=int(audit_raw.get("max_examples", 20)),
         workers=int(audit_raw.get("workers", 1)),
         validation_mode=audit_raw.get("validation_mode", "fast"),
+        min_fixture_completeness=float(audit_raw.get("min_fixture_completeness", 0.0)),
         show_generated=bool(audit_raw.get("show_generated", False)),
         save_generated=audit_raw.get("save_generated"),
         write_gaps_dir=audit_raw.get("write_gaps_dir"),
@@ -624,6 +659,11 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
         raise ConfigError(
             f"Invalid audit.validation_mode: {audit_cfg.validation_mode!r}. "
             f"Must be one of: {_VALID_AUDIT_VALIDATION_MODES}"
+        )
+    if not (0.0 <= audit_cfg.min_fixture_completeness <= 1.0):
+        raise ConfigError(
+            "audit.min_fixture_completeness must be between 0.0 and 1.0, "
+            f"got {audit_cfg.min_fixture_completeness}"
         )
 
     # -- Init --

@@ -72,11 +72,11 @@ ordeal scan myapp.scoring --save-artifacts
 
 Use `--save-artifacts` when you want the full handoff package: `.ordeal/findings/<module>.md`, `.ordeal/findings/<module>.json`, `tests/test_ordeal_regressions.py`, and `.ordeal/findings/index.json`. See [Bug Bundle](bug-bundle.md) for the artifact layout.
 
-`scan` promotes replayable crashes as likely bugs and keeps the rest of the evidence exploratory. That includes unreplayed crashes, weaker mined properties, and expected precondition failures. If you need stronger validation for a mature codebase, prefer `ordeal audit` for coverage and mutation comparison, and `ordeal mutate` for direct mutation scoring.
+`scan` promotes replayable crashes as likely bugs and keeps the rest of the evidence exploratory. That includes unreplayed crashes, weaker mined properties, and expected precondition failures. If `[[scan]]` or `[[objects]]` leave fixture completeness too low for the module, `scan` will report that as a block instead of pretending it has real leverage. In that case, add a factory, `state_factory`, or `harness = "stateful"` before expecting useful output. If you need stronger validation for a mature codebase, prefer `ordeal audit` for coverage and mutation comparison, and `ordeal mutate` for direct mutation scoring.
 
 Use `--list-targets` when you want to inspect how ordeal sees functions and methods before choosing a target. The listing shows the callable kind, whether it is async or sync, whether a factory is required or configured, and any skip reason if ordeal cannot run it yet.
 
-Most of the tuning knobs for `scan` live in `[[scan]]` inside `ordeal.toml`. Use `[fixtures].registries` for project-wide fixture registrations, `fixture_registries` for scan-specific registry imports, `ignore_properties` and `ignore_relations` to suppress noisy laws, and `property_overrides` or `relation_overrides` when one function needs a narrower set of checks. `expected_failures` keeps known preconditions from being promoted as bugs. For stateful OO code, `[[objects]]` supplies bound-instance factories and `[[contracts]]` adds explicit shell/path/env probes.
+Most of the tuning knobs for `scan` live in `[[scan]]` inside `ordeal.toml`. Use `[fixtures].registries` for project-wide fixture registrations, `fixture_registries` for scan-specific registry imports, `ignore_properties` and `ignore_relations` to suppress noisy laws, and `property_overrides` or `relation_overrides` when one function needs a narrower set of checks. `expected_failures` keeps known preconditions from being promoted as bugs. For stateful OO code, `[[objects]]` supplies bound-instance factories, `state_factory`, `teardown`, and `harness = "stateful"` when a class needs persistent lifecycle setup; `[[contracts]]` adds explicit shell/path/env probes.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -212,11 +212,13 @@ Every number is `[verified]` (measured and cross-checked for consistency) or `FA
 
 `audit` is the primary command when you want to judge test quality. It keeps replayable crash evidence separate from exploratory findings, and it returns `weakest_tests` plus `mutation_gap_stubs` so tooling like `init --close-gaps` can write draft follow-up tests without guessing.
 
+When `audit` cannot get enough runnable fixture coverage, it now reports that early as a block instead of flattening everything into generic gap noise. The fix is usually to add or correct the object harness in `[[objects]]` or `[[audit.targets]]`, then raise `audit.min_fixture_completeness` only if you intentionally want a lower bar.
+
 Use `--list-targets` to inspect the callable surface that audit can see, including bound methods and whether their factories are configured.
 
 `--validation-mode fast` replays mined inputs against each mutant and is the default because it is much faster. `--validation-mode deep` keeps that replay check and then re-runs `mine()` on each mutant, which is slower but keeps the broader exploratory search.
 
-`audit` now reads `[audit]` from `ordeal.toml` too. That means module lists, direct-test gates, validation depth, and gap-writing defaults can live in config and be reused by both humans and agents. Shared `[[objects]]` entries are expanded automatically, and `[[audit.targets]]` lets you override a factory or limit audit to selected methods.
+`audit` now reads `[audit]` from `ordeal.toml` too. That means module lists, direct-test gates, fixture-completeness thresholds, validation depth, and gap-writing defaults can live in config and be reused by both humans and agents. Shared `[[objects]]` entries are expanded automatically, and `[[audit.targets]]` lets you override a factory, state factory, teardown, harness, or limit audit to selected methods.
 
 The "migrated" column shows what a real ordeal test file looks like: `fuzz()` for crash safety plus explicitly mined properties (bounds, determinism, type checks). It generates the test file a developer would write after adopting ordeal.
 
@@ -234,6 +236,7 @@ ordeal audit myapp.scoring --save-generated test_migrated.py  # save to file
 | `--test-dir`, `-t` | `tests` | Directory containing existing tests |
 | `--max-examples` | `20` | Hypothesis examples per function |
 | `--validation-mode` | `fast` | `fast` replay or `deep` replay + re-mine for mutation validation |
+| `[audit].min_fixture_completeness` | `float` | `0.0` | Minimum runnable-target ratio before audit reports a blocked target |
 | `--write-gaps` | — | Write draft gap stubs to this path |
 | `--include-exploratory-function-gaps` | off | Include indirect-only function gaps in reports and draft stubs |
 | `--require-direct-tests` | off | Exit 1 when any function still lacks direct tests |

@@ -133,12 +133,16 @@ class ScanRuntimeDefaults:
     min_contract_fit: float = 0.55
     min_reachability: float = 0.45
     min_realism: float = 0.55
+    min_fixture_completeness: float = 0.0
     fixtures: dict[str, Any] | None = None
     targets: list[str] = field(default_factory=list)
     include_private: bool = False
     object_factories: dict[str, Any] | None = None
     object_setups: dict[str, Any] | None = None
     object_scenarios: dict[str, Any] | None = None
+    object_state_factories: dict[str, Any] | None = None
+    object_teardowns: dict[str, Any] | None = None
+    object_harnesses: dict[str, str] | None = None
     contract_checks: dict[str, list[Any]] = field(default_factory=dict)
     expected_failures: list[str] = field(default_factory=list)
     registry_warnings: list[str] = field(default_factory=list)
@@ -256,17 +260,25 @@ def _callable_listing_rows(
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
     object_scenarios: dict[str, Any] | None = None,
+    object_state_factories: dict[str, Any] | None = None,
+    object_teardowns: dict[str, Any] | None = None,
+    object_harnesses: dict[str, str] | None = None,
     contract_checks: Mapping[str, Sequence[Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Return stable discovery rows for callable targets in *module_name*."""
     from ordeal.auto import (
         _REGISTERED_OBJECT_FACTORIES,
+        _REGISTERED_OBJECT_HARNESSES,
         _REGISTERED_OBJECT_SCENARIOS,
         _REGISTERED_OBJECT_SETUPS,
+        _REGISTERED_OBJECT_STATE_FACTORIES,
+        _REGISTERED_OBJECT_TEARDOWNS,
         _infer_strategies,
         _resolve_module,
+        _resolve_object_harness,
         _resolve_object_hook,
         _selected_public_functions,
+        _state_param_name_for_callable,
         _unwrap,
     )
 
@@ -280,6 +292,15 @@ def _callable_listing_rows(
     merged_scenarios = dict(_REGISTERED_OBJECT_SCENARIOS)
     if object_scenarios:
         merged_scenarios.update(object_scenarios)
+    merged_state_factories = dict(_REGISTERED_OBJECT_STATE_FACTORIES)
+    if object_state_factories:
+        merged_state_factories.update(object_state_factories)
+    merged_teardowns = dict(_REGISTERED_OBJECT_TEARDOWNS)
+    if object_teardowns:
+        merged_teardowns.update(object_teardowns)
+    merged_harnesses = dict(_REGISTERED_OBJECT_HARNESSES)
+    if object_harnesses:
+        merged_harnesses.update(object_harnesses)
     discovered = _selected_public_functions(
         mod,
         targets=targets,
@@ -287,6 +308,9 @@ def _callable_listing_rows(
         object_factories=merged_factories,
         object_setups=merged_setups,
         object_scenarios=merged_scenarios,
+        object_state_factories=merged_state_factories,
+        object_teardowns=merged_teardowns,
+        object_harnesses=merged_harnesses,
     )
     selected_names: set[str] = set()
     for raw_target in selected_targets or ():
@@ -313,16 +337,35 @@ def _callable_listing_rows(
             and _resolve_object_hook(owner, merged_factories)
         )
         setup_configured = bool(owner is not None and _resolve_object_hook(owner, merged_setups))
+        teardown_configured = bool(
+            owner is not None and _resolve_object_hook(owner, merged_teardowns)
+        )
         resolved_scenario = (
             _resolve_object_hook(owner, merged_scenarios) if owner is not None else None
+        )
+        state_param = str(
+            getattr(func, "__ordeal_state_param__", None)
+            or (_state_param_name_for_callable(_unwrap(func)) if owner is not None else "")
+            or ""
+        ).strip() or None
+        state_factory_configured = bool(
+            state_param
+            and owner is not None
+            and _resolve_object_hook(owner, merged_state_factories)
+        )
+        harness_mode = (
+            _resolve_object_harness(owner, merged_harnesses) if owner is not None else "fresh"
         )
         scenario_count = int(getattr(resolved_scenario, "__ordeal_scenario_count__", 0))
         if resolved_scenario is not None and scenario_count == 0:
             scenario_count = 1
         skip_reason = getattr(func, "__ordeal_skip_reason__", None)
+        inferred_strategies = _infer_strategies(_unwrap(func))
         if factory_required and not factory_configured and not skip_reason:
             skip_reason = "missing object factory"
-        if _infer_strategies(_unwrap(func)) is None and not skip_reason:
+        if state_param and not state_factory_configured and inferred_strategies is None:
+            skip_reason = skip_reason or "missing state factory"
+        if inferred_strategies is None and not skip_reason:
             skip_reason = "missing inferable strategies"
         checks = list(contract_checks.get(name, [])) if contract_checks is not None else []
 
@@ -337,8 +380,13 @@ def _callable_listing_rows(
                 "factory_required": factory_required,
                 "factory_configured": factory_configured,
                 "setup_configured": setup_configured,
+                "state_param": state_param,
+                "state_factory_configured": state_factory_configured,
+                "teardown_configured": teardown_configured,
+                "harness": harness_mode,
                 "scenario_count": scenario_count,
                 "contract_checks": [str(getattr(check, "name", check)) for check in checks],
+                "lifecycle_phase": getattr(func, "__ordeal_lifecycle_phase__", None),
                 "runnable": skip_reason is None,
                 "skip_reason": skip_reason,
             }
@@ -375,13 +423,23 @@ def _render_target_listing_text(
                 f"async={row.get('async')}",
                 f"selected={'yes' if row.get('selected', True) else 'no'}",
                 f"factory={factory_text}",
+                f"harness={row.get('harness', 'fresh')}",
                 f"setup={'yes' if row.get('setup_configured') else 'no'}",
+                (
+                    "state=not-needed"
+                    if not row.get("state_param")
+                    else f"state={'yes' if row.get('state_factory_configured') else 'no'}"
+                ),
+                f"teardown={'yes' if row.get('teardown_configured') else 'no'}",
                 f"scenarios={row.get('scenario_count', 0)}",
                 f"runnable={'yes' if row.get('runnable') else 'no'}",
             ]
             contract_checks = list(row.get("contract_checks", []))
             if contract_checks:
                 parts.append(f"contracts={','.join(contract_checks)}")
+            lifecycle_phase = row.get("lifecycle_phase")
+            if lifecycle_phase:
+                parts.append(f"phase={lifecycle_phase}")
             skip_reason = row.get("skip_reason")
             if skip_reason:
                 parts.append(f"skip={skip_reason}")
@@ -430,6 +488,39 @@ def _build_target_listing_envelope(
             "skip_count": skip_count,
         },
     )
+
+
+def _callable_fixture_completeness(rows: Sequence[Mapping[str, Any]]) -> float:
+    """Return runnable-target completeness for a callable listing."""
+    if not rows:
+        return 0.0
+    runnable = sum(1 for row in rows if row.get("runnable"))
+    return runnable / len(rows)
+
+
+def _blocked_callable_listing_reason(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    threshold: float = 0.0,
+) -> str | None:
+    """Return a blocking reason when discovery lacks enough runnable targets."""
+    if not rows:
+        return "no callable targets were discovered"
+    completeness = _callable_fixture_completeness(rows)
+    if completeness <= 0.0:
+        skip_reasons = {str(row.get("skip_reason", "")) for row in rows}
+        if {
+            "missing object factory",
+            "missing state factory",
+        } & skip_reasons:
+            return "need instance/state harness or object/state factory for discovered methods"
+        return "no discovered targets had inferable fixtures or strategies"
+    if threshold > 0.0 and completeness < threshold:
+        return (
+            "fixture completeness is too low for meaningful exploration "
+            f"({completeness:.0%} < {threshold:.0%})"
+        )
+    return None
 
 
 def _arg(*tokens: str, **kwargs: Any) -> ArgumentSpec:
@@ -826,9 +917,7 @@ def _function_gap_detail_items(
     include_exploratory_function_gaps: bool,
 ) -> list[dict[str, Any]]:
     """Normalize function audits into finding-style detail items."""
-    fixture_completeness = max(
-        getattr(result, "total_functions", 0) - len(getattr(result, "gap_functions", [])), 0
-    ) / max(getattr(result, "total_functions", 0), 1)
+    fixture_completeness = float(getattr(result, "fixture_completeness", 0.0))
     function_audits = [
         item
         for item in getattr(result, "function_audits", [])
@@ -1049,20 +1138,38 @@ def _config_object_specs_for_module(cfg: OrdealConfig, module_name: str) -> list
 
 def _object_runtime_maps(
     object_specs: Sequence[Any],
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    """Resolve configured object factories, setup hooks, and scenarios."""
+) -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, str],
+]:
+    """Resolve configured object factories, state hooks, and scenarios."""
     factories: dict[str, Any] = {}
     setups: dict[str, Any] = {}
     scenarios: dict[str, Any] = {}
+    state_factories: dict[str, Any] = {}
+    teardowns: dict[str, Any] = {}
+    harnesses: dict[str, str] = {}
     for spec in object_specs:
         target = str(getattr(spec, "target"))
         factory_path = getattr(spec, "factory", None)
         setup_path = getattr(spec, "setup", None)
+        state_factory_path = getattr(spec, "state_factory", None)
+        teardown_path = getattr(spec, "teardown", None)
+        harness = str(getattr(spec, "harness", "fresh") or "fresh").strip().lower()
         scenario_paths = list(getattr(spec, "scenarios", []) or [])
         if factory_path:
             factories[target] = _resolve_symbol_path(str(factory_path))
         if setup_path:
             setups[target] = _resolve_symbol_path(str(setup_path))
+        if state_factory_path:
+            state_factories[target] = _resolve_symbol_path(str(state_factory_path))
+        if teardown_path:
+            teardowns[target] = _resolve_symbol_path(str(teardown_path))
+        harnesses[target] = harness if harness in {"fresh", "stateful"} else "fresh"
         if scenario_paths:
             resolved_hooks = [_resolve_symbol_path(str(path)) for path in scenario_paths]
             if len(resolved_hooks) == 1:
@@ -1081,7 +1188,7 @@ def _object_runtime_maps(
             with contextlib.suppress(Exception):
                 setattr(hook, "__ordeal_scenario_count__", len(resolved_hooks))
             scenarios[target] = hook
-    return factories, setups, scenarios
+    return factories, setups, scenarios, state_factories, teardowns, harnesses
 
 
 def _config_contract_checks_for_module(
@@ -1089,7 +1196,7 @@ def _config_contract_checks_for_module(
     module_name: str,
 ) -> dict[str, list[Any]]:
     """Resolve configured semantic contract probes for *module_name*."""
-    from ordeal.auto import builtin_contract_check
+    from ordeal.auto import ContractCheck, builtin_contract_check
 
     checks: dict[str, list[Any]] = {}
     for spec in cfg.contracts:
@@ -1099,15 +1206,28 @@ def _config_contract_checks_for_module(
         display_name = _scan_display_name(module_name, target)
         bucket = checks.setdefault(display_name, [])
         for check_name in spec.checks:
-            bucket.append(
-                builtin_contract_check(
-                    str(check_name),
-                    kwargs=dict(spec.kwargs),
-                    tracked_params=list(spec.tracked_params),
-                    protected_keys=list(spec.protected_keys),
-                    env_param=spec.env_param,
+            resolved_name = str(check_name)
+            try:
+                bucket.append(
+                    builtin_contract_check(
+                        resolved_name,
+                        kwargs=dict(spec.kwargs),
+                        tracked_params=list(spec.tracked_params),
+                        protected_keys=list(spec.protected_keys),
+                        env_param=spec.env_param,
+                    )
                 )
-            )
+            except ValueError:
+                predicate = _resolve_symbol_path(resolved_name)
+                summary = inspect.getdoc(predicate)
+                bucket.append(
+                    ContractCheck(
+                        name=resolved_name.rsplit(":", 1)[-1].rsplit(".", 1)[-1],
+                        predicate=predicate,
+                        kwargs=dict(spec.kwargs),
+                        summary=summary.splitlines()[0] if summary else None,
+                    )
+                )
     return checks
 
 
@@ -1134,12 +1254,16 @@ def _resolve_scan_runtime_defaults(
     min_contract_fit = 0.55
     min_reachability = 0.45
     min_realism = 0.55
+    min_fixture_completeness = 0.0
     targets: list[str] = []
     include_private = False
     fixtures = None
     object_factories: dict[str, Any] | None = None
     object_setups: dict[str, Any] | None = None
     object_scenarios: dict[str, Any] | None = None
+    object_state_factories: dict[str, Any] | None = None
+    object_teardowns: dict[str, Any] | None = None
+    object_harnesses: dict[str, str] | None = None
     contract_checks: dict[str, list[Any]] = {}
     expected_failures: list[str] = []
     ignore_properties: list[str] = []
@@ -1164,12 +1288,16 @@ def _resolve_scan_runtime_defaults(
             min_contract_fit=min_contract_fit,
             min_reachability=min_reachability,
             min_realism=min_realism,
+            min_fixture_completeness=min_fixture_completeness,
             targets=targets,
             include_private=include_private,
             fixtures=fixtures,
             object_factories=object_factories,
             object_setups=object_setups,
             object_scenarios=object_scenarios,
+            object_state_factories=object_state_factories,
+            object_teardowns=object_teardowns,
+            object_harnesses=object_harnesses,
             contract_checks=contract_checks,
             expected_failures=expected_failures,
             registry_warnings=warnings,
@@ -1194,12 +1322,16 @@ def _resolve_scan_runtime_defaults(
             min_contract_fit=min_contract_fit,
             min_reachability=min_reachability,
             min_realism=min_realism,
+            min_fixture_completeness=min_fixture_completeness,
             targets=targets,
             include_private=include_private,
             fixtures=fixtures,
             object_factories=object_factories,
             object_setups=object_setups,
             object_scenarios=object_scenarios,
+            object_state_factories=object_state_factories,
+            object_teardowns=object_teardowns,
+            object_harnesses=object_harnesses,
             contract_checks=contract_checks,
             expected_failures=expected_failures,
             registry_warnings=warnings,
@@ -1212,10 +1344,14 @@ def _resolve_scan_runtime_defaults(
             object_factories,
             object_setups,
             object_scenarios,
+            object_state_factories,
+            object_teardowns,
+            object_harnesses,
         ) = _object_runtime_maps(shared_object_specs)
     except Exception as exc:
         warnings.append(f"object factory config failed for {module_name}: {exc}")
         object_factories, object_setups, object_scenarios = {}, {}, {}
+        object_state_factories, object_teardowns, object_harnesses = {}, {}, {}
     try:
         contract_checks = _config_contract_checks_for_module(cfg, module_name)
     except Exception as exc:
@@ -1239,12 +1375,16 @@ def _resolve_scan_runtime_defaults(
             min_contract_fit=min_contract_fit,
             min_reachability=min_reachability,
             min_realism=min_realism,
+            min_fixture_completeness=min_fixture_completeness,
             targets=targets,
             include_private=include_private,
             fixtures=fixtures,
             object_factories=object_factories,
             object_setups=object_setups,
             object_scenarios=object_scenarios,
+            object_state_factories=object_state_factories,
+            object_teardowns=object_teardowns,
+            object_harnesses=object_harnesses,
             contract_checks=contract_checks,
             expected_failures=expected_failures,
             registry_warnings=warnings,
@@ -1265,6 +1405,7 @@ def _resolve_scan_runtime_defaults(
     min_contract_fit = float(match.min_contract_fit)
     min_reachability = float(match.min_reachability)
     min_realism = float(getattr(match, "min_realism", 0.55))
+    min_fixture_completeness = float(getattr(match, "min_fixture_completeness", 0.0))
     targets = list(match.targets)
     include_private = bool(match.include_private)
     fixtures = _parse_scan_fixture_specs(match.fixtures)
@@ -1293,12 +1434,16 @@ def _resolve_scan_runtime_defaults(
         min_contract_fit=min_contract_fit,
         min_reachability=min_reachability,
         min_realism=min_realism,
+        min_fixture_completeness=min_fixture_completeness,
         targets=targets,
         include_private=include_private,
         fixtures=fixtures,
         object_factories=object_factories,
         object_setups=object_setups,
         object_scenarios=object_scenarios,
+        object_state_factories=object_state_factories,
+        object_teardowns=object_teardowns,
+        object_harnesses=object_harnesses,
         contract_checks=contract_checks,
         expected_failures=expected_failures,
         registry_warnings=warnings,
@@ -1332,12 +1477,20 @@ def _run_configured_scans(
         object_factories: dict[str, Any] = {}
         object_setups: dict[str, Any] = {}
         object_scenarios: dict[str, Any] = {}
+        object_state_factories: dict[str, Any] = {}
+        object_teardowns: dict[str, Any] = {}
+        object_harnesses: dict[str, str] = {}
         contract_checks: dict[str, list[Any]] = {}
         if cfg is not None:
             try:
-                object_factories, object_setups, object_scenarios = _object_runtime_maps(
-                    _config_object_specs_for_module(cfg, scan_cfg.module)
-                )
+                (
+                    object_factories,
+                    object_setups,
+                    object_scenarios,
+                    object_state_factories,
+                    object_teardowns,
+                    object_harnesses,
+                ) = _object_runtime_maps(_config_object_specs_for_module(cfg, scan_cfg.module))
             except Exception as exc:
                 _stderr(f"warning: object factory config failed for {scan_cfg.module}: {exc}\n")
             try:
@@ -1365,6 +1518,9 @@ def _run_configured_scans(
             "object_factories": object_factories,
             "object_setups": object_setups,
             "object_scenarios": object_scenarios,
+            "object_state_factories": object_state_factories,
+            "object_teardowns": object_teardowns,
+            "object_harnesses": object_harnesses,
             "expected_failures": scan_cfg.expected_failures,
             "ignore_properties": scan_cfg.ignore_properties,
             "ignore_relations": scan_cfg.ignore_relations,
@@ -1431,7 +1587,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         runtime_defaults.relation_overrides,
         _named_override_specs_to_map(getattr(args, "cli_relation_overrides", None)),
     )
-    if getattr(args, "list_targets", False):
+    try:
         scan_target_rows = _callable_listing_rows(
             module_name,
             targets=[scan_target] if explicit_target else None,
@@ -1440,8 +1596,31 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             object_factories=runtime_defaults.object_factories,
             object_setups=runtime_defaults.object_setups,
             object_scenarios=runtime_defaults.object_scenarios,
+            object_state_factories=runtime_defaults.object_state_factories,
+            object_teardowns=runtime_defaults.object_teardowns,
+            object_harnesses=runtime_defaults.object_harnesses,
             contract_checks=runtime_defaults.contract_checks,
         )
+    except Exception as exc:
+        scan_target_rows = []
+        if getattr(args, "list_targets", False):
+            if args.json:
+                print(
+                    _build_blocked_agent_envelope(
+                        tool="scan",
+                        target=scan_target,
+                        summary="cannot resolve callable target metadata",
+                        blocking_reason=f"target metadata resolution failed: {exc}",
+                        raw_details={"target": scan_target, "error": str(exc)},
+                    ).to_json()
+                )
+                return 1
+            _stderr(f"Target metadata resolution failed: {exc}\n")
+            return 1
+    selected_scan_rows = [
+        row for row in scan_target_rows if bool(row.get("selected", True))
+    ] or scan_target_rows
+    if getattr(args, "list_targets", False):
         groups = [{"module": module_name, "targets": scan_target_rows}]
         if args.json:
             print(
@@ -1461,6 +1640,34 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                 )
             )
         return 0
+    if selected_scan_rows and (
+        blocking_reason := _blocked_callable_listing_reason(
+            selected_scan_rows,
+            threshold=runtime_defaults.min_fixture_completeness,
+        )
+    ):
+        if args.json:
+            print(
+                _build_blocked_agent_envelope(
+                    tool="scan",
+                    target=scan_target,
+                    summary="scan blocked before exploration",
+                    blocking_reason=blocking_reason,
+                    suggested_commands=(f"ordeal scan {scan_target} --list-targets",),
+                    raw_details={
+                        "target": scan_target,
+                        "module": module_name,
+                        "targets": selected_scan_rows,
+                        "warnings": list(runtime_defaults.registry_warnings),
+                    },
+                ).to_json()
+            )
+            return 1
+        for warning in runtime_defaults.registry_warnings:
+            _stderr(f"warning: {warning}\n")
+        _stderr(f"Scan blocked: {blocking_reason}\n")
+        _stderr(f"  Inspect targets with: ordeal scan {scan_target} --list-targets\n")
+        return 1
     if not args.json:
         _stderr(f"Scanning {scan_target} (seed={args.seed})...\n")
         for warning in runtime_defaults.registry_warnings:
@@ -1478,6 +1685,9 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             scan_object_factories=runtime_defaults.object_factories,
             scan_object_setups=runtime_defaults.object_setups,
             scan_object_scenarios=runtime_defaults.object_scenarios,
+            scan_object_state_factories=runtime_defaults.object_state_factories,
+            scan_object_teardowns=runtime_defaults.object_teardowns,
+            scan_object_harnesses=runtime_defaults.object_harnesses,
             scan_expected_failures=runtime_defaults.expected_failures,
             scan_ignore_properties=scan_ignore_properties,
             scan_ignore_relations=scan_ignore_relations,
@@ -1850,6 +2060,14 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             target=target,
             factory=getattr(spec, "factory", None) or getattr(existing, "factory", None),
             setup=getattr(spec, "setup", None) or getattr(existing, "setup", None),
+            state_factory=(
+                getattr(spec, "state_factory", None) or getattr(existing, "state_factory", None)
+            ),
+            teardown=getattr(spec, "teardown", None) or getattr(existing, "teardown", None),
+            harness=(
+                str(getattr(spec, "harness", "") or "").strip()
+                or str(getattr(existing, "harness", "fresh") or "fresh").strip()
+            ),
             scenarios=list(
                 dict.fromkeys(
                     [
@@ -1901,6 +2119,12 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             audit_cfg.workers if audit_cfg else 1,
         )
     )
+    min_fixture_completeness = float(
+        _cli_or_config(
+            getattr(args, "min_fixture_completeness", None),
+            audit_cfg.min_fixture_completeness if audit_cfg else 0.0,
+        )
+    )
     validation_mode = str(
         _cli_or_config(
             getattr(args, "validation_mode", None),
@@ -1942,7 +2166,14 @@ def _cmd_audit(args: argparse.Namespace) -> int:
 
     if getattr(args, "list_targets", False):
         try:
-            object_factories, object_setups, object_scenarios = _object_runtime_maps(object_specs)
+            (
+                object_factories,
+                object_setups,
+                object_scenarios,
+                object_state_factories,
+                object_teardowns,
+                object_harnesses,
+            ) = _object_runtime_maps(object_specs)
         except Exception as exc:
             if args.json:
                 print(
@@ -1969,12 +2200,22 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                 getattr(args, "include_private", False)
                 or any(bool(getattr(spec, "include_private", False)) for spec in module_specs)
             )
+            try:
+                module_contract_checks = (
+                    _config_contract_checks_for_module(cfg, module_name) if cfg else {}
+                )
+            except Exception:
+                module_contract_checks = {}
             rows = _callable_listing_rows(
                 module_name,
                 include_private=module_include_private,
                 object_factories=object_factories,
                 object_setups=object_setups,
                 object_scenarios=object_scenarios,
+                object_state_factories=object_state_factories,
+                object_teardowns=object_teardowns,
+                object_harnesses=object_harnesses,
+                contract_checks=module_contract_checks,
             )
             target_groups.append({"module": module_name, "targets": rows})
 
@@ -1998,18 +2239,29 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     def _collect_results() -> list[Any]:
         collected: list[Any] = []
         for target in target_names:
+            module_name = _scan_base_module(target)
             audit_kwargs: dict[str, Any] = {
                 "test_dir": test_dir,
                 "max_examples": max_examples,
                 "workers": workers,
                 "validation_mode": validation_mode,
             }
-            if target_specs := normalized_target_specs_by_module.get(_scan_base_module(target)):
+            if min_fixture_completeness > 0.0:
+                audit_kwargs["min_fixture_completeness"] = min_fixture_completeness
+            if target_specs := normalized_target_specs_by_module.get(module_name):
                 audit_kwargs["targets"] = target_specs
+            if cfg is not None:
+                try:
+                    module_contract_checks = _config_contract_checks_for_module(cfg, module_name)
+                    if module_contract_checks:
+                        audit_kwargs["contract_checks"] = module_contract_checks
+                except Exception as exc:
+                    _stderr(f"warning: contract config failed for {module_name}: {exc}\n")
             collected.append(audit(target, **audit_kwargs))
         return collected
 
     results = _collect_results()
+    blocked_results = [result for result in results if getattr(result, "blocking_reason", None)]
     direct_test_gate = _direct_test_gate_payload(results) if require_direct_tests else None
 
     if getattr(args, "json", False):
@@ -2033,6 +2285,8 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                 require_direct_tests=require_direct_tests,
             ).to_json()
         )
+        if blocked_results:
+            return 1
         if direct_test_gate is not None and not bool(direct_test_gate["passed"]):
             return 1
         return 0
@@ -2076,6 +2330,8 @@ def _cmd_audit(args: argparse.Namespace) -> int:
 
     if direct_test_gate is not None:
         print(f"\n  {_direct_test_gate_summary(direct_test_gate)}")
+    if blocked_results:
+        return 1
     if direct_test_gate is not None and not bool(direct_test_gate["passed"]):
         gate_suffix = _direct_test_gate_summary(direct_test_gate).removeprefix(
             "Direct test gate: "
@@ -2557,6 +2813,12 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
                 scan_kwargs["object_setups"] = runtime_defaults.object_setups
             if runtime_defaults.object_scenarios:
                 scan_kwargs["object_scenarios"] = runtime_defaults.object_scenarios
+            if runtime_defaults.object_state_factories:
+                scan_kwargs["object_state_factories"] = runtime_defaults.object_state_factories
+            if runtime_defaults.object_teardowns:
+                scan_kwargs["object_teardowns"] = runtime_defaults.object_teardowns
+            if runtime_defaults.object_harnesses:
+                scan_kwargs["object_harnesses"] = runtime_defaults.object_harnesses
             if runtime_defaults.contract_checks:
                 scan_kwargs["contract_checks"] = runtime_defaults.contract_checks
             if runtime_defaults.ignore_properties:
@@ -4751,6 +5013,19 @@ def _audit_detail_items(
 ) -> list[dict[str, Any]]:
     """Normalize one ModuleAudit into finding-style detail items."""
     details: list[dict[str, Any]] = []
+    if getattr(result, "blocking_reason", None):
+        details.append(
+            {
+                "kind": "blocked_target",
+                "category": "verification_warning",
+                "summary": str(result.blocking_reason),
+                "module": result.module,
+                "qualname": result.module,
+                "details": {
+                    "fixture_completeness": getattr(result, "fixture_completeness", 0.0),
+                },
+            }
+        )
     score_fraction = result.mutation_score_fraction
     if score_fraction is not None and score_fraction < 1.0:
         details.append(
@@ -4787,6 +5062,24 @@ def _audit_detail_items(
                 "module": result.module,
                 "function": function_name,
                 "qualname": f"{result.module}.{function_name}",
+            }
+        )
+    for finding in getattr(result, "contract_findings", []):
+        function_name = str(finding.get("function", result.module))
+        qualname = (
+            f"{result.module}.{function_name}"
+            if function_name and function_name != result.module
+            else result.module
+        )
+        details.append(
+            {
+                "kind": "contract",
+                "category": "semantic_contract",
+                "summary": str(finding.get("summary", "explicit contract failed")),
+                "module": result.module,
+                "function": function_name,
+                "qualname": qualname,
+                "details": dict(finding),
             }
         )
     details.extend(
@@ -4963,9 +5256,10 @@ def _build_audit_agent_envelope(
                 f"ordeal mine {module} -n 200",
                 f"ordeal mutate {module}",
             ]
-        )
+    )
     seen: set[str] = set()
     deduped_commands = [cmd for cmd in suggested_commands if not (cmd in seen or seen.add(cmd))]
+    blocked_count = sum(1 for result in results if getattr(result, "blocking_reason", None))
     report = {
         "target": ", ".join(modules),
         "tool": "audit",
@@ -4973,6 +5267,7 @@ def _build_audit_agent_envelope(
         "summary": [
             f"Audited: {len(results)} module(s)",
             f"Findings: {len(details)}",
+            f"Blocked modules: {blocked_count}",
             (
                 "Function evidence: "
                 f"{sum(result.function_audit_counts['exercised'] for result in results)}"
@@ -5003,7 +5298,8 @@ def _build_audit_agent_envelope(
     ]
     total_functions = sum(max(result.total_functions, 0) for result in results)
     covered_functions = sum(
-        max(result.total_functions - len(result.gap_functions), 0) for result in results
+        max(int(round(getattr(result, "fixture_completeness", 0.0) * result.total_functions)), 0)
+        for result in results
     )
     evidence = {
         "search_depth": {"modules": len(results), "coverage_measurements": total_measurements},
@@ -5108,6 +5404,15 @@ def _build_audit_agent_envelope(
         metadata = {key: value for key, value in item.items() if key != "path"}
         artifacts.append(_agent_artifact("gap-stub", path, "draft audit gap stub", **metadata))
     blocking_reason = None
+    blocked_reasons = list(
+        dict.fromkeys(
+            str(result.blocking_reason)
+            for result in results
+            if getattr(result, "blocking_reason", None)
+        )
+    )
+    if blocked_reasons:
+        blocking_reason = "; ".join(blocked_reasons)
     if direct_test_gate is not None and not bool(direct_test_gate["passed"]):
         blocking_reason = (
             "direct tests required for "

@@ -22,6 +22,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextlib
+import copy
 import functools
 import importlib
 import importlib.util
@@ -39,7 +40,7 @@ from typing import Any, Callable, Literal, Union, get_args, get_origin
 
 import hypothesis.strategies as st
 from hypothesis import given, settings
-from hypothesis.stateful import rule
+from hypothesis.stateful import initialize, rule
 
 from ordeal.chaos import ChaosTest
 from ordeal.faults import Fault
@@ -266,6 +267,9 @@ _REGISTERED_STRATEGIES: dict[str, st.SearchStrategy[Any]] = {}
 _REGISTERED_OBJECT_FACTORIES: dict[str, Any] = {}
 _REGISTERED_OBJECT_SETUPS: dict[str, Any] = {}
 _REGISTERED_OBJECT_SCENARIOS: dict[str, Any] = {}
+_REGISTERED_OBJECT_STATE_FACTORIES: dict[str, Any] = {}
+_REGISTERED_OBJECT_TEARDOWNS: dict[str, Any] = {}
+_REGISTERED_OBJECT_HARNESSES: dict[str, str] = {}
 _BOUNDARY_SMOKE_VALUES: dict[object, tuple[object, ...]] = {
     bool: (False, True),
     int: (0, 1, -1),
@@ -1025,6 +1029,27 @@ def register_object_scenario(name: str, scenario: Any) -> None:
     _REGISTERED_OBJECT_SCENARIOS[name] = scenario
 
 
+def register_object_state_factory(name: str, state_factory: Any) -> None:
+    """Register a per-method state factory for class-method targets."""
+    _REGISTERED_OBJECT_STATE_FACTORIES[name] = state_factory
+
+
+def register_object_teardown(name: str, teardown: Any) -> None:
+    """Register a per-instance teardown hook for class-method targets."""
+    _REGISTERED_OBJECT_TEARDOWNS[name] = teardown
+
+
+def register_object_harness(name: str, harness: str) -> None:
+    """Register how ordeal should exercise a class target.
+
+    Valid values are ``"fresh"`` and ``"stateful"``.
+    """
+    resolved = str(harness).strip().lower() or "fresh"
+    if resolved not in {"fresh", "stateful"}:
+        raise ValueError("object harness must be 'fresh' or 'stateful'")
+    _REGISTERED_OBJECT_HARNESSES[name] = resolved
+
+
 def _strategy_for_name(name: str) -> st.SearchStrategy[Any] | None:
     """Try to infer a strategy from the parameter name alone."""
     # 1. User-registered (project-specific, highest priority)
@@ -1093,13 +1118,20 @@ def _call_sync(func: Any, *args: Any, **kwargs: Any) -> Any:
     return _resolve_awaitable(func(*args, **kwargs))
 
 
-def _signature_without_first_context(func: Any) -> inspect.Signature:
-    """Return a callable signature with a leading self/cls parameter removed."""
+def _signature_without_first_context(
+    func: Any,
+    *,
+    omit_names: Sequence[str] = (),
+) -> inspect.Signature:
+    """Return a callable signature with contextual parameters removed."""
     sig = inspect.signature(func)
     params = list(sig.parameters.values())
     if params and params[0].name in {"self", "cls"}:
-        sig = sig.replace(parameters=params[1:])
-    return sig
+        params = params[1:]
+    omitted = set(omit_names)
+    if omitted:
+        params = [param for param in params if param.name not in omitted]
+    return sig.replace(parameters=params)
 
 
 def _object_hook_candidates(owner: type) -> list[str]:
@@ -1123,6 +1155,138 @@ def _resolve_object_hook(owner: type, hooks: dict[str, Any] | None) -> Any | Non
         if candidate in hooks:
             return hooks[candidate]
     return None
+
+
+def _resolve_object_harness(owner: type, harnesses: dict[str, str] | None) -> str:
+    """Resolve the configured harness mode for *owner*."""
+    if not harnesses:
+        return "fresh"
+    for candidate in _object_hook_candidates(owner):
+        if candidate in harnesses:
+            resolved = str(harnesses[candidate]).strip().lower()
+            if resolved in {"fresh", "stateful"}:
+                return resolved
+    return "fresh"
+
+
+def _lifecycle_phase(method_name: str, method: Any | None = None) -> str | None:
+    """Infer a coarse lifecycle phase from decorator attrs or method names."""
+    target = _unwrap(getattr(method, "__func__", method)) if method is not None else None
+    if target is not None:
+        for phase in ("stop", "cleanup", "teardown"):
+            if getattr(target, phase, False) or (
+                getattr(target, f"{phase}_priority", None) is not None
+            ):
+                return phase
+    lowered = method_name.lower()
+    exact = {
+        "setup_state": "setup",
+        "post_sandbox_setup": "setup",
+        "post_rollout": "rollout",
+    }
+    if lowered in exact:
+        return exact[lowered]
+    for phase in ("setup", "cleanup", "teardown", "stop", "rollout"):
+        if phase in lowered:
+            return phase
+    return None
+
+
+def _snapshot_instance_state(instance: Any) -> Any:
+    """Capture a best-effort snapshot of instance state for lifecycle predicates."""
+    state = getattr(instance, "__dict__", None)
+    if not isinstance(state, dict):
+        return None
+    try:
+        return copy.deepcopy(state)
+    except Exception:
+        return {key: repr(value) for key, value in state.items()}
+
+
+def _state_param_name_for_callable(func: Any) -> str | None:
+    """Return the likely runtime state parameter name for *func*."""
+    target = _unwrap(func)
+    try:
+        sig = inspect.signature(target)
+    except (TypeError, ValueError):
+        return None
+    hints = safe_get_annotations(target)
+    params = [param for param in sig.parameters.values() if param.name not in {"self", "cls"}]
+    for param in params:
+        lowered = param.name.lower()
+        hint = hints.get(param.name)
+        hint_name = getattr(hint, "__name__", "")
+        hint_text = str(hint_name or hint).lower()
+        if lowered == "state" or lowered.endswith("_state") or "state" in hint_text:
+            return param.name
+    return None
+
+
+def _call_with_optional_instance_arg(hook: Any, instance: Any) -> Any:
+    """Call *hook* with zero or one instance argument."""
+    try:
+        signature = inspect.signature(hook)
+    except (TypeError, ValueError):
+        try:
+            return _call_sync(hook, instance)
+        except TypeError:
+            return _call_sync(hook)
+
+    params = list(signature.parameters.values())
+    required = [
+        param
+        for param in params
+        if param.default is inspect.Parameter.empty
+        and param.kind
+        in {
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        }
+    ]
+    accepts_varargs = any(
+        param.kind in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}
+        for param in params
+    )
+    if accepts_varargs or required or params:
+        try:
+            return _call_sync(hook, instance)
+        except TypeError:
+            if not required:
+                return _call_sync(hook)
+            raise
+    return _call_sync(hook)
+
+
+def _build_state_value(
+    state_factory: Any | None,
+    *,
+    instance: Any,
+) -> Any:
+    """Build one state object for a bound method invocation."""
+    if state_factory is None:
+        raise ValueError("state factory is not configured")
+    return _call_with_optional_instance_arg(state_factory, instance)
+
+
+def _prepare_bound_method_call(
+    target: Any,
+    args: Sequence[Any],
+    kwargs: Mapping[str, Any],
+    *,
+    instance: Any,
+    state_factory: Any | None,
+    state_param: str | None,
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Normalize wrapper args into kwargs and inject configured state when needed."""
+    if not state_param or state_factory is None:
+        return tuple(args), dict(kwargs)
+
+    wrapper_sig = _signature_without_first_context(target, omit_names=(state_param,))
+    bound = wrapper_sig.bind_partial(*args, **kwargs)
+    call_kwargs = dict(bound.arguments)
+    call_kwargs.setdefault(state_param, _build_state_value(state_factory, instance=instance))
+    return (), call_kwargs
 
 
 def _apply_instance_hook(instance: Any, hook: Any | None) -> Any:
@@ -1164,6 +1328,9 @@ def _resolve_method_callable(
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
     object_scenarios: dict[str, Any] | None = None,
+    object_state_factories: dict[str, Any] | None = None,
+    object_teardowns: dict[str, Any] | None = None,
+    object_harnesses: dict[str, str] | None = None,
 ) -> tuple[str, Any]:
     """Resolve a class attribute into a sync-capable callable."""
     qualname = f"{owner.__qualname__}.{method_name}"
@@ -1180,9 +1347,22 @@ def _resolve_method_callable(
     factory = _resolve_object_hook(owner, object_factories)
     setup = _resolve_object_hook(owner, object_setups)
     scenario = _resolve_object_hook(owner, object_scenarios)
+    state_factory = _resolve_object_hook(owner, object_state_factories)
+    teardown = _resolve_object_hook(owner, object_teardowns)
+    harness = _resolve_object_harness(owner, object_harnesses)
+    state_param = _state_param_name_for_callable(raw_attr)
     if inspect.isfunction(raw_attr):
         if factory is None:
-            return qualname, _make_unbound_method_placeholder(owner, method_name, raw_attr)
+            return (
+                qualname,
+                _make_unbound_method_placeholder(
+                    owner,
+                    method_name,
+                    raw_attr,
+                    state_param=state_param,
+                    state_factory=state_factory,
+                ),
+            )
         return (
             qualname,
             _make_bound_method_callable(
@@ -1192,6 +1372,10 @@ def _resolve_method_callable(
                 factory=factory,
                 setup=setup,
                 scenario=scenario,
+                state_factory=state_factory,
+                state_param=state_param,
+                teardown=teardown,
+                harness=harness,
             ),
         )
 
@@ -1206,6 +1390,10 @@ def _make_bound_method_callable(
     factory: Any,
     setup: Any | None = None,
     scenario: Any | None = None,
+    state_factory: Any | None = None,
+    state_param: str | None = None,
+    teardown: Any | None = None,
+    harness: str = "fresh",
 ) -> Any:
     """Build a sync wrapper that creates a fresh object per invocation."""
     target = _unwrap(method)
@@ -1215,16 +1403,53 @@ def _make_bound_method_callable(
         instance = _call_sync(factory)
         instance = _apply_instance_hook(instance, setup)
         instance = _apply_instance_hook(instance, scenario)
+        before_state = _snapshot_instance_state(instance)
         bound = getattr(instance, method_name)
-        return _call_sync(bound, *args, **kwargs)
+        call_args, call_kwargs = _prepare_bound_method_call(
+            target,
+            args,
+            kwargs,
+            instance=instance,
+            state_factory=state_factory,
+            state_param=state_param,
+        )
+        result: Any = None
+        try:
+            result = _call_sync(bound, *call_args, **call_kwargs)
+            return result
+        finally:
+            wrapped.__ordeal_last_call_context__ = {
+                "instance": instance,
+                "before_state": before_state,
+                "after_state": _snapshot_instance_state(instance),
+                "kwargs": dict(call_kwargs),
+                "args": tuple(call_args),
+                "method_name": method_name,
+                "owner": owner,
+                "harness": harness,
+                "result": result,
+            }
 
     try:
-        wrapped.__signature__ = _signature_without_first_context(target)
+        wrapped.__signature__ = _signature_without_first_context(
+            target,
+            omit_names=((state_param,) if state_factory is not None and state_param else ()),
+        )
     except (TypeError, ValueError):
         pass
     wrapped.__qualname__ = f"{owner.__qualname__}.{method_name}"
     wrapped.__ordeal_requires_factory__ = False
     wrapped.__ordeal_owner__ = owner
+    wrapped.__ordeal_method_name__ = method_name
+    wrapped.__ordeal_factory__ = factory
+    wrapped.__ordeal_setup__ = setup
+    wrapped.__ordeal_scenario__ = scenario
+    wrapped.__ordeal_state_factory__ = state_factory
+    wrapped.__ordeal_state_param__ = state_param
+    wrapped.__ordeal_teardown__ = teardown
+    wrapped.__ordeal_harness__ = harness
+    wrapped.__ordeal_kind__ = "instance"
+    wrapped.__ordeal_lifecycle_phase__ = _lifecycle_phase(method_name, target)
     wrapped.__ordeal_keep_wrapped__ = True
     return wrapped
 
@@ -1233,6 +1458,9 @@ def _make_unbound_method_placeholder(
     owner: type,
     method_name: str,
     method: Any,
+    *,
+    state_param: str | None = None,
+    state_factory: Any | None = None,
 ) -> Any:
     """Build a placeholder callable for a method that still needs a factory."""
     target = _unwrap(method)
@@ -1248,6 +1476,12 @@ def _make_unbound_method_placeholder(
     wrapped.__qualname__ = f"{owner.__qualname__}.{method_name}"
     wrapped.__ordeal_requires_factory__ = True
     wrapped.__ordeal_owner__ = owner
+    wrapped.__ordeal_method_name__ = method_name
+    wrapped.__ordeal_kind__ = "instance"
+    wrapped.__ordeal_harness__ = "fresh"
+    wrapped.__ordeal_state_factory__ = state_factory
+    wrapped.__ordeal_state_param__ = state_param
+    wrapped.__ordeal_lifecycle_phase__ = _lifecycle_phase(method_name, target)
     wrapped.__ordeal_skip_reason__ = "missing object factory"
     wrapped.__ordeal_keep_wrapped__ = True
     return wrapped
@@ -1266,6 +1500,9 @@ def _resolve_explicit_target(
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
     object_scenarios: dict[str, Any] | None = None,
+    object_state_factories: dict[str, Any] | None = None,
+    object_teardowns: dict[str, Any] | None = None,
+    object_harnesses: dict[str, str] | None = None,
 ) -> tuple[str, Any]:
     """Resolve ``module:callable`` or ``module:Class.method`` targets."""
     module_name, sep, attr_path = target.partition(":")
@@ -1292,6 +1529,9 @@ def _resolve_explicit_target(
             object_factories=object_factories,
             object_setups=object_setups,
             object_scenarios=object_scenarios,
+            object_state_factories=object_state_factories,
+            object_teardowns=object_teardowns,
+            object_harnesses=object_harnesses,
         )
 
     resolved = getattr(obj, final_name)
@@ -1316,6 +1556,9 @@ def _selected_public_functions(
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
     object_scenarios: dict[str, Any] | None = None,
+    object_state_factories: dict[str, Any] | None = None,
+    object_teardowns: dict[str, Any] | None = None,
+    object_harnesses: dict[str, str] | None = None,
 ) -> list[tuple[str, Any]]:
     """Return discovered callables filtered to *targets* when provided."""
     discovered = _get_public_functions(
@@ -1324,6 +1567,9 @@ def _selected_public_functions(
         object_factories=object_factories,
         object_setups=object_setups,
         object_scenarios=object_scenarios,
+        object_state_factories=object_state_factories,
+        object_teardowns=object_teardowns,
+        object_harnesses=object_harnesses,
     )
     if not targets:
         return discovered
@@ -1352,6 +1598,9 @@ def _selected_public_functions(
                 object_factories=object_factories,
                 object_setups=object_setups,
                 object_scenarios=object_scenarios,
+                object_state_factories=object_state_factories,
+                object_teardowns=object_teardowns,
+                object_harnesses=object_harnesses,
             )
         else:
             raise ValueError(f"target {target!r} was not discovered in module {mod.__name__!r}")
@@ -1678,6 +1927,9 @@ def _get_public_functions(
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
     object_scenarios: dict[str, Any] | None = None,
+    object_state_factories: dict[str, Any] | None = None,
+    object_teardowns: dict[str, Any] | None = None,
+    object_harnesses: dict[str, str] | None = None,
 ) -> list[tuple[str, Any]]:
     """Return (name, callable) pairs for testable callables.
 
@@ -1703,6 +1955,15 @@ def _get_public_functions(
     merged_scenarios = dict(_REGISTERED_OBJECT_SCENARIOS)
     if object_scenarios:
         merged_scenarios.update(object_scenarios)
+    merged_state_factories = dict(_REGISTERED_OBJECT_STATE_FACTORIES)
+    if object_state_factories:
+        merged_state_factories.update(object_state_factories)
+    merged_teardowns = dict(_REGISTERED_OBJECT_TEARDOWNS)
+    if object_teardowns:
+        merged_teardowns.update(object_teardowns)
+    merged_harnesses = dict(_REGISTERED_OBJECT_HARNESSES)
+    if object_harnesses:
+        merged_harnesses.update(object_harnesses)
 
     results: list[tuple[str, Any]] = []
     for name, obj in sorted(vars(mod).items()):
@@ -1748,6 +2009,9 @@ def _get_public_functions(
                     object_factories=merged_factories,
                     object_setups=merged_setups,
                     object_scenarios=merged_scenarios,
+                    object_state_factories=merged_state_factories,
+                    object_teardowns=merged_teardowns,
+                    object_harnesses=merged_harnesses,
                 )
             )
     return results
@@ -2737,6 +3001,59 @@ def _build_proof_bundle(
     }
 
 
+def _call_contract_predicate(
+    predicate: Callable[..., Any],
+    value: Any,
+    *,
+    func: Any,
+    call_context: Mapping[str, Any] | None,
+    kwargs: Mapping[str, Any],
+) -> bool:
+    """Call a contract predicate with optional lifecycle-aware context."""
+    supported = {
+        "value": value,
+        "result": value,
+        "func": func,
+        "kwargs": dict(kwargs),
+    }
+    if call_context:
+        supported.update(
+            {
+                "instance": call_context.get("instance"),
+                "before_state": call_context.get("before_state"),
+                "after_state": call_context.get("after_state"),
+                "args": call_context.get("args"),
+                "method_name": call_context.get("method_name"),
+                "owner": call_context.get("owner"),
+                "harness": call_context.get("harness"),
+            }
+        )
+
+    try:
+        signature = inspect.signature(predicate)
+    except (TypeError, ValueError):
+        return bool(predicate(value))
+
+    kwargs_to_pass: dict[str, Any] = {}
+    has_var_keywords = any(
+        param.kind is inspect.Parameter.VAR_KEYWORD
+        for param in signature.parameters.values()
+    )
+    for name, param in signature.parameters.items():
+        if param.kind is inspect.Parameter.VAR_KEYWORD:
+            continue
+        if name in supported:
+            kwargs_to_pass[name] = supported[name]
+
+    if has_var_keywords:
+        for name, item in supported.items():
+            kwargs_to_pass.setdefault(name, item)
+
+    if kwargs_to_pass:
+        return bool(predicate(**kwargs_to_pass))
+    return bool(predicate(value))
+
+
 def _evaluate_contract_checks(
     func: Any,
     contract_checks: list[ContractCheck] | None,
@@ -2792,7 +3109,13 @@ def _evaluate_contract_checks(
             continue
 
         try:
-            passed = bool(_call_sync(check.predicate, value))
+            passed = _call_contract_predicate(
+                check.predicate,
+                value,
+                func=func,
+                call_context=getattr(func, "__ordeal_last_call_context__", None),
+                kwargs=kwargs,
+            )
         except Exception as exc:
             passed = False
             error = f"{type(exc).__name__}: {exc}"
@@ -2866,6 +3189,9 @@ def scan_module(
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
     object_scenarios: dict[str, Any] | None = None,
+    object_state_factories: dict[str, Any] | None = None,
+    object_teardowns: dict[str, Any] | None = None,
+    object_harnesses: dict[str, str] | None = None,
     expected_failures: list[str] | None = None,
     ignore_properties: list[str] | None = None,
     ignore_relations: list[str] | None = None,
@@ -2928,6 +3254,10 @@ def scan_module(
         object_factories: Factory overrides for class targets.
         object_setups: Optional per-class setup hooks run after factory creation.
         object_scenarios: Optional per-class collaborator scenarios run after setup.
+        object_state_factories: Optional per-class state factories for methods that take
+            a runtime ``state`` parameter.
+        object_teardowns: Optional per-class teardown hooks for stateful harnesses.
+        object_harnesses: Per-class harness mode (``fresh`` or ``stateful``).
         expected_failures: Function names that are expected to fail.
             Failures from these functions are tracked separately and
             do not cause ``result.passed`` to be ``False``.
@@ -2977,6 +3307,9 @@ def scan_module(
         object_factories=object_factories,
         object_setups=object_setups,
         object_scenarios=object_scenarios,
+        object_state_factories=object_state_factories,
+        object_teardowns=object_teardowns,
+        object_harnesses=object_harnesses,
     ):
         strategies = _infer_strategies(func, fixtures)
         if strategies is None:
@@ -3275,6 +3608,7 @@ def fuzz(
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
     object_scenarios: dict[str, Any] | None = None,
+    object_state_factories: dict[str, Any] | None = None,
     **fixtures: st.SearchStrategy[Any] | Any,
 ) -> FuzzResult:
     """Deep-fuzz a single function with auto-inferred strategies.
@@ -3296,6 +3630,8 @@ def fuzz(
         object_factories: Factory overrides for class targets.
         object_setups: Optional per-class setup hooks run after factory creation.
         object_scenarios: Optional per-class collaborator scenarios run after setup.
+        object_state_factories: Optional per-class state factories for methods that take
+            a runtime ``state`` parameter.
         **fixtures: Strategy overrides or plain values (auto-wrapped in st.just).
     """
     fn_name = getattr(fn, "__qualname__", getattr(fn, "__name__", repr(fn)))
@@ -3305,6 +3641,7 @@ def fuzz(
             object_factories=object_factories,
             object_setups=object_setups,
             object_scenarios=object_scenarios,
+            object_state_factories=object_state_factories,
         )
 
     # Auto-wrap plain values in st.just()
@@ -3393,6 +3730,9 @@ def _infer_faults(
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
     object_scenarios: dict[str, Any] | None = None,
+    object_state_factories: dict[str, Any] | None = None,
+    object_teardowns: dict[str, Any] | None = None,
+    object_harnesses: dict[str, str] | None = None,
 ) -> list[Fault]:
     """Auto-discover faults by scanning function ASTs for risky calls.
 
@@ -3410,6 +3750,9 @@ def _infer_faults(
         object_factories=object_factories,
         object_setups=object_setups,
         object_scenarios=object_scenarios,
+        object_state_factories=object_state_factories,
+        object_teardowns=object_teardowns,
+        object_harnesses=object_harnesses,
     ):
         try:
             source = textwrap.dedent(inspect.getsource(inspect.unwrap(func)))
@@ -3480,6 +3823,9 @@ def _infer_invariants(
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
     object_scenarios: dict[str, Any] | None = None,
+    object_state_factories: dict[str, Any] | None = None,
+    object_teardowns: dict[str, Any] | None = None,
+    object_harnesses: dict[str, str] | None = None,
 ) -> tuple[dict[str, list[Invariant]], list[Invariant]]:
     """Auto-discover invariants by mining function properties.
 
@@ -3503,6 +3849,9 @@ def _infer_invariants(
         object_factories=object_factories,
         object_setups=object_setups,
         object_scenarios=object_scenarios,
+        object_state_factories=object_state_factories,
+        object_teardowns=object_teardowns,
+        object_harnesses=object_harnesses,
     ):
         strats = _infer_strategies(func, fixtures)
         if strats is None:
@@ -3539,6 +3888,9 @@ def chaos_for(
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
     object_scenarios: dict[str, Any] | None = None,
+    object_state_factories: dict[str, Any] | None = None,
+    object_teardowns: dict[str, Any] | None = None,
+    object_harnesses: dict[str, str] | None = None,
     invariants: list[Invariant] | dict[str, Invariant] | None = None,
     faults: list[Fault] | None = None,
     max_examples: int = 50,
@@ -3574,6 +3926,10 @@ def chaos_for(
         fixtures: Strategy overrides for parameter names.
         object_factories: Factory overrides for class targets.
         object_setups: Optional per-class setup hooks run after factory creation.
+        object_state_factories: Optional per-class state factories for methods that take
+            a runtime ``state`` parameter.
+        object_teardowns: Optional per-class teardown hooks run during ChaosTest teardown.
+        object_harnesses: Per-class harness mode (``fresh`` or ``stateful``).
         invariants: ``None`` = auto-mine, list = global, dict = per-function.
         faults: ``None`` = auto-infer from code, list = explicit.
         max_examples: Hypothesis examples.
@@ -3591,6 +3947,9 @@ def chaos_for(
             object_factories=object_factories,
             object_setups=object_setups,
             object_scenarios=object_scenarios,
+            object_state_factories=object_state_factories,
+            object_teardowns=object_teardowns,
+            object_harnesses=object_harnesses,
         )
     else:
         fault_list = list(faults)
@@ -3603,6 +3962,9 @@ def chaos_for(
             object_factories=object_factories,
             object_setups=object_setups,
             object_scenarios=object_scenarios,
+            object_state_factories=object_state_factories,
+            object_teardowns=object_teardowns,
+            object_harnesses=object_harnesses,
         )
     elif isinstance(invariants, dict):
         invariant_map: dict[str, list[Invariant]] = {
@@ -3615,18 +3977,58 @@ def chaos_for(
 
     # Collect rule methods
     rules_dict: dict[str, Any] = {}
+    initialize_dict: dict[str, Any] = {}
+    teardown_hooks: list[tuple[str, Any]] = []
+    seen_stateful_owners: set[str] = set()
     for name, func in _get_public_functions(
         mod,
         object_factories=object_factories,
         object_setups=object_setups,
         object_scenarios=object_scenarios,
+        object_state_factories=object_state_factories,
+        object_teardowns=object_teardowns,
+        object_harnesses=object_harnesses,
     ):
         strategies = _infer_strategies(func, fixtures)
         if strategies is None:
             continue
         # Per-function invariants override global; if neither, empty list
         func_invs = invariant_map.get(name, global_invs)
-        method = _make_rule_method(name, func, strategies, func_invs)
+        if (
+            getattr(func, "__ordeal_kind__", None) == "instance"
+            and getattr(func, "__ordeal_harness__", "fresh") == "stateful"
+            and getattr(func, "__ordeal_factory__", None) is not None
+        ):
+            owner = getattr(func, "__ordeal_owner__", None)
+            method_name = str(getattr(func, "__ordeal_method_name__", name.rsplit(".", 1)[-1]))
+            owner_key = re.sub(
+                r"[^0-9a-zA-Z_]",
+                "_",
+                getattr(owner, "__qualname__", getattr(owner, "__name__", "owner")),
+            ).lower()
+            owner_attr = f"_ordeal_owner_{owner_key}"
+            if owner_attr not in seen_stateful_owners:
+                init_method = _make_stateful_initialize_method(
+                    owner_attr,
+                    factory=getattr(func, "__ordeal_factory__"),
+                    setup=getattr(func, "__ordeal_setup__", None),
+                    scenario=getattr(func, "__ordeal_scenario__", None),
+                )
+                initialize_dict[init_method.__name__] = init_method
+                teardown_hook = getattr(func, "__ordeal_teardown__", None)
+                if teardown_hook is not None:
+                    teardown_hooks.append((owner_attr, teardown_hook))
+                seen_stateful_owners.add(owner_attr)
+            method = _make_stateful_rule_method(
+                name,
+                func,
+                strategies,
+                func_invs,
+                owner_attr=owner_attr,
+                method_name=method_name,
+            )
+        else:
+            method = _make_rule_method(name, func, strategies, func_invs)
         rules_dict[method.__name__] = method
 
     if not rules_dict:
@@ -3639,8 +4041,11 @@ def chaos_for(
     namespace: dict[str, Any] = {
         "faults": fault_list,
         "rule_timeout": rule_timeout,
+        **initialize_dict,
         **rules_dict,
     }
+    if teardown_hooks:
+        namespace["teardown"] = _make_stateful_teardown_method(teardown_hooks)
 
     class_name = f"AutoChaos_{mod_name.replace('.', '_')}"
     AutoChaos = type(class_name, (ChaosTest,), namespace)
@@ -3675,3 +4080,98 @@ def _make_rule_method(
     method.__name__ = f"call_{safe_name}"
     method.__qualname__ = f"AutoChaos.call_{safe_name}"
     return method
+
+
+def _make_stateful_initialize_method(
+    owner_attr: str,
+    *,
+    factory: Any,
+    setup: Any | None = None,
+    scenario: Any | None = None,
+) -> Any:
+    """Create an ``@initialize`` hook that persists one owner instance."""
+
+    @initialize()
+    def method(self: Any) -> None:
+        instance = _call_sync(factory)
+        instance = _apply_instance_hook(instance, setup)
+        instance = _apply_instance_hook(instance, scenario)
+        setattr(self, owner_attr, instance)
+
+    method.__name__ = f"setup_{owner_attr}"
+    method.__qualname__ = f"AutoChaos.setup_{owner_attr}"
+    return method
+
+
+def _make_stateful_rule_method(
+    func_name: str,
+    func: Any,
+    strategies: dict[str, st.SearchStrategy],
+    invariants: list[Invariant],
+    *,
+    owner_attr: str,
+    method_name: str,
+) -> Any:
+    """Create a rule that reuses one persistent object instance."""
+    safe_name = func_name.replace(".", "_")
+
+    @rule(**strategies)
+    def method(self: Any, **kwargs: Any) -> None:
+        instance = getattr(self, owner_attr, None)
+        if instance is None:
+            raise RuntimeError(f"stateful harness did not initialize {owner_attr}")
+        before_state = _snapshot_instance_state(instance)
+        target = _unwrap(func)
+        call_args, call_kwargs = _prepare_bound_method_call(
+            target,
+            (),
+            kwargs,
+            instance=instance,
+            state_factory=getattr(func, "__ordeal_state_factory__", None),
+            state_param=getattr(func, "__ordeal_state_param__", None),
+        )
+        result = _call_sync(getattr(instance, method_name), *call_args, **call_kwargs)
+        func.__ordeal_last_call_context__ = {
+            "instance": instance,
+            "before_state": before_state,
+            "after_state": _snapshot_instance_state(instance),
+            "kwargs": dict(call_kwargs),
+            "args": tuple(call_args),
+            "method_name": method_name,
+            "owner": getattr(func, "__ordeal_owner__", None),
+            "harness": "stateful",
+        }
+        if result is not None:
+            for inv in invariants:
+                try:
+                    inv(result)
+                except TypeError:
+                    pass
+
+    method.__name__ = f"call_{safe_name}"
+    method.__qualname__ = f"AutoChaos.call_{safe_name}"
+    return method
+
+
+def _make_stateful_teardown_method(
+    owner_hooks: Sequence[tuple[str, Any]],
+) -> Any:
+    """Create a teardown that attempts every configured owner cleanup hook."""
+
+    def teardown(self: Any) -> None:
+        errors: list[str] = []
+        for owner_attr, hook in owner_hooks:
+            instance = getattr(self, owner_attr, None)
+            if instance is None or hook is None:
+                continue
+            try:
+                _call_sync(hook, instance)
+            except Exception as exc:
+                errors.append(f"{owner_attr}: {type(exc).__name__}: {exc}")
+        ChaosTest.teardown(self)
+        if errors:
+            raise AssertionError("; ".join(errors))
+
+    teardown.__name__ = "teardown"
+    teardown.__qualname__ = "AutoChaos.teardown"
+    return teardown

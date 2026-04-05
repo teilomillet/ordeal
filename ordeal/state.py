@@ -500,6 +500,9 @@ def explore_mine(
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
     object_scenarios: dict[str, Any] | None = None,
+    object_state_factories: dict[str, Any] | None = None,
+    object_teardowns: dict[str, Any] | None = None,
+    object_harnesses: dict[str, str] | None = None,
     ignore_properties: list[str] | None = None,
     ignore_relations: list[str] | None = None,
     property_overrides: dict[str, list[str]] | None = None,
@@ -518,6 +521,9 @@ def explore_mine(
         object_factories=object_factories,
         object_setups=object_setups,
         object_scenarios=object_scenarios,
+        object_state_factories=object_state_factories,
+        object_teardowns=object_teardowns,
+        object_harnesses=object_harnesses,
     )
 
     # Track skipped functions with reasons
@@ -593,6 +599,9 @@ def explore_scan(
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
     object_scenarios: dict[str, Any] | None = None,
+    object_state_factories: dict[str, Any] | None = None,
+    object_teardowns: dict[str, Any] | None = None,
+    object_harnesses: dict[str, str] | None = None,
     expected_failures: list[str] | None = None,
     ignore_properties: list[str] | None = None,
     ignore_relations: list[str] | None = None,
@@ -624,6 +633,9 @@ def explore_scan(
         object_factories=object_factories,
         object_setups=object_setups,
         object_scenarios=object_scenarios,
+        object_state_factories=object_state_factories,
+        object_teardowns=object_teardowns,
+        object_harnesses=object_harnesses,
         expected_failures=expected_failures,
         ignore_properties=ignore_properties,
         ignore_relations=ignore_relations,
@@ -776,6 +788,9 @@ def explore_chaos(
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
     object_scenarios: dict[str, Any] | None = None,
+    object_state_factories: dict[str, Any] | None = None,
+    object_teardowns: dict[str, Any] | None = None,
+    object_harnesses: dict[str, str] | None = None,
 ) -> ExplorationState:
     """Auto-generate and run chaos tests, update state."""
     from ordeal.auto import chaos_for
@@ -788,6 +803,9 @@ def explore_chaos(
             object_factories=object_factories,
             object_setups=object_setups,
             object_scenarios=object_scenarios,
+            object_state_factories=object_state_factories,
+            object_teardowns=object_teardowns,
+            object_harnesses=object_harnesses,
         )
         test = TestCase("runTest")
         test.runTest()
@@ -815,6 +833,9 @@ def explore(
     scan_object_factories: dict[str, Any] | None = None,
     scan_object_setups: dict[str, Any] | None = None,
     scan_object_scenarios: dict[str, Any] | None = None,
+    scan_object_state_factories: dict[str, Any] | None = None,
+    scan_object_teardowns: dict[str, Any] | None = None,
+    scan_object_harnesses: dict[str, str] | None = None,
     scan_expected_failures: list[str] | None = None,
     scan_ignore_properties: list[str] | None = None,
     scan_ignore_relations: list[str] | None = None,
@@ -906,6 +927,9 @@ def explore(
             object_factories=scan_object_factories,
             object_setups=scan_object_setups,
             object_scenarios=scan_object_scenarios,
+            object_state_factories=scan_object_state_factories,
+            object_teardowns=scan_object_teardowns,
+            object_harnesses=scan_object_harnesses,
             ignore_properties=scan_ignore_properties,
             ignore_relations=scan_ignore_relations,
             property_overrides=scan_property_overrides,
@@ -933,6 +957,9 @@ def explore(
                 object_factories=scan_object_factories,
                 object_setups=scan_object_setups,
                 object_scenarios=scan_object_scenarios,
+                object_state_factories=scan_object_state_factories,
+                object_teardowns=scan_object_teardowns,
+                object_harnesses=scan_object_harnesses,
                 expected_failures=scan_expected_failures,
                 ignore_properties=scan_ignore_properties,
                 ignore_relations=scan_ignore_relations,
@@ -984,6 +1011,9 @@ def explore(
                 object_factories=scan_object_factories,
                 object_setups=scan_object_setups,
                 object_scenarios=scan_object_scenarios,
+                object_state_factories=scan_object_state_factories,
+                object_teardowns=scan_object_teardowns,
+                object_harnesses=scan_object_harnesses,
             )
             chaos_hash = hash(("chaos", state.confidence))
             state.tree.checkpoint(

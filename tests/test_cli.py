@@ -140,6 +140,23 @@ def _make_target_listing_module(name: str = "tests._cli_targets") -> types.Modul
     return mod
 
 
+def _make_stateful_target_listing_module(
+    name: str = "tests._cli_stateful_targets",
+) -> types.ModuleType:
+    """Create a module with a lifecycle-style method that needs a harness."""
+    mod = types.ModuleType(name)
+    exec(
+        "class Env:\n"
+        "    def __init__(self, prefix: str):\n"
+        "        self.prefix = prefix\n"
+        "\n"
+        "    def rollout(self, state: dict[str, str], prompt: str) -> str:\n"
+        "        return f'{self.prefix}:{state[\"seed\"]}:{prompt}'\n",
+        mod.__dict__,
+    )
+    return mod
+
+
 class TestCLI:
     def test_no_command_returns_0(self):
         assert main([]) == 0
@@ -1089,6 +1106,60 @@ scan_max_examples = 12
         assert "selected=yes" in out
         assert "direct" in out
         assert "selected=no" in out
+
+    def test_scan_list_targets_reports_state_factory_metadata(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        mod = _make_stateful_target_listing_module()
+        key = f"{mod.__name__}:Env"
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setitem(sys.modules, mod.__name__, mod)
+        monkeypatch.setitem(ordeal_auto._REGISTERED_OBJECT_FACTORIES, key, lambda: mod.Env("env"))
+        monkeypatch.setitem(
+            ordeal_auto._REGISTERED_OBJECT_STATE_FACTORIES,
+            key,
+            lambda instance: {"seed": instance.prefix},
+        )
+        monkeypatch.setitem(ordeal_auto._REGISTERED_OBJECT_HARNESSES, key, "stateful")
+
+        rc = main(["scan", mod.__name__, "--list-targets"])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Env.rollout" in out
+        assert "state=yes" in out
+        assert "harness=stateful" in out
+
+    def test_scan_json_blocks_when_methods_need_harness(self, monkeypatch, tmp_path, capsys):
+        mod = _make_stateful_target_listing_module()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setitem(sys.modules, mod.__name__, mod)
+
+        rc = main(["scan", mod.__name__, "--json"])
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 1
+        assert payload["tool"] == "scan"
+        assert payload["status"] == "blocked"
+        assert "harness" in payload["blocking_reason"] or "factory" in payload["blocking_reason"]
+
+    def test_audit_json_blocks_when_methods_need_harness(self, monkeypatch, tmp_path, capsys):
+        mod = _make_stateful_target_listing_module("tests._cli_audit_stateful_targets")
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setitem(sys.modules, mod.__name__, mod)
+
+        rc = main(["audit", mod.__name__, "--json", "--test-dir", str(tests_dir)])
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 1
+        assert payload["tool"] == "audit"
+        assert payload["status"] == "blocked"
+        assert "harness" in payload["blocking_reason"] or "factory" in payload["blocking_reason"]
 
     def test_replay_missing_file(self):
         assert main(["replay", "/nonexistent/trace.json"]) == 1

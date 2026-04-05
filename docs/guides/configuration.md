@@ -122,7 +122,10 @@ Reusable object factories for bound instance methods. `scan` and `audit` use the
 |---|---|---|---|
 | `target` | `str` | required | Class target such as `pkg.mod:Env` |
 | `factory` | `str?` | `null` | Import path to a sync or async factory |
+| `state_factory` | `str?` | `null` | Optional state builder for harnesses that need a separate state object |
 | `setup` | `str?` | `null` | Optional sync or async hook run after factory creation |
+| `teardown` | `str?` | `null` | Optional sync or async cleanup hook run after audit or chaos execution |
+| `harness` | `str` | `"fresh"` | `fresh` creates a new instance per call, `stateful` reuses one instance across a machine run |
 | `scenarios` | `list[str]` | `[]` | Repeatable sync or async collaborator hooks applied after setup |
 | `methods` | `list[str]` | `[]` | Optional method subset for audit-target expansion |
 | `include_private` | `bool` | `false` | Include single-underscore methods when expanded |
@@ -131,12 +134,15 @@ Reusable object factories for bound instance methods. `scan` and `audit` use the
 [[objects]]
 target = "myapp.envs:ComposableEnv"
 factory = "tests.support.factories:make_composable_env"
+state_factory = "tests.support.factories:build_composable_state"
 setup = "tests.support.factories:prime_composable_env"
+teardown = "tests.support.factories:cleanup_composable_env"
+harness = "stateful"
 scenarios = ["tests.support.scenarios:disable_network"]
 methods = ["build_env_vars"]
 ```
 
-Use `factory` for construction, `setup` for one-time preparation, and `scenarios` for collaborator behavior that should be layered on top of the object before the listed methods are exercised.
+Use `factory` for construction, `state_factory` when the object needs a separate state payload, `setup` for one-time preparation, `teardown` for cleanup, and `scenarios` for collaborator behavior that should be layered on top of the object before the listed methods are exercised. `harness = "stateful"` tells ordeal to reuse the same instance across a stateful run instead of rebuilding it for every call.
 
 ### `[[contracts]]`
 
@@ -172,6 +178,7 @@ Set defaults for `ordeal audit`. CLI flags still win, but when omitted the comma
 | `max_examples` | `int` | `20` | Hypothesis examples per function |
 | `workers` | `int` | `1` | Parallel workers for mutation validation |
 | `validation_mode` | `str` | `"fast"` | `"fast"` replay or `"deep"` replay + re-mine |
+| `min_fixture_completeness` | `float` | `0.0` | Minimum runnable-target ratio before audit reports a blocked target |
 | `show_generated` | `bool` | `false` | Print generated ordeal tests during audit |
 | `save_generated` | `str?` | `null` | Save generated ordeal tests to this path |
 | `write_gaps_dir` | `str?` | `null` | Write draft gap stubs to this directory |
@@ -184,6 +191,7 @@ modules = ["myapp.scoring"]
 validation_mode = "deep"
 write_gaps_dir = "tests/gaps"
 require_direct_tests = true
+min_fixture_completeness = 0.5
 ```
 
 Use `[[audit.targets]]` when one class needs an audit-specific factory or a narrower method subset:
@@ -192,7 +200,10 @@ Use `[[audit.targets]]` when one class needs an audit-specific factory or a narr
 [[audit.targets]]
 target = "myapp.envs:ComposableEnv"
 factory = "tests.support.factories:make_composable_env"
+state_factory = "tests.support.factories:build_composable_state"
 setup = "tests.support.factories:prime_composable_env"
+teardown = "tests.support.factories:cleanup_composable_env"
+harness = "stateful"
 scenarios = ["tests.support.scenarios:disable_network"]
 methods = ["build_env_vars", "post_sandbox_setup"]
 ```

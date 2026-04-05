@@ -291,6 +291,7 @@ test_dir = "spec"
 max_examples = 30
 workers = 4
 validation_mode = "deep"
+min_fixture_completeness = 0.5
 write_gaps_dir = "tests/gaps"
 include_exploratory_function_gaps = true
 require_direct_tests = true
@@ -302,6 +303,7 @@ require_direct_tests = true
         assert cfg.audit.max_examples == 30
         assert cfg.audit.workers == 4
         assert cfg.audit.validation_mode == "deep"
+        assert cfg.audit.min_fixture_completeness == 0.5
         assert cfg.audit.write_gaps_dir == "tests/gaps"
         assert cfg.audit.include_exploratory_function_gaps is True
         assert cfg.audit.require_direct_tests is True
@@ -317,6 +319,9 @@ modules = ["myapp.scoring"]
 target = "verifiers.envs.experimental.cli_agent_env:CliAgentEnv"
 factory = "tests.support.factories:make_cli_agent_env"
 setup = "tests.support.factories:prime_cli_agent_env"
+state_factory = "tests.support.factories:make_cli_agent_state"
+teardown = "tests.support.factories:teardown_cli_agent_env"
+harness = "stateful"
 methods = ["build_env_vars", "post_sandbox_setup"]
 include_private = true
 """
@@ -327,6 +332,9 @@ include_private = true
         assert target.target == "verifiers.envs.experimental.cli_agent_env:CliAgentEnv"
         assert target.factory == "tests.support.factories:make_cli_agent_env"
         assert target.setup == "tests.support.factories:prime_cli_agent_env"
+        assert target.state_factory == "tests.support.factories:make_cli_agent_state"
+        assert target.teardown == "tests.support.factories:teardown_cli_agent_env"
+        assert target.harness == "stateful"
         assert target.methods == ["build_env_vars", "post_sandbox_setup"]
         assert target.include_private is True
 

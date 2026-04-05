@@ -155,7 +155,10 @@ verbose = true
 # [[objects]]
 # target = "myapp.envs:ComposableEnv"
 # factory = "tests.support.factories:make_composable_env"
+# state_factory = "tests.support.factories:build_composable_state"
 # setup = "tests.support.factories:prime_composable_env"
+# teardown = "tests.support.factories:cleanup_composable_env"
+# harness = "stateful"
 # scenarios = [
 #   "tests.support.scenarios:disable_network",
 #   "tests.support.scenarios:protect_env_keys",
@@ -192,7 +195,10 @@ verbose = true
 # [[audit.targets]]
 # target = "myapp.envs:ComposableEnv"
 # factory = "tests.support.factories:make_composable_env"
+# state_factory = "tests.support.factories:build_composable_state"
 # setup = "tests.support.factories:prime_composable_env"
+# teardown = "tests.support.factories:cleanup_composable_env"
+# harness = "stateful"
 # scenarios = ["tests.support.scenarios:disable_network"]
 # methods = ["build_env_vars", "post_sandbox_setup"]
 #
@@ -200,6 +206,7 @@ verbose = true
 # show_generated = false
 # # save_generated = "tests/test_migrated.py"
 # # write_gaps_dir = "tests/gaps"
+# # min_fixture_completeness = 0.5
 # include_exploratory_function_gaps = false
 # require_direct_tests = false
 #

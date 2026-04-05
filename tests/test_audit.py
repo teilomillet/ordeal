@@ -34,6 +34,7 @@ from ordeal.audit import (
     _verify_consistency,
     wilson_lower,
 )
+from ordeal.auto import ContractCheck
 from ordeal.mine import MinedProperty
 
 # ============================================================================
@@ -1055,6 +1056,113 @@ def attach_helper(instance: Env) -> Env:
         assert "Env.build_env_vars" in audits
         assert result.total_functions >= 1
         assert "Env.build_env_vars" not in result.gap_functions
+
+    def test_audit_blocks_when_discovered_methods_need_harness(self, tmp_path: Path, monkeypatch):
+        pkg = tmp_path / "blocked_pkg"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "models.py").write_text(
+            """
+class Env:
+    def __init__(self, prefix: str) -> None:
+        self.prefix = prefix
+
+    def rollout(self, state: dict[str, str], prompt: str) -> str:
+        return f"{self.prefix}:{state['seed']}:{prompt}"
+""",
+            encoding="utf-8",
+        )
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        from ordeal.audit import audit
+
+        result = audit(
+            "blocked_pkg.models",
+            test_dir=str(tests_dir),
+            max_examples=5,
+            min_fixture_completeness=0.5,
+        )
+
+        assert result.blocking_reason
+        assert "harness" in result.blocking_reason or "factory" in result.blocking_reason
+        assert result.total_functions >= 1
+        assert "Env.rollout" in result.gap_functions
+        assert result.migrated_test_count == 0
+
+    def test_audit_runs_lifecycle_contract_checks_with_state_factory(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        pkg = tmp_path / "contract_pkg"
+        support = tmp_path / "contract_support"
+        pkg.mkdir()
+        support.mkdir()
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (support / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "models.py").write_text(
+            """
+class Env:
+    def __init__(self) -> None:
+        self.cleaned = False
+
+    def cleanup(self, state: dict[str, str], marker: str) -> str:
+        state["marker"] = marker
+        return marker
+""",
+            encoding="utf-8",
+        )
+        (support / "factories.py").write_text(
+            """
+from contract_pkg.models import Env
+
+def make_env() -> Env:
+    return Env()
+
+def make_state(instance: Env) -> dict[str, str]:
+    return {"existing": "value"}
+""",
+            encoding="utf-8",
+        )
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        from ordeal.audit import audit
+
+        target = SimpleNamespace(
+            target="contract_pkg.models:Env",
+            factory="contract_support.factories:make_env",
+            state_factory="contract_support.factories:make_state",
+            methods=["cleanup"],
+        )
+
+        def cleanup_marks_instance(*, instance: object, value: object) -> bool:
+            del value
+            return bool(getattr(instance, "cleaned", False))
+
+        result = audit(
+            "contract_pkg.models",
+            targets=[target],
+            test_dir=str(tests_dir),
+            max_examples=5,
+            contract_checks={
+                "Env.cleanup": [
+                    ContractCheck(
+                        name="cleanup_marks_instance",
+                        kwargs={"marker": "done"},
+                        predicate=cleanup_marks_instance,
+                        summary="cleanup should mark the instance as cleaned",
+                    )
+                ]
+            },
+        )
+
+        assert result.blocking_reason is None
+        assert len(result.contract_findings) == 1
+        assert result.contract_findings[0]["function"] == "Env.cleanup"
 
 
 class TestModuleAuditSummaryValidation:

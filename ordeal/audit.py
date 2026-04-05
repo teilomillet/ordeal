@@ -66,12 +66,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Callable, Literal, Sequence, Union, get_args, get_origin
+from typing import Any, Callable, Literal, Mapping, Sequence, Union, get_args, get_origin
 
 from ordeal.auto import (
+    _evaluate_contract_checks,
     _get_public_functions,
     _infer_strategies,
+    _prepare_bound_method_call,
     _resolve_module,
+    _snapshot_instance_state,
+    _state_param_name_for_callable,
 )
 from ordeal.introspection import safe_get_annotations
 from ordeal.mine import MineResult, mine
@@ -535,6 +539,8 @@ class ModuleAudit:
     mutation_gaps: list[dict[str, str]] = field(default_factory=list)
     weakest_tests: list[dict[str, int | str]] = field(default_factory=list)
     mutation_gap_stubs: list[dict[str, str]] = field(default_factory=list)
+    contract_findings: list[dict[str, Any]] = field(default_factory=list)
+    blocking_reason: str | None = None
 
     # Known unknowns — what ordeal structurally cannot verify
     not_checked: list[str] = field(default_factory=list)
@@ -617,6 +623,10 @@ class ModuleAudit:
                 lines.append(f"      - {item['test']}: {item['kills']} kill(s)")
         if self.mutation_gap_stubs:
             lines.append(f"    stubs:    {len(self.mutation_gap_stubs)} draft review stub file(s)")
+        if self.contract_findings:
+            lines.append(
+                f"    contracts: {len(self.contract_findings)} explicit contract finding(s)"
+            )
 
         if self.function_audits:
             counts = self.function_audit_counts
@@ -641,6 +651,8 @@ class ModuleAudit:
                 f"    gaps:     {len(self.gap_functions)} functions need fixtures: "
                 f"{', '.join(self.gap_functions[:DISPLAY_CAP])}"
             )
+        if self.blocking_reason:
+            lines.append(f"    blocked:  {self.blocking_reason}")
 
         if self.suggestions:
             lines.append("    suggest:")
@@ -717,6 +729,13 @@ class ModuleAudit:
     def has_direct_test_gaps(self) -> bool:
         """True when any function is only exploratory or fully uncovered."""
         return bool(self.direct_test_gaps)
+
+    @property
+    def fixture_completeness(self) -> float:
+        """Fraction of discovered functions that ordeal could execute directly."""
+        if self.total_functions <= 0:
+            return 0.0
+        return max(self.total_functions - len(self.gap_functions), 0) / self.total_functions
 
 
 def _coverage_result_to_dict(result: CoverageResult | None) -> dict[str, object] | None:
@@ -808,6 +827,8 @@ def _module_audit_to_dict(result: ModuleAudit) -> dict[str, object]:
         "mutation_gaps": result.mutation_gaps,
         "weakest_tests": result.weakest_tests,
         "mutation_gap_stubs": result.mutation_gap_stubs,
+        "contract_findings": result.contract_findings,
+        "blocking_reason": result.blocking_reason,
         "not_checked": result.not_checked,
         "warnings": result.warnings,
         "generated_test": result.generated_test,
@@ -837,6 +858,12 @@ def _module_audit_from_dict(data: dict[str, object]) -> ModuleAudit:
         mutation_gaps=list(data.get("mutation_gaps", [])),
         weakest_tests=list(data.get("weakest_tests", [])),
         mutation_gap_stubs=list(data.get("mutation_gap_stubs", [])),
+        contract_findings=list(data.get("contract_findings", [])),
+        blocking_reason=(
+            str(data["blocking_reason"])
+            if data.get("blocking_reason") is not None
+            else None
+        ),
         not_checked=list(data.get("not_checked", [])),
         warnings=list(data.get("warnings", [])),
         generated_test=str(data.get("generated_test", "")),
@@ -1388,17 +1415,24 @@ def _call_with_async_support(func: Callable[..., Any], *args: Any, **kwargs: Any
         loop.close()
 
 
+def _resolve_audit_hook(hook: str | Any | None) -> Any | None:
+    """Resolve a hook path or passthrough a callable/object."""
+    if hook is None or not isinstance(hook, str):
+        return hook
+    return _resolve_audit_symbol(hook)
+
+
 def _instantiate_audit_owner(
     cls: type[Any],
     *,
-    factory: str | None = None,
-    setup: str | None = None,
-    scenarios: Sequence[str] | None = None,
+    factory: str | Any | None = None,
+    setup: str | Any | None = None,
+    scenarios: Sequence[str | Any] | None = None,
 ) -> tuple[Any | None, str | None]:
     """Create an object for auditing class methods."""
     try:
         if factory:
-            factory_obj = _resolve_audit_symbol(factory)
+            factory_obj = _resolve_audit_hook(factory)
             if not callable(factory_obj):
                 return None, f"factory {factory} is not callable"
             instance = _call_with_async_support(factory_obj)
@@ -1409,7 +1443,7 @@ def _instantiate_audit_owner(
 
     if setup:
         try:
-            setup_obj = _resolve_audit_symbol(setup)
+            setup_obj = _resolve_audit_hook(setup)
             if not callable(setup_obj):
                 return None, f"setup hook {setup} is not callable"
             setup_result = _call_with_async_support(setup_obj, instance)
@@ -1420,7 +1454,7 @@ def _instantiate_audit_owner(
 
     for scenario in scenarios or ():
         try:
-            scenario_obj = _resolve_audit_symbol(str(scenario))
+            scenario_obj = _resolve_audit_hook(scenario)
             if not callable(scenario_obj):
                 return None, f"scenario hook {scenario} is not callable"
             scenario_result = _call_with_async_support(scenario_obj, instance)
@@ -1442,22 +1476,36 @@ def _wrap_audit_callable(
     method_name: str | None = None,
     factory: str | None = None,
     setup: str | None = None,
-    scenarios: Sequence[str] | None = None,
+    scenarios: Sequence[str | Any] | None = None,
+    state_factory: str | Any | None = None,
+    teardown: str | Any | None = None,
+    harness: str = "fresh",
     kind: str = "function",
 ) -> Callable[..., Any]:
     """Wrap a callable while preserving its signature and metadata."""
 
     @functools.wraps(reference)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
-        return _call_with_async_support(invoke, *args, **kwargs)
+        result = _call_with_async_support(invoke, *args, **kwargs)
+        wrapped.__ordeal_last_call_context__ = getattr(  # type: ignore[attr-defined]
+            invoke,
+            "__ordeal_last_call_context__",
+            None,
+        )
+        return result
 
     wrapped.__ordeal_module__ = module_name  # type: ignore[attr-defined]
     wrapped.__ordeal_qualname__ = qualname  # type: ignore[attr-defined]
     wrapped.__ordeal_owner__ = owner_name  # type: ignore[attr-defined]
     wrapped.__ordeal_method__ = method_name  # type: ignore[attr-defined]
+    wrapped.__ordeal_method_name__ = method_name  # type: ignore[attr-defined]
     wrapped.__ordeal_factory__ = factory  # type: ignore[attr-defined]
     wrapped.__ordeal_setup__ = setup  # type: ignore[attr-defined]
     wrapped.__ordeal_scenarios__ = list(scenarios or ())  # type: ignore[attr-defined]
+    wrapped.__ordeal_state_factory__ = state_factory  # type: ignore[attr-defined]
+    wrapped.__ordeal_teardown__ = teardown  # type: ignore[attr-defined]
+    wrapped.__ordeal_harness__ = harness  # type: ignore[attr-defined]
+    wrapped.__ordeal_lifecycle_phase__ = getattr(reference, "__ordeal_lifecycle_phase__", None)  # type: ignore[attr-defined]
     wrapped.__ordeal_kind__ = kind  # type: ignore[attr-defined]
     return wrapped
 
@@ -1467,9 +1515,12 @@ def _class_target_callables(
     cls_name: str,
     cls: type[Any],
     *,
-    factory: str | None = None,
-    setup: str | None = None,
-    scenarios: Sequence[str] | None = None,
+    factory: str | Any | None = None,
+    setup: str | Any | None = None,
+    scenarios: Sequence[str | Any] | None = None,
+    state_factory: str | Any | None = None,
+    teardown: str | Any | None = None,
+    harness: str = "fresh",
     method_names: Sequence[str] | None = None,
     include_private: bool = False,
 ) -> tuple[list[tuple[str, object]], list[str]]:
@@ -1510,6 +1561,9 @@ def _class_target_callables(
                         factory=factory,
                         setup=setup,
                         scenarios=scenarios,
+                        state_factory=state_factory,
+                        teardown=teardown,
+                        harness=harness,
                         kind="static",
                     ),
                 )
@@ -1530,6 +1584,9 @@ def _class_target_callables(
                         factory=factory,
                         setup=setup,
                         scenarios=scenarios,
+                        state_factory=state_factory,
+                        teardown=teardown,
+                        harness=harness,
                         kind="class",
                     ),
                 )
@@ -1547,14 +1604,19 @@ def _class_target_callables(
                 continue
 
             reference = getattr(prototype, method_name)
+            state_param = _state_param_name_for_callable(reference)
 
             def _invoke(
                 *args: Any,
                 __cls: type[Any] = cls,
                 __method_name: str = method_name,
-                __factory: str | None = factory,
-                __setup: str | None = setup,
-                __scenarios: tuple[str, ...] = tuple(scenarios or ()),
+                __factory: str | Any | None = factory,
+                __setup: str | Any | None = setup,
+                __scenarios: tuple[str | Any, ...] = tuple(scenarios or ()),
+                __state_factory: str | Any | None = state_factory,
+                __state_param: str | None = state_param,
+                __teardown: str | Any | None = teardown,
+                __reference: Any = reference,
                 **kwargs: Any,
             ) -> Any:
                 instance, inst_reason = _instantiate_audit_owner(
@@ -1566,7 +1628,33 @@ def _class_target_callables(
                 if instance is None:
                     raise RuntimeError(inst_reason or f"cannot instantiate {__cls.__name__}")
                 bound = getattr(instance, __method_name)
-                return bound(*args, **kwargs)
+                call_args, call_kwargs = _prepare_bound_method_call(
+                    __reference,
+                    args,
+                    kwargs,
+                    instance=instance,
+                    state_factory=_resolve_audit_hook(__state_factory),
+                    state_param=__state_param,
+                )
+                before_state = _snapshot_instance_state(instance)
+                try:
+                    result = _call_with_async_support(bound, *call_args, **call_kwargs)
+                    _invoke.__ordeal_last_call_context__ = {
+                        "instance": instance,
+                        "before_state": before_state,
+                        "after_state": _snapshot_instance_state(instance),
+                        "kwargs": dict(call_kwargs),
+                        "args": tuple(call_args),
+                        "method_name": __method_name,
+                        "owner": __cls,
+                        "harness": harness,
+                        "result": result,
+                    }
+                    return result
+                finally:
+                    teardown_obj = _resolve_audit_hook(__teardown)
+                    if teardown_obj is not None:
+                        _call_with_async_support(teardown_obj, instance)
 
             discovered.append(
                 (
@@ -1581,6 +1669,9 @@ def _class_target_callables(
                         factory=factory,
                         setup=setup,
                         scenarios=scenarios,
+                        state_factory=state_factory,
+                        teardown=teardown,
+                        harness=harness,
                         kind="instance",
                     ),
                 )
@@ -1599,6 +1690,9 @@ def _module_target_callables(
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
     object_scenarios: dict[str, Any] | None = None,
+    object_state_factories: dict[str, Any] | None = None,
+    object_teardowns: dict[str, Any] | None = None,
+    object_harnesses: dict[str, str] | None = None,
 ) -> tuple[list[tuple[str, object]], list[str]]:
     """Collect public module callables plus class methods when available."""
     discovered = _get_public_functions(
@@ -1607,6 +1701,9 @@ def _module_target_callables(
         object_factories=object_factories,
         object_setups=object_setups,
         object_scenarios=object_scenarios,
+        object_state_factories=object_state_factories,
+        object_teardowns=object_teardowns,
+        object_harnesses=object_harnesses,
     )
     return discovered, []
 
@@ -1614,9 +1711,12 @@ def _module_target_callables(
 def _collect_target_callables(
     target: str,
     *,
-    factory: str | None = None,
-    setup: str | None = None,
-    scenarios: Sequence[str] | None = None,
+    factory: str | Any | None = None,
+    setup: str | Any | None = None,
+    scenarios: Sequence[str | Any] | None = None,
+    state_factory: str | Any | None = None,
+    teardown: str | Any | None = None,
+    harness: str = "fresh",
     methods: Sequence[str] | None = None,
     include_private: bool = False,
 ) -> tuple[list[tuple[str, object]], list[str]]:
@@ -1644,6 +1744,9 @@ def _collect_target_callables(
             factory=factory,
             setup=setup,
             scenarios=scenarios,
+            state_factory=state_factory,
+            teardown=teardown,
+            harness=harness,
             method_names=[method_name],
             include_private=include_private,
         )
@@ -1655,6 +1758,9 @@ def _collect_target_callables(
         factory=factory,
         setup=setup,
         scenarios=scenarios,
+        state_factory=state_factory,
+        teardown=teardown,
+        harness=harness,
         method_names=methods,
         include_private=include_private,
     )
@@ -1662,25 +1768,41 @@ def _collect_target_callables(
 
 def _audit_object_hook_maps(
     target_specs: Sequence[Any] | None,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    """Resolve configured object factories, setups, and scenarios for class targets."""
+) -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, str],
+]:
+    """Resolve configured object hooks for class targets."""
     factories: dict[str, Any] = {}
     setups: dict[str, Any] = {}
     scenarios: dict[str, Any] = {}
+    state_factories: dict[str, Any] = {}
+    teardowns: dict[str, Any] = {}
+    harnesses: dict[str, str] = {}
     for spec in target_specs or []:
         if isinstance(spec, str):
             target = spec
             factory = None
             setup = None
+            state_factory = None
+            teardown = None
+            harness = "fresh"
             scenario_paths: list[str] = []
         else:
             target = str(getattr(spec, "target"))
             factory = getattr(spec, "factory", None)
             setup = getattr(spec, "setup", None)
+            state_factory = getattr(spec, "state_factory", None)
+            teardown = getattr(spec, "teardown", None)
+            harness = str(getattr(spec, "harness", "fresh") or "fresh").strip().lower()
             scenario_paths = list(getattr(spec, "scenarios", []) or [])
-        if ":" not in target:
+        module_path, owner_path, _method_name = _split_audit_target_spec(target)
+        if owner_path is None:
             continue
-        module_path, owner_path = target.split(":", 1)
         owner_keys = {
             owner_path,
             f"{module_path}:{owner_path}",
@@ -1696,6 +1818,16 @@ def _audit_object_hook_maps(
             setup_obj = _resolve_audit_symbol(setup)
             for key in owner_keys:
                 setups[key] = setup_obj
+        if state_factory:
+            state_factory_obj = _resolve_audit_symbol(state_factory)
+            for key in owner_keys:
+                state_factories[key] = state_factory_obj
+        if teardown:
+            teardown_obj = _resolve_audit_symbol(teardown)
+            for key in owner_keys:
+                teardowns[key] = teardown_obj
+        for key in owner_keys:
+            harnesses[key] = harness if harness in {"fresh", "stateful"} else "fresh"
         if scenario_paths:
             resolved_hooks = [_resolve_audit_symbol(path) for path in scenario_paths]
 
@@ -1714,7 +1846,7 @@ def _audit_object_hook_maps(
             setattr(_scenario_hook, "__ordeal_scenario_count__", len(resolved_hooks))
             for key in owner_keys:
                 scenarios[key] = _scenario_hook
-    return factories, setups, scenarios
+    return factories, setups, scenarios, state_factories, teardowns, harnesses
 
 
 def _collect_audit_functions(
@@ -1729,7 +1861,14 @@ def _collect_audit_functions(
     ``skipped`` functions still appear in the summary as fixture gaps.
     """
     mod = _resolve_module(module)
-    object_factories, object_setups, object_scenarios = _audit_object_hook_maps(target_specs)
+    (
+        object_factories,
+        object_setups,
+        object_scenarios,
+        object_state_factories,
+        object_teardowns,
+        object_harnesses,
+    ) = _audit_object_hook_maps(target_specs)
     scannable: dict[str, object] = {}
     discovered_callables: dict[str, object] = {}
     skipped: dict[str, None] = {}
@@ -1749,6 +1888,9 @@ def _collect_audit_functions(
         object_factories=object_factories,
         object_setups=object_setups,
         object_scenarios=object_scenarios,
+        object_state_factories=object_state_factories,
+        object_teardowns=object_teardowns,
+        object_harnesses=object_harnesses,
     )
     for name, func in discovered:
         _add_scannable(name, func)
@@ -1768,6 +1910,9 @@ def _collect_audit_functions(
             factory = getattr(spec, "factory", None)
             setup = getattr(spec, "setup", None)
             scenarios = list(getattr(spec, "scenarios", []) or [])
+            state_factory = getattr(spec, "state_factory", None)
+            teardown = getattr(spec, "teardown", None)
+            harness = str(getattr(spec, "harness", "fresh") or "fresh")
             methods = list(getattr(spec, "methods", []))
             include_private = bool(getattr(spec, "include_private", False))
         discovered, target_skipped = _collect_target_callables(
@@ -1775,6 +1920,9 @@ def _collect_audit_functions(
             factory=factory,
             setup=setup,
             scenarios=scenarios,
+            state_factory=state_factory,
+            teardown=teardown,
+            harness=harness,
             methods=methods,
             include_private=include_private,
         )
@@ -1809,6 +1957,55 @@ def _normalize_audit_function_collection(
         discovered = list(scannable) + [(name, object()) for name in skipped]
         return list(scannable), list(skipped), discovered
     raise ValueError(f"unexpected audit collection shape: {len(collected)}")
+
+
+def _audit_contract_findings(
+    functions: Sequence[tuple[str, object]],
+    *,
+    contract_checks: Mapping[str, Sequence[Any]] | None,
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Run explicit contract probes against discovered audit callables."""
+    findings: list[dict[str, Any]] = []
+    if not contract_checks:
+        return findings
+    for name, func in functions:
+        checks = list(contract_checks.get(name, []))
+        if not checks:
+            continue
+        try:
+            _violations, details = _evaluate_contract_checks(func, checks)
+        except Exception as exc:
+            warnings.append(f"contract checks failed for {name}: {type(exc).__name__}: {exc}")
+            continue
+        for detail in details:
+            enriched = dict(detail)
+            enriched.setdefault("function", name)
+            findings.append(enriched)
+    return findings
+
+
+def _audit_blocking_reason(
+    *,
+    total_functions: int,
+    gap_functions: Sequence[str],
+    discovered_functions: Sequence[tuple[str, object]],
+    min_fixture_completeness: float,
+) -> str | None:
+    """Return an early blocking reason when audit lacks enough runnable leverage."""
+    if total_functions <= 0:
+        return "no callable targets were discovered"
+    completeness = max(total_functions - len(gap_functions), 0) / max(total_functions, 1)
+    if completeness <= 0.0:
+        if any("." in name for name, _func in discovered_functions):
+            return "need instance/state harness or object/state factory for discovered methods"
+        return "no discovered targets had inferable fixtures or strategies"
+    if min_fixture_completeness > 0.0 and completeness < min_fixture_completeness:
+        return (
+            "fixture completeness is too low for meaningful audit "
+            f"({completeness:.0%} < {min_fixture_completeness:.0%})"
+        )
+    return None
 
 
 def _function_name_in_nodeid(function_name: str, nodeid: str) -> bool:
@@ -3314,16 +3511,32 @@ def _generated_callable_helper(
     """Generate a helper wrapper for a callable used in migrated tests."""
     safe_name = re.sub(r"[^0-9a-zA-Z_]", "_", name.replace(".", "_"))
     helper_name = f"_ordeal_target_{safe_name}"
-    imports: set[str] = {"from ordeal.audit import _call_with_async_support"}
+    imports: set[str] = {
+        "from ordeal.audit import _call_with_async_support",
+        "from ordeal.auto import _prepare_bound_method_call",
+    }
     lines = [f"def {helper_name}({', '.join(param_decls)}):"]
 
     kind = str(getattr(func, "__ordeal_kind__", "function"))
-    owner = getattr(func, "__ordeal_owner__", None)
-    method = getattr(func, "__ordeal_method__", None)
+    owner_value = getattr(func, "__ordeal_owner__", None)
+    owner = (
+        getattr(owner_value, "__qualname__", getattr(owner_value, "__name__", None))
+        if owner_value is not None and not isinstance(owner_value, str)
+        else owner_value
+    )
+    method = getattr(func, "__ordeal_method__", None) or getattr(
+        func,
+        "__ordeal_method_name__",
+        None,
+    )
     factory = getattr(func, "__ordeal_factory__", None)
     setup = getattr(func, "__ordeal_setup__", None)
     scenarios = list(getattr(func, "__ordeal_scenarios__", []) or [])
+    state_factory = getattr(func, "__ordeal_state_factory__", None)
+    state_param = getattr(func, "__ordeal_state_param__", None)
+    teardown = getattr(func, "__ordeal_teardown__", None)
     arg_suffix = f", {call_args}" if call_args else ""
+    call_kwargs_expr = "{" + ", ".join(f"{item!r}: {item}" for item in param_names) + "}"
 
     if not owner or not method:
         target_expr = f"{module}.{name}"
@@ -3337,34 +3550,69 @@ def _generated_callable_helper(
 
     factory_expr = None
     if factory:
-        factory_module, factory_attr = (
-            factory.rsplit(":", 1) if ":" in factory else factory.rsplit(".", 1)
-        )
-        factory_name = f"_ordeal_factory_{safe_name}"
-        factory_expr = factory_name
-        imports.add(f"from {factory_module} import {factory_attr} as {factory_name}")
+        hook_import = _generated_hook_import(factory, f"_ordeal_factory_mod_{safe_name}")
+        if hook_import is not None:
+            import_line, factory_expr = hook_import
+            imports.add(import_line)
 
     if factory_expr is None:
         lines.append(f"    instance = {module}.{owner}()")
     else:
         lines.append(f"    instance = _call_with_async_support({factory_expr})")
     if setup:
-        setup_module, setup_attr = setup.rsplit(":", 1) if ":" in setup else setup.rsplit(".", 1)
-        setup_name = f"_ordeal_setup_{safe_name}"
-        imports.add(f"from {setup_module} import {setup_attr} as {setup_name}")
-        lines.append(f"    setup_result = _call_with_async_support({setup_name}, instance)")
-        lines.append("    if setup_result is not None:")
-        lines.append("        instance = setup_result")
+        hook_import = _generated_hook_import(setup, f"_ordeal_setup_mod_{safe_name}")
+        if hook_import is not None:
+            import_line, setup_expr = hook_import
+            imports.add(import_line)
+            lines.append(f"    setup_result = _call_with_async_support({setup_expr}, instance)")
+            lines.append("    if setup_result is not None:")
+            lines.append("        instance = setup_result")
     for idx, scenario in enumerate(scenarios, 1):
-        scenario_module, scenario_attr = (
-            scenario.rsplit(":", 1) if ":" in scenario else scenario.rsplit(".", 1)
-        )
-        scenario_name = f"_ordeal_scenario_{safe_name}_{idx}"
-        imports.add(f"from {scenario_module} import {scenario_attr} as {scenario_name}")
-        lines.append(f"    scenario_result = _call_with_async_support({scenario_name}, instance)")
+        hook_import = _generated_hook_import(scenario, f"_ordeal_scenario_mod_{safe_name}_{idx}")
+        if hook_import is None:
+            continue
+        import_line, scenario_expr = hook_import
+        imports.add(import_line)
+        lines.append(f"    scenario_result = _call_with_async_support({scenario_expr}, instance)")
         lines.append("    if scenario_result is not None:")
         lines.append("        instance = scenario_result")
-    lines.append(f"    return _call_with_async_support(instance.{method}{arg_suffix})")
+    lines.append("    try:")
+    if state_factory and state_param:
+        hook_import = _generated_hook_import(state_factory, f"_ordeal_state_mod_{safe_name}")
+        if hook_import is not None:
+            import_line, state_factory_expr = hook_import
+            imports.add(import_line)
+            lines.append(f"        _ordeal_bound = instance.{method}")
+            lines.append(
+                "        _ordeal_call_args, _ordeal_call_kwargs = "
+                "_prepare_bound_method_call("
+            )
+            lines.append("            _ordeal_bound,")
+            lines.append("            (),")
+            lines.append(f"            {call_kwargs_expr},")
+            lines.append("            instance=instance,")
+            lines.append(f"            state_factory={state_factory_expr},")
+            lines.append(f"            state_param={state_param!r},")
+            lines.append("        )")
+            lines.append(
+                "        return _call_with_async_support("
+                "_ordeal_bound, *_ordeal_call_args, **_ordeal_call_kwargs)"
+            )
+        else:
+            lines.append(f"        return _call_with_async_support(instance.{method}{arg_suffix})")
+    else:
+        lines.append(f"        return _call_with_async_support(instance.{method}{arg_suffix})")
+    lines.append("    finally:")
+    if teardown:
+        hook_import = _generated_hook_import(teardown, f"_ordeal_teardown_mod_{safe_name}")
+        if hook_import is not None:
+            import_line, teardown_expr = hook_import
+            imports.add(import_line)
+            lines.append(f"        _call_with_async_support({teardown_expr}, instance)")
+        else:
+            lines.append("        pass")
+    else:
+        lines.append("        pass")
     return lines, imports, helper_name
 
 
@@ -3413,6 +3661,25 @@ def _property_to_assertion(
                 return f"assert len(result) {op} len({param})"
 
     return None
+
+
+def _generated_hook_import(
+    hook: str | Any | None,
+    alias: str,
+) -> tuple[str, str] | None:
+    """Return ``(import_line, expr)`` for a generated helper hook."""
+    if hook is None:
+        return None
+    if isinstance(hook, str):
+        module_name, sep, attr_path = hook.partition(":")
+        if not sep:
+            module_name, _, attr_path = hook.rpartition(".")
+    else:
+        module_name = getattr(hook, "__module__", "")
+        attr_path = getattr(hook, "__qualname__", getattr(hook, "__name__", ""))
+    if not module_name or not attr_path or "<locals>" in attr_path:
+        return None
+    return (f"import {module_name} as {alias}", f"{alias}.{attr_path}")
 
 
 def _generate_migrated_test(
@@ -3649,6 +3916,8 @@ def audit(
     max_examples: int = 20,
     workers: int = 1,
     validation_mode: AuditValidationMode = "fast",
+    contract_checks: Mapping[str, Sequence[Any]] | None = None,
+    min_fixture_completeness: float = 0.0,
 ) -> ModuleAudit:
     """Audit a module: measure current tests vs ordeal-migrated tests.
 
@@ -3667,6 +3936,9 @@ def audit(
             ``1`` keeps the current sequential behavior.
         validation_mode: ``"fast"`` replays mined inputs against mutants.
             ``"deep"`` replays mined inputs, then re-mines each mutant.
+        contract_checks: Explicit semantic contract probes keyed by callable name.
+        min_fixture_completeness: Minimum runnable-target fraction required before
+            audit spends time on migrated-test generation and mutation checks.
 
     Returns:
         A ``ModuleAudit`` with verified or explicitly-failed measurements.
@@ -3736,6 +4008,49 @@ def audit(
     )
     result.gap_functions = skipped
     result.total_functions = len(discovered_callables)
+    result.contract_findings = _audit_contract_findings(
+        discovered_callables,
+        contract_checks=contract_checks,
+        warnings=result.warnings,
+    )
+    result.blocking_reason = _audit_blocking_reason(
+        total_functions=result.total_functions,
+        gap_functions=result.gap_functions,
+        discovered_functions=discovered_callables,
+        min_fixture_completeness=min_fixture_completeness,
+    )
+    if result.blocking_reason is not None:
+        if test_files:
+            result.current_coverage = _measure_coverage(test_files, base_module)
+        else:
+            result.current_coverage = CoverageMeasurement(
+                Status.FAILED,
+                error="no test files found",
+            )
+        collected_nodeids = (
+            _collect_pytest_nodeids(test_files)
+            if _should_collect_pytest_nodeids(
+                discovered_callables,
+                current_coverage=result.current_coverage,
+                test_file_evidence=test_file_evidence,
+            )
+            else {}
+        )
+        result.function_audits = _build_function_audits(
+            discovered_callables,
+            current_coverage=result.current_coverage,
+            test_file_evidence=test_file_evidence,
+            collected_nodeids=collected_nodeids,
+        )
+        from ordeal.mine import STRUCTURAL_LIMITATIONS
+
+        result.not_checked = list(STRUCTURAL_LIMITATIONS)
+        if state_hash is not None:
+            try:
+                _save_audit_cache(cache_key, state_hash, result)
+            except Exception:
+                pass
+        return result
     mine_examples = min(max_examples, MINE_EXAMPLES_FOR_GENERATED_TEST)
     mine_results = _mine_audit_functions(
         scannable,

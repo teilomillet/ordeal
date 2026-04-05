@@ -88,6 +88,23 @@ def _install_scenario_target_module(module_name: str):
     return mod
 
 
+def _install_stateful_target_module(module_name: str):
+    mod = types.ModuleType(module_name)
+    sys.modules[module_name] = mod
+    exec(
+        "class Env:\n"
+        "    def __init__(self) -> None:\n"
+        "        self.seen = []\n"
+        "\n"
+        "    def rollout(self, state: dict[str, str], prompt: str) -> str:\n"
+        "        state['prompt'] = prompt\n"
+        "        self.seen.append(prompt)\n"
+        "        return state['prompt']\n",
+        mod.__dict__,
+    )
+    return mod
+
+
 class TestScanModule:
     def test_scans_typed_functions(self):
         result = scan_module("tests._auto_target", max_examples=10)
@@ -658,6 +675,52 @@ class TestChaosFor:
             )
             test = TestCase("runTest")
             test.runTest()
+        finally:
+            del sys.modules[module_name]
+
+    def test_state_factory_unlocks_stateful_method_targets(self):
+        import sys
+
+        module_name = "_test_stateful_method_targets"
+        mod = _install_stateful_target_module(module_name)
+        key = f"{module_name}:Env"
+        teardown_calls: list[list[str]] = []
+
+        def factory():
+            return mod.Env()
+
+        def state_factory(instance):
+            return {"prior_calls": str(len(instance.seen))}
+
+        def teardown(instance):
+            teardown_calls.append(list(instance.seen))
+
+        try:
+            result = scan_module(
+                mod,
+                targets=[f"{module_name}:Env.rollout"],
+                object_factories={key: factory},
+                object_state_factories={key: state_factory},
+                max_examples=5,
+            )
+            assert "Env.rollout" in [item.name for item in result.functions]
+            assert "Env.rollout" not in [name for name, _reason in result.skipped]
+
+            TestCase = chaos_for(
+                mod,
+                object_factories={key: factory},
+                object_state_factories={key: state_factory},
+                object_teardowns={key: teardown},
+                object_harnesses={key: "stateful"},
+                faults=[],
+                invariants=[],
+                max_examples=3,
+                stateful_step_count=3,
+            )
+            test = TestCase("runTest")
+            test.runTest()
+
+            assert teardown_calls
         finally:
             del sys.modules[module_name]
 

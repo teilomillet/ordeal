@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.20
+
+**Features:**
+
+- tighten scan verdicts and suppressions
+
+
 ## 0.3.18
 
 **Fixes:**

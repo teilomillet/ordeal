@@ -663,9 +663,7 @@ class ModuleAudit:
         if self.harness_hints:
             lines.append("    harness hints:")
             for hint in self.harness_hints[:DISPLAY_CAP]:
-                lines.append(
-                    f"      - {hint['function']}: {hint['kind']} -> {hint['suggestion']}"
-                )
+                lines.append(f"      - {hint['function']}: {hint['kind']} -> {hint['suggestion']}")
 
         if self.suggestions:
             lines.append("    suggest:")
@@ -1500,19 +1498,22 @@ def _wrap_audit_callable(
     @functools.wraps(reference)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
         with (
-            _active_instance_probe(
-                invoke,
-                getattr(wrapped, "__ordeal_instance_probe__", None),
-            )
-            if getattr(wrapped, "__ordeal_instance_probe__", None) is not None
-            else contextlib.nullcontext()
-        ), (
-            _active_contract_faults(
-                invoke,
-                tuple(getattr(wrapped, "__ordeal_contract_faults__", ())),
-            )
-            if getattr(wrapped, "__ordeal_contract_faults__", ())
-            else contextlib.nullcontext()
+            (
+                _active_instance_probe(
+                    invoke,
+                    getattr(wrapped, "__ordeal_instance_probe__", None),
+                )
+                if getattr(wrapped, "__ordeal_instance_probe__", None) is not None
+                else contextlib.nullcontext()
+            ),
+            (
+                _active_contract_faults(
+                    invoke,
+                    tuple(getattr(wrapped, "__ordeal_contract_faults__", ())),
+                )
+                if getattr(wrapped, "__ordeal_contract_faults__", ())
+                else contextlib.nullcontext()
+            ),
         ):
             try:
                 return _call_with_async_support(invoke, *args, **kwargs)

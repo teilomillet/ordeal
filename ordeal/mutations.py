@@ -612,8 +612,8 @@ def _metadata_semantic_tags(metadata: Mapping[str, Any] | None) -> list[str]:
 
     for key in ("contract_kind", "kind", "contract_boundary", "boundary", "boundary_label"):
         _add(metadata.get(key))
-    contract_tags = metadata.get("contract_tags") or metadata.get("tags") or metadata.get(
-        "explicit_tags"
+    contract_tags = (
+        metadata.get("contract_tags") or metadata.get("tags") or metadata.get("explicit_tags")
     )
     if isinstance(contract_tags, str):
         _add(contract_tags)
@@ -722,8 +722,7 @@ def _mutant_semantic_tags(
 ) -> list[str]:
     """Infer coarse semantic tags for a surviving mutant."""
     lowered = (
-        f"{target or ''} {mutant.qualname or ''} "
-        f"{mutant.description} {mutant.source_line}"
+        f"{target or ''} {mutant.qualname or ''} {mutant.description} {mutant.source_line}"
     ).lower()
     tags: list[str] = []
     tags.extend(_metadata_semantic_tags(metadata or mutant.metadata))

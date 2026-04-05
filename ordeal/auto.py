@@ -110,6 +110,7 @@ class ContractCheck:
     summary: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
+
 @dataclass
 class ScanResult:
     """Result of scanning a module."""
@@ -1189,12 +1190,12 @@ def _scenario_exception_from_spec(spec: Any) -> BaseException:
     if isinstance(spec, type) and issubclass(spec, BaseException):
         return spec()
     if isinstance(spec, Mapping):
-        exc_type = str(
-            spec.get("type")
-            or spec.get("exception")
-            or spec.get("name")
+        exc_type = (
+            str(
+                spec.get("type") or spec.get("exception") or spec.get("name") or "RuntimeError"
+            ).strip()
             or "RuntimeError"
-        ).strip() or "RuntimeError"
+        )
         message = spec.get("message", spec.get("value", ""))
     else:
         text = str(spec).strip()
@@ -1249,12 +1250,7 @@ def _scenario_hook_from_spec(spec: Mapping[str, Any]) -> Callable[[Any], Any]:
             kind = "stub_raise"
         elif spec.get("path") is not None or spec.get("target") is not None:
             kind = "setattr"
-    path = (
-        spec.get("path")
-        or spec.get("target")
-        or spec.get("attr")
-        or spec.get("name")
-    )
+    path = spec.get("path") or spec.get("target") or spec.get("attr") or spec.get("name")
 
     def _setattr_hook(instance: Any) -> Any:
         if path is None:
@@ -1548,6 +1544,7 @@ def _lifecycle_fault_runtime(
             original = getattr(instance, name)
             is_async = inspect.iscoroutinefunction(getattr(original, "__func__", original))
             if is_async:
+
                 @functools.wraps(original)
                 async def wrapper(
                     *args: Any,
@@ -1584,6 +1581,7 @@ def _lifecycle_fault_runtime(
                         event["error_type"] = type(exc).__name__
                         raise
             else:
+
                 @functools.wraps(original)
                 def wrapper(
                     *args: Any,
@@ -1648,10 +1646,7 @@ def _discover_lifecycle_handlers(
     for name, raw_attr in inspect.getmembers_static(cls):
         if name.startswith("_") or name == exclude_method:
             continue
-        if not (
-            isinstance(raw_attr, (staticmethod, classmethod))
-            or inspect.isfunction(raw_attr)
-        ):
+        if not (isinstance(raw_attr, (staticmethod, classmethod)) or inspect.isfunction(raw_attr)):
             continue
         if _lifecycle_phase(name, raw_attr) == phase:
             handlers.append(name)
@@ -4179,21 +4174,15 @@ def _lifecycle_contract_probe(func: Any, check: ContractCheck) -> Callable[..., 
         return None
 
     phase = str(
-        metadata.get("phase")
-        or getattr(func, "__ordeal_lifecycle_phase__", None)
-        or "cleanup"
+        metadata.get("phase") or getattr(func, "__ordeal_lifecycle_phase__", None) or "cleanup"
     )
     fault = str(metadata.get("fault", "raise") or "raise")
     configured_handler = metadata.get("handler_name")
     followup_phases = [
-        str(item)
-        for item in list(metadata.get("followup_phases", []) or [])
-        if str(item).strip()
+        str(item) for item in list(metadata.get("followup_phases", []) or []) if str(item).strip()
     ]
     runtime_faults = [
-        str(item)
-        for item in list(metadata.get("runtime_faults", []) or [])
-        if str(item).strip()
+        str(item) for item in list(metadata.get("runtime_faults", []) or []) if str(item).strip()
     ]
 
     def probe(*, instance: Any, owner: type | None, method_name: str) -> Any:
@@ -4201,8 +4190,7 @@ def _lifecycle_contract_probe(func: Any, check: ContractCheck) -> Callable[..., 
         if method_name in target_handlers and len(target_handlers) > 1:
             target_handlers = [name for name in target_handlers if name != method_name]
         followup_handlers = {
-            item: _discover_lifecycle_handlers(instance, item)
-            for item in followup_phases
+            item: _discover_lifecycle_handlers(instance, item) for item in followup_phases
         }
         combined = list(dict.fromkeys([*target_handlers, *sum(followup_handlers.values(), [])]))
         if not combined:
@@ -4236,6 +4224,7 @@ def _lifecycle_contract_probe(func: Any, check: ContractCheck) -> Callable[..., 
         def _make_wrapper(bound: Any, current_name: str, *, inject: bool) -> Any:
             is_async = inspect.iscoroutinefunction(getattr(bound, "__func__", bound))
             if is_async:
+
                 @functools.wraps(bound)
                 async def wrapped(*args: Any, **kwargs: Any) -> Any:
                     attempts.append(current_name)
@@ -4246,6 +4235,7 @@ def _lifecycle_contract_probe(func: Any, check: ContractCheck) -> Callable[..., 
                         return await result
                     return result
             else:
+
                 @functools.wraps(bound)
                 def wrapped(*args: Any, **kwargs: Any) -> Any:
                     attempts.append(current_name)
@@ -4380,13 +4370,16 @@ def _evaluate_contract_checks(
         ]
         try:
             with (
-                _active_instance_probe(func, lifecycle_probe)
-                if lifecycle_probe is not None
-                else contextlib.nullcontext()
-            ), (
-                _active_contract_faults(func, runtime_faults)
-                if runtime_faults
-                else contextlib.nullcontext()
+                (
+                    _active_instance_probe(func, lifecycle_probe)
+                    if lifecycle_probe is not None
+                    else contextlib.nullcontext()
+                ),
+                (
+                    _active_contract_faults(func, runtime_faults)
+                    if runtime_faults
+                    else contextlib.nullcontext()
+                ),
             ):
                 value = _call_sync(func, **kwargs)
             call_context = getattr(func, "__ordeal_last_call_context__", None)

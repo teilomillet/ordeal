@@ -946,8 +946,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
             print(f"PASS explicit contracts for {resolved_name}")
             if target_listing is not None:
                 print(
-                    "Target metadata: "
-                    + "  ".join(_render_target_listing_parts(target_listing))
+                    "Target metadata: " + "  ".join(_render_target_listing_parts(target_listing))
                 )
             return 0
 
@@ -976,6 +975,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
 
     result = mine(func, max_examples=max_examples)
     if getattr(args, "json", False):
+
         def _property_detail(item: Any) -> dict[str, Any]:
             return {
                 "kind": "property",
@@ -1545,8 +1545,7 @@ def _config_contract_checks_for_module(
             try:
                 builtin_kwargs = dict(spec.kwargs)
                 lifecycle_phase = (
-                    str(getattr(spec, "phase", None) or builtin_kwargs.pop("phase", ""))
-                    or None
+                    str(getattr(spec, "phase", None) or builtin_kwargs.pop("phase", "")) or None
                 )
                 followup_phases = [
                     str(item)
@@ -1557,9 +1556,7 @@ def _config_contract_checks_for_module(
                     if str(item).strip()
                 ] or None
                 fault = str(
-                    getattr(spec, "fault", None)
-                    or builtin_kwargs.pop("fault", "raise")
-                    or "raise"
+                    getattr(spec, "fault", None) or builtin_kwargs.pop("fault", "raise") or "raise"
                 )
                 handler_name = (
                     str(
@@ -1884,9 +1881,7 @@ def _build_explicit_contract_checks(func: Any, names: Sequence[str]) -> list[Any
         tracked_params: list[str] = []
     else:
         tracked_params = [
-            param.name
-            for param in sig.parameters.values()
-            if param.name not in {"self", "cls"}
+            param.name for param in sig.parameters.values() if param.name not in {"self", "cls"}
         ]
 
     phase = (
@@ -1896,11 +1891,7 @@ def _build_explicit_contract_checks(func: Any, names: Sequence[str]) -> list[Any
     )
     smoke_inputs = _boundary_smoke_inputs(func)
     base_kwargs = dict(smoke_inputs[0]) if smoke_inputs else {}
-    followup_phases = (
-        ("cleanup", "teardown")
-        if phase in {"setup", "rollout"}
-        else None
-    )
+    followup_phases = ("cleanup", "teardown") if phase in {"setup", "rollout"} else None
     checks: list[Any] = []
     for name in names:
         checks.append(

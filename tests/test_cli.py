@@ -1166,11 +1166,7 @@ scan_max_examples = 12
         monkeypatch.chdir(tmp_path)
         monkeypatch.syspath_prepend(str(tmp_path))
         (tmp_path / "scan_support.py").write_text(
-            "class Env:\n"
-            "    pass\n"
-            "\n"
-            "def make_env():\n"
-            "    return Env()\n",
+            "class Env:\n    pass\n\ndef make_env():\n    return Env()\n",
             encoding="utf-8",
         )
         (tmp_path / "ordeal.toml").write_text(
@@ -1344,8 +1340,7 @@ scan_max_examples = 12
         monkeypatch.syspath_prepend(str(tmp_path))
         monkeypatch.delitem(sys.modules, "pkg_mod", raising=False)
         (tmp_path / "pkg_mod.py").write_text(
-            "def normalize(x: int) -> int:\n"
-            "    return x\n",
+            "def normalize(x: int) -> int:\n    return x\n",
             encoding="utf-8",
         )
 
@@ -1452,8 +1447,7 @@ scan_max_examples = 12
         hint_kinds = {hint["kind"] for hint in row["harness_hints"]}
         assert {"factory", "state_factory", "teardown"} <= hint_kinds
         assert any(
-            hint.get("config", {}).get("section") == "[[objects]]"
-            for hint in row["harness_hints"]
+            hint.get("config", {}).get("section") == "[[objects]]" for hint in row["harness_hints"]
         )
 
     def test_scan_list_targets_text_shows_harness_config_hints(

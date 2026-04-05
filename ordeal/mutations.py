@@ -88,6 +88,7 @@ from typing import (
     Any,
     Callable,
     Literal,
+    Sequence,
     Union,
     get_args,
     get_origin,
@@ -528,6 +529,7 @@ class Mutant:
     error: str | None = None
     source_line: str = ""
     killed_by: str | None = None
+    qualname: str | None = None
     _mutant_source: str | None = field(default=None, repr=False)
 
     @property
@@ -544,10 +546,26 @@ class Mutant:
         return advice
 
 
-def _mutant_semantic_tags(mutant: Mutant) -> list[str]:
-    """Infer coarse semantic tags for a surviving mutant."""
-    lowered = f"{mutant.description} {mutant.source_line}".lower()
+def _target_semantic_tags(target: str) -> list[str]:
+    """Infer semantic boundary tags from the explicit mutation target."""
+    lowered = target.lower()
     tags: list[str] = []
+    if any(token in lowered for token in {"cleanup", "teardown", "rollout", "setup", "stop"}):
+        tags.append("lifecycle")
+    if any(token in lowered for token in {"build_env", "env_vars", "sandbox", "shell", "argv"}):
+        tags.append("contract_boundary")
+    return tags
+
+
+def _mutant_semantic_tags(mutant: Mutant, *, target: str | None = None) -> list[str]:
+    """Infer coarse semantic tags for a surviving mutant."""
+    lowered = (
+        f"{target or ''} {mutant.qualname or ''} "
+        f"{mutant.description} {mutant.source_line}"
+    ).lower()
+    tags: list[str] = list(_target_semantic_tags(target or ""))
+    if any(token in lowered for token in {"cleanup", "teardown", "rollout", "setup", "stop"}):
+        tags.append("lifecycle")
     if any(token in lowered for token in {"shell", "argv", "execute_command", "subprocess"}):
         tags.append("shell")
     if any(token in lowered for token in {"path", "quote", "cwd", "workdir", "upload"}):
@@ -576,6 +594,8 @@ def _mutant_semantic_tags(mutant: Mutant) -> list[str]:
 def _semantic_cluster_label(tag: str) -> str:
     """Render one semantic survivor-cluster label."""
     return {
+        "lifecycle": "lifecycle contract boundary",
+        "contract_boundary": "configured contract boundary",
         "shell": "shell/argv construction",
         "path": "path quoting or normalization",
         "env": "environment shaping",
@@ -586,6 +606,46 @@ def _semantic_cluster_label(tag: str) -> str:
         "control_flow": "control-flow behavior",
         "behavior": "observable behavior",
     }.get(tag, tag.replace("_", " "))
+
+
+def _qualname_ranges(tree: ast.AST) -> list[tuple[int, int, str]]:
+    """Return ``(start, end, qualname)`` ranges for functions and methods."""
+
+    class _Visitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.stack: list[str] = []
+            self.ranges: list[tuple[int, int, str]] = []
+
+        def _visit_scoped(self, node: ast.AST, name: str) -> None:
+            self.stack.append(name)
+            end_lineno = int(getattr(node, "end_lineno", getattr(node, "lineno", 0)) or 0)
+            lineno = int(getattr(node, "lineno", 0) or 0)
+            if lineno > 0 and end_lineno >= lineno:
+                self.ranges.append((lineno, end_lineno, ".".join(self.stack)))
+            self.generic_visit(node)
+            self.stack.pop()
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            self._visit_scoped(node, node.name)
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self._visit_scoped(node, node.name)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            self._visit_scoped(node, node.name)
+
+    visitor = _Visitor()
+    visitor.visit(tree)
+    return visitor.ranges
+
+
+def _qualname_for_line(ranges: Sequence[tuple[int, int, str]], line: int) -> str | None:
+    """Return the deepest qualname that contains *line*."""
+    matches = [item for item in ranges if item[0] <= line <= item[1]]
+    if not matches:
+        return None
+    matches.sort(key=lambda item: ((item[1] - item[0]), -item[0]))
+    return matches[0][2]
 
 
 # Multiple candidate values per type — distinct values so that a != b.
@@ -756,18 +816,30 @@ class MutationResult:
 
     def semantic_survivor_clusters(self) -> list[dict[str, Any]]:
         """Group surviving mutants by coarse semantic boundary or sink."""
-        groups: dict[str, dict[str, Any]] = {}
+        groups: dict[tuple[str, str], dict[str, Any]] = {}
         for mutant in self.survived:
-            tags = _mutant_semantic_tags(mutant)
+            tags = _mutant_semantic_tags(mutant, target=self.target)
             key = tags[0]
+            owner = mutant.qualname or self.target
             bucket = groups.setdefault(
-                key,
+                (owner, key),
                 {
+                    "owner": owner,
                     "tag": key,
                     "label": _semantic_cluster_label(key),
                     "mutants": [],
                     "operators": set(),
                     "lines": set(),
+                    "coherent_boundary": key
+                    in {
+                        "lifecycle",
+                        "contract_boundary",
+                        "shell",
+                        "path",
+                        "env",
+                        "json",
+                        "http",
+                    },
                 },
             )
             bucket["mutants"].append(mutant)
@@ -778,22 +850,31 @@ class MutationResult:
         for bucket in groups.values():
             clusters.append(
                 {
+                    "owner": bucket["owner"],
                     "tag": bucket["tag"],
                     "label": bucket["label"],
                     "size": len(bucket["mutants"]),
                     "operators": sorted(bucket["operators"]),
                     "lines": sorted(bucket["lines"]),
                     "mutants": list(bucket["mutants"]),
+                    "coherent_boundary": bool(bucket["coherent_boundary"]),
                 }
             )
-        return sorted(clusters, key=lambda item: (-int(item["size"]), str(item["tag"])))
+        return sorted(
+            clusters,
+            key=lambda item: (-int(item["size"]), str(item["owner"]), str(item["tag"])),
+        )
 
     def promoted_survivor_clusters(self) -> list[dict[str, Any]]:
         """Return survivor clusters strong enough to surface as main gaps."""
         clusters = self.semantic_survivor_clusters()
         if not self.promote_clusters_only:
             return clusters
-        return [cluster for cluster in clusters if int(cluster["size"]) >= self.cluster_min_size]
+        return [
+            cluster
+            for cluster in clusters
+            if int(cluster["size"]) >= self.cluster_min_size or bool(cluster["coherent_boundary"])
+        ]
 
     def filter_report(self) -> str:
         """Structured breakdown of the mutation pipeline for AI assistants.
@@ -890,7 +971,9 @@ class MutationResult:
             for cluster in promoted_clusters:
                 ops = ", ".join(cluster["operators"])
                 lines.append(
-                    f"    cluster: {cluster['label']} ({cluster['size']} survivor(s), ops: {ops})"
+                    "    cluster: "
+                    f"{cluster['owner']} -> {cluster['label']} "
+                    f"({cluster['size']} survivor(s), ops: {ops})"
                 )
         elif self.survived:
             lines.append(
@@ -900,6 +983,8 @@ class MutationResult:
             )
         for m in self.survived:
             header = f"  GAP {m.location} [{m.operator}] {m.description}"
+            if m.qualname:
+                header += f"  @  {m.qualname}"
             if m.source_line:
                 header += f"  |  {m.source_line}"
             lines.append(header)
@@ -966,10 +1051,16 @@ class MutationResult:
 
         for i, m in enumerate(self.survived, 1):
             test_name = f"test_{safe_target}_kill_{m.operator}_{i}"
+            boundary_label = _semantic_cluster_label(
+                _mutant_semantic_tags(m, target=self.target)[0]
+            )
             lines.append("")
             lines.append(f"def {test_name}():")
             lines.append("    # Review this draft before pinning it as a regression.")
             lines.append(f"    # Mutant: {m.operator}: {m.description} at {m.location}")
+            if m.qualname:
+                lines.append(f"    # Owner: {m.qualname}")
+            lines.append(f"    # Boundary: {boundary_label}")
             if m.source_line:
                 lines.extend(_comment_lines(f"Source: {m.source_line}"))
             lines.extend(_comment_lines(f"Fix idea: {m.remediation}"))
@@ -1317,6 +1408,7 @@ def _mutant_to_dict(m: Mutant) -> dict:
         "error": m.error,
         "source_line": m.source_line,
         "killed_by": m.killed_by,
+        "qualname": m.qualname,
     }
 
 
@@ -1330,6 +1422,7 @@ def _mutant_from_dict(d: dict) -> Mutant:
         error=d.get("error"),
         source_line=d.get("source_line", ""),
         killed_by=d.get("killed_by"),
+        qualname=d.get("qualname"),
     )
 
 
@@ -3704,6 +3797,7 @@ def generate_mutants(
     """
     deadline = time.monotonic() + timeout if timeout is not None else None
     tree = ast.parse(source)
+    qualname_ranges = _qualname_ranges(tree)
     source_lines = source.splitlines()
     ops = operators or _default_operator_order()
     results: list[tuple[Mutant, ast.Module]] = []
@@ -3762,6 +3856,7 @@ def generate_mutants(
                     line=applicator.line,
                     col=applicator.col,
                     source_line=src_line,
+                    qualname=_qualname_for_line(qualname_ranges, applicator.line),
                     _mutant_source=msrc,
                 )
                 results.append((mutant, mutated_tree))
@@ -3916,6 +4011,7 @@ def _validate_extra_mutants(
             line=line,
             col=col,
             source_line=src_line,
+            qualname=_qualname_for_line(_qualname_ranges(mutant_tree), line),
             _mutant_source=mutant_source,
         )
         results.append((mutant, mutant_tree))

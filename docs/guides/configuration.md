@@ -156,6 +156,10 @@ Explicit semantic probes for scan targets. Use these for shell/path/env helpers 
 | `tracked_params` | `list[str]` | `[]` | String params to track in shell/path checks |
 | `protected_keys` | `list[str]` | `[]` | Env keys that must survive updates |
 | `env_param` | `str?` | `null` | Which kwarg carries the input env mapping |
+| `phase` | `str?` | `null` | Lifecycle phase under test, such as `setup`, `rollout`, `cleanup`, or `teardown` |
+| `followup_phases` | `list[str]` | `[]` | Lifecycle phases that must still run after an injected fault |
+| `fault` | `str?` | `null` | Injected lifecycle fault name, such as `cancel_rollout` or `raise_setup_hook` |
+| `handler_name` | `str?` | `null` | Optional preferred lifecycle handler to target during the probe |
 
 ```toml
 [[contracts]]
@@ -165,6 +169,14 @@ kwargs = { path = "tmp/my binary", env_vars = { PATH = "/bin", HOME = "/tmp/home
 tracked_params = ["path"]
 protected_keys = ["PATH", "HOME"]
 env_param = "env_vars"
+
+[[contracts]]
+target = "myapp.envs:ComposableEnv.rollout"
+checks = ["cleanup_after_cancellation"]
+kwargs = { marker = "demo" }
+phase = "rollout"
+followup_phases = ["cleanup", "teardown"]
+fault = "cancel_rollout"
 ```
 
 ### `[audit]`

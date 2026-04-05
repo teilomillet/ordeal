@@ -150,6 +150,7 @@ def test_mutation_result_promotes_only_clustered_survivors_by_default():
                 line=10,
                 col=4,
                 source_line="if timeout <= limit:",
+                qualname="Service.build_env_vars",
             ),
             mutations.Mutant(
                 operator="boundary",
@@ -157,6 +158,7 @@ def test_mutation_result_promotes_only_clustered_survivors_by_default():
                 line=12,
                 col=8,
                 source_line="timeout = min(timeout, 10)",
+                qualname="Service.build_env_vars",
             ),
             mutations.Mutant(
                 operator="delete_statement",
@@ -164,15 +166,20 @@ def test_mutation_result_promotes_only_clustered_survivors_by_default():
                 line=20,
                 col=2,
                 source_line="result = build_shell_command(path)",
+                qualname="Service.cleanup",
             ),
         ],
     )
 
     promoted = result.promoted_survivor_clusters()
-    assert len(promoted) == 1
-    assert promoted[0]["tag"] == "boundary"
+    assert len(promoted) == 2
+    assert promoted[0]["owner"] == "Service.build_env_vars"
+    assert promoted[0]["tag"] == "env"
+    assert promoted[1]["owner"] == "Service.cleanup"
+    assert promoted[1]["tag"] == "lifecycle"
     summary = result.summary()
-    assert "cluster: boundary handling (2 survivor(s)" in summary
+    assert "cluster: Service.build_env_vars -> environment shaping (2 survivor(s)" in summary
+    assert "cluster: Service.cleanup -> lifecycle contract boundary (1 survivor(s)" in summary
     assert "exploratory survivor(s) remain" not in summary
 
 
@@ -194,3 +201,34 @@ def test_mutation_result_can_expose_single_survivors_when_cluster_gate_disabled(
     promoted = result.promoted_survivor_clusters()
     assert len(promoted) == 1
     assert promoted[0]["tag"] in {"shell", "path", "behavior"}
+
+
+def test_mutation_result_clusters_lifecycle_survivors_by_owner():
+    result = mutations.MutationResult(
+        target="pkg.mod",
+        promote_clusters_only=False,
+        mutants=[
+            mutations.Mutant(
+                operator="delete_statement",
+                description="remove cleanup call",
+                line=40,
+                col=2,
+                source_line="self.cleanup_handlers.append(handler)",
+                qualname="Env.cleanup",
+            ),
+            mutations.Mutant(
+                operator="logical",
+                description="and -> or",
+                line=44,
+                col=6,
+                source_line="if teardown and cleanup:",
+                qualname="Env.cleanup",
+            ),
+        ],
+    )
+
+    clusters = result.semantic_survivor_clusters()
+    assert clusters[0]["owner"] == "Env.cleanup"
+    assert clusters[0]["tag"] == "lifecycle"
+    summary = result.summary()
+    assert "Env.cleanup -> lifecycle contract boundary" in summary

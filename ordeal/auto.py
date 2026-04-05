@@ -107,7 +107,7 @@ class ContractCheck:
     predicate: Callable[[Any], bool] = field(repr=False)
     kwargs: dict[str, Any] = field(default_factory=dict)
     summary: str | None = None
-
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class ScanResult:
@@ -299,6 +299,16 @@ class CandidateInput:
     rationale: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class HarnessHint:
+    """One mined suggestion for configuring a stateful object target."""
+
+    kind: str
+    suggestion: str
+    evidence: str
+    confidence: float = 0.5
+
+
 _DEFAULT_AUTO_CONTRACTS = (
     "shell_safe",
     "quoted_paths",
@@ -307,6 +317,8 @@ _DEFAULT_AUTO_CONTRACTS = (
     "json_roundtrip",
     "http_shape",
     "subprocess_argv",
+    "lifecycle_attempts_all",
+    "lifecycle_followup",
 )
 
 
@@ -1173,7 +1185,7 @@ def _lifecycle_phase(method_name: str, method: Any | None = None) -> str | None:
     """Infer a coarse lifecycle phase from decorator attrs or method names."""
     target = _unwrap(getattr(method, "__func__", method)) if method is not None else None
     if target is not None:
-        for phase in ("stop", "cleanup", "teardown"):
+        for phase in ("setup", "rollout", "stop", "cleanup", "teardown"):
             if getattr(target, phase, False) or (
                 getattr(target, f"{phase}_priority", None) is not None
             ):
@@ -1201,6 +1213,328 @@ def _snapshot_instance_state(instance: Any) -> Any:
         return copy.deepcopy(state)
     except Exception:
         return {key: repr(value) for key, value in state.items()}
+
+
+def _lifecycle_phase_members(
+    owner: type,
+    phase: str,
+    *,
+    exclude: Sequence[str] = (),
+) -> list[str]:
+    """Return public owner methods that look like members of one lifecycle phase."""
+    excluded = set(exclude)
+    members: list[str] = []
+    for name, raw_attr in inspect.getmembers_static(owner):
+        if name.startswith("_") or name in excluded:
+            continue
+        if _lifecycle_phase(name, raw_attr) != phase:
+            continue
+        if isinstance(raw_attr, (staticmethod, classmethod)) or inspect.isfunction(raw_attr):
+            members.append(name)
+    return members
+
+
+def _lifecycle_fault_exception(name: str) -> BaseException:
+    """Return the concrete exception raised for one lifecycle fault name."""
+    if name in {"cancel", "cancel_rollout"}:
+        return asyncio.CancelledError("injected rollout cancellation")
+    if name == "raise_setup_hook":
+        return RuntimeError("injected setup failure")
+    if name == "raise_teardown_hook":
+        return RuntimeError("injected teardown failure")
+    if name == "raise_cleanup_handler":
+        return RuntimeError("injected cleanup handler failure")
+    if name == "raise_teardown_handler":
+        return RuntimeError("injected teardown handler failure")
+    return RuntimeError(f"injected lifecycle fault: {name}")
+
+
+@contextlib.contextmanager
+def _active_contract_faults(
+    func: Any,
+    faults: Sequence[str],
+) -> Any:
+    """Temporarily attach contract-scoped lifecycle fault names to *func*."""
+    if not faults:
+        yield
+        return
+    previous = getattr(func, "__ordeal_contract_faults__", None)
+    setattr(func, "__ordeal_contract_faults__", tuple(faults))
+    try:
+        yield
+    finally:
+        if previous is None:
+            with contextlib.suppress(AttributeError):
+                delattr(func, "__ordeal_contract_faults__")
+        else:
+            setattr(func, "__ordeal_contract_faults__", previous)
+
+
+@contextlib.contextmanager
+def _active_instance_probe(
+    func: Any,
+    probe: Any | None,
+) -> Any:
+    """Temporarily attach an instance probe to one wrapped callable."""
+    previous = getattr(func, "__ordeal_instance_probe__", None)
+    setattr(func, "__ordeal_instance_probe__", probe)
+    try:
+        yield
+    finally:
+        setattr(func, "__ordeal_instance_probe__", previous)
+
+
+@contextlib.contextmanager
+def _lifecycle_fault_runtime(
+    instance: Any,
+    owner: type,
+    *,
+    method_name: str,
+    setup: Any | None = None,
+    teardown: Any | None = None,
+    fault_names: Sequence[str] = (),
+) -> Any:
+    """Patch lifecycle collaborators on *instance* for contract-driven probes."""
+    events: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    applied_faults: list[str] = []
+    phase_candidates: dict[str, list[str]] = {}
+    restore: list[tuple[Any, str, Any]] = []
+    fired: dict[str, bool] = {}
+
+    def _record(
+        *,
+        phase: str,
+        name: str,
+        kind: str,
+        injected: bool = False,
+        raised: bool = False,
+        error_type: str | None = None,
+    ) -> None:
+        events.append(
+            {
+                "phase": phase,
+                "name": name,
+                "kind": kind,
+                "injected": injected,
+                "raised": raised,
+                "error_type": error_type,
+            }
+        )
+
+    def _hook_wrapper(hook: Any, *, phase: str, fault_name: str | None) -> Any:
+        if hook is None:
+            return None
+
+        @functools.wraps(hook)
+        def wrapped_hook(current: Any) -> Any:
+            should_inject = bool(fault_name) and not fired.get(str(fault_name), False)
+            event = {
+                "phase": phase,
+                "name": getattr(hook, "__name__", phase),
+                "kind": "hook",
+                "injected": should_inject,
+                "raised": False,
+                "error_type": None,
+            }
+            events.append(event)
+            if should_inject:
+                fired[str(fault_name)] = True
+                event["raised"] = True
+                exc = _lifecycle_fault_exception(str(fault_name))
+                event["error_type"] = type(exc).__name__
+                raise exc
+            try:
+                return _call_with_optional_instance_arg(hook, current)
+            except BaseException as exc:
+                event["raised"] = True
+                event["error_type"] = type(exc).__name__
+                raise
+
+        return wrapped_hook
+
+    setup_hook = _hook_wrapper(
+        setup,
+        phase="setup",
+        fault_name="raise_setup_hook" if "raise_setup_hook" in fault_names else None,
+    )
+    teardown_hook = _hook_wrapper(
+        teardown,
+        phase="teardown",
+        fault_name="raise_teardown_hook" if "raise_teardown_hook" in fault_names else None,
+    )
+    if setup_hook is not None and "raise_setup_hook" in fault_names:
+        applied_faults.append("raise_setup_hook")
+    if teardown_hook is not None and "raise_teardown_hook" in fault_names:
+        applied_faults.append("raise_teardown_hook")
+
+    phase_faults = {
+        "raise_cleanup_handler": "cleanup",
+        "raise_teardown_handler": "teardown",
+        "cancel_rollout": "rollout",
+    }
+    for fault_name, phase in phase_faults.items():
+        if fault_name not in fault_names:
+            continue
+        names = _lifecycle_phase_members(owner, phase, exclude=(method_name,))
+        phase_candidates[phase] = names
+        if not names:
+            warnings.append(f"{fault_name}: no {phase} handlers found to inject")
+            continue
+        injected_name = names[0]
+        for name in names:
+            original = getattr(instance, name)
+            is_async = inspect.iscoroutinefunction(getattr(original, "__func__", original))
+            if is_async:
+                @functools.wraps(original)
+                async def wrapper(
+                    *args: Any,
+                    __orig: Any = original,
+                    __name: str = name,
+                    __phase: str = phase,
+                    __fault_name: str = fault_name,
+                    __inject: bool = name == injected_name,
+                    **kwargs: Any,
+                ) -> Any:
+                    should_inject = __inject and not fired.get(__fault_name, False)
+                    event = {
+                        "phase": __phase,
+                        "name": __name,
+                        "kind": "handler",
+                        "injected": should_inject,
+                        "raised": False,
+                        "error_type": None,
+                    }
+                    events.append(event)
+                    if should_inject:
+                        fired[__fault_name] = True
+                        event["raised"] = True
+                        exc = _lifecycle_fault_exception(__fault_name)
+                        event["error_type"] = type(exc).__name__
+                        raise exc
+                    try:
+                        result = __orig(*args, **kwargs)
+                        if inspect.isawaitable(result):
+                            return await result
+                        return result
+                    except BaseException as exc:
+                        event["raised"] = True
+                        event["error_type"] = type(exc).__name__
+                        raise
+            else:
+                @functools.wraps(original)
+                def wrapper(
+                    *args: Any,
+                    __orig: Any = original,
+                    __name: str = name,
+                    __phase: str = phase,
+                    __fault_name: str = fault_name,
+                    __inject: bool = name == injected_name,
+                    **kwargs: Any,
+                ) -> Any:
+                    should_inject = __inject and not fired.get(__fault_name, False)
+                    event = {
+                        "phase": __phase,
+                        "name": __name,
+                        "kind": "handler",
+                        "injected": should_inject,
+                        "raised": False,
+                        "error_type": None,
+                    }
+                    events.append(event)
+                    if should_inject:
+                        fired[__fault_name] = True
+                        event["raised"] = True
+                        exc = _lifecycle_fault_exception(__fault_name)
+                        event["error_type"] = type(exc).__name__
+                        raise exc
+                    try:
+                        return _call_sync(__orig, *args, **kwargs)
+                    except BaseException as exc:
+                        event["raised"] = True
+                        event["error_type"] = type(exc).__name__
+                        raise
+
+            restore.append((instance, name, original))
+            setattr(instance, name, wrapper)
+        applied_faults.append(fault_name)
+
+    runtime = {
+        "events": events,
+        "warnings": warnings,
+        "applied_faults": applied_faults,
+        "phase_candidates": phase_candidates,
+        "setup_hook": setup_hook or setup,
+        "teardown_hook": teardown_hook or teardown,
+    }
+    try:
+        yield runtime
+    finally:
+        for obj, attr_name, original in reversed(restore):
+            setattr(obj, attr_name, original)
+
+
+def _discover_lifecycle_handlers(
+    owner: type | Any,
+    phase: str,
+    *,
+    exclude_method: str | None = None,
+) -> list[str]:
+    """Return public handler names that look like they belong to one lifecycle phase."""
+    cls = owner if inspect.isclass(owner) else type(owner)
+    handlers: list[str] = []
+    for name, raw_attr in inspect.getmembers_static(cls):
+        if name.startswith("_") or name == exclude_method:
+            continue
+        if not (
+            isinstance(raw_attr, (staticmethod, classmethod))
+            or inspect.isfunction(raw_attr)
+        ):
+            continue
+        if _lifecycle_phase(name, raw_attr) == phase:
+            handlers.append(name)
+    return sorted(dict.fromkeys(handlers))
+
+
+def _contract_seed_kwargs(func: Any) -> dict[str, Any]:
+    """Return one deterministic concrete input for a contract probe."""
+    candidates = _candidate_inputs(
+        func,
+        fixtures=None,
+        mutate_observed_inputs=False,
+    )
+    if not candidates:
+        return {}
+    return dict(candidates[0].kwargs)
+
+
+def _instance_probe_result(
+    probe: Any | None,
+    *,
+    instance: Any,
+    owner: type | None,
+    method_name: str,
+) -> tuple[Callable[[], None] | None, dict[str, Any]]:
+    """Apply a temporary instance probe and normalize its cleanup/context payload."""
+    if probe is None:
+        return None, {}
+    result = probe(
+        instance=instance,
+        owner=owner,
+        method_name=method_name,
+    )
+    if result is None:
+        return None, {}
+    if callable(result):
+        return result, {}
+    if isinstance(result, tuple) and len(result) == 2:
+        cleanup, details = result
+        if isinstance(details, Mapping):
+            return cleanup, dict(details)
+        return cleanup, {}
+    if isinstance(result, Mapping):
+        return None, dict(result)
+    return None, {}
 
 
 def _state_param_name_for_callable(func: Any) -> str | None:
@@ -1397,38 +1731,84 @@ def _make_bound_method_callable(
 ) -> Any:
     """Build a sync wrapper that creates a fresh object per invocation."""
     target = _unwrap(method)
+    lifecycle_phase = _lifecycle_phase(method_name, target)
 
     @functools.wraps(target)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
         instance = _call_sync(factory)
-        instance = _apply_instance_hook(instance, setup)
-        instance = _apply_instance_hook(instance, scenario)
-        before_state = _snapshot_instance_state(instance)
-        bound = getattr(instance, method_name)
-        call_args, call_kwargs = _prepare_bound_method_call(
-            target,
-            args,
-            kwargs,
-            instance=instance,
-            state_factory=state_factory,
-            state_param=state_param,
-        )
         result: Any = None
-        try:
-            result = _call_sync(bound, *call_args, **call_kwargs)
-            return result
-        finally:
-            wrapped.__ordeal_last_call_context__ = {
-                "instance": instance,
-                "before_state": before_state,
-                "after_state": _snapshot_instance_state(instance),
-                "kwargs": dict(call_kwargs),
-                "args": tuple(call_args),
-                "method_name": method_name,
-                "owner": owner,
-                "harness": harness,
-                "result": result,
-            }
+        error: BaseException | None = None
+        before_state = _snapshot_instance_state(instance)
+        call_args = tuple(args)
+        call_kwargs = dict(kwargs)
+        teardown_called = False
+        teardown_error: str | None = None
+        probe_cleanup: Callable[[], None] | None = None
+        probe_context: dict[str, Any] = {}
+        fault_names = tuple(getattr(wrapped, "__ordeal_contract_faults__", ()))
+        with _lifecycle_fault_runtime(
+            instance,
+            owner,
+            method_name=method_name,
+            setup=setup,
+            teardown=teardown,
+            fault_names=fault_names,
+        ) as lifecycle_runtime:
+            runtime_setup = lifecycle_runtime.get("setup_hook", setup)
+            runtime_teardown = lifecycle_runtime.get("teardown_hook", teardown)
+            try:
+                probe_cleanup, probe_context = _instance_probe_result(
+                    getattr(wrapped, "__ordeal_instance_probe__", None),
+                    instance=instance,
+                    owner=owner,
+                    method_name=method_name,
+                )
+                instance = _apply_instance_hook(instance, runtime_setup)
+                instance = _apply_instance_hook(instance, scenario)
+                before_state = _snapshot_instance_state(instance)
+                bound = getattr(instance, method_name)
+                call_args, call_kwargs = _prepare_bound_method_call(
+                    target,
+                    args,
+                    kwargs,
+                    instance=instance,
+                    state_factory=state_factory,
+                    state_param=state_param,
+                )
+                result = _call_sync(bound, *call_args, **call_kwargs)
+                return result
+            except BaseException as exc:
+                error = exc
+                raise
+            finally:
+                if runtime_teardown is not None:
+                    teardown_called = True
+                    try:
+                        _call_with_optional_instance_arg(runtime_teardown, instance)
+                    except BaseException as exc:
+                        teardown_error = f"{type(exc).__name__}: {exc}"
+                        if error is None:
+                            error = exc
+                            raise
+                wrapped.__ordeal_last_call_context__ = {
+                    "instance": instance,
+                    "before_state": before_state,
+                    "after_state": _snapshot_instance_state(instance),
+                    "kwargs": dict(call_kwargs),
+                    "args": tuple(call_args),
+                    "method_name": method_name,
+                    "owner": owner,
+                    "harness": harness,
+                    "result": result,
+                    "error": error,
+                    "teardown_called": teardown_called,
+                    "teardown_error": teardown_error,
+                    "lifecycle_phase": lifecycle_phase,
+                    "lifecycle_runtime": lifecycle_runtime,
+                    **probe_context,
+                }
+                if probe_cleanup is not None:
+                    probe_cleanup()
 
     try:
         wrapped.__signature__ = _signature_without_first_context(
@@ -1449,8 +1829,12 @@ def _make_bound_method_callable(
     wrapped.__ordeal_teardown__ = teardown
     wrapped.__ordeal_harness__ = harness
     wrapped.__ordeal_kind__ = "instance"
-    wrapped.__ordeal_lifecycle_phase__ = _lifecycle_phase(method_name, target)
+    wrapped.__ordeal_lifecycle_phase__ = lifecycle_phase
     wrapped.__ordeal_keep_wrapped__ = True
+    wrapped.__ordeal_instance_probe__ = None
+    wrapped.__ordeal_harness_hints__ = tuple(
+        _mine_object_harness_hints(owner.__module__, owner.__name__, method_name)
+    )
     return wrapped
 
 
@@ -1484,6 +1868,10 @@ def _make_unbound_method_placeholder(
     wrapped.__ordeal_lifecycle_phase__ = _lifecycle_phase(method_name, target)
     wrapped.__ordeal_skip_reason__ = "missing object factory"
     wrapped.__ordeal_keep_wrapped__ = True
+    wrapped.__ordeal_instance_probe__ = None
+    wrapped.__ordeal_harness_hints__ = tuple(
+        _mine_object_harness_hints(owner.__module__, owner.__name__, method_name)
+    )
     return wrapped
 
 
@@ -1834,6 +2222,107 @@ def subprocess_argv_contract(
     )
 
 
+def lifecycle_attempts_all_contract(
+    *,
+    kwargs: dict[str, Any],
+    phase: str,
+    fault: str = "raise_cleanup_handler",
+    handler_name: str | None = None,
+    contract_name: str = "lifecycle_attempts_all",
+) -> ContractCheck:
+    """Build a lifecycle probe that requires best-effort handler attempts."""
+
+    def predicate(
+        value: Any,
+        *,
+        lifecycle_probe: Mapping[str, Any] | None = None,
+        **_extra: Any,
+    ) -> bool:
+        del value
+        probe = dict(lifecycle_probe or {})
+        attempts = list(probe.get("attempts", []))
+        target_handlers = list(probe.get("target_handlers", []))
+        if not target_handlers:
+            return False
+        return all(name in attempts for name in target_handlers)
+
+    return ContractCheck(
+        name=contract_name,
+        kwargs=dict(kwargs),
+        predicate=predicate,
+        summary=f"all {phase} handlers should be attempted even if one fails",
+        metadata={
+            "kind": "lifecycle",
+            "phase": phase,
+            "fault": fault,
+            "handler_name": handler_name,
+        },
+    )
+
+
+def lifecycle_followup_contract(
+    *,
+    kwargs: dict[str, Any],
+    phase: str,
+    followup_phases: Sequence[str],
+    fault: str = "raise_setup_hook",
+    handler_name: str | None = None,
+    contract_name: str = "lifecycle_followup",
+) -> ContractCheck:
+    """Build a lifecycle probe that requires follow-up phases after a fault."""
+
+    def predicate(
+        value: Any,
+        *,
+        lifecycle_probe: Mapping[str, Any] | None = None,
+        teardown_called: bool | None = None,
+        **_extra: Any,
+    ) -> bool:
+        del value
+        probe = dict(lifecycle_probe or {})
+        attempts = list(probe.get("attempts", []))
+        followup_handlers = dict(probe.get("followup_handlers", {}))
+        if not followup_handlers and teardown_called:
+            return True
+        saw_followup = False
+        for followup_phase, names in followup_handlers.items():
+            if followup_phase == "teardown" and teardown_called:
+                saw_followup = True
+                continue
+            if not names:
+                continue
+            if any(name in attempts for name in names):
+                saw_followup = True
+                continue
+            return False
+        return saw_followup
+
+    phases = [str(item) for item in followup_phases if str(item).strip()]
+    summary = (
+        f"{', '.join(phases)} handlers should still be attempted after {phase} fails"
+        if phases
+        else f"follow-up lifecycle handlers should still be attempted after {phase} fails"
+    )
+    return ContractCheck(
+        name=contract_name,
+        kwargs=dict(kwargs),
+        predicate=predicate,
+        summary=summary,
+        metadata={
+            "kind": "lifecycle",
+            "phase": phase,
+            "fault": fault,
+            "handler_name": handler_name,
+            "followup_phases": phases,
+            "runtime_faults": (
+                [fault]
+                if fault in {"raise_setup_hook", "raise_teardown_hook", "cancel_rollout"}
+                else []
+            ),
+        },
+    )
+
+
 def builtin_contract_check(
     name: str,
     *,
@@ -1841,9 +2330,43 @@ def builtin_contract_check(
     tracked_params: Sequence[str] | None = None,
     protected_keys: Sequence[str] | None = None,
     env_param: str | None = None,
+    phase: str | None = None,
+    followup_phases: Sequence[str] | None = None,
+    fault: str = "raise",
+    handler_name: str | None = None,
 ) -> ContractCheck:
     """Build one built-in semantic contract probe by *name*."""
     match name:
+        case "cleanup_attempts_all":
+            return lifecycle_attempts_all_contract(
+                kwargs=kwargs,
+                phase="cleanup",
+                fault="raise",
+                handler_name=handler_name,
+            )
+        case "teardown_attempts_all":
+            return lifecycle_attempts_all_contract(
+                kwargs=kwargs,
+                phase="teardown",
+                fault="raise",
+                handler_name=handler_name,
+            )
+        case "setup_failure_triggers_teardown":
+            return lifecycle_followup_contract(
+                kwargs=kwargs,
+                phase="setup",
+                followup_phases=["teardown"],
+                fault="raise",
+                handler_name=handler_name,
+            )
+        case "rollout_cancellation_triggers_cleanup":
+            return lifecycle_followup_contract(
+                kwargs=kwargs,
+                phase="rollout",
+                followup_phases=["cleanup", "teardown"],
+                fault="cancel",
+                handler_name=handler_name,
+            )
         case "shell_safe":
             return shell_safe_contract(kwargs=kwargs, tracked_params=tracked_params)
         case "quoted_paths":
@@ -1862,6 +2385,57 @@ def builtin_contract_check(
             return http_shape_contract(kwargs=kwargs)
         case "subprocess_argv":
             return subprocess_argv_contract(kwargs=kwargs, tracked_params=tracked_params)
+        case "all_cleanup_handlers_attempted":
+            return lifecycle_attempts_all_contract(
+                kwargs=kwargs,
+                phase="cleanup",
+                fault="raise_cleanup_handler",
+                handler_name=handler_name,
+                contract_name="all_cleanup_handlers_attempted",
+            )
+        case "all_teardown_handlers_attempted":
+            return lifecycle_attempts_all_contract(
+                kwargs=kwargs,
+                phase="teardown",
+                fault="raise_teardown_handler",
+                handler_name=handler_name,
+                contract_name="all_teardown_handlers_attempted",
+            )
+        case "cleanup_after_setup_failure":
+            return lifecycle_followup_contract(
+                kwargs=kwargs,
+                phase="setup",
+                followup_phases=list(followup_phases or ("cleanup", "teardown")),
+                fault="raise_setup_hook",
+                handler_name=handler_name,
+                contract_name="cleanup_after_setup_failure",
+            )
+        case "cleanup_after_cancellation":
+            return lifecycle_followup_contract(
+                kwargs=kwargs,
+                phase="rollout",
+                followup_phases=list(followup_phases or ("cleanup", "teardown")),
+                fault="cancel_rollout",
+                handler_name=handler_name,
+                contract_name="cleanup_after_cancellation",
+            )
+        case "lifecycle_attempts_all":
+            resolved_phase = str(phase or "cleanup")
+            return lifecycle_attempts_all_contract(
+                kwargs=kwargs,
+                phase=resolved_phase,
+                fault=fault,
+                handler_name=handler_name,
+            )
+        case "lifecycle_followup":
+            resolved_phase = str(phase or "rollout")
+            return lifecycle_followup_contract(
+                kwargs=kwargs,
+                phase=resolved_phase,
+                followup_phases=list(followup_phases or ("cleanup", "teardown")),
+                fault=fault,
+                handler_name=handler_name,
+            )
         case _:
             raise ValueError(f"unknown built-in contract check: {name}")
 
@@ -1874,11 +2448,9 @@ def _auto_contract_checks(
 ) -> tuple[list[ContractCheck], list[str]]:
     """Infer built-in sink-aware contract probes for *func* from source and seeds."""
     sink_categories = _infer_sink_categories(func)
-    if not sink_categories:
-        return [], sink_categories
 
     enabled = set(auto_contracts or _DEFAULT_AUTO_CONTRACTS)
-    probe_kwargs = dict(seed_examples[0].kwargs) if seed_examples else {}
+    probe_kwargs = dict(seed_examples[0].kwargs) if seed_examples else _contract_seed_kwargs(func)
     tracked_params = list(probe_kwargs)
     env_param = next(
         (name for name, value in probe_kwargs.items() if isinstance(value, Mapping)),
@@ -1904,10 +2476,68 @@ def _auto_contract_checks(
     if "http" in sink_categories:
         contract_names.append("http_shape")
 
+    lifecycle_phase = getattr(func, "__ordeal_lifecycle_phase__", None)
+    if (
+        lifecycle_phase
+        and getattr(func, "__ordeal_kind__", None) == "instance"
+        and getattr(func, "__ordeal_factory__", None) is not None
+    ):
+        owner = getattr(func, "__ordeal_owner__", None)
+        method_name = str(getattr(func, "__ordeal_method_name__", ""))
+        handlers = _discover_lifecycle_handlers(owner, lifecycle_phase)
+        if method_name in handlers and len(handlers) > 1:
+            handlers = [name for name in handlers if name != method_name]
+        if lifecycle_phase == "cleanup" and len(handlers) >= 1:
+            contract_names.append("cleanup_attempts_all")
+        if lifecycle_phase == "stop" and len(handlers) >= 1:
+            contract_names.append("lifecycle_attempts_all")
+        if lifecycle_phase == "teardown" and len(handlers) >= 1:
+            contract_names.append("teardown_attempts_all")
+        if lifecycle_phase in {"setup", "rollout"}:
+            followup = [
+                phase
+                for phase in ("cleanup", "teardown", "stop")
+                if _discover_lifecycle_handlers(owner, phase)
+                or (phase == "teardown" and getattr(func, "__ordeal_teardown__", None) is not None)
+            ]
+            if followup:
+                if lifecycle_phase == "setup":
+                    contract_names.append("setup_failure_triggers_teardown")
+                else:
+                    contract_names.append("rollout_cancellation_triggers_cleanup")
+
     checks: list[ContractCheck] = []
     for name in dict.fromkeys(contract_names):
         if name not in enabled or not probe_kwargs:
             continue
+        followup_phases: list[str] | None = None
+        phase = None
+        if name in {"lifecycle_attempts_all", "cleanup_attempts_all", "teardown_attempts_all"}:
+            phase = str(lifecycle_phase or "cleanup")
+            if name == "cleanup_attempts_all":
+                phase = "cleanup"
+            elif name == "teardown_attempts_all":
+                phase = "teardown"
+        elif name in {
+            "lifecycle_followup",
+            "setup_failure_triggers_teardown",
+            "rollout_cancellation_triggers_cleanup",
+        }:
+            phase = str(lifecycle_phase or "rollout")
+            if name == "setup_failure_triggers_teardown":
+                phase = "setup"
+                followup_phases = ["teardown"]
+            elif name == "rollout_cancellation_triggers_cleanup":
+                phase = "rollout"
+                followup_phases = ["cleanup", "teardown"]
+            else:
+                followup_phases = [
+                    phase_name
+                    for phase_name in ("cleanup", "teardown", "stop")
+                    if _discover_lifecycle_handlers(
+                        getattr(func, "__ordeal_owner__", None), phase_name
+                    )
+                ]
         checks.append(
             builtin_contract_check(
                 name,
@@ -1915,6 +2545,8 @@ def _auto_contract_checks(
                 tracked_params=tracked_params,
                 protected_keys=protected_keys,
                 env_param=env_param,
+                phase=phase,
+                followup_phases=followup_phases,
             )
         )
     return checks, sink_categories
@@ -2215,6 +2847,159 @@ def _callable_seed_files(module_name: str) -> list[Path]:
                 seen.add(resolved)
                 candidates.append(resolved)
     return sorted(candidates)
+
+
+def _camel_case_tokens(text: str) -> list[str]:
+    """Split one identifier into coarse searchable tokens."""
+    return [token.lower() for token in re.findall(r"[A-Z]?[a-z]+|[0-9]+", text) if token]
+
+
+def _harness_doc_files(module_name: str) -> list[Path]:
+    """Return markdown files that may document lifecycle harness setup."""
+    roots = [Path.cwd(), Path.cwd() / "docs"]
+    try:
+        module = importlib.import_module(module_name)
+    except Exception:
+        module = None
+    module_file = getattr(module, "__file__", None)
+    if module_file:
+        module_root = Path(module_file).resolve().parent
+        roots.extend([module_root, *module_root.parents[:2]])
+
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        if not root.exists():
+            continue
+        for pattern in ("README*.md", "*.md", "docs/**/*.md"):
+            for path in root.glob(pattern):
+                resolved = path.resolve()
+                if resolved in seen or not resolved.is_file():
+                    continue
+                seen.add(resolved)
+                candidates.append(resolved)
+    return sorted(candidates)
+
+
+@functools.lru_cache(maxsize=128)
+def _mine_object_harness_hints(
+    module_name: str,
+    class_name: str,
+    method_name: str,
+) -> tuple[HarnessHint, ...]:
+    """Mine likely factory/state/teardown/client hooks from tests and docs."""
+    class_tokens = {class_name.lower(), *(_camel_case_tokens(class_name))}
+    method_tokens = {method_name.lower(), *(_camel_case_tokens(method_name))}
+    target_tokens = class_tokens | method_tokens
+    hints: list[HarnessHint] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add_hint(kind: str, suggestion: str, evidence: str, confidence: float) -> None:
+        key = (kind, suggestion)
+        if key in seen:
+            return
+        seen.add(key)
+        hints.append(
+            HarnessHint(
+                kind=kind,
+                suggestion=suggestion,
+                evidence=evidence,
+                confidence=confidence,
+            )
+        )
+
+    support_files = list(_callable_seed_files(module_name))
+    extra_patterns = ("*factory*.py", "*fixture*.py", "*support*.py", "conftest.py")
+    for root in _test_search_roots(module_name):
+        for pattern in extra_patterns:
+            for path in root.rglob(pattern):
+                resolved = path.resolve()
+                if resolved.is_file() and resolved not in support_files:
+                    support_files.append(resolved)
+
+    for path in sorted(dict.fromkeys(support_files)):
+        tree = _parse_python_source(str(path))
+        if tree is None:
+            continue
+        try:
+            display_path = path.relative_to(Path.cwd())
+        except ValueError:
+            display_path = path
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            name_lower = node.name.lower()
+            doc_lower = (ast.get_docstring(node) or "").lower()
+            returns_lower = (
+                ast.unparse(node.returns).lower()
+                if getattr(node, "returns", None) is not None
+                else ""
+            )
+            text_lower = " ".join([name_lower, doc_lower, returns_lower])
+            is_fixture = any(
+                _call_name(decorator.func) == "pytest.fixture"
+                if isinstance(decorator, ast.Call)
+                else _call_name(decorator) == "pytest.fixture"
+                for decorator in node.decorator_list
+            )
+            evidence = f"{display_path}:{getattr(node, 'lineno', '?')}"
+            mentions_target = any(token in text_lower for token in target_tokens)
+
+            if mentions_target and (
+                name_lower.startswith(("make_", "build_", "create_", "new_"))
+                or "factory" in name_lower
+            ):
+                _add_hint("factory", f"{evidence}:{node.name}", evidence, 0.9)
+            if mentions_target and "state" in text_lower:
+                _add_hint("state_factory", f"{evidence}:{node.name}", evidence, 0.85)
+            if mentions_target and any(
+                token in text_lower for token in ("teardown", "cleanup", "close", "stop")
+            ):
+                _add_hint("teardown", f"{evidence}:{node.name}", evidence, 0.8)
+            if is_fixture and any(
+                token in text_lower for token in ("client", "sandbox", "session", "transport")
+            ):
+                _add_hint("client_fixture", f"{evidence}:{node.name}", evidence, 0.75)
+
+    for path in _harness_doc_files(module_name):
+        try:
+            content = path.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        try:
+            display_path = path.relative_to(Path.cwd())
+        except ValueError:
+            display_path = path
+        lowered = content.lower()
+        if not any(token in lowered for token in target_tokens):
+            continue
+        for idx, line in enumerate(lowered.splitlines(), 1):
+            if not any(token in line for token in target_tokens):
+                continue
+            evidence = f"{display_path}:{idx}"
+            if "state" in line:
+                _add_hint(
+                    "state_factory",
+                    "docs mention state setup for this target",
+                    evidence,
+                    0.55,
+                )
+            if any(token in line for token in ("teardown", "cleanup", "close", "stop")):
+                _add_hint("teardown", "docs mention lifecycle teardown/cleanup", evidence, 0.55)
+            if any(token in line for token in ("client", "sandbox", "session")):
+                _add_hint(
+                    "client_fixture",
+                    "docs mention a client/session collaborator",
+                    evidence,
+                    0.5,
+                )
+
+    return tuple(
+        sorted(
+            hints,
+            key=lambda item: (-float(item.confidence), item.kind, item.suggestion),
+        )
+    )
 
 
 def _import_alias_maps(
@@ -3001,6 +3786,141 @@ def _build_proof_bundle(
     }
 
 
+@contextlib.contextmanager
+def _temporary_callable_attr(func: Any, name: str, value: Any) -> Any:
+    """Temporarily set one attribute on *func* for a contract execution."""
+    marker = object()
+    previous = getattr(func, name, marker)
+    setattr(func, name, value)
+    try:
+        yield
+    finally:
+        if previous is marker:
+            with contextlib.suppress(AttributeError):
+                delattr(func, name)
+        else:
+            setattr(func, name, previous)
+
+
+def _lifecycle_contract_probe(func: Any, check: ContractCheck) -> Callable[..., Any] | None:
+    """Build an instance probe that injects lifecycle faults for *check*."""
+    metadata = dict(check.metadata)
+    if metadata.get("kind") != "lifecycle":
+        return None
+    if getattr(func, "__ordeal_kind__", None) != "instance":
+        return None
+
+    phase = str(
+        metadata.get("phase")
+        or getattr(func, "__ordeal_lifecycle_phase__", None)
+        or "cleanup"
+    )
+    fault = str(metadata.get("fault", "raise") or "raise")
+    configured_handler = metadata.get("handler_name")
+    followup_phases = [
+        str(item)
+        for item in list(metadata.get("followup_phases", []) or [])
+        if str(item).strip()
+    ]
+    runtime_faults = [
+        str(item)
+        for item in list(metadata.get("runtime_faults", []) or [])
+        if str(item).strip()
+    ]
+
+    def probe(*, instance: Any, owner: type | None, method_name: str) -> Any:
+        target_handlers = _discover_lifecycle_handlers(instance, phase)
+        if method_name in target_handlers and len(target_handlers) > 1:
+            target_handlers = [name for name in target_handlers if name != method_name]
+        followup_handlers = {
+            item: _discover_lifecycle_handlers(instance, item)
+            for item in followup_phases
+        }
+        combined = list(dict.fromkeys([*target_handlers, *sum(followup_handlers.values(), [])]))
+        if not combined:
+            return None, {
+                "lifecycle_probe": {
+                    "phase": phase,
+                    "fault": fault,
+                    "owner": getattr(owner, "__qualname__", None),
+                    "method_name": method_name,
+                    "target_handlers": [],
+                    "followup_handlers": followup_handlers,
+                    "attempts": [],
+                    "injected_handler": None,
+                    "runtime_faults": runtime_faults,
+                }
+            }
+
+        attempts: list[str] = []
+        patched: list[tuple[str, Any]] = []
+        inject_via_probe = not runtime_faults
+        injected_handler = (
+            (
+                str(configured_handler)
+                if configured_handler and str(configured_handler) in combined
+                else combined[0]
+            )
+            if inject_via_probe
+            else None
+        )
+
+        def _make_wrapper(bound: Any, current_name: str, *, inject: bool) -> Any:
+            is_async = inspect.iscoroutinefunction(getattr(bound, "__func__", bound))
+            if is_async:
+                @functools.wraps(bound)
+                async def wrapped(*args: Any, **kwargs: Any) -> Any:
+                    attempts.append(current_name)
+                    if inject:
+                        raise _lifecycle_fault_exception(fault)
+                    result = bound(*args, **kwargs)
+                    if inspect.isawaitable(result):
+                        return await result
+                    return result
+            else:
+                @functools.wraps(bound)
+                def wrapped(*args: Any, **kwargs: Any) -> Any:
+                    attempts.append(current_name)
+                    if inject:
+                        raise _lifecycle_fault_exception(fault)
+                    return _call_sync(bound, *args, **kwargs)
+
+            return wrapped
+
+        for current_name in combined:
+            bound = getattr(instance, current_name, None)
+            if bound is None or not callable(bound):
+                continue
+            patched.append((current_name, bound))
+            setattr(
+                instance,
+                current_name,
+                _make_wrapper(bound, current_name, inject=current_name == injected_handler),
+            )
+
+        def cleanup() -> None:
+            for current_name, bound in reversed(patched):
+                setattr(instance, current_name, bound)
+
+        return cleanup, {
+            "lifecycle_probe": {
+                "phase": phase,
+                "fault": fault,
+                "owner": getattr(owner, "__qualname__", None),
+                "method_name": method_name,
+                "target_handlers": list(target_handlers),
+                "followup_handlers": {
+                    key: list(value) for key, value in followup_handlers.items()
+                },
+                "attempts": attempts,
+                "injected_handler": injected_handler,
+                "runtime_faults": runtime_faults,
+            }
+        }
+
+    return probe
+
+
 def _call_contract_predicate(
     predicate: Callable[..., Any],
     value: Any,
@@ -3008,6 +3928,7 @@ def _call_contract_predicate(
     func: Any,
     call_context: Mapping[str, Any] | None,
     kwargs: Mapping[str, Any],
+    error: BaseException | None = None,
 ) -> bool:
     """Call a contract predicate with optional lifecycle-aware context."""
     supported = {
@@ -3015,6 +3936,8 @@ def _call_contract_predicate(
         "result": value,
         "func": func,
         "kwargs": dict(kwargs),
+        "error": error,
+        "exception": error,
     }
     if call_context:
         supported.update(
@@ -3026,6 +3949,11 @@ def _call_contract_predicate(
                 "method_name": call_context.get("method_name"),
                 "owner": call_context.get("owner"),
                 "harness": call_context.get("harness"),
+                "lifecycle_phase": call_context.get("lifecycle_phase"),
+                "lifecycle_probe": call_context.get("lifecycle_probe"),
+                "teardown_called": call_context.get("teardown_called"),
+                "teardown_error": call_context.get("teardown_error"),
+                "lifecycle_runtime": call_context.get("lifecycle_runtime"),
             }
         )
 
@@ -3068,58 +3996,54 @@ def _evaluate_contract_checks(
     for check in contract_checks:
         kwargs = dict(check.kwargs)
         contract_fit, realism, sink_signal, rationale = _score_contract_fit(kwargs, profile)
+        lifecycle_probe = _lifecycle_contract_probe(func, check)
+        call_context: Mapping[str, Any] | None = None
+        error_obj: BaseException | None = None
+        metadata = dict(check.metadata)
+        detail_category = (
+            "lifecycle_contract"
+            if str(metadata.get("kind")) == "lifecycle"
+            else "semantic_contract"
+        )
+        runtime_faults = [
+            str(item)
+            for item in list(metadata.get("runtime_faults", []) or [])
+            if str(item).strip()
+        ]
         try:
-            value = _call_sync(func, **kwargs)
-        except Exception as exc:
-            summary = check.summary or f"explicit contract failed: {check.name}"
-            violations.append(summary)
-            details.append(
-                {
-                    "kind": "contract",
-                    "category": "semantic_contract",
-                    "name": check.name,
-                    "summary": summary,
-                    "error": str(exc)[:300],
-                    "error_type": type(exc).__name__,
-                    "failing_args": kwargs,
-                    "contract_fit": contract_fit,
-                    "reachability": 1.0,
-                    "realism": realism,
-                    "sink_signal": max(sink_signal, 1.0),
-                    "input_source": "explicit_contract",
-                    "proof_bundle": _build_proof_bundle(
-                        qualname=qualname,
-                        error=exc,
-                        failing_args=kwargs,
-                        input_source="explicit_contract",
-                        contract_fit=contract_fit,
-                        reachability=1.0,
-                        realism=realism,
-                        rationale=rationale,
-                        replayable=True,
-                        replay_attempts=1,
-                        replay_matches=1,
-                        category="semantic_contract",
-                        profile=profile,
-                        sink_signal=max(sink_signal, 1.0),
-                    ),
-                }
-            )
-            continue
+            with (
+                _active_instance_probe(func, lifecycle_probe)
+                if lifecycle_probe is not None
+                else contextlib.nullcontext()
+            ), (
+                _active_contract_faults(func, runtime_faults)
+                if runtime_faults
+                else contextlib.nullcontext()
+            ):
+                value = _call_sync(func, **kwargs)
+            call_context = getattr(func, "__ordeal_last_call_context__", None)
+        except BaseException as exc:
+            error_obj = exc
+            call_context = getattr(func, "__ordeal_last_call_context__", None)
+            value = None
+
+        if call_context is None:
+            call_context = getattr(func, "__ordeal_last_call_context__", None)
 
         try:
             passed = _call_contract_predicate(
                 check.predicate,
                 value,
                 func=func,
-                call_context=getattr(func, "__ordeal_last_call_context__", None),
+                call_context=call_context,
                 kwargs=kwargs,
+                error=error_obj,
             )
         except Exception as exc:
             passed = False
             error = f"{type(exc).__name__}: {exc}"
         else:
-            error = None
+            error = None if error_obj is None else f"{type(error_obj).__name__}: {error_obj}"
 
         if passed:
             continue
@@ -3128,7 +4052,7 @@ def _evaluate_contract_checks(
         violations.append(summary)
         detail = {
             "kind": "contract",
-            "category": "semantic_contract",
+            "category": detail_category,
             "name": check.name,
             "summary": summary,
             "failing_args": kwargs,
@@ -3139,8 +4063,16 @@ def _evaluate_contract_checks(
             "sink_signal": max(sink_signal, 1.0),
             "input_source": "explicit_contract",
         }
+        if call_context:
+            detail["lifecycle_phase"] = call_context.get("lifecycle_phase")
+            detail["lifecycle_probe"] = call_context.get("lifecycle_probe")
+            detail["teardown_called"] = call_context.get("teardown_called")
+            detail["teardown_error"] = call_context.get("teardown_error")
+            detail["lifecycle_runtime"] = call_context.get("lifecycle_runtime")
         if error is not None:
             detail["error"] = error[:300]
+            if error_obj is not None:
+                detail["error_type"] = type(error_obj).__name__
         detail["proof_bundle"] = {
             "valid_input_witness": {
                 "input": dict(kwargs),
@@ -3155,7 +4087,7 @@ def _evaluate_contract_checks(
                 "contract_check": check.name,
             },
             "contract_validity": {
-                "category": "semantic_contract",
+                "category": detail_category,
                 "likely_contract": profile.get("params", {}),
                 "rationale": list(rationale),
             },
@@ -3165,8 +4097,21 @@ def _evaluate_contract_checks(
                 "replay_matches": 1,
                 "failing_args": dict(kwargs),
             },
-            "likely_impact": _likely_impact("likely_bug", max(sink_signal, 1.0)),
+            "likely_impact": (
+                "violates an explicit lifecycle contract on a configured harness."
+                if call_context and call_context.get("lifecycle_probe") is not None
+                else _likely_impact("likely_bug", max(sink_signal, 1.0))
+            ),
         }
+        if call_context and call_context.get("lifecycle_probe") is not None:
+            detail["proof_bundle"]["lifecycle"] = dict(call_context["lifecycle_probe"])
+        if error_obj is not None:
+            detail["proof_bundle"]["failing_path"] = {
+                "qualname": qualname,
+                "contract_check": check.name,
+                "error_type": type(error_obj).__name__,
+                "error": str(error_obj)[:300],
+            }
         details.append(detail)
 
     return violations, details
@@ -3501,6 +4446,36 @@ def _test_one_function(
             min_realism=min_realism,
             require_replayable=require_replayable,
         )
+        proof_bundle = None
+        if proof_bundles:
+            proof_bundle = _build_proof_bundle(
+                qualname=str(profile.get("qualname", name)),
+                error=e,
+                failing_args=last_kwargs,
+                input_source=last_input_source,
+                contract_fit=contract_fit,
+                reachability=reachability,
+                realism=realism,
+                rationale=rationale,
+                replayable=replayable,
+                replay_attempts=replay_attempts,
+                replay_matches=replay_matches,
+                category=crash_category,
+                profile=profile,
+                sink_signal=sink_signal,
+                sink_categories=sink_categories,
+            )
+            call_context = getattr(func, "__ordeal_last_call_context__", None)
+            if call_context:
+                lifecycle_details = {
+                    "phase": call_context.get("lifecycle_phase"),
+                    "probe": call_context.get("lifecycle_probe"),
+                    "runtime": call_context.get("lifecycle_runtime"),
+                    "teardown_called": call_context.get("teardown_called"),
+                    "teardown_error": call_context.get("teardown_error"),
+                }
+                if any(value is not None for value in lifecycle_details.values()):
+                    proof_bundle["lifecycle"] = lifecycle_details
         return FunctionResult(
             name=name,
             passed=False,
@@ -3521,27 +4496,7 @@ def _test_one_function(
                 for example in profile.get("seed_examples", [])
             ],
             input_source=last_input_source,
-            proof_bundle=(
-                _build_proof_bundle(
-                    qualname=str(profile.get("qualname", name)),
-                    error=e,
-                    failing_args=last_kwargs,
-                    input_source=last_input_source,
-                    contract_fit=contract_fit,
-                    reachability=reachability,
-                    realism=realism,
-                    rationale=rationale,
-                    replayable=replayable,
-                    replay_attempts=replay_attempts,
-                    replay_matches=replay_matches,
-                    category=crash_category,
-                    profile=profile,
-                    sink_signal=sink_signal,
-                    sink_categories=sink_categories,
-                )
-                if proof_bundles
-                else None
-            ),
+            proof_bundle=proof_bundle,
         )
 
     # Mine properties to detect semantic anomalies (not just crashes)
@@ -4119,6 +5074,12 @@ def _make_stateful_rule_method(
         instance = getattr(self, owner_attr, None)
         if instance is None:
             raise RuntimeError(f"stateful harness did not initialize {owner_attr}")
+        probe_cleanup, probe_context = _instance_probe_result(
+            getattr(func, "__ordeal_instance_probe__", None),
+            instance=instance,
+            owner=getattr(func, "__ordeal_owner__", None),
+            method_name=method_name,
+        )
         before_state = _snapshot_instance_state(instance)
         target = _unwrap(func)
         call_args, call_kwargs = _prepare_bound_method_call(
@@ -4139,7 +5100,11 @@ def _make_stateful_rule_method(
             "method_name": method_name,
             "owner": getattr(func, "__ordeal_owner__", None),
             "harness": "stateful",
+            "lifecycle_phase": getattr(func, "__ordeal_lifecycle_phase__", None),
+            **probe_context,
         }
+        if probe_cleanup is not None:
+            probe_cleanup()
         if result is not None:
             for inv in invariants:
                 try:

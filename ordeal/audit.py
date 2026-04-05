@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 import enum
 import functools
 import hashlib
@@ -69,9 +70,14 @@ from types import ModuleType
 from typing import Any, Callable, Literal, Mapping, Sequence, Union, get_args, get_origin
 
 from ordeal.auto import (
+    _active_contract_faults,
+    _active_instance_probe,
     _evaluate_contract_checks,
     _get_public_functions,
     _infer_strategies,
+    _instance_probe_result,
+    _lifecycle_fault_runtime,
+    _mine_object_harness_hints,
     _prepare_bound_method_call,
     _resolve_module,
     _snapshot_instance_state,
@@ -541,6 +547,7 @@ class ModuleAudit:
     mutation_gap_stubs: list[dict[str, str]] = field(default_factory=list)
     contract_findings: list[dict[str, Any]] = field(default_factory=list)
     blocking_reason: str | None = None
+    harness_hints: list[dict[str, Any]] = field(default_factory=list)
 
     # Known unknowns — what ordeal structurally cannot verify
     not_checked: list[str] = field(default_factory=list)
@@ -653,6 +660,12 @@ class ModuleAudit:
             )
         if self.blocking_reason:
             lines.append(f"    blocked:  {self.blocking_reason}")
+        if self.harness_hints:
+            lines.append("    harness hints:")
+            for hint in self.harness_hints[:DISPLAY_CAP]:
+                lines.append(
+                    f"      - {hint['function']}: {hint['kind']} -> {hint['suggestion']}"
+                )
 
         if self.suggestions:
             lines.append("    suggest:")
@@ -829,6 +842,7 @@ def _module_audit_to_dict(result: ModuleAudit) -> dict[str, object]:
         "mutation_gap_stubs": result.mutation_gap_stubs,
         "contract_findings": result.contract_findings,
         "blocking_reason": result.blocking_reason,
+        "harness_hints": result.harness_hints,
         "not_checked": result.not_checked,
         "warnings": result.warnings,
         "generated_test": result.generated_test,
@@ -862,6 +876,7 @@ def _module_audit_from_dict(data: dict[str, object]) -> ModuleAudit:
         blocking_reason=(
             str(data["blocking_reason"]) if data.get("blocking_reason") is not None else None
         ),
+        harness_hints=list(data.get("harness_hints", [])),
         not_checked=list(data.get("not_checked", [])),
         warnings=list(data.get("warnings", [])),
         generated_test=str(data.get("generated_test", "")),
@@ -1470,7 +1485,7 @@ def _wrap_audit_callable(
     *,
     module_name: str,
     qualname: str,
-    owner_name: str | None = None,
+    owner: type[Any] | str | None = None,
     method_name: str | None = None,
     factory: str | None = None,
     setup: str | None = None,
@@ -1484,17 +1499,33 @@ def _wrap_audit_callable(
 
     @functools.wraps(reference)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
-        result = _call_with_async_support(invoke, *args, **kwargs)
-        wrapped.__ordeal_last_call_context__ = getattr(  # type: ignore[attr-defined]
-            invoke,
-            "__ordeal_last_call_context__",
-            None,
-        )
-        return result
+        with (
+            _active_instance_probe(
+                invoke,
+                getattr(wrapped, "__ordeal_instance_probe__", None),
+            )
+            if getattr(wrapped, "__ordeal_instance_probe__", None) is not None
+            else contextlib.nullcontext()
+        ), (
+            _active_contract_faults(
+                invoke,
+                tuple(getattr(wrapped, "__ordeal_contract_faults__", ())),
+            )
+            if getattr(wrapped, "__ordeal_contract_faults__", ())
+            else contextlib.nullcontext()
+        ):
+            try:
+                return _call_with_async_support(invoke, *args, **kwargs)
+            finally:
+                wrapped.__ordeal_last_call_context__ = getattr(  # type: ignore[attr-defined]
+                    invoke,
+                    "__ordeal_last_call_context__",
+                    None,
+                )
 
     wrapped.__ordeal_module__ = module_name  # type: ignore[attr-defined]
     wrapped.__ordeal_qualname__ = qualname  # type: ignore[attr-defined]
-    wrapped.__ordeal_owner__ = owner_name  # type: ignore[attr-defined]
+    wrapped.__ordeal_owner__ = owner  # type: ignore[attr-defined]
     wrapped.__ordeal_method__ = method_name  # type: ignore[attr-defined]
     wrapped.__ordeal_method_name__ = method_name  # type: ignore[attr-defined]
     wrapped.__ordeal_factory__ = factory  # type: ignore[attr-defined]
@@ -1505,6 +1536,7 @@ def _wrap_audit_callable(
     wrapped.__ordeal_harness__ = harness  # type: ignore[attr-defined]
     wrapped.__ordeal_lifecycle_phase__ = getattr(reference, "__ordeal_lifecycle_phase__", None)  # type: ignore[attr-defined]
     wrapped.__ordeal_kind__ = kind  # type: ignore[attr-defined]
+    wrapped.__ordeal_instance_probe__ = None  # type: ignore[attr-defined]
     return wrapped
 
 
@@ -1554,7 +1586,7 @@ def _class_target_callables(
                         reference,
                         module_name=module_name,
                         qualname=qualname,
-                        owner_name=cls_name,
+                        owner=cls,
                         method_name=method_name,
                         factory=factory,
                         setup=setup,
@@ -1577,7 +1609,7 @@ def _class_target_callables(
                         reference,
                         module_name=module_name,
                         qualname=qualname,
-                        owner_name=cls_name,
+                        owner=cls,
                         method_name=method_name,
                         factory=factory,
                         setup=setup,
@@ -1620,39 +1652,103 @@ def _class_target_callables(
                 instance, inst_reason = _instantiate_audit_owner(
                     __cls,
                     factory=__factory,
-                    setup=__setup,
-                    scenarios=__scenarios,
+                    setup=None,
+                    scenarios=None,
                 )
                 if instance is None:
                     raise RuntimeError(inst_reason or f"cannot instantiate {__cls.__name__}")
-                bound = getattr(instance, __method_name)
-                call_args, call_kwargs = _prepare_bound_method_call(
-                    __reference,
-                    args,
-                    kwargs,
-                    instance=instance,
-                    state_factory=_resolve_audit_hook(__state_factory),
-                    state_param=__state_param,
-                )
+                fault_names = tuple(getattr(_invoke, "__ordeal_contract_faults__", ()))
+                call_args = tuple(args)
+                call_kwargs = dict(kwargs)
                 before_state = _snapshot_instance_state(instance)
-                try:
-                    result = _call_with_async_support(bound, *call_args, **call_kwargs)
-                    _invoke.__ordeal_last_call_context__ = {
-                        "instance": instance,
-                        "before_state": before_state,
-                        "after_state": _snapshot_instance_state(instance),
-                        "kwargs": dict(call_kwargs),
-                        "args": tuple(call_args),
-                        "method_name": __method_name,
-                        "owner": __cls,
-                        "harness": harness,
-                        "result": result,
-                    }
-                    return result
-                finally:
-                    teardown_obj = _resolve_audit_hook(__teardown)
-                    if teardown_obj is not None:
-                        _call_with_async_support(teardown_obj, instance)
+                result: Any = None
+                error: BaseException | None = None
+                teardown_called = False
+                teardown_error: str | None = None
+                probe_cleanup: Callable[[], None] | None = None
+                probe_context: dict[str, Any] = {}
+                with _lifecycle_fault_runtime(
+                    instance,
+                    __cls,
+                    method_name=__method_name,
+                    setup=_resolve_audit_hook(__setup),
+                    teardown=_resolve_audit_hook(__teardown),
+                    fault_names=fault_names,
+                ) as lifecycle_runtime:
+                    runtime_setup = lifecycle_runtime.get(
+                        "setup_hook",
+                        _resolve_audit_hook(__setup),
+                    )
+                    runtime_teardown = lifecycle_runtime.get(
+                        "teardown_hook",
+                        _resolve_audit_hook(__teardown),
+                    )
+                    try:
+                        probe_cleanup, probe_context = _instance_probe_result(
+                            getattr(_invoke, "__ordeal_instance_probe__", None),
+                            instance=instance,
+                            owner=__cls,
+                            method_name=__method_name,
+                        )
+                        if __setup:
+                            setup_result = _call_with_async_support(runtime_setup, instance)
+                            if setup_result is not None:
+                                instance = setup_result
+                        for scenario in __scenarios:
+                            scenario_obj = _resolve_audit_hook(scenario)
+                            if scenario_obj is None:
+                                continue
+                            scenario_result = _call_with_async_support(scenario_obj, instance)
+                            if scenario_result is not None:
+                                instance = scenario_result
+                        bound = getattr(instance, __method_name)
+                        call_args, call_kwargs = _prepare_bound_method_call(
+                            __reference,
+                            args,
+                            kwargs,
+                            instance=instance,
+                            state_factory=_resolve_audit_hook(__state_factory),
+                            state_param=__state_param,
+                        )
+                        before_state = _snapshot_instance_state(instance)
+                        result = _call_with_async_support(bound, *call_args, **call_kwargs)
+                        return result
+                    except BaseException as exc:
+                        error = exc
+                        raise
+                    finally:
+                        if runtime_teardown is not None:
+                            teardown_called = True
+                            try:
+                                _call_with_async_support(runtime_teardown, instance)
+                            except BaseException as exc:
+                                teardown_error = f"{type(exc).__name__}: {exc}"
+                                if error is None:
+                                    error = exc
+                                    raise
+                        _invoke.__ordeal_last_call_context__ = {
+                            "instance": instance,
+                            "before_state": before_state,
+                            "after_state": _snapshot_instance_state(instance),
+                            "kwargs": dict(call_kwargs),
+                            "args": tuple(call_args),
+                            "method_name": __method_name,
+                            "owner": __cls,
+                            "harness": harness,
+                            "result": result,
+                            "error": error,
+                            "teardown_called": teardown_called,
+                            "teardown_error": teardown_error,
+                            "lifecycle_phase": getattr(
+                                __reference,
+                                "__ordeal_lifecycle_phase__",
+                                None,
+                            ),
+                            "lifecycle_runtime": lifecycle_runtime,
+                            **probe_context,
+                        }
+                        if probe_cleanup is not None:
+                            probe_cleanup()
 
             discovered.append(
                 (
@@ -1662,7 +1758,7 @@ def _class_target_callables(
                         _invoke,
                         module_name=module_name,
                         qualname=qualname,
-                        owner_name=cls_name,
+                        owner=cls,
                         method_name=method_name,
                         factory=factory,
                         setup=setup,
@@ -2004,6 +2100,41 @@ def _audit_blocking_reason(
             f"({completeness:.0%} < {min_fixture_completeness:.0%})"
         )
     return None
+
+
+def _audit_harness_hints(
+    discovered_functions: Sequence[tuple[str, object]],
+    gap_functions: Sequence[str],
+) -> list[dict[str, Any]]:
+    """Mine concrete harness suggestions for blocked instance-method targets."""
+    hints: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    missing = set(gap_functions)
+    for name, func in discovered_functions:
+        if missing and name not in missing:
+            continue
+        owner = getattr(func, "__ordeal_owner__", None)
+        if owner is None:
+            continue
+        for hint in _mine_object_harness_hints(
+            getattr(owner, "__module__", ""),
+            getattr(owner, "__name__", "Owner"),
+            name.rsplit(".", 1)[-1],
+        )[:5]:
+            key = (name, hint.kind, hint.suggestion)
+            if key in seen:
+                continue
+            seen.add(key)
+            hints.append(
+                {
+                    "function": name,
+                    "kind": hint.kind,
+                    "suggestion": hint.suggestion,
+                    "evidence": hint.evidence,
+                    "confidence": round(float(hint.confidence), 2),
+                }
+            )
+    return hints
 
 
 def _function_name_in_nodeid(function_name: str, nodeid: str) -> bool:
@@ -4005,6 +4136,7 @@ def audit(
     )
     result.gap_functions = skipped
     result.total_functions = len(discovered_callables)
+    result.harness_hints = _audit_harness_hints(discovered_callables, result.gap_functions)
     result.contract_findings = _audit_contract_findings(
         discovered_callables,
         contract_checks=contract_checks,

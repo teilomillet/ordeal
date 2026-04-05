@@ -724,6 +724,261 @@ class TestChaosFor:
         finally:
             del sys.modules[module_name]
 
+    def test_lifecycle_attempts_all_contract_detects_short_circuit_cleanup(self):
+        import sys
+
+        module_name = "_test_lifecycle_contract_cleanup"
+        mod = types.ModuleType(module_name)
+        sys.modules[module_name] = mod
+        exec(
+            "class Env:\n"
+            "    def __init__(self) -> None:\n"
+            "        self.events = []\n"
+            "\n"
+            "    def cleanup(self, marker: str) -> list[str]:\n"
+            "        try:\n"
+            "            self.cleanup_first(marker)\n"
+            "        except Exception:\n"
+            "            return list(self.events)\n"
+            "        self.cleanup_second(marker)\n"
+            "        return list(self.events)\n"
+            "\n"
+            "    def cleanup_first(self, marker: str) -> None:\n"
+            "        self.events.append(f'first:{marker}')\n"
+            "\n"
+            "    def cleanup_second(self, marker: str) -> None:\n"
+            "        self.events.append(f'second:{marker}')\n"
+            "\n"
+            "Env.cleanup_first.cleanup = True\n"
+            "Env.cleanup_second.cleanup = True\n",
+            mod.__dict__,
+        )
+        key = f"{module_name}:Env"
+
+        try:
+            result = scan_module(
+                mod,
+                targets=[f"{module_name}:Env.cleanup"],
+                object_factories={key: mod.Env},
+                contract_checks={
+                    "Env.cleanup": [
+                        auto_mod.builtin_contract_check(
+                            "lifecycle_attempts_all",
+                            kwargs={"marker": "demo"},
+                            phase="cleanup",
+                            fault="raise_cleanup_handler",
+                        )
+                    ]
+                },
+                max_examples=5,
+            )
+
+            function = next(item for item in result.functions if item.name == "Env.cleanup")
+            assert function.passed
+            assert function.contract_violations
+            detail = function.contract_violation_details[0]
+            assert detail["category"] == "lifecycle_contract"
+            assert detail["lifecycle_probe"]["phase"] == "cleanup"
+            assert detail["lifecycle_probe"]["attempts"] == ["cleanup_first"]
+        finally:
+            del sys.modules[module_name]
+
+    def test_lifecycle_followup_contract_accepts_teardown_after_rollout_cancellation(self):
+        import sys
+
+        module_name = "_test_lifecycle_contract_followup"
+        mod = types.ModuleType(module_name)
+        sys.modules[module_name] = mod
+        exec(
+            "class Env:\n"
+            "    def __init__(self) -> None:\n"
+            "        self.events = []\n"
+            "\n"
+            "    def rollout(self, marker: str) -> list[str]:\n"
+            "        try:\n"
+            "            self.rollout_step(marker)\n"
+            "        finally:\n"
+            "            self.teardown_alpha()\n"
+            "            self.teardown_beta()\n"
+            "        return list(self.events)\n"
+            "\n"
+            "    def rollout_step(self, marker: str) -> None:\n"
+            "        self.events.append(f'rollout:{marker}')\n"
+            "\n"
+            "    def teardown_alpha(self) -> None:\n"
+            "        self.events.append('alpha')\n"
+            "\n"
+            "    def teardown_beta(self) -> None:\n"
+            "        self.events.append('beta')\n"
+            "\n"
+            "Env.teardown_alpha.teardown = True\n"
+            "Env.teardown_beta.teardown = True\n",
+            mod.__dict__,
+        )
+        key = f"{module_name}:Env"
+
+        try:
+            result = scan_module(
+                mod,
+                targets=[f"{module_name}:Env.rollout"],
+                object_factories={key: mod.Env},
+                contract_checks={
+                    "Env.rollout": [
+                        auto_mod.builtin_contract_check(
+                            "lifecycle_followup",
+                            kwargs={"marker": "demo"},
+                            phase="rollout",
+                            followup_phases=["teardown"],
+                            fault="cancel_rollout",
+                        )
+                    ]
+                },
+                max_examples=5,
+            )
+
+            function = next(item for item in result.functions if item.name == "Env.rollout")
+            assert function.passed
+            assert function.contract_violations == []
+        finally:
+            del sys.modules[module_name]
+
+    def test_async_setup_failure_contract_still_runs_async_teardown(self):
+        import sys
+
+        module_name = "_test_async_lifecycle_setup_failure"
+        mod = types.ModuleType(module_name)
+        sys.modules[module_name] = mod
+        exec(
+            "class Env:\n"
+            "    def __init__(self) -> None:\n"
+            "        self.events = []\n"
+            "\n"
+            "    async def rollout(self, marker: str) -> str:\n"
+            "        self.events.append(f'rollout:{marker}')\n"
+            "        return marker\n",
+            mod.__dict__,
+        )
+
+        async def setup_env(instance):
+            instance.events.append("setup")
+            return instance
+
+        async def teardown_env(instance):
+            instance.events.append("teardown")
+            return None
+
+        key = f"{module_name}:Env"
+
+        try:
+            result = scan_module(
+                mod,
+                targets=[f"{module_name}:Env.rollout"],
+                object_factories={key: mod.Env},
+                object_setups={key: setup_env},
+                object_teardowns={key: teardown_env},
+                contract_checks={
+                    "Env.rollout": [
+                        auto_mod.builtin_contract_check(
+                            "setup_failure_triggers_teardown",
+                            kwargs={"marker": "demo"},
+                        )
+                    ]
+                },
+                max_examples=5,
+            )
+
+            function = next(item for item in result.functions if item.name == "Env.rollout")
+            assert function.passed
+            assert function.contract_violations == []
+        finally:
+            del sys.modules[module_name]
+
+    def test_async_rollout_cancellation_contract_tracks_async_followups(self):
+        import sys
+
+        module_name = "_test_async_lifecycle_rollout_cancel"
+        mod = types.ModuleType(module_name)
+        sys.modules[module_name] = mod
+        exec(
+            "class Env:\n"
+            "    def __init__(self) -> None:\n"
+            "        self.events = []\n"
+            "\n"
+            "    async def rollout(self, marker: str) -> list[str]:\n"
+            "        try:\n"
+            "            await self.rollout_step(marker)\n"
+            "        finally:\n"
+            "            await self.teardown_alpha()\n"
+            "            await self.teardown_beta()\n"
+            "        return list(self.events)\n"
+            "\n"
+            "    async def rollout_step(self, marker: str) -> None:\n"
+            "        self.events.append(f'rollout:{marker}')\n"
+            "\n"
+            "    async def teardown_alpha(self) -> None:\n"
+            "        self.events.append('alpha')\n"
+            "\n"
+            "    async def teardown_beta(self) -> None:\n"
+            "        self.events.append('beta')\n"
+            "\n"
+            "Env.teardown_alpha.teardown = True\n"
+            "Env.teardown_beta.teardown = True\n",
+            mod.__dict__,
+        )
+        key = f"{module_name}:Env"
+
+        try:
+            result = scan_module(
+                mod,
+                targets=[f"{module_name}:Env.rollout"],
+                object_factories={key: mod.Env},
+                contract_checks={
+                    "Env.rollout": [
+                        auto_mod.builtin_contract_check(
+                            "cleanup_after_cancellation",
+                            kwargs={"marker": "demo"},
+                            followup_phases=["teardown"],
+                        )
+                    ]
+                },
+                max_examples=5,
+            )
+
+            function = next(item for item in result.functions if item.name == "Env.rollout")
+            assert function.passed
+            assert function.contract_violations == []
+        finally:
+            del sys.modules[module_name]
+
+    def test_lifecycle_phase_honors_setup_and_rollout_decorator_markers(self):
+        def setup_hook() -> None:
+            return None
+
+        def rollout_hook() -> None:
+            return None
+
+        setup_hook.setup = True  # type: ignore[attr-defined]
+        rollout_hook.rollout = True  # type: ignore[attr-defined]
+
+        assert auto_mod._lifecycle_phase("prepare_env", setup_hook) == "setup"
+        assert auto_mod._lifecycle_phase("execute", rollout_hook) == "rollout"
+
+    def test_discover_lifecycle_handlers_includes_inherited_methods(self):
+        class BaseEnv:
+            def cleanup_alpha(self) -> None:
+                return None
+
+        class ChildEnv(BaseEnv):
+            def cleanup_beta(self) -> None:
+                return None
+
+        BaseEnv.cleanup_alpha.cleanup = True  # type: ignore[attr-defined]
+        ChildEnv.cleanup_beta.cleanup = True  # type: ignore[attr-defined]
+
+        handlers = auto_mod._discover_lifecycle_handlers(ChildEnv, "cleanup")
+
+        assert handlers == ["cleanup_alpha", "cleanup_beta"]
+
 
 # ============================================================================
 # Tests for new features

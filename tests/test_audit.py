@@ -1164,6 +1164,99 @@ def make_state(instance: Env) -> dict[str, str]:
         assert len(result.contract_findings) == 1
         assert result.contract_findings[0]["function"] == "Env.cleanup"
 
+    def test_audit_preserves_lifecycle_context_when_async_setup_faults(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        pkg = tmp_path / "async_contract_pkg"
+        support = tmp_path / "async_contract_support"
+        pkg.mkdir()
+        support.mkdir()
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (support / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "models.py").write_text(
+            """
+class Env:
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+    async def rollout(self, marker: str) -> str:
+        self.events.append(f"rollout:{marker}")
+        return marker
+""",
+            encoding="utf-8",
+        )
+        (support / "factories.py").write_text(
+            """
+from async_contract_pkg.models import Env
+
+def make_env() -> Env:
+    return Env()
+
+async def setup_env(instance: Env) -> Env:
+    instance.events.append("setup")
+    return instance
+
+async def teardown_env(instance: Env) -> None:
+    instance.events.append("teardown")
+""",
+            encoding="utf-8",
+        )
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        from ordeal.audit import audit
+
+        target = SimpleNamespace(
+            target="async_contract_pkg.models:Env",
+            factory="async_contract_support.factories:make_env",
+            setup="async_contract_support.factories:setup_env",
+            teardown="async_contract_support.factories:teardown_env",
+            methods=["rollout"],
+        )
+
+        def force_detail(
+            value: object,
+            *,
+            lifecycle_probe: dict[str, object] | None = None,
+            teardown_called: bool | None = None,
+            **_extra: object,
+        ) -> bool:
+            del value, lifecycle_probe, teardown_called
+            return False
+
+        result = audit(
+            "async_contract_pkg.models",
+            targets=[target],
+            test_dir=str(tests_dir),
+            max_examples=5,
+            contract_checks={
+                "Env.rollout": [
+                    ContractCheck(
+                        name="setup_failure_triggers_teardown",
+                        kwargs={"marker": "demo"},
+                        predicate=force_detail,
+                        summary="teardown should run even when setup fails",
+                        metadata={
+                            "kind": "lifecycle",
+                            "phase": "setup",
+                            "fault": "raise_setup_hook",
+                            "followup_phases": ["teardown"],
+                            "runtime_faults": ["raise_setup_hook"],
+                        },
+                    )
+                ]
+            },
+        )
+
+        assert result.blocking_reason is None
+        finding = result.contract_findings[0]
+        assert finding["function"] == "Env.rollout"
+        assert finding["lifecycle_probe"]["phase"] == "setup"
+        assert finding["teardown_called"] is True
+
 
 class TestModuleAuditSummaryValidation:
     def test_includes_fast_validation_mode_with_mutation_score(self):

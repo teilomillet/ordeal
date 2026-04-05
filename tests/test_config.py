@@ -232,6 +232,31 @@ env_param = "env_vars"
         assert cfg.contracts[0].protected_keys == ["PATH", "HOME"]
         assert cfg.contracts[0].env_param == "env_vars"
 
+    def test_contract_config_supports_lifecycle_fields(self, tmp_toml):
+        cfg = load_config(
+            tmp_toml(
+                """
+[[contracts]]
+target = "myapp.envs:ComposableEnv.rollout"
+checks = ["lifecycle_followup"]
+kwargs = { marker = "demo" }
+phase = "rollout"
+followup_phases = ["cleanup", "teardown"]
+fault = "cancel_rollout"
+handler_name = "cleanup_alpha"
+"""
+            )
+        )
+
+        contract = cfg.contracts[0]
+        assert contract.target == "myapp.envs:ComposableEnv.rollout"
+        assert contract.checks == ["lifecycle_followup"]
+        assert contract.kwargs == {"marker": "demo"}
+        assert contract.phase == "rollout"
+        assert contract.followup_phases == ["cleanup", "teardown"]
+        assert contract.fault == "cancel_rollout"
+        assert contract.handler_name == "cleanup_alpha"
+
     def test_audit_target_config_supports_scenarios(self, tmp_toml):
         cfg = load_config(
             tmp_toml(

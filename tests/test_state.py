@@ -83,6 +83,36 @@ class TestExplorationStateSerialization:
             detail["proof_bundle"]["likely_impact"] == "command construction may break execution"
         )
 
+    def test_lifecycle_contract_findings_promote_above_other_scan_output(self):
+        state = ExplorationState("pkg.mod")
+
+        lifecycle = state.function("cleanup")
+        lifecycle.contract_violations = ["cleanup handlers were not all attempted"]
+        lifecycle.contract_violation_details = [
+            {
+                "kind": "contract",
+                "category": "lifecycle_contract",
+                "summary": "cleanup handlers were not all attempted",
+                "lifecycle_phase": "cleanup",
+                "lifecycle_probe": {"phase": "cleanup", "attempts": ["cleanup_alpha"]},
+            }
+        ]
+
+        crash = state.function("render")
+        crash.scanned = True
+        crash.crash_free = False
+        crash.scan_crash_category = "likely_bug"
+        crash.scan_error = "boom"
+        crash.scan_contract_fit = 0.9
+        crash.scan_reachability = 0.8
+
+        assert state.findings[0] == "cleanup: violates an explicit lifecycle contract"
+
+        details = state.finding_details
+        assert details[0]["category"] == "lifecycle_contract"
+        assert details[0]["function"] == "cleanup"
+        assert details[0]["lifecycle_signal"] == 1.0
+
     def test_explore_scan_surfaces_contract_violations(self, monkeypatch):
         import ordeal.auto as auto_mod
         from ordeal.state import explore_scan

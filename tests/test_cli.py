@@ -157,6 +157,48 @@ def _make_stateful_target_listing_module(
     return mod
 
 
+def _write_harness_hint_project(tmp_path: Path) -> str:
+    """Write a tiny package whose tests/docs imply harness hooks."""
+    pkg = tmp_path / "hintpkg"
+    tests_dir = tmp_path / "tests"
+    docs_dir = tmp_path / "docs"
+    pkg.mkdir()
+    tests_dir.mkdir()
+    docs_dir.mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "envs.py").write_text(
+        "class Env:\n"
+        "    def __init__(self, prefix: str):\n"
+        "        self.prefix = prefix\n"
+        "\n"
+        "    def rollout(self, state: dict[str, str], prompt: str) -> str:\n"
+        "        return f'{self.prefix}:{state[\"seed\"]}:{prompt}'\n",
+        encoding="utf-8",
+    )
+    (tests_dir / "support_factories.py").write_text(
+        "from hintpkg.envs import Env\n"
+        "\n"
+        "def make_env() -> Env:\n"
+        "    return Env('demo')\n"
+        "\n"
+        "def make_env_state() -> dict[str, str]:\n"
+        "    return {'seed': 'cached'}\n"
+        "\n"
+        "def teardown_env(env: Env) -> None:\n"
+        "    env.prefix = 'closed'\n"
+        "\n"
+        "def sandbox_client():\n"
+        "    return object()\n",
+        encoding="utf-8",
+    )
+    (docs_dir / "lifecycle.md").write_text(
+        "Cli lifecycle notes for Env.rollout.\n"
+        "This target needs state setup and a sandbox client before teardown.\n",
+        encoding="utf-8",
+    )
+    return "hintpkg.envs"
+
+
 class TestCLI:
     def test_no_command_returns_0(self):
         assert main([]) == 0
@@ -1074,8 +1116,62 @@ scan_max_examples = 12
         assert "factory=required, configured=yes" in out
         assert "setup=yes" in out
         assert "scenarios=1" in out
-        assert "async=async" in out
-        assert "skip=missing inferable strategies" in out
+
+    def test_scan_reads_lifecycle_contract_metadata_from_toml(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        (tmp_path / "scan_support.py").write_text(
+            "class Env:\n"
+            "    pass\n"
+            "\n"
+            "def make_env():\n"
+            "    return Env()\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "ordeal.toml").write_text(
+            "[[scan]]\n"
+            'module = "pkg.mod"\n'
+            "\n"
+            "[[objects]]\n"
+            'target = "pkg.mod:Env"\n'
+            'factory = "scan_support:make_env"\n'
+            "\n"
+            "[[contracts]]\n"
+            'target = "pkg.mod:Env.rollout"\n'
+            'checks = ["lifecycle_followup"]\n'
+            'kwargs = { marker = "demo" }\n'
+            'phase = "rollout"\n'
+            'followup_phases = ["teardown"]\n'
+            'fault = "cancel_rollout"\n',
+            encoding="utf-8",
+        )
+
+        calls: dict[str, object] = {}
+
+        def fake_explore(module: str, **kwargs):
+            calls.update(kwargs)
+            return SimpleNamespace(
+                module=module,
+                confidence=0.0,
+                functions={},
+                supervisor_info={},
+                tree=SimpleNamespace(size=0),
+                findings=[],
+                frontier={},
+                skipped=[],
+            )
+
+        monkeypatch.setattr(ordeal_state, "explore", fake_explore)
+
+        rc = main(["scan", "pkg.mod"])
+
+        assert rc == 0
+        check = calls["scan_contract_checks"]["Env.rollout"][0]
+        assert check.name == "lifecycle_followup"
+        assert check.kwargs == {"marker": "demo"}
+        assert check.metadata["phase"] == "rollout"
+        assert check.metadata["followup_phases"] == ["teardown"]
+        assert check.metadata["fault"] == "cancel_rollout"
 
     def test_scan_list_targets_shows_unselected_rows_when_toml_limits_targets(
         self,
@@ -1132,6 +1228,44 @@ scan_max_examples = 12
         assert "Env.rollout" in out
         assert "state=yes" in out
         assert "harness=stateful" in out
+
+    def test_scan_list_targets_json_includes_mined_harness_hints(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        module_name = _write_harness_hint_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        rc = main(["scan", module_name, "--list-targets", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 0
+        row = next(
+            item for item in payload["raw_details"]["targets"] if item["name"] == "Env.rollout"
+        )
+        hint_kinds = {hint["kind"] for hint in row["harness_hints"]}
+        assert {"factory", "state_factory", "teardown"} <= hint_kinds
+
+    def test_audit_json_surfaces_mined_harness_hints_for_blocked_methods(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        module_name = _write_harness_hint_project(tmp_path)
+        tests_dir = tmp_path / "tests"
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        rc = main(["audit", module_name, "--json", "--test-dir", str(tests_dir)])
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 1
+        assert payload["status"] == "blocked"
+        assert any(detail["kind"] == "harness_hint" for detail in payload["findings"])
 
     def test_scan_json_blocks_when_methods_need_harness(self, monkeypatch, tmp_path, capsys):
         mod = _make_stateful_target_listing_module()

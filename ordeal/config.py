@@ -206,6 +206,10 @@ class ContractConfig:
     tracked_params: list[str] = field(default_factory=list)
     protected_keys: list[str] = field(default_factory=list)
     env_param: str | None = None
+    phase: str | None = None
+    followup_phases: list[str] = field(default_factory=list)
+    fault: str | None = None
+    handler_name: str | None = None
 
 
 @dataclass
@@ -527,6 +531,10 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
                 tracked_params=list(contract_raw.get("tracked_params", [])),
                 protected_keys=list(contract_raw.get("protected_keys", [])),
                 env_param=contract_raw.get("env_param"),
+                phase=contract_raw.get("phase"),
+                followup_phases=list(contract_raw.get("followup_phases", [])),
+                fault=contract_raw.get("fault"),
+                handler_name=contract_raw.get("handler_name"),
             )
         )
 

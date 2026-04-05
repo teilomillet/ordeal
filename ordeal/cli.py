@@ -274,6 +274,7 @@ def _callable_listing_rows(
         _REGISTERED_OBJECT_STATE_FACTORIES,
         _REGISTERED_OBJECT_TEARDOWNS,
         _infer_strategies,
+        _mine_object_harness_hints,
         _resolve_module,
         _resolve_object_harness,
         _resolve_object_hook,
@@ -371,6 +372,21 @@ def _callable_listing_rows(
         if inferred_strategies is None and not skip_reason:
             skip_reason = "missing inferable strategies"
         checks = list(contract_checks.get(name, [])) if contract_checks is not None else []
+        harness_hints: list[dict[str, Any]] = []
+        if owner is not None and kind == "instance":
+            for hint in _mine_object_harness_hints(
+                getattr(owner, "__module__", module_name),
+                getattr(owner, "__name__", "Owner"),
+                name.rsplit(".", 1)[-1],
+            )[:5]:
+                harness_hints.append(
+                    {
+                        "kind": hint.kind,
+                        "suggestion": hint.suggestion,
+                        "evidence": hint.evidence,
+                        "confidence": round(float(hint.confidence), 2),
+                    }
+                )
 
         rows.append(
             {
@@ -390,12 +406,27 @@ def _callable_listing_rows(
                 "scenario_count": scenario_count,
                 "contract_checks": [str(getattr(check, "name", check)) for check in checks],
                 "lifecycle_phase": getattr(func, "__ordeal_lifecycle_phase__", None),
+                "harness_hints": harness_hints,
                 "runnable": skip_reason is None,
                 "skip_reason": skip_reason,
             }
         )
 
     return rows
+
+
+def _harness_hint_summary(hints: Sequence[Mapping[str, Any]]) -> str | None:
+    """Render a compact one-line summary of mined harness hints."""
+    by_kind: dict[str, str] = {}
+    for hint in hints:
+        kind = str(hint.get("kind", "")).strip()
+        suggestion = str(hint.get("suggestion", "")).strip()
+        if kind and suggestion and kind not in by_kind:
+            by_kind[kind] = suggestion
+    if not by_kind:
+        return None
+    parts = [f"{kind}={value}" for kind, value in by_kind.items()]
+    return "; ".join(parts[:3])
 
 
 def _render_target_listing_text(
@@ -446,6 +477,9 @@ def _render_target_listing_text(
             skip_reason = row.get("skip_reason")
             if skip_reason:
                 parts.append(f"skip={skip_reason}")
+            hint_summary = _harness_hint_summary(list(row.get("harness_hints", [])))
+            if hint_summary:
+                parts.append(f"hints={hint_summary}")
             lines.append(f"  {row.get('name', ''):<38} " + "  ".join(parts))
     return "\n".join(lines)
 
@@ -1211,13 +1245,42 @@ def _config_contract_checks_for_module(
         for check_name in spec.checks:
             resolved_name = str(check_name)
             try:
+                builtin_kwargs = dict(spec.kwargs)
+                lifecycle_phase = (
+                    str(getattr(spec, "phase", None) or builtin_kwargs.pop("phase", ""))
+                    or None
+                )
+                followup_phases = [
+                    str(item)
+                    for item in (
+                        list(getattr(spec, "followup_phases", []) or [])
+                        or list(builtin_kwargs.pop("followup_phases", []) or [])
+                    )
+                    if str(item).strip()
+                ] or None
+                fault = str(
+                    getattr(spec, "fault", None)
+                    or builtin_kwargs.pop("fault", "raise")
+                    or "raise"
+                )
+                handler_name = (
+                    str(
+                        getattr(spec, "handler_name", None)
+                        or builtin_kwargs.pop("handler_name", "")
+                    )
+                    or None
+                )
                 bucket.append(
                     builtin_contract_check(
                         resolved_name,
-                        kwargs=dict(spec.kwargs),
+                        kwargs=builtin_kwargs,
                         tracked_params=list(spec.tracked_params),
                         protected_keys=list(spec.protected_keys),
                         env_param=spec.env_param,
+                        phase=lifecycle_phase,
+                        followup_phases=followup_phases,
+                        fault=fault,
+                        handler_name=handler_name,
                     )
                 )
             except ValueError:
@@ -2911,7 +2974,10 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
                     }
                 )
 
-    if any(item.get("category") in {"likely_bug", "semantic_contract"} for item in findings):
+    if any(
+        item.get("category") in {"likely_bug", "semantic_contract", "lifecycle_contract"}
+        for item in findings
+    ):
         status = "findings found"
     elif findings:
         status = "exploratory findings"
@@ -4179,11 +4245,17 @@ def _render_finding_section(detail: dict[str, Any]) -> list[str]:
     if kind == "contract":
         lines.append(f"- Evidence: `{detail.get('summary', title)}`")
         _append_proof_bundle(lines, detail)
+        category = str(detail.get("category", "semantic_contract"))
         lines.extend(
             [
                 "",
                 "Next steps:",
-                f"- Add a direct regression for `{qualname}` around the semantic sink",
+                (
+                    "- Add a direct lifecycle regression for "
+                    f"`{qualname}` with the recorded fault path"
+                    if category == "lifecycle_contract"
+                    else f"- Add a direct regression for `{qualname}` around the semantic sink"
+                ),
                 f"- Re-run `ordeal scan {module} --mode real_bug`",
             ]
         )
@@ -4307,6 +4379,9 @@ def _build_scan_report(state: Any) -> dict[str, Any]:
         for detail in _scan_report_details(state)
     ]
     promoted_count = len(getattr(state, "findings", []))
+    lifecycle_contract_count = sum(
+        1 for detail in details if detail.get("category") == "lifecycle_contract"
+    )
     semantic_contract_count = sum(
         1 for detail in details if detail.get("category") == "semantic_contract"
     )
@@ -4340,6 +4415,7 @@ def _build_scan_report(state: Any) -> dict[str, Any]:
         "summary": [
             f"Checked: {', '.join(_scan_checked_items(state))}",
             f"Promoted findings: {promoted_count}",
+            f"Lifecycle contracts: {lifecycle_contract_count}",
             f"Semantic contracts: {semantic_contract_count}",
             f"Coverage gaps: {coverage_gap_count}",
             f"Invalid-input crashes: {invalid_input_count}",
@@ -5029,6 +5105,20 @@ def _audit_detail_items(
                 },
             }
         )
+    for hint in getattr(result, "harness_hints", []):
+        details.append(
+            {
+                "kind": "harness_hint",
+                "category": "verification_warning",
+                "summary": (
+                    f"{hint['function']}: suggested {hint['kind']} -> {hint['suggestion']}"
+                ),
+                "module": result.module,
+                "function": hint["function"],
+                "qualname": f"{result.module}.{hint['function']}",
+                "details": dict(hint),
+            }
+        )
     score_fraction = result.mutation_score_fraction
     if score_fraction is not None and score_fraction < 1.0:
         details.append(
@@ -5077,7 +5167,7 @@ def _audit_detail_items(
         details.append(
             {
                 "kind": "contract",
-                "category": "semantic_contract",
+                "category": str(finding.get("category", "semantic_contract")),
                 "summary": str(finding.get("summary", "explicit contract failed")),
                 "module": result.module,
                 "function": function_name,

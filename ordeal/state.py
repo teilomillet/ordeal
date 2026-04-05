@@ -278,6 +278,11 @@ class ExplorationState:
         results: list[str] = []
         for name, fs in self.functions.items():
             if any(
+                detail.get("category") == "lifecycle_contract"
+                for detail in fs.contract_violation_details
+            ):
+                results.append(f"{name}: violates an explicit lifecycle contract")
+            if any(
                 detail.get("category") == "semantic_contract"
                 for detail in fs.contract_violation_details
             ):
@@ -355,12 +360,24 @@ class ExplorationState:
                         "input_sources": fs.scan_input_sources,
                         "input_source": fs.scan_input_source,
                         "proof_bundle": fs.scan_proof_bundle,
+                        "lifecycle_signal": (
+                            1.0
+                            if isinstance(fs.scan_proof_bundle, dict)
+                            and isinstance(fs.scan_proof_bundle.get("lifecycle"), dict)
+                            else 0.0
+                        ),
                     }
                 )
             for item in fs.contract_violation_details:
                 details.append(
                     {
                         "function": name,
+                        "lifecycle_signal": (
+                            1.0
+                            if item.get("lifecycle_phase") is not None
+                            or item.get("lifecycle_probe") is not None
+                            else 0.0
+                        ),
                         **item,
                     }
                 )
@@ -385,19 +402,21 @@ class ExplorationState:
                     }
                 )
         category_rank = {
-            "likely_bug": 0,
-            "semantic_contract": 1,
-            "coverage_gap": 2,
-            "speculative_crash": 3,
-            "invalid_input_crash": 4,
-            "speculative_property": 5,
-            "test_strength_gap": 6,
-            "verification_warning": 7,
+            "lifecycle_contract": 0,
+            "likely_bug": 1,
+            "semantic_contract": 2,
+            "coverage_gap": 3,
+            "speculative_crash": 4,
+            "invalid_input_crash": 5,
+            "speculative_property": 6,
+            "test_strength_gap": 7,
+            "verification_warning": 8,
         }
         return sorted(
             details,
             key=lambda detail: (
                 category_rank.get(str(detail.get("category")), 99),
+                -float(detail.get("lifecycle_signal") or 0.0),
                 -float(detail.get("sink_signal") or 0.0),
                 -float(detail.get("contract_fit") or 0.0),
                 -float(detail.get("reachability") or 0.0),

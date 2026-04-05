@@ -762,7 +762,7 @@ write_gaps_dir = "{gap_dir.as_posix()}"
 
         rc = main(["mutate", "ordeal.demo.normalize", "--json"])
 
-        assert rc == 0
+        assert rc == 1
         payload = json.loads(capsys.readouterr().out)
         assert payload["tool"] == "mutate"
         assert payload["status"] == "findings"

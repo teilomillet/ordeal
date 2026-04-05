@@ -232,3 +232,132 @@ def test_mutation_result_clusters_lifecycle_survivors_by_owner():
     assert clusters[0]["tag"] == "lifecycle"
     summary = result.summary()
     assert "Env.cleanup -> lifecycle contract boundary" in summary
+
+
+def test_mutation_result_prefers_explicit_contract_metadata_over_heuristics():
+    result = mutations.MutationResult(
+        target="pkg.mod.Service.run",
+        contract_context={
+            "contract_name": "cleanup_after_cancellation",
+            "contract_kind": "lifecycle",
+            "harness": "stateful",
+        },
+        mutants=[
+            mutations.Mutant(
+                operator="delete_statement",
+                description="remove cleanup callback",
+                line=40,
+                col=2,
+                source_line="return result",
+                qualname="Service.cleanup",
+                metadata={
+                    "contract_name": "cleanup_after_cancellation",
+                    "contract_kind": "lifecycle",
+                    "harness": "stateful",
+                },
+            )
+        ],
+    )
+
+    clusters = result.promoted_survivor_clusters()
+    assert clusters[0]["owner"] == "Service.cleanup"
+    assert clusters[0]["tag"] == "lifecycle"
+    assert clusters[0]["contract_name"] == "cleanup_after_cancellation"
+    assert clusters[0]["harness"] == "stateful"
+    summary = result.summary()
+    assert "contract: cleanup_after_cancellation, lifecycle, harness=stateful" in summary
+    assert "Service.cleanup -> lifecycle contract boundary" in summary
+
+
+def test_mutation_contract_context_extracts_names_tags_and_harness():
+    from types import SimpleNamespace
+
+    context = mutations.mutation_contract_context(
+        [
+            SimpleNamespace(
+                name="cleanup_after_cancellation",
+                metadata={
+                    "kind": "lifecycle",
+                    "phase": "rollout",
+                    "followup_phases": ["cleanup", "teardown"],
+                    "fault": "cancel_rollout",
+                },
+            )
+        ],
+        harness="stateful",
+    )
+
+    assert context["contract_name"] == "cleanup_after_cancellation"
+    assert context["contract_kind"] == "lifecycle"
+    assert "cleanup_after_cancellation" in context["contract_tags"]
+    assert context["phase"] == "rollout"
+    assert context["followup_phases"] == ["cleanup", "teardown"]
+    assert context["fault"] == "cancel_rollout"
+    assert context["harness"] == "stateful"
+
+
+def test_mutation_result_uses_explicit_shell_path_env_tags():
+    result = mutations.MutationResult(
+        target="pkg.mod.Service.build",
+        mutants=[
+            mutations.Mutant(
+                operator="delete_statement",
+                description="remove command argument quoting",
+                line=12,
+                col=4,
+                source_line="return rendered",
+                qualname="Service.build_env_vars",
+                metadata={
+                    "contract_tags": ["shell", "path", "env"],
+                    "contract_name": "quoted_paths",
+                },
+            )
+        ],
+    )
+
+    cluster = result.promoted_survivor_clusters()[0]
+    assert cluster["owner"] == "Service.build_env_vars"
+    assert cluster["tag"] == "shell"
+    assert cluster["contract_name"] == "quoted_paths"
+    assert cluster["coherent_boundary"] is True
+    summary = result.summary()
+    assert "Service.build_env_vars -> shell/argv construction" in summary
+
+
+def test_mutation_metadata_and_contract_context_round_trip_through_cache(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    result = mutations.MutationResult(
+        target="pkg.mod.Service.run",
+        contract_context={
+            "contract_name": "cleanup_after_cancellation",
+            "contract_kind": "lifecycle",
+            "harness": "stateful",
+        },
+        mutants=[
+            mutations.Mutant(
+                operator="delete_statement",
+                description="remove cleanup callback",
+                line=40,
+                col=2,
+                source_line="return result",
+                qualname="Service.cleanup",
+                metadata={"contract_kind": "lifecycle", "harness": "stateful"},
+            )
+        ],
+    )
+
+    mutations._save_cache("pkg.mod.Service.run", result, "module-hash", "config-hash")
+    loaded = mutations._load_cache(
+        "pkg.mod.Service.run",
+        "module-hash",
+        None,
+        None,
+        "config-hash",
+    )
+
+    assert loaded is not None
+    assert loaded.contract_context == result.contract_context
+    assert loaded.mutants[0].metadata == result.mutants[0].metadata

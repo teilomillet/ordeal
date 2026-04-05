@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import builtins
 import contextlib
 import copy
 import functools
@@ -307,6 +308,7 @@ class HarnessHint:
     suggestion: str
     evidence: str
     confidence: float = 0.5
+    config: dict[str, Any] = field(default_factory=dict)
 
 
 _DEFAULT_AUTO_CONTRACTS = (
@@ -1037,7 +1039,7 @@ def register_object_setup(name: str, setup: Any) -> None:
 
 
 def register_object_scenario(name: str, scenario: Any) -> None:
-    """Register a collaborator scenario hook for class-method targets."""
+    """Register one or more collaborator scenario hooks for class-method targets."""
     _REGISTERED_OBJECT_SCENARIOS[name] = scenario
 
 
@@ -1167,6 +1169,166 @@ def _resolve_object_hook(owner: type, hooks: dict[str, Any] | None) -> Any | Non
         if candidate in hooks:
             return hooks[candidate]
     return None
+
+
+def _scenario_path_target(instance: Any, path: str) -> tuple[Any, str]:
+    """Resolve a dotted scenario path against *instance*."""
+    parts = [part for part in str(path).split(".") if part]
+    if not parts:
+        raise ValueError("scenario path must not be empty")
+    target = instance
+    for part in parts[:-1]:
+        target = getattr(target, part)
+    return target, parts[-1]
+
+
+def _scenario_exception_from_spec(spec: Any) -> BaseException:
+    """Build a concrete exception object from a scenario spec."""
+    if isinstance(spec, BaseException):
+        return spec
+    if isinstance(spec, type) and issubclass(spec, BaseException):
+        return spec()
+    if isinstance(spec, Mapping):
+        exc_type = str(
+            spec.get("type")
+            or spec.get("exception")
+            or spec.get("name")
+            or "RuntimeError"
+        ).strip() or "RuntimeError"
+        message = spec.get("message", spec.get("value", ""))
+    else:
+        text = str(spec).strip()
+        if not text:
+            return RuntimeError("injected collaborator failure")
+        if ":" in text:
+            exc_type, message = text.split(":", 1)
+        else:
+            return RuntimeError(text)
+    exc_cls = getattr(builtins, str(exc_type).strip(), RuntimeError)
+    if not isinstance(exc_cls, type) or not issubclass(exc_cls, BaseException):
+        exc_cls = RuntimeError
+    try:
+        return exc_cls(str(message).strip()) if str(message).strip() else exc_cls()
+    except Exception:
+        return RuntimeError(str(spec))
+
+
+def _scenario_stub_wrapper(
+    original: Any,
+    *,
+    return_value: Any = None,
+    error: BaseException | None = None,
+) -> Any:
+    """Wrap one collaborator method so it returns or raises a fixed outcome."""
+    is_async = inspect.iscoroutinefunction(original)
+
+    if is_async:
+
+        @functools.wraps(original)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            if error is not None:
+                raise error
+            return return_value
+
+    else:
+
+        @functools.wraps(original)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            if error is not None:
+                raise error
+            return return_value
+
+    return wrapper
+
+
+def _scenario_hook_from_spec(spec: Mapping[str, Any]) -> Callable[[Any], Any]:
+    """Compile one TOML-friendly collaborator scenario spec into a hook."""
+    kind = str(spec.get("kind") or spec.get("action") or spec.get("op") or "").strip().lower()
+    if not kind:
+        if spec.get("error") is not None or spec.get("exception") is not None:
+            kind = "stub_raise"
+        elif spec.get("path") is not None or spec.get("target") is not None:
+            kind = "setattr"
+    path = (
+        spec.get("path")
+        or spec.get("target")
+        or spec.get("attr")
+        or spec.get("name")
+    )
+
+    def _setattr_hook(instance: Any) -> Any:
+        if path is None:
+            raise ValueError("scenario setattr spec needs a path")
+        target, attr_name = _scenario_path_target(instance, str(path))
+        setattr(target, attr_name, spec.get("value"))
+        return instance
+
+    def _stub_return_hook(instance: Any) -> Any:
+        if path is None:
+            raise ValueError("scenario stub_return spec needs a path")
+        target, attr_name = _scenario_path_target(instance, str(path))
+        original = getattr(target, attr_name)
+        if not callable(original):
+            raise ValueError(f"scenario path {path!r} does not resolve to a callable")
+        setattr(
+            target,
+            attr_name,
+            _scenario_stub_wrapper(original, return_value=spec.get("value")),
+        )
+        return instance
+
+    def _stub_raise_hook(instance: Any) -> Any:
+        if path is None:
+            raise ValueError("scenario stub_raise spec needs a path")
+        target, attr_name = _scenario_path_target(instance, str(path))
+        original = getattr(target, attr_name)
+        if not callable(original):
+            raise ValueError(f"scenario path {path!r} does not resolve to a callable")
+        setattr(
+            target,
+            attr_name,
+            _scenario_stub_wrapper(
+                original,
+                error=_scenario_exception_from_spec(
+                    spec.get("error", spec.get("exception", spec.get("value")))
+                ),
+            ),
+        )
+        return instance
+
+    match kind:
+        case "setattr" | "assign" | "set":
+            return _setattr_hook
+        case "stub_return" | "return" | "returns":
+            return _stub_return_hook
+        case "stub_raise" | "raise" | "raises":
+            return _stub_raise_hook
+        case _:
+            raise ValueError(f"unsupported scenario kind {kind!r}")
+
+
+def _expand_object_scenario_hooks(hook: Any) -> tuple[Any, ...]:
+    """Normalize a scenario entry into one or more executable hooks."""
+    if hook is None:
+        return ()
+    if callable(hook) or isinstance(hook, (str, bytes)):
+        return (hook,)
+    if isinstance(hook, Mapping):
+        return (_scenario_hook_from_spec(hook),)
+    if isinstance(hook, Sequence):
+        compiled: list[Any] = []
+        for item in hook:
+            compiled.extend(_expand_object_scenario_hooks(item))
+        return tuple(compiled)
+    return (hook,)
+
+
+def _resolve_object_hooks(owner: type, hooks: dict[str, Any] | None) -> tuple[Any, ...]:
+    """Resolve one or more registered hooks for *owner* from several key styles."""
+    hook = _resolve_object_hook(owner, hooks)
+    if hook is None:
+        return ()
+    return _expand_object_scenario_hooks(hook)
 
 
 def _resolve_object_harness(owner: type, harnesses: dict[str, str] | None) -> str:
@@ -1627,8 +1789,130 @@ def _apply_instance_hook(instance: Any, hook: Any | None) -> Any:
     """Apply a setup or scenario hook and keep any replacement instance."""
     if hook is None:
         return instance
+    if isinstance(hook, Mapping):
+        return _apply_instance_scenario_spec(instance, hook)
     result = _call_sync(hook, instance)
     return instance if result is None else result
+
+
+def _apply_instance_hooks(instance: Any, hooks: Sequence[Any] | None) -> Any:
+    """Apply a sequence of setup/scenario hooks in order."""
+    current = instance
+    for hook in hooks or ():
+        current = _apply_instance_hook(current, hook)
+    return current
+
+
+def _normalize_scenario_path(path: str) -> str:
+    """Normalize a scenario target path relative to one configured instance."""
+    cleaned = path.strip()
+    for prefix in ("self.", "instance.", "obj."):
+        if cleaned.startswith(prefix):
+            return cleaned[len(prefix) :]
+    return cleaned
+
+
+def _resolve_scenario_target(instance: Any, path: str) -> tuple[Any, str]:
+    """Resolve ``foo.bar.baz`` into ``(foo.bar, "baz")`` on *instance*."""
+    cleaned = _normalize_scenario_path(path)
+    parts = [part for part in cleaned.split(".") if part]
+    if not parts:
+        raise ValueError("scenario path is empty")
+    current = instance
+    for part in parts[:-1]:
+        current = getattr(current, part)
+    return current, parts[-1]
+
+
+def _clone_scenario_value(value: object) -> object:
+    """Clone configured scenario values when possible to avoid cross-call sharing."""
+    try:
+        return copy.deepcopy(value)
+    except Exception:
+        return value
+
+
+def _scenario_exception(error: object) -> BaseException:
+    """Coerce one TOML-friendly exception description into an exception instance."""
+    if isinstance(error, BaseException):
+        return error
+    if inspect.isclass(error) and issubclass(error, BaseException):
+        return error()
+    if isinstance(error, Mapping):
+        name = str(error.get("type") or error.get("name") or "RuntimeError").strip()
+        message = str(error.get("message") or error.get("detail") or "").strip()
+        exc_type = getattr(builtins, name, RuntimeError)
+        if inspect.isclass(exc_type) and issubclass(exc_type, BaseException):
+            return exc_type(message)
+        return RuntimeError(f"{name}: {message}" if message else name)
+    if isinstance(error, str):
+        name, sep, message = error.partition(":")
+        exc_name = name.strip() or "RuntimeError"
+        exc_type = getattr(builtins, exc_name, RuntimeError)
+        detail = message.strip() if sep else error.strip()
+        if inspect.isclass(exc_type) and issubclass(exc_type, BaseException):
+            return exc_type(detail)
+        return RuntimeError(detail or exc_name)
+    return RuntimeError(repr(error))
+
+
+def _scenario_stub(original: Any, *, value: object = None, error: object | None = None) -> Any:
+    """Build one stub wrapper that preserves async behavior for collaborators."""
+    is_async = inspect.iscoroutinefunction(getattr(original, "__func__", original))
+
+    if is_async:
+
+        async def wrapped(*_args: Any, **_kwargs: Any) -> Any:
+            if error is not None:
+                raise _scenario_exception(error)
+            return _clone_scenario_value(value)
+
+    else:
+
+        def wrapped(*_args: Any, **_kwargs: Any) -> Any:
+            if error is not None:
+                raise _scenario_exception(error)
+            return _clone_scenario_value(value)
+
+    return functools.wraps(original)(wrapped)
+
+
+def _apply_instance_scenario_spec(
+    instance: Any,
+    spec: Mapping[str, object],
+) -> Any:
+    """Apply one declarative collaborator scenario spec to *instance*."""
+    kind = str(spec.get("kind") or spec.get("action") or "").strip().lower()
+    path = str(spec.get("path") or spec.get("attr") or spec.get("target") or "").strip()
+    if not kind:
+        raise ValueError("scenario spec is missing 'kind'")
+    if not path:
+        raise ValueError("scenario spec is missing 'path'")
+
+    target, attr_name = _resolve_scenario_target(instance, path)
+    match kind:
+        case "setattr":
+            setattr(target, attr_name, _clone_scenario_value(spec.get("value")))
+        case "stub_return":
+            original = getattr(target, attr_name)
+            setattr(
+                target,
+                attr_name,
+                _scenario_stub(original, value=spec.get("value")),
+            )
+        case "stub_raise":
+            original = getattr(target, attr_name)
+            setattr(
+                target,
+                attr_name,
+                _scenario_stub(
+                    original,
+                    error=spec.get("error") or spec.get("exception") or "RuntimeError",
+                ),
+            )
+        case _:
+            raise ValueError(f"unsupported scenario kind: {kind!r}")
+    return instance
 
 
 def _make_sync_callable(
@@ -1680,7 +1964,7 @@ def _resolve_method_callable(
 
     factory = _resolve_object_hook(owner, object_factories)
     setup = _resolve_object_hook(owner, object_setups)
-    scenario = _resolve_object_hook(owner, object_scenarios)
+    scenarios = _resolve_object_hooks(owner, object_scenarios)
     state_factory = _resolve_object_hook(owner, object_state_factories)
     teardown = _resolve_object_hook(owner, object_teardowns)
     harness = _resolve_object_harness(owner, object_harnesses)
@@ -1705,7 +1989,7 @@ def _resolve_method_callable(
                 raw_attr,
                 factory=factory,
                 setup=setup,
-                scenario=scenario,
+                scenarios=scenarios,
                 state_factory=state_factory,
                 state_param=state_param,
                 teardown=teardown,
@@ -1723,7 +2007,7 @@ def _make_bound_method_callable(
     *,
     factory: Any,
     setup: Any | None = None,
-    scenario: Any | None = None,
+    scenarios: Sequence[Any] | None = None,
     state_factory: Any | None = None,
     state_param: str | None = None,
     teardown: Any | None = None,
@@ -1764,7 +2048,7 @@ def _make_bound_method_callable(
                     method_name=method_name,
                 )
                 instance = _apply_instance_hook(instance, runtime_setup)
-                instance = _apply_instance_hook(instance, scenario)
+                instance = _apply_instance_hooks(instance, scenarios)
                 before_state = _snapshot_instance_state(instance)
                 bound = getattr(instance, method_name)
                 call_args, call_kwargs = _prepare_bound_method_call(
@@ -1823,7 +2107,8 @@ def _make_bound_method_callable(
     wrapped.__ordeal_method_name__ = method_name
     wrapped.__ordeal_factory__ = factory
     wrapped.__ordeal_setup__ = setup
-    wrapped.__ordeal_scenario__ = scenario
+    wrapped.__ordeal_scenario__ = (scenarios or (None,))[0]
+    wrapped.__ordeal_scenarios__ = tuple(scenarios or ())
     wrapped.__ordeal_state_factory__ = state_factory
     wrapped.__ordeal_state_param__ = state_param
     wrapped.__ordeal_teardown__ = teardown
@@ -1872,6 +2157,7 @@ def _make_unbound_method_placeholder(
     wrapped.__ordeal_harness_hints__ = tuple(
         _mine_object_harness_hints(owner.__module__, owner.__name__, method_name)
     )
+    wrapped.__ordeal_scenarios__ = ()
     return wrapped
 
 
@@ -2894,7 +3180,14 @@ def _mine_object_harness_hints(
     hints: list[HarnessHint] = []
     seen: set[tuple[str, str]] = set()
 
-    def _add_hint(kind: str, suggestion: str, evidence: str, confidence: float) -> None:
+    def _add_hint(
+        kind: str,
+        suggestion: str,
+        evidence: str,
+        confidence: float,
+        *,
+        config: dict[str, Any] | None = None,
+    ) -> None:
         key = (kind, suggestion)
         if key in seen:
             return
@@ -2905,6 +3198,7 @@ def _mine_object_harness_hints(
                 suggestion=suggestion,
                 evidence=evidence,
                 confidence=confidence,
+                config=dict(config or {}),
             )
         )
 
@@ -2949,17 +3243,65 @@ def _mine_object_harness_hints(
                 name_lower.startswith(("make_", "build_", "create_", "new_"))
                 or "factory" in name_lower
             ):
-                _add_hint("factory", f"{evidence}:{node.name}", evidence, 0.9)
+                _add_hint(
+                    "factory",
+                    f"[[objects]] factory -> {evidence}:{node.name}",
+                    evidence,
+                    0.9,
+                    config={
+                        "section": "[[objects]]",
+                        "target": f"{module_name}:{class_name}",
+                        "method": method_name,
+                        "key": "factory",
+                        "value": f"{evidence}:{node.name}",
+                    },
+                )
             if mentions_target and "state" in text_lower:
-                _add_hint("state_factory", f"{evidence}:{node.name}", evidence, 0.85)
+                _add_hint(
+                    "state_factory",
+                    f"[[objects]] state_factory -> {evidence}:{node.name}",
+                    evidence,
+                    0.85,
+                    config={
+                        "section": "[[objects]]",
+                        "target": f"{module_name}:{class_name}",
+                        "method": method_name,
+                        "key": "state_factory",
+                        "value": f"{evidence}:{node.name}",
+                    },
+                )
             if mentions_target and any(
                 token in text_lower for token in ("teardown", "cleanup", "close", "stop")
             ):
-                _add_hint("teardown", f"{evidence}:{node.name}", evidence, 0.8)
+                _add_hint(
+                    "teardown",
+                    f"[[objects]] teardown -> {evidence}:{node.name}",
+                    evidence,
+                    0.8,
+                    config={
+                        "section": "[[objects]]",
+                        "target": f"{module_name}:{class_name}",
+                        "method": method_name,
+                        "key": "teardown",
+                        "value": f"{evidence}:{node.name}",
+                    },
+                )
             if is_fixture and any(
                 token in text_lower for token in ("client", "sandbox", "session", "transport")
             ):
-                _add_hint("client_fixture", f"{evidence}:{node.name}", evidence, 0.75)
+                _add_hint(
+                    "client_fixture",
+                    f"[[objects]] scenarios -> [{evidence}:{node.name}]",
+                    evidence,
+                    0.75,
+                    config={
+                        "section": "[[objects]]",
+                        "target": f"{module_name}:{class_name}",
+                        "method": method_name,
+                        "key": "scenarios",
+                        "value": [f"{evidence}:{node.name}"],
+                    },
+                )
 
     for path in _harness_doc_files(module_name):
         try:
@@ -2983,15 +3325,41 @@ def _mine_object_harness_hints(
                     "docs mention state setup for this target",
                     evidence,
                     0.55,
+                    config={
+                        "section": "[[objects]]",
+                        "target": f"{module_name}:{class_name}",
+                        "method": method_name,
+                        "key": "state_factory",
+                        "value": "docs mention state setup for this target",
+                    },
                 )
             if any(token in line for token in ("teardown", "cleanup", "close", "stop")):
-                _add_hint("teardown", "docs mention lifecycle teardown/cleanup", evidence, 0.55)
+                _add_hint(
+                    "teardown",
+                    "docs mention lifecycle teardown/cleanup",
+                    evidence,
+                    0.55,
+                    config={
+                        "section": "[[objects]]",
+                        "target": f"{module_name}:{class_name}",
+                        "method": method_name,
+                        "key": "teardown",
+                        "value": "docs mention lifecycle teardown/cleanup",
+                    },
+                )
             if any(token in line for token in ("client", "sandbox", "session")):
                 _add_hint(
                     "client_fixture",
                     "docs mention a client/session collaborator",
                     evidence,
                     0.5,
+                    config={
+                        "section": "[[objects]]",
+                        "target": f"{module_name}:{class_name}",
+                        "method": method_name,
+                        "key": "scenarios",
+                        "value": ["docs mention a client/session collaborator"],
+                    },
                 )
 
     return tuple(
@@ -4966,7 +5334,7 @@ def chaos_for(
                     owner_attr,
                     factory=getattr(func, "__ordeal_factory__"),
                     setup=getattr(func, "__ordeal_setup__", None),
-                    scenario=getattr(func, "__ordeal_scenario__", None),
+                    scenarios=tuple(getattr(func, "__ordeal_scenarios__", ()) or ()),
                 )
                 initialize_dict[init_method.__name__] = init_method
                 teardown_hook = getattr(func, "__ordeal_teardown__", None)
@@ -5041,7 +5409,7 @@ def _make_stateful_initialize_method(
     *,
     factory: Any,
     setup: Any | None = None,
-    scenario: Any | None = None,
+    scenarios: Sequence[Any] | None = None,
 ) -> Any:
     """Create an ``@initialize`` hook that persists one owner instance."""
 
@@ -5049,7 +5417,7 @@ def _make_stateful_initialize_method(
     def method(self: Any) -> None:
         instance = _call_sync(factory)
         instance = _apply_instance_hook(instance, setup)
-        instance = _apply_instance_hook(instance, scenario)
+        instance = _apply_instance_hooks(instance, scenarios)
         setattr(self, owner_attr, instance)
 
     method.__name__ = f"setup_{owner_attr}"

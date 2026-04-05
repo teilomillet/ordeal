@@ -16,6 +16,7 @@ from hypothesis import settings as hsettings
 
 import ordeal.auto as ordeal_auto
 import ordeal.cli as cli
+import ordeal.mine as ordeal_mine
 import ordeal.scaling as scaling
 import ordeal.state as ordeal_state
 from ordeal import ChaosTest, always, invariant, rule
@@ -197,6 +198,50 @@ def _write_harness_hint_project(tmp_path: Path) -> str:
         encoding="utf-8",
     )
     return "hintpkg.envs"
+
+
+def _write_check_contract_project(tmp_path: Path) -> Path:
+    """Write a tiny package with a harnessed class-method target and config."""
+    (tmp_path / "pkg_mod.py").write_text(
+        "class Env:\n"
+        "    def __init__(self, prefix: str):\n"
+        "        self.prefix = prefix\n"
+        "\n"
+        "    def build_command(self, path: str) -> list[str]:\n"
+        "        return ['cp', path, '/tmp']\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "check_support.py").write_text(
+        "from pkg_mod import Env\n"
+        "\n"
+        "def make_env() -> Env:\n"
+        "    return Env('demo')\n"
+        "\n"
+        "def prime_env(instance: Env) -> Env:\n"
+        "    instance.prefix = 'primed'\n"
+        "    return instance\n"
+        "\n"
+        "def scenario_env(instance: Env) -> Env:\n"
+        "    instance.mode = 'scenario'\n"
+        "    return instance\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "ordeal.toml"
+    config_path.write_text(
+        "[[objects]]\n"
+        'target = "pkg_mod:Env"\n'
+        'factory = "check_support:make_env"\n'
+        'setup = "check_support:prime_env"\n'
+        'scenarios = ["check_support:scenario_env"]\n'
+        "\n"
+        "[[contracts]]\n"
+        'target = "pkg_mod:Env.build_command"\n'
+        'checks = ["command_arg_stability"]\n'
+        'kwargs = { path = "demo.txt" }\n'
+        'tracked_params = ["path"]\n',
+        encoding="utf-8",
+    )
+    return config_path
 
 
 class TestCLI:
@@ -1173,6 +1218,164 @@ scan_max_examples = 12
         assert check.metadata["followup_phases"] == ["teardown"]
         assert check.metadata["fault"] == "cancel_rollout"
 
+    def test_check_uses_config_backed_objects_and_contracts_for_method_targets(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        config_path = _write_check_contract_project(tmp_path)
+
+        calls: dict[str, object] = {}
+
+        def fake_resolve(target: str, **kwargs):
+            calls["target"] = target
+            calls.update(kwargs)
+
+            def bound(path: str) -> list[str]:
+                return ["cp", path, "/tmp"]
+
+            return "Env.build_command", bound
+
+        def fake_evaluate(func, contract_checks):
+            calls["func_name"] = getattr(func, "__qualname__", repr(func))
+            calls["checks"] = [check.name for check in contract_checks]
+            return [], []
+
+        monkeypatch.setattr(ordeal_auto, "_resolve_explicit_target", fake_resolve)
+        monkeypatch.setattr(ordeal_auto, "_evaluate_contract_checks", fake_evaluate)
+
+        rc = main(["check", "pkg_mod:Env.build_command", "--config", str(config_path)])
+        out = capsys.readouterr().err
+
+        assert rc == 0
+        assert calls["target"] == "pkg_mod:Env.build_command"
+        assert callable(calls["object_factories"]["pkg_mod:Env"])
+        assert callable(calls["object_setups"]["pkg_mod:Env"])
+        assert callable(calls["object_scenarios"]["pkg_mod:Env"])
+        assert calls["object_state_factories"] == {}
+        assert calls["object_teardowns"] == {}
+        assert calls["object_harnesses"]["pkg_mod:Env"] == "fresh"
+        assert calls["checks"] == ["command_arg_stability"]
+        assert "Checking pkg_mod:Env.build_command explicit contract(s)" in out
+        assert "Target metadata:" in out
+        assert "factory=required, configured=yes" in out
+        assert "configs=" in out
+
+    def test_check_json_emits_agent_envelope_for_explicit_method_targets(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        config_path = _write_check_contract_project(tmp_path)
+
+        rc = main(
+            [
+                "check",
+                "pkg_mod:Env.build_command",
+                "--config",
+                str(config_path),
+                "--json",
+            ]
+        )
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 0
+        assert payload["tool"] == "check"
+        assert payload["status"] == "ok"
+        assert payload["raw_details"]["resolved_target"] == "Env.build_command"
+        assert payload["raw_details"]["contracts"][0]["name"] == "command_arg_stability"
+        assert payload["raw_details"]["target_listing"]["factory_configured"] is True
+        assert payload["raw_details"]["target_listing"]["harness"] == "fresh"
+        assert any(
+            "config" in hint and hint["config"].get("key")
+            for hint in payload["raw_details"]["target_listing"]["harness_hints"]
+        )
+        assert payload["raw_details"]["violations"] == []
+
+    def test_check_supports_direct_builtin_contracts_without_toml(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        monkeypatch.delitem(sys.modules, "pkg_mod", raising=False)
+        (tmp_path / "pkg_mod.py").write_text(
+            "def build_command(path: str = 'demo files/input.txt') -> list[str]:\n"
+            "    return ['cp', path, '/tmp']\n",
+            encoding="utf-8",
+        )
+
+        calls: dict[str, object] = {}
+
+        def fake_evaluate(func, contract_checks):
+            calls["func_name"] = getattr(func, "__qualname__", repr(func))
+            calls["checks"] = [check.name for check in contract_checks]
+            calls["kwargs"] = [dict(check.kwargs) for check in contract_checks]
+            return [], []
+
+        monkeypatch.setattr(ordeal_auto, "_evaluate_contract_checks", fake_evaluate)
+
+        rc = main(
+            [
+                "check",
+                "pkg_mod.build_command",
+                "--contract",
+                "command_arg_stability",
+            ]
+        )
+        out = capsys.readouterr().err
+
+        assert rc == 0
+        assert calls["func_name"] == "build_command"
+        assert calls["checks"] == ["command_arg_stability"]
+        assert calls["kwargs"] == [{"path": "demo files/input.txt"}]
+        assert "Checking pkg_mod.build_command explicit contract(s)" in out
+
+    def test_check_property_mode_still_uses_mine(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        monkeypatch.delitem(sys.modules, "pkg_mod", raising=False)
+        (tmp_path / "pkg_mod.py").write_text(
+            "def normalize(x: int) -> int:\n"
+            "    return x\n",
+            encoding="utf-8",
+        )
+
+        calls: dict[str, object] = {}
+
+        def fake_mine(func, max_examples):
+            calls["func"] = getattr(func, "__name__", repr(func))
+            calls["max_examples"] = max_examples
+            return MineResult(
+                function="pkg_mod.normalize",
+                examples=max_examples,
+                properties=[
+                    MinedProperty(
+                        name="idempotent",
+                        holds=max_examples,
+                        total=max_examples,
+                    )
+                ],
+            )
+
+        monkeypatch.setattr(ordeal_mine, "mine", fake_mine)
+
+        rc = main(["check", "pkg_mod.normalize", "-p", "idempotent", "-n", "5"])
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        assert calls["func"] == "normalize"
+        assert calls["max_examples"] == 5
+        assert "ALWAYS" in out or "PASS" in out
+
     def test_scan_list_targets_shows_unselected_rows_when_toml_limits_targets(
         self,
         monkeypatch,
@@ -1248,6 +1451,27 @@ scan_max_examples = 12
         )
         hint_kinds = {hint["kind"] for hint in row["harness_hints"]}
         assert {"factory", "state_factory", "teardown"} <= hint_kinds
+        assert any(
+            hint.get("config", {}).get("section") == "[[objects]]"
+            for hint in row["harness_hints"]
+        )
+
+    def test_scan_list_targets_text_shows_harness_config_hints(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        module_name = _write_harness_hint_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        rc = main(["scan", module_name, "--list-targets"])
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        assert "configs=" in out
+        assert "[[objects]]" in out
 
     def test_audit_json_surfaces_mined_harness_hints_for_blocked_methods(
         self,
@@ -2786,7 +3010,7 @@ verbose = false
         rc = main(["mutate", "pkg.mod.normalize", "--json"])
         payload = json.loads(capsys.readouterr().out)
 
-        assert rc == 0
+        assert rc == 1
         assert payload["tool"] == "mutate"
         assert payload["status"] == "findings"
         assert payload["findings"][0]["kind"] == "mutation"
@@ -2819,6 +3043,37 @@ verbose = false
         assert payload["suggested_test_file"] == "tests/test_pkg_mod.py"
         starters = payload["raw_details"]["blockers"][0]["starter_tests"]
         assert starters.startswith("def test_pkg_mod")
+
+    def test_mutate_uses_config_backed_contract_context_for_targets(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        import ordeal.mutations as mutations_mod
+        from ordeal.mutations import MutationResult
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        config_path = _write_check_contract_project(tmp_path)
+
+        calls: dict[str, object] = {}
+
+        def fake_mutate(*args, **kwargs):
+            calls["target"] = args[0]
+            calls["contract_context"] = kwargs.get("contract_context")
+            return MutationResult(target=args[0])
+
+        monkeypatch.setattr(mutations_mod, "mutate", fake_mutate)
+
+        rc = main(["mutate", "pkg_mod:Env.build_command", "--config", str(config_path)])
+        capsys.readouterr()
+
+        assert rc == 0
+        assert calls["target"] == "pkg_mod:Env.build_command"
+        assert calls["contract_context"]["contract_name"] == "command_arg_stability"
+        assert "command_arg_stability" in calls["contract_context"]["contract_tags"]
+        assert calls["contract_context"]["harness"] == "fresh"
 
 
 # ============================================================================

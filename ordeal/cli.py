@@ -152,6 +152,20 @@ class ScanRuntimeDefaults:
     relation_overrides: dict[str, list[str]] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class CheckRuntimeDefaults:
+    """Resolved runtime config for one explicit check target."""
+
+    object_factories: dict[str, Any] | None = None
+    object_setups: dict[str, Any] | None = None
+    object_scenarios: dict[str, Any] | None = None
+    object_state_factories: dict[str, Any] | None = None
+    object_teardowns: dict[str, Any] | None = None
+    object_harnesses: dict[str, str] | None = None
+    contract_checks: list[Any] = field(default_factory=list)
+    registry_warnings: list[str] = field(default_factory=list)
+
+
 def _load_fixture_registry_warnings(
     *,
     shared_modules: Sequence[str] = (),
@@ -169,6 +183,14 @@ def _load_fixture_registry_warnings(
 def _scan_base_module(target: str) -> str:
     """Return the module component for a scan target."""
     return target.split(":", 1)[0]
+
+
+def _target_module_name(target: str) -> str:
+    """Return the importable module for dotted or explicit callable targets."""
+    if ":" in target:
+        return target.split(":", 1)[0]
+    module_name, _, _ = target.rpartition(".")
+    return module_name or target
 
 
 def _scan_display_name(module_name: str, target: str) -> str:
@@ -361,6 +383,12 @@ def _callable_listing_rows(
             _resolve_object_harness(owner, merged_harnesses) if owner is not None else "fresh"
         )
         scenario_count = int(getattr(resolved_scenario, "__ordeal_scenario_count__", 0))
+        if (
+            scenario_count == 0
+            and isinstance(resolved_scenario, Sequence)
+            and not isinstance(resolved_scenario, (str, bytes, bytearray))
+        ):
+            scenario_count = len([item for item in resolved_scenario if item is not None])
         if resolved_scenario is not None and scenario_count == 0:
             scenario_count = 1
         skip_reason = getattr(func, "__ordeal_skip_reason__", None)
@@ -385,6 +413,7 @@ def _callable_listing_rows(
                         "suggestion": hint.suggestion,
                         "evidence": hint.evidence,
                         "confidence": round(float(hint.confidence), 2),
+                        "config": hint.config,
                     }
                 )
 
@@ -429,6 +458,75 @@ def _harness_hint_summary(hints: Sequence[Mapping[str, Any]]) -> str | None:
     return "; ".join(parts[:3])
 
 
+def _harness_hint_config_summary(hints: Sequence[Mapping[str, Any]]) -> str | None:
+    """Render a compact one-line summary of mined harness config hints."""
+    configs: list[str] = []
+    seen: set[str] = set()
+    for hint in hints:
+        config = hint.get("config")
+        if not isinstance(config, Mapping):
+            continue
+        section = str(config.get("section", "")).strip()
+        target = str(config.get("target", "")).strip()
+        method = str(config.get("method", "")).strip()
+        key = str(config.get("key", "")).strip()
+        value = config.get("value")
+        value_text = value if isinstance(value, str) else pformat(value, compact=True)
+        parts = [part for part in (section, target, method) if part]
+        if key:
+            parts.append(f"{key}={value_text}")
+        elif value is not None:
+            parts.append(str(value_text))
+        summary = " ".join(parts).strip()
+        if summary and summary not in seen:
+            seen.add(summary)
+            configs.append(summary)
+    if not configs:
+        return None
+    return "; ".join(configs[:3])
+
+
+def _render_target_listing_parts(row: Mapping[str, Any]) -> list[str]:
+    """Return the normalized text fragments for one callable discovery row."""
+    factory_text = (
+        "not-needed"
+        if not row.get("factory_required")
+        else f"required, configured={'yes' if row.get('factory_configured') else 'no'}"
+    )
+    parts = [
+        f"kind={row.get('kind')}",
+        f"async={row.get('async')}",
+        f"selected={'yes' if row.get('selected', True) else 'no'}",
+        f"factory={factory_text}",
+        f"harness={row.get('harness', 'fresh')}",
+        f"setup={'yes' if row.get('setup_configured') else 'no'}",
+        (
+            "state=not-needed"
+            if not row.get("state_param")
+            else f"state={'yes' if row.get('state_factory_configured') else 'no'}"
+        ),
+        f"teardown={'yes' if row.get('teardown_configured') else 'no'}",
+        f"scenarios={row.get('scenario_count', 0)}",
+        f"runnable={'yes' if row.get('runnable') else 'no'}",
+    ]
+    contract_checks = list(row.get("contract_checks", []))
+    if contract_checks:
+        parts.append(f"contracts={','.join(contract_checks)}")
+    lifecycle_phase = row.get("lifecycle_phase")
+    if lifecycle_phase:
+        parts.append(f"phase={lifecycle_phase}")
+    skip_reason = row.get("skip_reason")
+    if skip_reason:
+        parts.append(f"skip={skip_reason}")
+    hint_summary = _harness_hint_summary(list(row.get("harness_hints", [])))
+    if hint_summary:
+        parts.append(f"hints={hint_summary}")
+    config_summary = _harness_hint_config_summary(list(row.get("harness_hints", [])))
+    if config_summary:
+        parts.append(f"configs={config_summary}")
+    return parts
+
+
 def _render_target_listing_text(
     title: str,
     groups: Sequence[Mapping[str, Any]],
@@ -447,39 +545,7 @@ def _render_target_listing_text(
             lines.append("  (no callable targets found)")
             continue
         for row in targets:
-            factory_text = (
-                "not-needed"
-                if not row.get("factory_required")
-                else f"required, configured={'yes' if row.get('factory_configured') else 'no'}"
-            )
-            parts = [
-                f"kind={row.get('kind')}",
-                f"async={row.get('async')}",
-                f"selected={'yes' if row.get('selected', True) else 'no'}",
-                f"factory={factory_text}",
-                f"harness={row.get('harness', 'fresh')}",
-                f"setup={'yes' if row.get('setup_configured') else 'no'}",
-                (
-                    "state=not-needed"
-                    if not row.get("state_param")
-                    else f"state={'yes' if row.get('state_factory_configured') else 'no'}"
-                ),
-                f"teardown={'yes' if row.get('teardown_configured') else 'no'}",
-                f"scenarios={row.get('scenario_count', 0)}",
-                f"runnable={'yes' if row.get('runnable') else 'no'}",
-            ]
-            contract_checks = list(row.get("contract_checks", []))
-            if contract_checks:
-                parts.append(f"contracts={','.join(contract_checks)}")
-            lifecycle_phase = row.get("lifecycle_phase")
-            if lifecycle_phase:
-                parts.append(f"phase={lifecycle_phase}")
-            skip_reason = row.get("skip_reason")
-            if skip_reason:
-                parts.append(f"skip={skip_reason}")
-            hint_summary = _harness_hint_summary(list(row.get("harness_hints", [])))
-            if hint_summary:
-                parts.append(f"hints={hint_summary}")
+            parts = _render_target_listing_parts(row)
             lines.append(f"  {row.get('name', ''):<38} " + "  ".join(parts))
     return "\n".join(lines)
 
@@ -705,18 +771,189 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
 
 
 def _cmd_check(args: argparse.Namespace) -> int:
-    """Mine a function and verify a specific property — one-step workflow.
-
-    Collapses: mine() → spot property → fuzz with assertion → confirm
-    into a single command.  Exit code 0 if property holds, 1 if violated.
-    """
-    from ordeal.auto import _unwrap
+    """Verify a mined property or an explicit contract on one target."""
+    from ordeal.auto import _evaluate_contract_checks, _resolve_explicit_target, _unwrap
     from ordeal.mine import mine
 
     target = args.target
     prop = args.property
+    cli_contract_names = _check_contract_names(args)
+    contract_runtime = _resolve_check_runtime_defaults(
+        target,
+        config_path=getattr(args, "config", None),
+    )
+    if cli_contract_names and contract_runtime.contract_checks:
+        _stderr("Use either --contract or config-backed explicit contracts, not both.\n")
+        return 1
 
-    # Resolve the function
+    has_explicit_contracts = bool(contract_runtime.contract_checks or cli_contract_names)
+    explicit_target = ":" in target
+
+    if prop is not None and has_explicit_contracts:
+        _stderr("Use either --property or explicit contracts, not both.\n")
+        return 1
+
+    if prop is None and explicit_target and not has_explicit_contracts:
+        _stderr(
+            f"No explicit contracts configured for {target}. "
+            "Add a matching [[contracts]] entry in ordeal.toml, "
+            "pass --contract, or use --property.\n"
+        )
+        return 1
+
+    if prop is None and (explicit_target or has_explicit_contracts):
+        module_name = _target_module_name(target)
+        target_name = (
+            target
+            if explicit_target
+            else f"{module_name}:{_scan_display_name(module_name, target)}"
+        )
+        try:
+            resolved_name, func = _resolve_explicit_target(
+                target_name,
+                object_factories=contract_runtime.object_factories,
+                object_setups=contract_runtime.object_setups,
+                object_scenarios=contract_runtime.object_scenarios,
+                object_state_factories=contract_runtime.object_state_factories,
+                object_teardowns=contract_runtime.object_teardowns,
+                object_harnesses=contract_runtime.object_harnesses,
+            )
+        except (ImportError, AttributeError, TypeError, ValueError) as exc:
+            _stderr(f"Cannot resolve {target_name}: {exc}\n")
+            return 1
+
+        try:
+            effective_contract_checks = (
+                _build_explicit_contract_checks(func, cli_contract_names)
+                if cli_contract_names
+                else list(contract_runtime.contract_checks)
+            )
+        except ValueError as exc:
+            _stderr(f"Unknown contract for {target_name}: {exc}\n")
+            return 1
+
+        if contract_runtime.registry_warnings:
+            for warning in contract_runtime.registry_warnings:
+                _stderr(f"warning: {warning}\n")
+
+        if getattr(func, "__ordeal_requires_factory__", False):
+            skip_reason = getattr(func, "__ordeal_skip_reason__", "missing object factory")
+            _stderr(f"Cannot verify {target_name}: {skip_reason}.\n")
+            return 1
+
+        target_listing: dict[str, Any] | None = None
+        try:
+            target_rows = _callable_listing_rows(
+                module_name,
+                targets=[target_name],
+                selected_targets=[target_name],
+                object_factories=contract_runtime.object_factories,
+                object_setups=contract_runtime.object_setups,
+                object_scenarios=contract_runtime.object_scenarios,
+                object_state_factories=contract_runtime.object_state_factories,
+                object_teardowns=contract_runtime.object_teardowns,
+                object_harnesses=contract_runtime.object_harnesses,
+                contract_checks={
+                    _scan_display_name(module_name, target_name): effective_contract_checks
+                },
+            )
+            target_listing = next(
+                (
+                    row
+                    for row in target_rows
+                    if row.get("name") == _scan_display_name(module_name, target_name)
+                ),
+                target_rows[0] if target_rows else None,
+            )
+        except Exception as exc:
+            _stderr(f"warning: target metadata unavailable for {target_name}: {exc}\n")
+
+        if target_listing is not None:
+            _stderr(
+                "Target metadata: "
+                + "  ".join(_render_target_listing_parts(target_listing))
+                + "\n"
+            )
+
+        _stderr(
+            f"Checking {target} explicit contract(s) "
+            f"({len(effective_contract_checks)} check(s))...\n"
+        )
+        violations, details = _evaluate_contract_checks(
+            _unwrap(func),
+            effective_contract_checks,
+        )
+        report = {
+            "tool": "check",
+            "target": target,
+            "mode": "explicit_contract",
+            "summary": [
+                f"Checked {len(effective_contract_checks)} explicit contract(s)",
+                f"Target: {resolved_name}",
+                f"Violations: {len(details)}",
+            ],
+            "details": details,
+            "suggested_commands": [
+                (
+                    " ".join(
+                        [
+                            "ordeal check",
+                            target,
+                            *[f"--contract {name}" for name in cli_contract_names],
+                        ]
+                    )
+                    if cli_contract_names
+                    else f"ordeal check {target} --config ordeal.toml"
+                ),
+            ],
+        }
+        if getattr(args, "json", False):
+            print(
+                _build_agent_envelope_from_report(
+                    report,
+                    status="findings" if details else "ok",
+                    confidence=1.0 if details else 0.0,
+                    confidence_basis=("explicit contract evaluation",),
+                    blocking_reason=None if not details else None,
+                    raw_details={
+                        "resolved_target": resolved_name,
+                        "config_path": getattr(args, "config", None),
+                        "contracts": [
+                            {
+                                "name": check.name,
+                                "summary": check.summary,
+                                "kwargs": check.kwargs,
+                                "metadata": check.metadata,
+                            }
+                            for check in effective_contract_checks
+                        ],
+                        "target_listing": target_listing,
+                        "violations": violations,
+                        "details": details,
+                    },
+                ).to_json()
+            )
+        else:
+            if details:
+                print(f"{len(details)} explicit contract violation(s):")
+                for detail in details:
+                    print(f"  FAIL {detail.get('summary', detail.get('name', 'contract'))}")
+                    proof = detail.get("proof_bundle", {})
+                    lifecycle = proof.get("lifecycle") if isinstance(proof, Mapping) else None
+                    if lifecycle:
+                        print(f"    lifecycle: {lifecycle}")
+                return 1
+            print(f"PASS explicit contracts for {resolved_name}")
+            if target_listing is not None:
+                print(
+                    "Target metadata: "
+                    + "  ".join(_render_target_listing_parts(target_listing))
+                )
+            return 0
+
+        return 1 if details else 0
+
+    # Fallback: property/mining mode for plain dotted functions.
     mod_path, _, func_name = target.rpartition(".")
     if not mod_path:
         _stderr("Target must be dotted path: module.function\n")
@@ -738,6 +975,73 @@ def _cmd_check(args: argparse.Namespace) -> int:
         _stderr(f"Checking {target} contracts ({max_examples} examples)...\n")
 
     result = mine(func, max_examples=max_examples)
+    if getattr(args, "json", False):
+        def _property_detail(item: Any) -> dict[str, Any]:
+            return {
+                "kind": "property",
+                "module": mod_path,
+                "function": func_name,
+                "qualname": target,
+                "name": item.name,
+                "summary": f"{item.name} ({item.confidence:.0%})",
+                "confidence": item.confidence,
+                "holds": item.holds,
+                "total": item.total,
+                "counterexample": item.counterexample,
+            }
+
+        if prop:
+            matching = [p for p in result.properties if prop.lower() in p.name.lower()]
+            if not matching:
+                _stderr(
+                    f"\n  Property '{prop}' not found. Available: "
+                    f"{', '.join(p.name for p in result.properties if p.total > 0)}\n"
+                )
+                return 1
+            selected = matching
+        else:
+            contracts = [
+                "never None",
+                "no NaN",
+                "never empty",
+                "deterministic",
+                "idempotent",
+                "finite",
+            ]
+            selected = [p for p in result.properties if p.total > 0 and p.name in contracts]
+
+        report = {
+            "tool": "check",
+            "target": target,
+            "mode": "property" if prop else "contract",
+            "summary": [result.summary()],
+            "details": [_property_detail(item) for item in selected],
+            "suggested_commands": [f"ordeal check {target} -n {max_examples}"],
+        }
+        print(
+            _build_agent_envelope_from_report(
+                report,
+                status="findings" if any(not p.universal for p in selected) else "ok",
+                confidence=max((p.confidence for p in selected), default=0.0),
+                confidence_basis=("mine() property mining",),
+                raw_details={
+                    "max_examples": max_examples,
+                    "properties": [
+                        {
+                            "name": p.name,
+                            "holds": p.holds,
+                            "total": p.total,
+                            "confidence": p.confidence,
+                            "universal": p.universal,
+                            "counterexample": p.counterexample,
+                        }
+                        for p in result.properties
+                    ],
+                },
+            ).to_json()
+        )
+        return 1 if any(not p.universal for p in selected) else 0
+
     print(result.summary())
 
     # --contract mode: check all standard properties that catch bugs
@@ -1170,7 +1474,7 @@ def _merge_named_overrides(
 
 def _config_object_specs_for_module(cfg: OrdealConfig, module_name: str) -> list[Any]:
     """Return shared object configs that belong to *module_name*."""
-    return [spec for spec in cfg.objects if _scan_base_module(spec.target) == module_name]
+    return [spec for spec in cfg.objects if _target_module_name(spec.target) == module_name]
 
 
 def _object_runtime_maps(
@@ -1190,6 +1494,12 @@ def _object_runtime_maps(
     state_factories: dict[str, Any] = {}
     teardowns: dict[str, Any] = {}
     harnesses: dict[str, str] = {}
+
+    def _resolve_scenario_item(item: object) -> object:
+        if isinstance(item, Mapping):
+            return dict(item)
+        return _resolve_symbol_path(str(item))
+
     for spec in object_specs:
         target = str(getattr(spec, "target"))
         factory_path = getattr(spec, "factory", None)
@@ -1208,20 +1518,8 @@ def _object_runtime_maps(
             teardowns[target] = _resolve_symbol_path(str(teardown_path))
         harnesses[target] = harness if harness in {"fresh", "stateful"} else "fresh"
         if scenario_paths:
-            resolved_hooks = [_resolve_symbol_path(str(path)) for path in scenario_paths]
-            if len(resolved_hooks) == 1:
-                hook = resolved_hooks[0]
-            else:
-                from ordeal.auto import _call_sync
-
-                def hook(instance: Any, *, __hooks: Sequence[Any] = tuple(resolved_hooks)) -> Any:
-                    current = instance
-                    for item in __hooks:
-                        result = _call_sync(item, current)
-                        if result is not None:
-                            current = result
-                    return current
-
+            resolved_hooks = tuple(_resolve_scenario_item(path) for path in scenario_paths)
+            hook: object = resolved_hooks[0] if len(resolved_hooks) == 1 else resolved_hooks
             with contextlib.suppress(Exception):
                 setattr(hook, "__ordeal_scenario_count__", len(resolved_hooks))
             scenarios[target] = hook
@@ -1238,7 +1536,7 @@ def _config_contract_checks_for_module(
     checks: dict[str, list[Any]] = {}
     for spec in cfg.contracts:
         target = str(spec.target)
-        if _scan_base_module(target) != module_name:
+        if _target_module_name(target) != module_name:
             continue
         display_name = _scan_display_name(module_name, target)
         bucket = checks.setdefault(display_name, [])
@@ -1517,6 +1815,145 @@ def _resolve_scan_runtime_defaults(
         ignore_relations=ignore_relations,
         property_overrides=property_overrides,
         relation_overrides=relation_overrides,
+    )
+
+
+def _resolve_check_runtime_defaults(
+    target: str,
+    *,
+    config_path: str | None = None,
+) -> CheckRuntimeDefaults:
+    """Load config-backed object hooks and explicit contracts for *target*."""
+    module_name = _target_module_name(target)
+    warnings: list[str] = []
+    config = _load_optional_config(config_path)
+    if config is None:
+        return CheckRuntimeDefaults()
+
+    try:
+        object_specs = _config_object_specs_for_module(config, module_name)
+        (
+            object_factories,
+            object_setups,
+            object_scenarios,
+            object_state_factories,
+            object_teardowns,
+            object_harnesses,
+        ) = _object_runtime_maps(object_specs)
+    except Exception as exc:
+        warnings.append(f"object config failed for {module_name}: {exc}")
+        object_factories, object_setups, object_scenarios = {}, {}, {}
+        object_state_factories, object_teardowns, object_harnesses = {}, {}, {}
+
+    try:
+        contract_checks = _config_contract_checks_for_module(config, module_name)
+    except Exception as exc:
+        warnings.append(f"contract config failed for {module_name}: {exc}")
+        contract_checks = {}
+
+    display_name = _scan_display_name(module_name, target)
+    return CheckRuntimeDefaults(
+        object_factories=object_factories,
+        object_setups=object_setups,
+        object_scenarios=object_scenarios,
+        object_state_factories=object_state_factories,
+        object_teardowns=object_teardowns,
+        object_harnesses=object_harnesses,
+        contract_checks=list(contract_checks.get(display_name, [])),
+        registry_warnings=warnings,
+    )
+
+
+def _check_contract_names(args: argparse.Namespace) -> list[str]:
+    """Normalize repeated ``--contract`` CLI values."""
+    names: list[str] = []
+    for raw in list(getattr(args, "contract", []) or []):
+        name = str(raw).strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _build_explicit_contract_checks(func: Any, names: Sequence[str]) -> list[Any]:
+    """Build direct built-in contract checks for one resolved callable."""
+    from ordeal.auto import _boundary_smoke_inputs, _unwrap, builtin_contract_check
+
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        tracked_params: list[str] = []
+    else:
+        tracked_params = [
+            param.name
+            for param in sig.parameters.values()
+            if param.name not in {"self", "cls"}
+        ]
+
+    phase = (
+        str(getattr(func, "__ordeal_lifecycle_phase__", "") or "").strip()
+        or str(getattr(_unwrap(func), "__ordeal_lifecycle_phase__", "") or "").strip()
+        or None
+    )
+    smoke_inputs = _boundary_smoke_inputs(func)
+    base_kwargs = dict(smoke_inputs[0]) if smoke_inputs else {}
+    followup_phases = (
+        ("cleanup", "teardown")
+        if phase in {"setup", "rollout"}
+        else None
+    )
+    checks: list[Any] = []
+    for name in names:
+        checks.append(
+            builtin_contract_check(
+                name,
+                kwargs=dict(base_kwargs),
+                tracked_params=tracked_params,
+                phase=phase,
+                followup_phases=followup_phases,
+            )
+        )
+    return checks
+
+
+def _target_harness_mode(
+    target: str,
+    object_harnesses: Mapping[str, str] | None,
+) -> str | None:
+    """Resolve one configured harness mode for a scan/audit/mutation target."""
+    if not object_harnesses:
+        return None
+    module_name = _target_module_name(target)
+    display_name = _scan_display_name(module_name, target)
+    if "." not in display_name:
+        return None
+    owner_name = display_name.rsplit(".", 1)[0]
+    return object_harnesses.get(f"{module_name}:{owner_name}")
+
+
+def _mutation_contract_context_for_target(
+    cfg: OrdealConfig | None,
+    target: str,
+) -> dict[str, Any]:
+    """Build mutation-ranking contract metadata for one configured target."""
+    if cfg is None:
+        return {}
+
+    from ordeal.mutations import mutation_contract_context
+
+    module_name = _target_module_name(target)
+    try:
+        checks_by_target = _config_contract_checks_for_module(cfg, module_name)
+    except Exception:
+        checks_by_target = {}
+    try:
+        object_specs = _config_object_specs_for_module(cfg, module_name)
+        *_unused, object_harnesses = _object_runtime_maps(object_specs)
+    except Exception:
+        object_harnesses = {}
+    display_name = _scan_display_name(module_name, target)
+    return mutation_contract_context(
+        checks_by_target.get(display_name, ()),
+        harness=_target_harness_mode(target, object_harnesses),
     )
 
 
@@ -3453,13 +3890,44 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
     resume: bool = args.resume
     promote_clusters_only = True
     cluster_min_size = 2
+    cfg: OrdealConfig | None = None
+
+    try:
+        cfg = _load_optional_config(args.config)
+    except FileNotFoundError:
+        if args.config is not None:
+            if getattr(args, "json", False):
+                print(
+                    _build_blocked_agent_envelope(
+                        tool="mutate",
+                        target=str(args.config),
+                        summary=f"config file not found: {args.config}",
+                        blocking_reason=f"config file not found: {args.config}",
+                        raw_details={"config": args.config},
+                    ).to_json()
+                )
+            else:
+                _stderr(f"Config file not found: {args.config}\n")
+            return 1
+    except ConfigError as e:
+        if getattr(args, "json", False):
+            print(
+                _build_blocked_agent_envelope(
+                    tool="mutate",
+                    target=str(args.config or "ordeal.toml"),
+                    summary=f"config error in {args.config or 'ordeal.toml'}",
+                    blocking_reason=str(e),
+                    raw_details={"config": args.config or "ordeal.toml"},
+                ).to_json()
+            )
+        else:
+            _stderr(f"Config error: {e}\n")
+        return 1
 
     # Fall back to config file if no targets given
     if not targets:
         config_path = args.config or "ordeal.toml"
-        try:
-            cfg = load_config(config_path)
-        except FileNotFoundError:
+        if cfg is None:
             if getattr(args, "json", False):
                 print(
                     _build_blocked_agent_envelope(
@@ -3480,20 +3948,6 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
                 "  ordeal mutate myapp.scoring.compute\n"
                 "  ordeal mutate myapp.scoring\n"
             )
-            return 1
-        except ConfigError as e:
-            if getattr(args, "json", False):
-                print(
-                    _build_blocked_agent_envelope(
-                        tool="mutate",
-                        target=config_path,
-                        summary=f"config error in {config_path}",
-                        blocking_reason=str(e),
-                        raw_details={"config": config_path},
-                    ).to_json()
-                )
-                return 1
-            _stderr(f"Config error: {e}\n")
             return 1
 
         if cfg.mutations is None:
@@ -3527,7 +3981,8 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
             _stderr("No targets in [mutations] section.\n")
             return 1
 
-        # Config provides defaults; CLI flags override
+    if cfg is not None and cfg.mutations is not None:
+        # Config provides defaults; explicit CLI flags override.
         if preset is None and cfg.mutations.operators is None:
             preset = cfg.mutations.preset
         if cfg.mutations.operators is not None and preset is None:
@@ -3559,6 +4014,7 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
     for target in targets:
         if not getattr(args, "json", False):
             _stderr(f"Mutating {target}...\n")
+        contract_context = _mutation_contract_context_for_target(cfg, target)
 
         try:
             if getattr(args, "json", False):
@@ -3579,6 +4035,7 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
                         promote_clusters_only=promote_clusters_only,
                         cluster_min_size=cluster_min_size,
                         resume=resume,
+                        contract_context=contract_context,
                     )
             else:
                 result = mutate(
@@ -3594,6 +4051,7 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
                     promote_clusters_only=promote_clusters_only,
                     cluster_min_size=cluster_min_size,
                     resume=resume,
+                    contract_context=contract_context,
                 )
         except NoTestsFoundError as e:
             if not getattr(args, "json", False):
@@ -6317,14 +6775,25 @@ def _command_specs() -> tuple[CommandSpec, ...]:
         CommandSpec(
             name="check",
             handler=_cmd_check,
-            help="Verify a specific property on a function (mine + assert in one step)",
+            help="Verify a property or explicit contract on a callable target",
             arguments=(
-                _arg("target", help="Dotted path: mymod.func"),
+                _arg("target", help="Callable target: mymod.func or mymod:Class.method"),
+                _arg(
+                    "--config",
+                    default=None,
+                    help="Optional ordeal.toml path (default: ./ordeal.toml when present)",
+                ),
                 _arg(
                     "--property",
                     "-p",
                     default=None,
                     help="Property to verify. Omit to check all standard contracts.",
+                ),
+                _arg(
+                    "--contract",
+                    action="append",
+                    default=[],
+                    help="Repeat to check one or more named built-in contracts directly.",
                 ),
                 _arg(
                     "--max-examples",
@@ -6333,6 +6802,7 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     default=200,
                     help="Examples to test (default: 200)",
                 ),
+                _arg("--json", action="store_true", help="Emit a JSON agent envelope"),
             ),
         ),
         CommandSpec(

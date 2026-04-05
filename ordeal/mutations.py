@@ -88,6 +88,7 @@ from typing import (
     Any,
     Callable,
     Literal,
+    Mapping,
     Sequence,
     Union,
     get_args,
@@ -530,6 +531,7 @@ class Mutant:
     source_line: str = ""
     killed_by: str | None = None
     qualname: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
     _mutant_source: str | None = field(default=None, repr=False)
 
     @property
@@ -557,13 +559,175 @@ def _target_semantic_tags(target: str) -> list[str]:
     return tags
 
 
-def _mutant_semantic_tags(mutant: Mutant, *, target: str | None = None) -> list[str]:
+_CONTRACT_TAG_ALIASES: dict[str, str] = {
+    "cleanup_attempts_all": "lifecycle",
+    "teardown_attempts_all": "lifecycle",
+    "setup_failure_triggers_teardown": "lifecycle",
+    "cleanup_after_cancellation": "lifecycle",
+    "lifecycle_attempts_all": "lifecycle",
+    "lifecycle_followup": "lifecycle",
+    "rollout_cancellation_triggers_cleanup": "lifecycle",
+    "shell_safe": "shell",
+    "subprocess_argv": "shell",
+    "command_arg_stability": "shell",
+    "quoted_paths": "path",
+    "protected_env_keys": "env",
+    "json_roundtrip": "json",
+    "http_shape": "http",
+    "contract_boundary": "contract_boundary",
+}
+
+_COHERENT_BOUNDARY_TAGS = {
+    "lifecycle",
+    "contract_boundary",
+    "shell",
+    "path",
+    "env",
+    "json",
+    "http",
+    "sql",
+}
+
+
+def _normalize_semantic_tag(value: Any) -> str | None:
+    """Normalize a contract or heuristic label into one semantic tag."""
+    if not isinstance(value, str):
+        return None
+    lowered = value.strip().lower().replace("-", "_")
+    if not lowered:
+        return None
+    return _CONTRACT_TAG_ALIASES.get(lowered, lowered)
+
+
+def _metadata_semantic_tags(metadata: Mapping[str, Any] | None) -> list[str]:
+    """Extract explicit semantic tags from contract or harness metadata."""
+    if not metadata:
+        return []
+    tags: list[str] = []
+
+    def _add(value: Any) -> None:
+        tag = _normalize_semantic_tag(value)
+        if tag:
+            tags.append(tag)
+
+    for key in ("contract_kind", "kind", "contract_boundary", "boundary", "boundary_label"):
+        _add(metadata.get(key))
+    contract_tags = metadata.get("contract_tags") or metadata.get("tags") or metadata.get(
+        "explicit_tags"
+    )
+    if isinstance(contract_tags, str):
+        _add(contract_tags)
+    elif isinstance(contract_tags, Sequence):
+        for item in contract_tags:
+            _add(item)
+    if any(metadata.get(key) is not None for key in ("phase", "followup_phases", "fault")):
+        _add("lifecycle")
+    return list(dict.fromkeys(tags))
+
+
+def _merge_semantic_context(*contexts: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Merge explicit metadata contexts with later contexts taking precedence."""
+    merged: dict[str, Any] = {}
+    for context in contexts:
+        if context:
+            merged.update(context)
+    return merged
+
+
+def mutation_contract_context(
+    contract_checks: Sequence[Any] | None,
+    *,
+    harness: str | None = None,
+) -> dict[str, Any]:
+    """Summarize configured contract checks into mutation-ranking metadata."""
+    checks = [check for check in contract_checks or () if getattr(check, "name", None)]
+    if not checks and not harness:
+        return {}
+
+    names: list[str] = []
+    kinds: list[str] = []
+    phases: list[str] = []
+    followups: list[str] = []
+    faults: list[str] = []
+    tags: list[str] = []
+
+    for check in checks:
+        name = str(getattr(check, "name", "")).strip()
+        if name:
+            names.append(name)
+            tags.append(name)
+        metadata = getattr(check, "metadata", {}) or {}
+        kind = _normalize_semantic_tag(metadata.get("kind"))
+        if kind:
+            kinds.append(kind)
+            tags.append(kind)
+        phase = str(metadata.get("phase", "")).strip()
+        if phase:
+            phases.append(phase)
+        fault = str(metadata.get("fault", "")).strip()
+        if fault:
+            faults.append(fault)
+        raw_followups = metadata.get("followup_phases")
+        if isinstance(raw_followups, Sequence) and not isinstance(
+            raw_followups, (str, bytes, bytearray)
+        ):
+            for item in raw_followups:
+                followup = str(item).strip()
+                if followup:
+                    followups.append(followup)
+
+    context: dict[str, Any] = {}
+    unique_names = list(dict.fromkeys(names))
+    unique_kinds = list(dict.fromkeys(kinds))
+    unique_tags = list(dict.fromkeys(tags))
+    if len(unique_names) == 1:
+        context["contract_name"] = unique_names[0]
+    if len(unique_kinds) == 1:
+        context["contract_kind"] = unique_kinds[0]
+    if unique_tags:
+        context["contract_tags"] = unique_tags
+    if phases:
+        context["phase"] = phases[0]
+    if followups:
+        context["followup_phases"] = list(dict.fromkeys(followups))
+    if faults:
+        context["fault"] = faults[0]
+    if harness:
+        context["harness"] = harness
+    return context
+
+
+def _contract_context_summary(metadata: Mapping[str, Any] | None) -> str | None:
+    """Render one compact label for explicit contract/harness metadata."""
+    if not metadata:
+        return None
+    parts: list[str] = []
+    for key in ("contract_name", "contract_kind", "harness", "phase"):
+        value = metadata.get(key)
+        if value is not None and str(value).strip():
+            if key == "harness":
+                parts.append(f"harness={value}")
+            elif key == "phase":
+                parts.append(f"phase={value}")
+            else:
+                parts.append(str(value))
+    return ", ".join(parts) or None
+
+
+def _mutant_semantic_tags(
+    mutant: Mutant,
+    *,
+    target: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> list[str]:
     """Infer coarse semantic tags for a surviving mutant."""
     lowered = (
         f"{target or ''} {mutant.qualname or ''} "
         f"{mutant.description} {mutant.source_line}"
     ).lower()
-    tags: list[str] = list(_target_semantic_tags(target or ""))
+    tags: list[str] = []
+    tags.extend(_metadata_semantic_tags(metadata or mutant.metadata))
+    tags.extend(_target_semantic_tags(target or ""))
     if any(token in lowered for token in {"cleanup", "teardown", "rollout", "setup", "stop"}):
         tags.append("lifecycle")
     if any(token in lowered for token in {"shell", "argv", "execute_command", "subprocess"}):
@@ -763,6 +927,7 @@ class MutationResult:
     operators_used: list[str] | None = None
     preset_used: str | None = None
     concern: str | None = None
+    contract_context: dict[str, Any] = field(default_factory=dict)
     timings: dict[str, float] = field(default_factory=dict)
     promote_clusters_only: bool = True
     cluster_min_size: int = 2
@@ -818,9 +983,10 @@ class MutationResult:
         """Group surviving mutants by coarse semantic boundary or sink."""
         groups: dict[tuple[str, str], dict[str, Any]] = {}
         for mutant in self.survived:
-            tags = _mutant_semantic_tags(mutant, target=self.target)
+            context = _merge_semantic_context(self.contract_context, mutant.metadata)
+            tags = _mutant_semantic_tags(mutant, target=self.target, metadata=context)
             key = tags[0]
-            owner = mutant.qualname or self.target
+            owner = str(context.get("owner") or mutant.qualname or self.target)
             bucket = groups.setdefault(
                 (owner, key),
                 {
@@ -830,16 +996,12 @@ class MutationResult:
                     "mutants": [],
                     "operators": set(),
                     "lines": set(),
-                    "coherent_boundary": key
-                    in {
-                        "lifecycle",
-                        "contract_boundary",
-                        "shell",
-                        "path",
-                        "env",
-                        "json",
-                        "http",
-                    },
+                    "contract_kind": context.get("contract_kind") or context.get("kind"),
+                    "contract_name": context.get("contract_name") or context.get("name"),
+                    "harness": context.get("harness"),
+                    "contract_context": context,
+                    "coherent_boundary": key in _COHERENT_BOUNDARY_TAGS
+                    or any(tag in _COHERENT_BOUNDARY_TAGS for tag in tags[:3]),
                 },
             )
             bucket["mutants"].append(mutant)
@@ -857,6 +1019,10 @@ class MutationResult:
                     "operators": sorted(bucket["operators"]),
                     "lines": sorted(bucket["lines"]),
                     "mutants": list(bucket["mutants"]),
+                    "contract_kind": bucket["contract_kind"],
+                    "contract_name": bucket["contract_name"],
+                    "harness": bucket["harness"],
+                    "contract_context": dict(bucket["contract_context"]),
                     "coherent_boundary": bool(bucket["coherent_boundary"]),
                 }
             )
@@ -927,6 +1093,9 @@ class MutationResult:
             parts.append(f"operators: {len(self.operators_used)}/{len(OPERATORS)}")
         if self.concern:
             parts.append(f"concern: {self.concern}")
+        contract_note = _contract_context_summary(self.contract_context)
+        if contract_note:
+            parts.append(f"contract: {contract_note}")
         meta = ", ".join(parts)
 
         # When no mutants survived filtering, explain why instead of "100%"
@@ -975,6 +1144,9 @@ class MutationResult:
                     f"{cluster['owner']} -> {cluster['label']} "
                     f"({cluster['size']} survivor(s), ops: {ops})"
                 )
+                contract_note = _contract_context_summary(cluster.get("contract_context"))
+                if contract_note:
+                    lines.append(f"      contract: {contract_note}")
         elif self.survived:
             lines.append(
                 f"  {len(self.survived)} test gap(s) remain, "
@@ -988,6 +1160,11 @@ class MutationResult:
             if m.source_line:
                 header += f"  |  {m.source_line}"
             lines.append(header)
+            context_note = _contract_context_summary(
+                _merge_semantic_context(self.contract_context, m.metadata)
+            )
+            if context_note:
+                lines.append(f"    Contract: {context_note}")
             if remediation:
                 lines.append(f"    Cause: mutant changes {m.description} and tests still pass.")
                 lines.append(f"    Fix: {m.remediation}")
@@ -1045,14 +1222,18 @@ class MutationResult:
             f"import {module_path} as _ordeal_target",
             "",
         ]
+        contract_note = _contract_context_summary(self.contract_context)
+        if contract_note:
+            lines.append(f"# Contract context: {contract_note}")
         if target_spec.qualname_parts:
             lines.append(f"# Method target: {module_path}.{call_target}")
             lines.append("")
 
         for i, m in enumerate(self.survived, 1):
             test_name = f"test_{safe_target}_kill_{m.operator}_{i}"
+            context = _merge_semantic_context(self.contract_context, m.metadata)
             boundary_label = _semantic_cluster_label(
-                _mutant_semantic_tags(m, target=self.target)[0]
+                _mutant_semantic_tags(m, target=self.target, metadata=context)[0]
             )
             lines.append("")
             lines.append(f"def {test_name}():")
@@ -1060,6 +1241,9 @@ class MutationResult:
             lines.append(f"    # Mutant: {m.operator}: {m.description} at {m.location}")
             if m.qualname:
                 lines.append(f"    # Owner: {m.qualname}")
+            contract_note = _contract_context_summary(context)
+            if contract_note:
+                lines.append(f"    # Contract: {contract_note}")
             lines.append(f"    # Boundary: {boundary_label}")
             if m.source_line:
                 lines.extend(_comment_lines(f"Source: {m.source_line}"))
@@ -1372,6 +1556,7 @@ def _mutation_cache_config_hash(
     concern: str | None,
     mutant_timeout: float | None,
     disk_mutation: bool,
+    contract_context: Mapping[str, Any] | None = None,
 ) -> str | None:
     """Hash the mutation settings that materially change the result."""
     if llm is not None:
@@ -1388,6 +1573,7 @@ def _mutation_cache_config_hash(
         "concern": concern,
         "mutant_timeout": mutant_timeout,
         "disk_mutation": disk_mutation,
+        "contract_context": dict(contract_context or {}),
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
@@ -1409,6 +1595,7 @@ def _mutant_to_dict(m: Mutant) -> dict:
         "source_line": m.source_line,
         "killed_by": m.killed_by,
         "qualname": m.qualname,
+        "metadata": m.metadata,
     }
 
 
@@ -1423,6 +1610,7 @@ def _mutant_from_dict(d: dict) -> Mutant:
         source_line=d.get("source_line", ""),
         killed_by=d.get("killed_by"),
         qualname=d.get("qualname"),
+        metadata=dict(d.get("metadata", {})),
     )
 
 
@@ -1435,6 +1623,7 @@ def _save_cache(target: str, result: MutationResult, module_hash: str, config_ha
         "preset_used": result.preset_used,
         "operators_used": result.operators_used,
         "concern": result.concern,
+        "contract_context": result.contract_context,
         "mutants": [_mutant_to_dict(m) for m in result.mutants],
         "timings": result.timings,
         "diagnostics": result.diagnostics,
@@ -1484,6 +1673,7 @@ def _load_cache(
         operators_used=data.get("operators_used"),
         preset_used=data.get("preset_used"),
         concern=data.get("concern"),
+        contract_context=dict(data.get("contract_context", {})),
     )
     result.mutants = [_mutant_from_dict(m) for m in data.get("mutants", [])]
     result.timings = data.get("timings", {})
@@ -5195,6 +5385,7 @@ def _module_mine_oracle_fallback(
     equivalence_samples: int,
     preset_used: str | None,
     mutant_timeout: float | None,
+    contract_context: Mapping[str, Any] | None = None,
 ) -> MutationResult | None:
     """Run mine oracle per-function when module-level tests killed 0 mutants.
 
@@ -5203,7 +5394,12 @@ def _module_mine_oracle_fallback(
     catches mutations that tests missed, warns about process isolation and
     returns the combined result.
     """
-    combined = MutationResult(target=target, operators_used=operators, preset_used=preset_used)
+    combined = MutationResult(
+        target=target,
+        operators_used=operators,
+        preset_used=preset_used,
+        contract_context=dict(contract_context or {}),
+    )
     any_killed = False
 
     for name, obj in sorted(vars(module).items()):
@@ -5241,6 +5437,7 @@ def _module_mine_oracle_fallback(
                 equivalence_samples=equivalence_samples,
                 operators_used=operators,
                 preset_used=preset_used,
+                contract_context=contract_context,
                 _stats={},
             )
             combined.mutants.extend(mine_result.mutants)
@@ -5285,6 +5482,7 @@ def mutate_and_test(
     disk_mutation: bool | None = None,
     promote_clusters_only: bool = True,
     cluster_min_size: int = 2,
+    contract_context: Mapping[str, Any] | None = None,
 ) -> MutationResult:
     """Apply mutations to an entire module and run *test_fn* against each.
 
@@ -5368,6 +5566,7 @@ def mutate_and_test(
         concern=concern,
         promote_clusters_only=promote_clusters_only,
         cluster_min_size=cluster_min_size,
+        contract_context=dict(contract_context or {}),
     )
 
     # Batch mode: single pytest session for all mutants (much faster)
@@ -5405,6 +5604,7 @@ def mutate_and_test(
                     equivalence_samples=equivalence_samples,
                     preset_used=used_preset,
                     mutant_timeout=mutant_timeout,
+                    contract_context=contract_context,
                 )
             if mine_kills is not None:
                 mine_kills.timings.update(timings)
@@ -5459,6 +5659,7 @@ def validate_mined_properties(
     preset: PresetName | None = None,
     mine_result: "MineResult | None" = None,
     validation_mode: ValidationMode = "fast",
+    contract_context: Mapping[str, Any] | None = None,
 ) -> MutationResult:
     """Mine properties of *target*, then mutate it and check the properties catch the mutations.
 
@@ -5492,7 +5693,7 @@ def validate_mined_properties(
     original_mine: MineResult = mine_result or mine(func, max_examples=max_examples)
     universal = original_mine.universal
     if not universal:
-        return MutationResult(target=target)  # nothing to validate
+        return MutationResult(target=target, contract_context=dict(contract_context or {}))
 
     def _sample_inputs_for_validation(
         current_func: Callable,
@@ -5625,7 +5826,15 @@ def validate_mined_properties(
                 mine(current_func, max_examples=deep_examples).properties
             )
 
-    return mutate_function_and_test(target, mined_test, operators)
+    mutate_kwargs: dict[str, Any] = {}
+    if contract_context:
+        mutate_kwargs["contract_context"] = dict(contract_context)
+    return mutate_function_and_test(
+        target,
+        mined_test,
+        operators,
+        **mutate_kwargs,
+    )
 
 
 _BOUNDARY_VALUES: dict[type, list] = {
@@ -5796,6 +6005,7 @@ def mutate_function_and_test(
     disk_mutation: bool | None = None,
     promote_clusters_only: bool = True,
     cluster_min_size: int = 2,
+    contract_context: Mapping[str, Any] | None = None,
 ) -> MutationResult:
     """Mutate a single function and run tests against each mutant.
 
@@ -5917,6 +6127,7 @@ def mutate_function_and_test(
         concern=concern,
         promote_clusters_only=promote_clusters_only,
         cluster_min_size=cluster_min_size,
+        contract_context=dict(contract_context or {}),
     )
 
     if auto_discovered_tests and mutant_pairs:
@@ -5969,6 +6180,7 @@ def mutate_function_and_test(
                     equivalence_samples=equivalence_samples,
                     operators_used=operators,
                     preset_used=used_preset,
+                    contract_context=contract_context,
                     _stats=stats,
                 )
             mine_result.diagnostics.update(stats)
@@ -6065,6 +6277,7 @@ def mutate_function_and_test(
                 equivalence_samples=equivalence_samples,
                 operators_used=operators,
                 preset_used=used_preset,
+                contract_context=contract_context,
                 _stats={},
             )
         if mine_result.killed > 0:
@@ -6115,6 +6328,7 @@ def _mine_based_mutation_test(
     equivalence_samples: int,
     operators_used: list[str] | None,
     preset_used: str | None,
+    contract_context: Mapping[str, Any] | None = None,
     _stats: dict[str, int] | None = None,
 ) -> MutationResult:
     """Kill mutants using mine()-discovered properties as the test oracle.
@@ -6154,7 +6368,12 @@ def _mine_based_mutation_test(
                     break
 
     st = _stats  # alias for brevity
-    result = MutationResult(target=target, operators_used=operators_used, preset_used=preset_used)
+    result = MutationResult(
+        target=target,
+        operators_used=operators_used,
+        preset_used=preset_used,
+        contract_context=dict(contract_context or {}),
+    )
 
     for mutant, mutated_tree in mutant_pairs:
         try:
@@ -6297,6 +6516,7 @@ def mutate(
     promote_clusters_only: bool = True,
     cluster_min_size: int = 2,
     resume: bool = False,
+    contract_context: Mapping[str, Any] | None = None,
 ) -> MutationResult:
     """Unified mutation testing entry point — auto-detects function vs module.
 
@@ -6386,6 +6606,7 @@ def mutate(
         concern=concern,
         mutant_timeout=mutant_timeout,
         disk_mutation=resolved_disk_mutation,
+        contract_context=contract_context,
     )
     if resume:
         try:
@@ -6414,6 +6635,7 @@ def mutate(
         disk_mutation=resolved_disk_mutation,
         promote_clusters_only=promote_clusters_only,
         cluster_min_size=cluster_min_size,
+        contract_context=contract_context,
     )
 
     # Save cache after fresh run — but NOT if the result came from the

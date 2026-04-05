@@ -162,6 +162,8 @@ verbose = true
 # scenarios = [
 #   "tests.support.scenarios:disable_network",
 #   "tests.support.scenarios:protect_env_keys",
+#   { kind = "stub_return", path = "sandbox_client.execute_command", value = { returncode = 0, stdout = "ok" } },
+#   { kind = "stub_raise", path = "upload_content", error = "RuntimeError: denied" },
 # ]
 # methods = ["build_env_vars"]
 #

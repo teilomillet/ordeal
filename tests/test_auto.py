@@ -88,6 +88,77 @@ def _install_scenario_target_module(module_name: str):
     return mod
 
 
+def _install_multi_scenario_target_module(module_name: str):
+    mod = types.ModuleType(module_name)
+    sys.modules[module_name] = mod
+    exec(
+        "class Helper:\n"
+        "    def __init__(self, prefix: str) -> None:\n"
+        "        self.prefix = prefix\n"
+        "\n"
+        "    def render(self, name: str) -> str:\n"
+        "        return f'{self.prefix}{name}'\n"
+        "\n"
+        "class Env:\n"
+        "    def __init__(self) -> None:\n"
+        "        self.ready = False\n"
+        "        self.helper = None\n"
+        "\n"
+        "    def render(self, name: str) -> str:\n"
+        "        if not self.ready:\n"
+        "            raise RuntimeError('not ready')\n"
+        "        if self.helper is None:\n"
+        "            raise RuntimeError('missing helper')\n"
+        "        return self.helper.render(name)\n"
+        "\n"
+        "    async def async_render(self, name: str) -> str:\n"
+        "        if not self.ready:\n"
+        "            raise RuntimeError('not ready')\n"
+        "        if self.helper is None:\n"
+        "            raise RuntimeError('missing helper')\n"
+        "        return self.helper.render(name)\n",
+        mod.__dict__,
+    )
+    return mod
+
+
+def _install_inline_scenario_target_module(module_name: str):
+    mod = types.ModuleType(module_name)
+    sys.modules[module_name] = mod
+    exec(
+        "class Helper:\n"
+        "    def __init__(self, prefix: str = 'scenario:') -> None:\n"
+        "        self.prefix = prefix\n"
+        "\n"
+        "    def render(self, name: str) -> str:\n"
+        "        return f'{self.prefix}{name}'\n"
+        "\n"
+        "    async def async_render(self, name: str) -> str:\n"
+        "        return f'{self.prefix}{name}'\n"
+        "\n"
+        "class Env:\n"
+        "    def __init__(self) -> None:\n"
+        "        self.ready = False\n"
+        "        self.helper = None\n"
+        "\n"
+        "    def render(self, name: str) -> str:\n"
+        "        if not self.ready:\n"
+        "            raise RuntimeError('not ready')\n"
+        "        if self.helper is None:\n"
+        "            raise RuntimeError('missing helper')\n"
+        "        return self.helper.render(name)\n"
+        "\n"
+        "    async def async_render(self, name: str) -> str:\n"
+        "        if not self.ready:\n"
+        "            raise RuntimeError('not ready')\n"
+        "        if self.helper is None:\n"
+        "            raise RuntimeError('missing helper')\n"
+        "        return await self.helper.async_render(name)\n",
+        mod.__dict__,
+    )
+    return mod
+
+
 def _install_stateful_target_module(module_name: str):
     mod = types.ModuleType(module_name)
     sys.modules[module_name] = mod
@@ -302,6 +373,147 @@ class TestScanModule:
         finally:
             del sys.modules[module_name]
 
+    def test_method_scenarios_can_be_applied_as_an_ordered_sequence(self):
+        import sys
+
+        module_name = "_test_method_targets_multi_scenario"
+        mod = _install_multi_scenario_target_module(module_name)
+        key = f"{module_name}:Env"
+
+        def factory() -> object:
+            return mod.Env()
+
+        def setup(instance: object) -> None:
+            instance.ready = True
+
+        def scenario_one(instance: object) -> object:
+            instance.helper = mod.Helper(prefix="first:")
+            return instance
+
+        def scenario_two(instance: object) -> object:
+            instance.helper.prefix += "second:"
+            return instance
+
+        try:
+            result = scan_module(
+                mod,
+                max_examples=20,
+                object_factories={key: factory},
+                object_setups={key: setup},
+                object_scenarios={key: (scenario_one, scenario_two)},
+            )
+            names = [f.name for f in result.functions]
+            assert "Env.render" in names
+            assert "Env.async_render" in names
+            assert result.passed
+
+            fuzz_result = fuzz(
+                f"{module_name}:Env.render",
+                max_examples=20,
+                object_factories={key: factory},
+                object_setups={key: setup},
+                object_scenarios={key: (scenario_one, scenario_two)},
+            )
+            assert fuzz_result.passed
+
+            test_case = chaos_for(
+                mod,
+                max_examples=5,
+                stateful_step_count=5,
+                object_factories={key: factory},
+                object_setups={key: setup},
+                object_scenarios={key: (scenario_one, scenario_two)},
+            )
+            test_case("runTest").runTest()
+        finally:
+            del sys.modules[module_name]
+
+    def test_inline_scenario_specs_apply_to_bound_methods_and_stateful_init(self):
+        import sys
+
+        module_name = "_test_inline_method_scenarios"
+        mod = _install_inline_scenario_target_module(module_name)
+        key = f"{module_name}:Env"
+
+        def factory() -> object:
+            return mod.Env()
+
+        def setup(instance: object) -> None:
+            instance.ready = True
+
+        scenarios = [
+            {"kind": "setattr", "path": "helper", "value": mod.Helper(prefix="scenario:")},
+            {"kind": "stub_return", "path": "helper.render", "value": "stubbed-sync"},
+            {"kind": "stub_return", "path": "helper.async_render", "value": "stubbed-async"},
+        ]
+
+        try:
+            result = scan_module(
+                mod,
+                max_examples=20,
+                object_factories={key: factory},
+                object_setups={key: setup},
+                object_scenarios={key: scenarios},
+            )
+            names = [f.name for f in result.functions]
+            assert "Env.render" in names
+            assert "Env.async_render" in names
+            assert result.passed
+
+            fuzz_result = fuzz(
+                f"{module_name}:Env.render",
+                max_examples=20,
+                object_factories={key: factory},
+                object_setups={key: setup},
+                object_scenarios={key: scenarios},
+            )
+            assert fuzz_result.passed
+
+            test_case = chaos_for(
+                mod,
+                max_examples=5,
+                stateful_step_count=5,
+                object_factories={key: factory},
+                object_setups={key: setup},
+                object_scenarios={key: scenarios},
+                object_harnesses={key: "stateful"},
+            )
+            test_case("runTest").runTest()
+        finally:
+            del sys.modules[module_name]
+
+    def test_inline_scenario_stub_raise_is_applied_to_collaborators(self):
+        import sys
+
+        module_name = "_test_inline_method_scenarios_raise"
+        mod = _install_inline_scenario_target_module(module_name)
+        key = f"{module_name}:Env"
+
+        def factory() -> object:
+            return mod.Env()
+
+        def setup(instance: object) -> None:
+            instance.ready = True
+
+        scenarios = [
+            {"kind": "setattr", "path": "helper", "value": mod.Helper(prefix="scenario:")},
+            {"kind": "stub_raise", "path": "helper.async_render", "error": "RuntimeError: denied"},
+        ]
+
+        try:
+            result = fuzz(
+                f"{module_name}:Env.async_render",
+                max_examples=1,
+                object_factories={key: factory},
+                object_setups={key: setup},
+                object_scenarios={key: scenarios},
+            )
+            assert not result.passed
+            assert result.failures
+            assert isinstance(result.failures[0], RuntimeError)
+        finally:
+            del sys.modules[module_name]
+
     def test_scan_module_can_limit_to_explicit_method_targets(self):
         import sys
 
@@ -343,6 +555,57 @@ class TestScanModule:
             assert names == ["real"]
         finally:
             del sys.modules["_test_imported_helpers"]
+
+    def test_harness_hints_include_concrete_config_suggestions(self, tmp_path, monkeypatch):
+        pkg = tmp_path / "hintpkg"
+        tests_dir = tmp_path / "tests"
+        docs_dir = tmp_path / "docs"
+        pkg.mkdir()
+        tests_dir.mkdir()
+        docs_dir.mkdir()
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "envs.py").write_text(
+            "class Env:\n"
+            "    def __init__(self, prefix: str):\n"
+            "        self.prefix = prefix\n"
+            "\n"
+            "    def render(self, state: dict[str, str], prompt: str) -> str:\n"
+            "        return f'{self.prefix}:{state[\"seed\"]}:{prompt}'\n",
+            encoding="utf-8",
+        )
+        (tests_dir / "support_factories.py").write_text(
+            "from hintpkg.envs import Env\n"
+            "\n"
+            "def make_env() -> Env:\n"
+            "    return Env('demo')\n"
+            "\n"
+            "def make_env_state() -> dict[str, str]:\n"
+            "    return {'seed': 'cached'}\n"
+            "\n"
+            "def teardown_env(env: Env) -> None:\n"
+            "    env.prefix = 'closed'\n",
+            encoding="utf-8",
+        )
+        (docs_dir / "lifecycle.md").write_text(
+            "Cli lifecycle notes for Env.render.\n"
+            "This target needs state setup and a teardown hook.\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        hints = auto_mod._mine_object_harness_hints("hintpkg.envs", "Env", "render")
+
+        factory_hint = next(hint for hint in hints if hint.kind == "factory")
+        state_hint = next(hint for hint in hints if hint.kind == "state_factory")
+        teardown_hint = next(hint for hint in hints if hint.kind == "teardown")
+
+        assert factory_hint.config["section"] == "[[objects]]"
+        assert factory_hint.config["target"] == "hintpkg.envs:Env"
+        assert factory_hint.config["key"] == "factory"
+        assert factory_hint.config["value"].endswith("make_env")
+        assert state_hint.config["key"] == "state_factory"
+        assert teardown_hint.config["key"] == "teardown"
 
     def test_documented_precondition_is_not_reported_as_crash(self):
         mod = types.ModuleType("_test_preconditions")

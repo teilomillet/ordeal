@@ -126,7 +126,7 @@ Reusable object factories for bound instance methods. `scan` and `audit` use the
 | `setup` | `str?` | `null` | Optional sync or async hook run after factory creation |
 | `teardown` | `str?` | `null` | Optional sync or async cleanup hook run after audit or chaos execution |
 | `harness` | `str` | `"fresh"` | `fresh` creates a new instance per call, `stateful` reuses one instance across a machine run |
-| `scenarios` | `list[str]` | `[]` | Repeatable sync or async collaborator hooks applied after setup |
+| `scenarios` | `list[str | inline-table]` | `[]` | Repeatable sync/async hooks or inline collaborator scenario specs applied after setup |
 | `methods` | `list[str]` | `[]` | Optional method subset for audit-target expansion |
 | `include_private` | `bool` | `false` | Include single-underscore methods when expanded |
 
@@ -142,7 +142,15 @@ scenarios = ["tests.support.scenarios:disable_network"]
 methods = ["build_env_vars"]
 ```
 
-Use `factory` for construction, `state_factory` when the object needs a separate state payload, `setup` for one-time preparation, `teardown` for cleanup, and `scenarios` for collaborator behavior that should be layered on top of the object before the listed methods are exercised. `harness = "stateful"` tells ordeal to reuse the same instance across a stateful run instead of rebuilding it for every call.
+Use `factory` for construction, `state_factory` when the object needs a separate state payload, `setup` for one-time preparation, `teardown` for cleanup, and `scenarios` for collaborator behavior that should be layered on top of the object before the listed methods are exercised. `harness = "stateful"` tells ordeal to reuse the same instance across a stateful run instead of rebuilding it for every call. Inline scenario tables now cover small collaborator tweaks directly in TOML:
+
+```toml
+scenarios = [
+  { kind = "setattr", path = "sandbox_client.mode", value = "offline" },
+  { kind = "stub_return", path = "sandbox_client.execute_command", value = { returncode = 0, stdout = "ok" } },
+  { kind = "stub_raise", path = "upload_content", error = "RuntimeError: denied" },
+]
+```
 
 ### `[[contracts]]`
 

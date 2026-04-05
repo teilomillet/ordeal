@@ -4214,13 +4214,22 @@ def audit(
     result.suggested_relations = _suggest_relations(result.mined_properties)
 
     # Validate mined properties against mutations using standard preset
-    from ordeal.mutations import validate_mined_properties
+    from ordeal.mutations import mutation_contract_context, validate_mined_properties
 
-    targets: list[tuple[str, MineResult]] = []
-    for name, _func in scannable:
+    targets: list[tuple[str, MineResult, dict[str, Any]]] = []
+    for name, func in scannable:
         mine_result = mine_results.get(name)
         if mine_result is not None and _should_validate_mined_properties(mine_result):
-            targets.append((f"{base_module}.{name}", mine_result))
+            targets.append(
+                (
+                    f"{base_module}.{name}",
+                    mine_result,
+                    mutation_contract_context(
+                        list((contract_checks or {}).get(name, [])),
+                        harness=str(getattr(func, "__ordeal_harness__", "") or "") or None,
+                    ),
+                )
+            )
 
     total_killed = total_mutants = 0
     max_validation_examples = min(max_examples, 20)
@@ -4228,7 +4237,7 @@ def audit(
     kill_counts: dict[str, int] = {}
 
     if worker_count == 1 or len(targets) <= 1:
-        for target_path, mine_result in targets:
+        for target_path, mine_result, contract_context in targets:
             try:
                 mr = validate_mined_properties(
                     target_path,
@@ -4236,6 +4245,7 @@ def audit(
                     preset="standard",
                     mine_result=mine_result,
                     validation_mode=validation_mode,
+                    contract_context=contract_context,
                 )
                 total_killed += mr.killed
                 total_mutants += mr.total
@@ -4252,8 +4262,9 @@ def audit(
                     preset="standard",
                     mine_result=mine_result,
                     validation_mode=validation_mode,
+                    contract_context=contract_context,
                 ): target_path
-                for target_path, mine_result in targets
+                for target_path, mine_result, contract_context in targets
             }
             for future in as_completed(future_targets):
                 try:

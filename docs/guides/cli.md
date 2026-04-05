@@ -45,15 +45,19 @@ Verify one mined property, or the default bug-catching contracts, for a single f
 ordeal check myapp.scoring.normalize
 ordeal check myapp.scoring.normalize -p idempotent
 ordeal check myapp.scoring.score -p "output in [0, 1]" -n 500
+ordeal check myapp.envs:ComposableEnv.build_env_vars --contract quoted_paths
 ```
 
-Without `-p`, `check` verifies the standard contracts that catch real bugs quickly: `never None`, `no NaN`, `never empty`, `deterministic`, `idempotent`, and `finite`.
+Without `-p`, `check` verifies the standard contracts that catch real bugs quickly: `never None`, `no NaN`, `never empty`, `deterministic`, `idempotent`, and `finite`. For explicit targets, `--contract` lets you run named built-in semantic probes directly, and `--config` reuses any matching `[[objects]]` and `[[contracts]]` entries from `ordeal.toml`.
 
 | Flag | Default | Description |
 |---|---|---|
 | `target` | required | Dotted function path such as `myapp.scoring.normalize` |
 | `--property`, `-p` | all standard contracts | Check one property by name or substring match |
+| `--contract` | `[]` | Repeat to run named built-in semantic contracts such as `quoted_paths` or `cleanup_after_cancellation` |
+| `--config` | `./ordeal.toml` when present | Load object factories and configured explicit contracts |
 | `--max-examples`, `-n` | `200` | Examples to test |
+| `--json` | `false` | Emit the agent envelope instead of text |
 
 ### `ordeal scan`
 

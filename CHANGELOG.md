@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.18
+
+**Fixes:**
+
+- sync lockfile in release workflow
+
+
 ## 0.3.16
 
 **Features:**

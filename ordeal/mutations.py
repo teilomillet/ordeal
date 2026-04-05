@@ -75,6 +75,7 @@ import importlib
 import importlib.machinery
 import inspect
 import json
+import os
 import pkgutil
 import sys
 import textwrap
@@ -127,6 +128,20 @@ def _timed_phase(timings: dict[str, float], name: str) -> Callable[[], None]:
         yield
     finally:
         timings[name] = timings.get(name, 0.0) + (time.perf_counter() - start)
+
+
+@contextmanager
+def _disable_seed_replay() -> Callable[[], None]:
+    """Suppress pytest seed-corpus replay for mutation test sessions."""
+    previous = os.environ.get("ORDEAL_DISABLE_SEED_REPLAY")
+    os.environ["ORDEAL_DISABLE_SEED_REPLAY"] = "1"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("ORDEAL_DISABLE_SEED_REPLAY", None)
+        else:
+            os.environ["ORDEAL_DISABLE_SEED_REPLAY"] = previous
 
 
 def _unwrap_func(func: object) -> object:
@@ -5104,19 +5119,20 @@ def _batch_module_test(
 
     plugin = _BatchPlugin()
     with _timed_phase(phase_timings, "pytest_seconds"):
-        pytest.main(
-            [
-                "-x",
-                "-q",
-                "--tb=no",
-                "--no-header",
-                "--chaos",
-                "-o",
-                "addopts=",
-                *selection.pytest_args(),
-            ],
-            plugins=[plugin],
-        )
+        with _disable_seed_replay():
+            pytest.main(
+                [
+                    "-x",
+                    "-q",
+                    "--tb=no",
+                    "--no-header",
+                    "--chaos",
+                    "-o",
+                    "addopts=",
+                    *selection.pytest_args(),
+                ],
+                plugins=[plugin],
+            )
     if stats is not None:
         stats["collected_tests"] = plugin.collected_tests
     if plugin.no_tests_found:
@@ -5306,19 +5322,20 @@ def _batch_function_test(
 
     plugin = _BatchPlugin()
     with _timed_phase(phase_timings, "pytest_seconds"):
-        pytest.main(
-            [
-                "-x",
-                "-q",
-                "--tb=no",
-                "--no-header",
-                "--chaos",
-                "-o",
-                "addopts=",
-                *selection.pytest_args(),
-            ],
-            plugins=[plugin],
-        )
+        with _disable_seed_replay():
+            pytest.main(
+                [
+                    "-x",
+                    "-q",
+                    "--tb=no",
+                    "--no-header",
+                    "--chaos",
+                    "-o",
+                    "addopts=",
+                    *selection.pytest_args(),
+                ],
+                plugins=[plugin],
+            )
     if stats is not None:
         stats["collected_tests"] = plugin.collected_tests
     if plugin.no_tests_found:
@@ -5980,18 +5997,19 @@ def _auto_test_fn(target: str, test_filter: str | None = None) -> Callable[[], N
         import pytest
 
         selection = _mutation_test_selection(target, test_filter=test_filter)
-        rc = pytest.main(
-            [
-                "-x",
-                "-q",
-                "--tb=short",
-                "--no-header",
-                "--chaos",
-                "-o",
-                "addopts=",
-                *selection.pytest_args(),
-            ]
-        )
+        with _disable_seed_replay():
+            rc = pytest.main(
+                [
+                    "-x",
+                    "-q",
+                    "--tb=short",
+                    "--no-header",
+                    "--chaos",
+                    "-o",
+                    "addopts=",
+                    *selection.pytest_args(),
+                ]
+            )
         if rc == 5:
             _raise_no_tests_found(target)
         if rc != 0:

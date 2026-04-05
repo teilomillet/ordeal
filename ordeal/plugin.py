@@ -38,6 +38,7 @@ Fixtures::
 
 from __future__ import annotations
 
+import os
 from collections.abc import Generator
 from typing import Any
 
@@ -156,6 +157,12 @@ def _register_array_strategies() -> None:
 _seed_replay_results: list[dict[str, Any]] = []
 
 
+def _seed_replay_disabled() -> bool:
+    """Return ``True`` when pytest seed replay should be skipped."""
+    value = os.environ.get("ORDEAL_DISABLE_SEED_REPLAY", "")
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
 def _replay_seed_corpus() -> list[dict[str, Any]]:
     """Scan .ordeal/seeds/ and replay all seeds.  Returns replay results."""
     from pathlib import Path
@@ -216,10 +223,11 @@ def pytest_configure(config: pytest.Config) -> None:
     # invocation, not just --chaos.  This is the Go fuzzing model: saved
     # crashers are permanent regression tests that run automatically.
     _seed_replay_results.clear()
-    try:
-        _seed_replay_results.extend(_replay_seed_corpus())
-    except Exception:
-        pass  # seed replay is best-effort
+    if not _seed_replay_disabled():
+        try:
+            _seed_replay_results.extend(_replay_seed_corpus())
+        except Exception:
+            pass  # seed replay is best-effort
 
     # -- rule_timeout: CLI flag → ordeal.toml → class default (30s) --
     rule_timeout = config.getoption("rule_timeout", default=None)

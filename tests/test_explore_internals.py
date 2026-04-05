@@ -18,8 +18,6 @@ from ordeal.explore import (
     ProgressSnapshot,
     _DataProxy,
     _RuleInfo,
-    _deserialize_failure_payload,
-    _serialize_failure_payload,
 )
 from ordeal.faults import LambdaFault
 from ordeal.trace import Trace, TraceFailure

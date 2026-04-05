@@ -627,7 +627,11 @@ class TestParallelAggregation:
             share_checkpoints=False,
             record_traces=True,
         )
-        monkeypatch.setattr(explorer, "_parallel_retry_reason", lambda worker_results, result: None)
+        monkeypatch.setattr(
+            explorer,
+            "_parallel_retry_reason",
+            lambda worker_results, result: None,
+        )
         result = explorer._run_parallel(
             max_time=1.0,
             max_runs=2,

@@ -7,8 +7,8 @@ import warnings
 import pytest
 from hypothesis.stateful import invariant, rule
 
-from ordeal.chaos import ChaosTest
 from ordeal.assertions import sometimes, tracker
+from ordeal.chaos import ChaosTest
 from ordeal.explore import Checkpoint, CoverageCollector, Explorer, _DataProxy
 from ordeal.faults import LambdaFault
 from tests._explore_target import BranchyService

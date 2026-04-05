@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import importlib
+import os
 import sys
 from pathlib import Path
 
@@ -148,6 +149,34 @@ def test_mutant_semantic_tags_do_not_infer_transport_semantics_from_generic_targ
     assert "json" not in tags
     assert "http" not in tags
     assert "shell" not in tags
+
+
+def test_create_pytest_test_fn_disables_seed_replay(monkeypatch):
+    class _Selection:
+        def pytest_args(self) -> list[str]:
+            return ["tests/test_mutation_bench_target.py"]
+
+    observed: dict[str, str | None] = {}
+
+    def fake_pytest_main(args: list[str]) -> int:
+        observed["env"] = os.environ.get("ORDEAL_DISABLE_SEED_REPLAY")
+        observed["args"] = " ".join(args)
+        return 0
+
+    monkeypatch.delenv("ORDEAL_DISABLE_SEED_REPLAY", raising=False)
+    monkeypatch.setattr(
+        mutations,
+        "_mutation_test_selection",
+        lambda target, test_filter=None: _Selection(),
+    )
+    monkeypatch.setattr("pytest.main", fake_pytest_main)
+
+    run_tests = mutations._auto_test_fn("pkg.mod.fn")
+    run_tests()
+
+    assert observed["env"] == "1"
+    assert observed["args"] is not None
+    assert os.environ.get("ORDEAL_DISABLE_SEED_REPLAY") is None
 
 
 def test_review_signature_refreshes_shadowed_local_modules(tmp_path_factory, monkeypatch):

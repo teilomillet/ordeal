@@ -2584,9 +2584,10 @@ class Explorer:
             if step_zero_failures >= max(3, worker_count):
                 issues.append(f"{step_zero_failures} step-0 failure(s)")
 
-            spam_count = Counter(_parallel_failure_signature(f) for f in all_failures).most_common(1)[
-                0
-            ][1]
+            spam_count = (
+                Counter(_parallel_failure_signature(f) for f in all_failures)
+                .most_common(1)[0][1]
+            )
             if spam_count >= max(3, worker_count):
                 issues.append(f"{spam_count} identical crash(es)")
 
@@ -2734,7 +2735,11 @@ class Explorer:
                         "shrink": shrink,
                         "max_shrink_time": max_shrink_time,
                         "patience": patience,
-                        "corpus_dir": str(self.corpus_dir) if self.corpus_dir is not None else None,
+                        "corpus_dir": (
+                            str(self.corpus_dir)
+                            if self.corpus_dir is not None
+                            else None
+                        ),
                         "rule_swarm": self.rule_swarm,
                         "shared_edges_name": shm_name,
                         "shared_state_name": state_shm_name,
@@ -2904,7 +2909,9 @@ def _worker_fn(args: dict[str, Any]) -> dict[str, Any]:
             "edge_log": result.edge_log,
             "edges": list(explorer._total_edges),
             "traces": (
-                [trace.to_dict() for trace in result.traces] if args.get("record_traces", False) else []
+                [trace.to_dict() for trace in result.traces]
+                if args.get("record_traces", False)
+                else []
             ),
         }
     except Exception as exc:

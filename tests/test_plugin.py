@@ -14,7 +14,9 @@ from ordeal.buggify import is_active as _buggify_is_active
 from ordeal.plugin import (
     OrdealScanError,
     OrdealScanItem,
+    _mutation_results,
     _parse_toml_fixtures,
+    _seed_replay_results,
     pytest_addoption,
     pytest_collection_modifyitems,
     pytest_configure,
@@ -315,9 +317,17 @@ class TestPytestTerminalSummary:
             tr = MagicMock()
             prev = assertions.tracker.active
             assertions.tracker.reset()
-            pytest_terminal_summary(tr, 0, cfg)
-            tr.section.assert_not_called()
-            assertions.tracker.active = prev
+            prior_seed_results = list(_seed_replay_results)
+            prior_mutation_results = list(_mutation_results)
+            _seed_replay_results.clear()
+            _mutation_results.clear()
+            try:
+                pytest_terminal_summary(tr, 0, cfg)
+                tr.section.assert_not_called()
+            finally:
+                _seed_replay_results[:] = prior_seed_results
+                _mutation_results[:] = prior_mutation_results
+                assertions.tracker.active = prev
 
     def test_prints_pass_results(self):
         cfg = _make_config(chaos=True)
@@ -332,8 +342,13 @@ class TestPytestTerminalSummary:
             "results",
             new_callable=lambda: property(lambda self: [prop]),
         ):
-            pytest_terminal_summary(tr, 0, cfg)
-            tr.section.assert_called_once_with("Ordeal Property Results")
+            prior_seed_results = list(_seed_replay_results)
+            _seed_replay_results.clear()
+            try:
+                pytest_terminal_summary(tr, 0, cfg)
+                tr.section.assert_called_once_with("Ordeal Property Results")
+            finally:
+                _seed_replay_results[:] = prior_seed_results
 
     def test_prints_fail_results(self):
         cfg = _make_config(chaos=True)
@@ -351,6 +366,11 @@ class TestPytestTerminalSummary:
             "results",
             new_callable=lambda: property(lambda self: [prop_pass, prop_fail]),
         ):
-            pytest_terminal_summary(tr, 0, cfg)
-            tr.section.assert_called_once()
-            assert tr.line.call_count >= 3
+            prior_seed_results = list(_seed_replay_results)
+            _seed_replay_results.clear()
+            try:
+                pytest_terminal_summary(tr, 0, cfg)
+                tr.section.assert_called_once()
+                assert tr.line.call_count >= 3
+            finally:
+                _seed_replay_results[:] = prior_seed_results

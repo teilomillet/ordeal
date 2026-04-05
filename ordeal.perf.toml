@@ -69,4 +69,5 @@ repeats = 5
 workers = 1
 preset = "standard"
 filter_equivalent = true
+test_filter = "tiny_add"
 max_seconds = 0.40

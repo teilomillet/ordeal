@@ -404,7 +404,11 @@ def _repair_to_constraint(
         return candidate
 
     if kind == "float":
-        candidate = value if isinstance(value, (int, float)) and not isinstance(value, bool) else original
+        candidate = (
+            value
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+            else original
+        )
         if not isinstance(candidate, (int, float)) or isinstance(candidate, bool):
             candidate = _default_for_constraint(constraint, rng)
         candidate = float(candidate)
@@ -424,7 +428,11 @@ def _repair_to_constraint(
         candidate = (
             value
             if isinstance(value, str)
-            else (original if isinstance(original, str) else _default_for_constraint(constraint, rng))
+            else (
+                original
+                if isinstance(original, str)
+                else _default_for_constraint(constraint, rng)
+            )
         )
         min_size = int(constraint.get("min_size", 0))
         max_size = constraint.get("max_size")
@@ -480,9 +488,20 @@ def _repair_to_constraint(
                 elif originals:
                     baseline = originals[-1]
                 else:
-                    baseline = _default_for_constraint(element_constraint, rng) if element_constraint else None
+                    baseline = (
+                        _default_for_constraint(element_constraint, rng)
+                        if element_constraint
+                        else None
+                    )
                 if element_constraint is not None:
-                    candidate.append(_repair_to_constraint(baseline, baseline, element_constraint, rng))
+                    candidate.append(
+                        _repair_to_constraint(
+                            baseline,
+                            baseline,
+                            element_constraint,
+                            rng,
+                        )
+                    )
                 else:
                     candidate.append(baseline)
         return candidate

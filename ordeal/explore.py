@@ -64,9 +64,10 @@ import struct
 import sys
 import threading
 import time as _time
+import traceback as _traceback
 import warnings
 import zlib
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -478,6 +479,7 @@ _ENERGY_MIN = 0.01
 # See module docstring for the full rationale and literature references.
 _SEED_MUTATION_PROB = 0.25  # 25% of rule executions use mutation (mine.py uses same ratio)
 _MAX_SEEDS_PER_CHECKPOINT = 16  # bounded to prevent memory growth
+_AUTO_WORKER_CAP = 8  # auto mode stays conservative; explicit workers can exceed this
 
 # Swarm configuration constants (Groce et al., ISSTA 2012)
 _SWARM_ENERGY_REWARD = 2.0  # energy boost when a config leads to new edges
@@ -705,6 +707,11 @@ class ProgressSnapshot:
 # ============================================================================
 
 
+def _error_display_name(error: Exception) -> str:
+    """Return the most useful display name for *error*."""
+    return getattr(error, "error_type", type(error).__name__)
+
+
 @dataclass
 class Failure:
     """A failure found during exploration, with optional trace for replay."""
@@ -716,6 +723,7 @@ class Failure:
     rule_log: list[str]
     trace: Trace | None = None
     necessary_faults: dict[str, bool] | None = None
+    error_traceback: str | None = None
 
     def __str__(self) -> str:
         faults = ", ".join(self.active_faults) or "none"
@@ -732,7 +740,7 @@ class Failure:
                 ablation = "\n  Necessary faults: none (fails without any faults)"
         return (
             f"Run {self.run_id}, step {self.step}: "
-            f"{type(self.error).__name__}: {self.error}{shrunk}\n"
+            f"{_error_display_name(self.error)}: {self.error}{shrunk}\n"
             f"  Active faults: {faults}{ablation}\n"
             f"  Sequence: {last_rules}"
         )
@@ -769,6 +777,7 @@ class ExplorationResult:
     coverage_gaps: list[dict[str, Any]] = field(default_factory=list)
     lines_covered: int = 0
     lines_total: int = 0
+    parallel_fallback_reason: str = ""
 
     def summary(self) -> str:
         """Human-readable exploration summary."""
@@ -813,6 +822,11 @@ class ExplorationResult:
             )
         if self.adaptation_phase > 0:
             lines.append(f"Adapted: {self.adaptation_phase} phase(s) of escalation")
+        if self.parallel_fallback_reason:
+            lines.append(
+                "Parallel fallback: reran with workers=1 after "
+                f"{self.parallel_fallback_reason}"
+            )
         if self.unique_edges > 0 and self.total_runs > 0:
             if self.saturated:
                 lines.append(
@@ -917,6 +931,116 @@ class ExplorationResult:
         return suggestions
 
 
+def _resolve_worker_count(workers: int) -> int:
+    """Resolve requested workers to a safe concrete process count."""
+    if workers > 0:
+        return max(1, min(workers, _POOL_NUM_SLOTS))
+    auto = os.cpu_count() or 1
+    return max(1, min(auto, _AUTO_WORKER_CAP, _POOL_NUM_SLOTS))
+
+
+def _format_exception_traceback(error: BaseException) -> str:
+    """Best-effort formatted traceback for later inspection."""
+    return "".join(_traceback.format_exception(type(error), error, error.__traceback__))
+
+
+def _serialize_failure_payload(
+    error: BaseException,
+    *,
+    worker_id: int,
+    run_id: int,
+    step: int,
+    active_faults: list[str],
+    rule_log: list[str],
+    trace: Trace | None,
+    error_traceback: str | None = None,
+) -> dict[str, Any]:
+    """Convert a worker-side failure into a transport-safe payload."""
+    payload = {
+        "worker_id": worker_id,
+        "run_id": run_id,
+        "step": step,
+        "active_faults": list(active_faults),
+        "rule_log": list(rule_log),
+        "error_type": type(error).__name__,
+        "error_module": type(error).__module__,
+        "error_qualname": type(error).__qualname__,
+        "error_message": str(error)[:1000],
+        "error_traceback": (error_traceback or _format_exception_traceback(error))[:12000],
+    }
+    if trace is not None:
+        payload["trace"] = trace.to_dict()
+        payload["trace_hash"] = trace.content_hash()
+    return payload
+
+
+def _load_exception_type(module_name: str, qualname: str) -> type[Exception] | None:
+    """Import an exception type when the worker serialized a real class."""
+    if "<locals>" in qualname:
+        return None
+    try:
+        obj: Any = importlib.import_module(module_name)
+        for part in qualname.split("."):
+            obj = getattr(obj, part)
+        if isinstance(obj, type) and issubclass(obj, Exception):
+            return obj
+    except Exception:
+        return None
+    return None
+
+
+def _deserialize_worker_exception(payload: dict[str, Any]) -> Exception:
+    """Reconstruct the most faithful exception object we can in the parent."""
+    module_name = str(payload.get("error_module", "builtins"))
+    qualname = str(payload.get("error_qualname", payload.get("error_type", "RuntimeError")))
+    message = str(payload.get("error_message", ""))
+    exc_type = _load_exception_type(module_name, qualname)
+    if exc_type is None:
+        remote_name = payload.get("error_type", qualname)
+        error = RuntimeError(f"{remote_name}: {message}" if message else str(remote_name))
+    else:
+        try:
+            error = exc_type(message)
+        except Exception:
+            remote_name = payload.get("error_type", qualname)
+            error = RuntimeError(f"{remote_name}: {message}" if message else str(remote_name))
+    setattr(error, "__ordeal_remote_worker_id__", payload.get("worker_id"))
+    setattr(error, "__ordeal_remote_traceback__", payload.get("error_traceback"))
+    setattr(error, "error_type", payload.get("error_type", qualname))
+    setattr(error, "remote_traceback", payload.get("error_traceback"))
+    return error
+
+
+def _deserialize_failure_payload(payload: dict[str, Any]) -> Failure:
+    """Rebuild a worker failure, preserving type, traceback, and trace payload."""
+    trace_payload = payload.get("trace")
+    trace = Trace.from_dict(trace_payload) if isinstance(trace_payload, dict) else None
+    return Failure(
+        error=_deserialize_worker_exception(payload),
+        step=int(payload.get("step", 0)),
+        run_id=int(payload.get("run_id", -1)),
+        active_faults=list(payload.get("active_faults", [])),
+        rule_log=list(payload.get("rule_log", [])),
+        trace=trace,
+        error_traceback=payload.get("error_traceback"),
+    )
+
+
+def _parallel_failure_signature(payload: dict[str, Any]) -> tuple[Any, ...]:
+    """Stable dedup key for crash spam from parallel workers."""
+    trace_hash = payload.get("trace_hash")
+    if trace_hash:
+        return ("trace", trace_hash)
+    return (
+        payload.get("error_module"),
+        payload.get("error_qualname"),
+        payload.get("error_message"),
+        payload.get("step"),
+        tuple(payload.get("active_faults", [])),
+        tuple(payload.get("rule_log", [])[-4:]),
+    )
+
+
 # ============================================================================
 # Explorer
 # ============================================================================
@@ -971,6 +1095,7 @@ class Explorer:
         share_checkpoints: bool = True,
         mutation_targets: list[str] | None = None,
         seed_mutation_prob: float | None = None,
+        seed_mutation_respect_strategies: bool = False,
         ngram: int = 2,
         corpus_dir: str | Path | None = None,
         rule_swarm: bool = False,
@@ -1011,6 +1136,11 @@ class Explorer:
                 make the explorer more exploitation-focused — useful when
                 the rule parameter space is large relative to the state
                 space.  See ``ordeal.mutagen`` for the mutation engine.
+            seed_mutation_respect_strategies: If True, mutate productive
+                seeds but keep values within common bounds implied by the
+                rule's declared Hypothesis strategies.  Useful for control-
+                plane systems where "nearby but still valid" mutations are
+                more informative than unconstrained fuzzing.
             ngram: N-gram depth for edge coverage hashing.  ``1`` gives
                 classic AFL single-edge hashing (``prev_loc XOR cur_loc``).
                 ``2`` (the default) hashes the last 2 locations with the
@@ -1040,7 +1170,7 @@ class Explorer:
         self.checkpoint_strategy = checkpoint_strategy
         self.fault_toggle_prob = fault_toggle_prob
         self.record_traces = record_traces
-        self.workers = (os.cpu_count() or 1) if workers <= 0 else workers
+        self.workers = _resolve_worker_count(workers)
         self.share_edges = share_edges
         self.share_checkpoints = share_checkpoints
         self.ngram = ngram
@@ -1048,6 +1178,7 @@ class Explorer:
         self.seed_mutation_prob = (
             seed_mutation_prob if seed_mutation_prob is not None else _SEED_MUTATION_PROB
         )
+        self.seed_mutation_respect_strategies = seed_mutation_respect_strategies
         self.corpus_dir: Path | None = Path(corpus_dir) if corpus_dir is not None else None
         self.rule_swarm = rule_swarm
 
@@ -1093,10 +1224,16 @@ class Explorer:
     # -- Snapshot / restore -------------------------------------------------
 
     def _snapshot_machine(self, machine: ChaosTest) -> _MachineSnapshot:
-        """Create a lightweight snapshot, skipping Fault objects."""
+        """Create a lightweight snapshot, with optional user-defined filtering."""
+        snapshot_filter = getattr(machine, "checkpoint_snapshot_filter", None)
+        legacy_snapshot_filter = getattr(machine, "snapshot_filter", None)
         state: dict[str, Any] = {}
         for k, v in machine.__dict__.items():
             if k == "_faults":
+                continue
+            if callable(snapshot_filter) and not snapshot_filter(k, v):
+                continue
+            if callable(legacy_snapshot_filter) and not legacy_snapshot_filter(k, v):
                 continue
             try:
                 state[k] = copy.deepcopy(v)
@@ -1106,13 +1243,22 @@ class Explorer:
         return _MachineSnapshot(state_dict=state, fault_active=fault_active)
 
     def _restore_machine(self, snapshot: _MachineSnapshot) -> ChaosTest:
-        """Restore a fresh machine from a snapshot."""
+        """Restore a fresh machine from a snapshot, with optional user hook."""
         machine = self.test_class()
-        for k, v in snapshot.state_dict.items():
-            try:
-                machine.__dict__[k] = copy.deepcopy(v)
-            except Exception:
-                machine.__dict__[k] = v
+        restore_checkpoint = None
+        if "restore_checkpoint_state" in type(machine).__dict__:
+            restore_checkpoint = getattr(machine, "restore_checkpoint_state", None)
+        legacy_restore = getattr(machine, "restore_snapshot", None)
+        if callable(restore_checkpoint):
+            restore_checkpoint(copy.deepcopy(snapshot.state_dict))
+        elif callable(legacy_restore):
+            legacy_restore(copy.deepcopy(snapshot.state_dict))
+        else:
+            for k, v in snapshot.state_dict.items():
+                try:
+                    machine.__dict__[k] = copy.deepcopy(v)
+                except Exception:
+                    machine.__dict__[k] = v
         for f in machine._faults:
             was_active = snapshot.fault_active.get(f.name, False)
             if was_active and not f.active:
@@ -1317,7 +1463,12 @@ class Explorer:
                 from ordeal.mutagen import mutate_inputs
 
                 _, seed = self.rng.choice(matching)
-                params = mutate_inputs(seed, self.rng)
+                params = mutate_inputs(
+                    seed,
+                    self.rng,
+                    strategies=rule.strategies,
+                    respect_strategies=self.seed_mutation_respect_strategies,
+                )
                 used_mutation = True
 
         # Fresh generation path (default, or fallback if no seeds matched)
@@ -1936,6 +2087,7 @@ class Explorer:
                 active_faults=[f.name for f in machine.active_faults],
                 rule_log=rule_log,
                 trace=trace,
+                error_traceback=_format_exception_traceback(e),
             )
         )
         return trace
@@ -2098,325 +2250,393 @@ class Explorer:
         # Activate property tracker for property-guided search
         from ordeal import assertions as _assertions
 
-        _tracker_was_active = _assertions.tracker.active
+        _tracker_snapshot = _assertions.tracker.snapshot()
+        _assertions.tracker.reset()
         _assertions.tracker.active = True
-        if not self._rules:
-            raise ValueError(f"No callable rules found on {self.test_class.__name__}")
-
-        result = ExplorationResult()
-        result.ngram = self.ngram
-
-        # Replay seed corpus before exploration
-        result.seed_replays = self._replay_seeds()
-
-        # Resume from saved state if provided
-        if resume_from is not None:
-            restored = self.load_state(resume_from)
-            result.unique_edges = restored["total_edges"]
-            result.checkpoints_saved = restored["checkpoints"]
-
-        use_coverage = bool(self.target_paths)
-        _lines_hit_all: dict[str, set[int]] = {}
-        start = _time.monotonic()
-        class_name = _qualified_name(self.test_class)
-
-        # Generate mutation faults from target functions
-        _mutation_pairs: list[tuple] = []
         _original_test_class = self.test_class
-        if self.mutation_targets:
-            from ordeal.mutations import mutation_faults as _gen_mutation_faults
-
-            for mt in self.mutation_targets:
-                try:
-                    _mutation_pairs.extend(_gen_mutation_faults(mt))
-                except Exception:
-                    pass
-            if _mutation_pairs:
-                _mfaults = [f for _, f in _mutation_pairs]
-
-                class _MutatedTest(self.test_class):
-                    faults = list(self.test_class.faults) + _mfaults
-
-                self.test_class = _MutatedTest
-                result.mutations_total = len(_mutation_pairs)
-
-        _runs_since_new: int = 0
-        _adapt_phase: int = 0
         _orig_fault_prob = self.fault_toggle_prob
         _orig_cp_strategy = self.checkpoint_strategy
+        try:
+            if not self._rules:
+                raise ValueError(f"No callable rules found on {self.test_class.__name__}")
 
-        while True:
-            elapsed = _time.monotonic() - start
-            if elapsed >= max_time:
-                result.stopped_reason = "time"
-                break
-            if max_runs is not None and result.total_runs >= max_runs:
-                result.stopped_reason = "max_runs"
-                break
-            if patience > 0 and _runs_since_new >= patience and use_coverage:
-                if _adapt_phase < 3:
-                    # Escalate: go deeper before giving up
-                    _adapt_phase += 1
-                    _runs_since_new = 0
-                    steps_per_run = min(steps_per_run * 2, 500)
-                    self.fault_toggle_prob = min(0.5, self.fault_toggle_prob + 0.1)
-                    if _adapt_phase == 2:
-                        self.checkpoint_strategy = "uniform"
-                    result.adaptation_phase = _adapt_phase
-                else:
-                    result.saturated = True
-                    result.stopped_reason = "saturated"
+            result = ExplorationResult()
+            result.ngram = self.ngram
+
+            # Replay seed corpus before exploration
+            result.seed_replays = self._replay_seeds()
+            _assertions.tracker.reset()
+
+            # Resume from saved state if provided
+            if resume_from is not None:
+                restored = self.load_state(resume_from)
+                result.unique_edges = restored["total_edges"]
+                result.checkpoints_saved = restored["checkpoints"]
+
+            use_coverage = bool(self.target_paths)
+            _lines_hit_all: dict[str, set[int]] = {}
+            start = _time.monotonic()
+            class_name = _qualified_name(self.test_class)
+
+            # Generate mutation faults from target functions
+            _mutation_pairs: list[tuple] = []
+            if self.mutation_targets:
+                from ordeal.mutations import mutation_faults as _gen_mutation_faults
+
+                for mt in self.mutation_targets:
+                    try:
+                        _mutation_pairs.extend(_gen_mutation_faults(mt))
+                    except Exception:
+                        pass
+                if _mutation_pairs:
+                    _mfaults = [f for _, f in _mutation_pairs]
+
+                    class _MutatedTest(self.test_class):
+                        faults = list(self.test_class.faults) + _mfaults
+
+                    self.test_class = _MutatedTest
+                    result.mutations_total = len(_mutation_pairs)
+
+            _runs_since_new: int = 0
+            _adapt_phase: int = 0
+
+            while True:
+                elapsed = _time.monotonic() - start
+                if elapsed >= max_time:
+                    result.stopped_reason = "time"
                     break
+                if max_runs is not None and result.total_runs >= max_runs:
+                    result.stopped_reason = "max_runs"
+                    break
+                if patience > 0 and _runs_since_new >= patience and use_coverage:
+                    if _adapt_phase < 3:
+                        # Escalate: go deeper before giving up
+                        _adapt_phase += 1
+                        _runs_since_new = 0
+                        steps_per_run = min(steps_per_run * 2, 500)
+                        self.fault_toggle_prob = min(0.5, self.fault_toggle_prob + 0.1)
+                        if _adapt_phase == 2:
+                            self.checkpoint_strategy = "uniform"
+                        result.adaptation_phase = _adapt_phase
+                    else:
+                        result.saturated = True
+                        result.stopped_reason = "saturated"
+                        break
 
-            # Pull checkpoints from other workers
-            self._pool_subscribe()
+                # Pull checkpoints from other workers
+                self._pool_subscribe()
 
-            result.total_runs += 1
-            run_id = result.total_runs
-            rule_log: list[str] = []
-            trace_steps: list[TraceStep] = []
-            run_start = _time.monotonic()
-            source_cp: Checkpoint | None = None
+                result.total_runs += 1
+                run_id = result.total_runs
+                rule_log: list[str] = []
+                trace_steps: list[TraceStep] = []
+                run_start = _time.monotonic()
+                source_cp: Checkpoint | None = None
 
-            # -- Start: fresh or from checkpoint --
-            from_cp = self._checkpoints and self.rng.random() < self.checkpoint_prob
-            if from_cp:
-                source_cp = self._select_checkpoint()
-                machine = self._restore_machine(source_cp.snapshot)
-                rule_log.append(f"[checkpoint r{source_cp.run_id}s{source_cp.step}]")
-            else:
-                machine = self.test_class()
+                # -- Start: fresh or from checkpoint --
+                from_cp = self._checkpoints and self.rng.random() < self.checkpoint_prob
+                if from_cp:
+                    source_cp = self._select_checkpoint()
+                    machine = self._restore_machine(source_cp.snapshot)
+                    rule_log.append(f"[checkpoint r{source_cp.run_id}s{source_cp.step}]")
+                else:
+                    machine = self.test_class()
 
-            # Unified swarm: joint rule+fault configuration per run.
-            #
-            # Each feature (rule or fault) is included with independent
-            # probability 0.5 (fair coin flip, Groce et al. ISSTA 2012).
-            # A single bitmask covers both rules and faults — the
-            # "configuration" is the full feature set, not two independent
-            # selections.
-            #
-            # After a warmup period, configurations are selected with
-            # energy-weighted probability (MOpt pattern): configs that led
-            # to new coverage get higher selection probability.
-            self._active_fault_names = None  # reset — means "all faults"
-            self._current_swarm_config = None
-            if self.rule_swarm:
-                swarm_cfg = self._select_swarm_config(machine, result.total_runs)
-                if swarm_cfg is not None:
-                    self._current_swarm_config = swarm_cfg
-                    self._active_rules = [
-                        r for r in self._rules if r.name in swarm_cfg.active_rules
-                    ]
-                    self._active_fault_names = swarm_cfg.active_faults
-                    result.rule_swarm_runs += 1
-                    trace_steps.append(
-                        TraceStep(
-                            kind="rule_swarm",
-                            name=(
-                                f"[swarm rules={len(swarm_cfg.active_rules)}"
-                                f" faults={len(swarm_cfg.active_faults)}]"
-                            ),
-                            params={
-                                "active_rules": swarm_cfg.active_rules,
-                                "active_faults": swarm_cfg.active_faults,
-                            },
+                # Unified swarm: joint rule+fault configuration per run.
+                self._active_fault_names = None  # reset — means "all faults"
+                self._current_swarm_config = None
+                if self.rule_swarm:
+                    swarm_cfg = self._select_swarm_config(machine, result.total_runs)
+                    if swarm_cfg is not None:
+                        self._current_swarm_config = swarm_cfg
+                        self._active_rules = [
+                            r for r in self._rules if r.name in swarm_cfg.active_rules
+                        ]
+                        self._active_fault_names = swarm_cfg.active_faults
+                        result.rule_swarm_runs += 1
+                        trace_steps.append(
+                            TraceStep(
+                                kind="rule_swarm",
+                                name=(
+                                    f"[swarm rules={len(swarm_cfg.active_rules)}"
+                                    f" faults={len(swarm_cfg.active_faults)}]"
+                                ),
+                                params={
+                                    "active_rules": swarm_cfg.active_rules,
+                                    "active_faults": swarm_cfg.active_faults,
+                                },
+                            )
                         )
-                    )
+                    else:
+                        self._active_rules = self._rules
                 else:
                     self._active_rules = self._rules
-            else:
-                self._active_rules = self._rules
 
-            n_steps = self.rng.randint(1, steps_per_run)
-            collector = (
-                CoverageCollector(self.target_paths, ngram=self.ngram) if use_coverage else None
-            )
-            if collector:
-                collector.start()
-
-            step = 0
-            new_edges_this_run = 0
-            try:
-                for step in range(n_steps):
-                    result.total_steps += 1
-                    ts_offset = _time.monotonic() - run_start
-
-                    executed = self._execute_step(
-                        machine,
-                        rule_log,
-                        trace_steps,
-                        ts_offset,
-                        new_edges_this_run,
-                        source_cp=source_cp,
-                    )
-                    if not executed:
-                        result.skipped_steps += 1
-                        continue
-                    if self._last_step_used_mutation:
-                        result.seed_mutations_used += 1
-                    self._check_invariants(machine)
-                    new_edges_this_run = self._process_coverage(
-                        machine,
-                        collector,
-                        step,
-                        run_id,
-                        new_edges_this_run,
-                        result,
-                        use_coverage,
-                        _assertions,
-                        source_cp=source_cp,
-                    )
-
-            except Exception as e:
-                trace = self._record_failure(
-                    e,
-                    run_id,
-                    step,
-                    trace_steps,
-                    rule_log,
-                    machine,
-                    source_cp,
-                    new_edges_this_run,
-                    run_start,
-                    class_name,
-                    result,
-                    _mutation_pairs,
+                n_steps = self.rng.randint(1, steps_per_run)
+                collector = (
+                    CoverageCollector(self.target_paths, ngram=self.ngram)
+                    if use_coverage
+                    else None
                 )
-                if self.record_traces:
-                    result.traces.append(trace)
+                if collector:
+                    collector.start()
 
-            else:
-                if self.record_traces:
-                    result.traces.append(
-                        Trace(
-                            run_id=run_id,
-                            seed=self.seed,
-                            test_class=class_name,
-                            from_checkpoint=source_cp.run_id if source_cp else None,
-                            steps=trace_steps,
-                            edges_discovered=new_edges_this_run,
-                            duration=_time.monotonic() - run_start,
+                step = 0
+                new_edges_this_run = 0
+                try:
+                    for step in range(n_steps):
+                        result.total_steps += 1
+                        ts_offset = _time.monotonic() - run_start
+
+                        executed = self._execute_step(
+                            machine,
+                            rule_log,
+                            trace_steps,
+                            ts_offset,
+                            new_edges_this_run,
+                            source_cp=source_cp,
+                        )
+                        if not executed:
+                            result.skipped_steps += 1
+                            continue
+                        if self._last_step_used_mutation:
+                            result.seed_mutations_used += 1
+                        self._check_invariants(machine)
+                        new_edges_this_run = self._process_coverage(
+                            machine,
+                            collector,
+                            step,
+                            run_id,
+                            new_edges_this_run,
+                            result,
+                            use_coverage,
+                            _assertions,
+                            source_cp=source_cp,
+                        )
+
+                except Exception as e:
+                    trace = self._record_failure(
+                        e,
+                        run_id,
+                        step,
+                        trace_steps,
+                        rule_log,
+                        machine,
+                        source_cp,
+                        new_edges_this_run,
+                        run_start,
+                        class_name,
+                        result,
+                        _mutation_pairs,
+                    )
+                    if self.record_traces:
+                        result.traces.append(trace)
+
+                else:
+                    if self.record_traces:
+                        result.traces.append(
+                            Trace(
+                                run_id=run_id,
+                                seed=self.seed,
+                                test_class=class_name,
+                                from_checkpoint=source_cp.run_id if source_cp else None,
+                                steps=trace_steps,
+                                edges_discovered=new_edges_this_run,
+                                duration=_time.monotonic() - run_start,
+                            )
+                        )
+                finally:
+                    if collector:
+                        collector.stop()
+                        # Accumulate line-level coverage across runs
+                        for fn, lines in collector.lines_hit.items():
+                            existing = _lines_hit_all.get(fn)
+                            if existing is None:
+                                _lines_hit_all[fn] = set(lines)
+                            else:
+                                existing.update(lines)
+                    machine.teardown()
+
+                # Update checkpoint energy
+                if source_cp is not None:
+                    self._update_checkpoint_energy(source_cp, new_edges_this_run)
+
+                result.edge_log.append((run_id, len(self._total_edges)))
+
+                # Saturation tracking
+                if new_edges_this_run > 0:
+                    _runs_since_new = 0
+                    result.last_new_edge_run = run_id
+                else:
+                    _runs_since_new += 1
+                result.runs_since_new_edge = _runs_since_new
+
+                # Update swarm config energy + coverage-directed gap files
+                if self.rule_swarm:
+                    self._update_swarm_energy(new_edges_this_run)
+                    if (
+                        use_coverage
+                        and self.target_modules
+                        and result.total_runs % 50 == 0
+                        and _lines_hit_all
+                    ):
+                        gaps, _, _ = _compute_coverage_gaps(
+                            _lines_hit_all, self.target_modules, result.total_runs
+                        )
+                        self._gap_files = {g["file"] for g in gaps}
+
+                # Progress callback
+                if progress:
+                    elapsed_now = _time.monotonic() - start
+                    progress(
+                        ProgressSnapshot(
+                            elapsed=elapsed_now,
+                            total_runs=result.total_runs,
+                            total_steps=result.total_steps,
+                            unique_edges=len(self._total_edges),
+                            checkpoints=len(self._checkpoints),
+                            failures=len(result.failures),
+                            runs_per_second=result.total_runs / max(elapsed_now, 0.001),
                         )
                     )
-            finally:
-                if collector:
-                    collector.stop()
-                    # Accumulate line-level coverage across runs
-                    for fn, lines in collector.lines_hit.items():
-                        existing = _lines_hit_all.get(fn)
-                        if existing is None:
-                            _lines_hit_all[fn] = set(lines)
-                        else:
-                            existing.update(lines)
-                machine.teardown()
 
-            # Update checkpoint energy
-            if source_cp is not None:
-                self._update_checkpoint_energy(source_cp, new_edges_this_run)
+            result.unique_states = len(self._total_states)
+            result.strategy_failures = dict(self._strategy_failures)
 
-            result.edge_log.append((run_id, len(self._total_edges)))
+            # -- Post-exploration: shrink failures --
+            if shrink:
+                _assertions.tracker.reset()
+                for failure in result.failures:
+                    if failure.trace and failure.trace.steps:
+                        failure.trace = _shrink_trace(
+                            failure.trace,
+                            self.test_class,
+                            max_time=max_shrink_time,
+                        )
 
-            # Saturation tracking
-            if new_edges_this_run > 0:
-                _runs_since_new = 0
-                result.last_new_edge_run = run_id
-            else:
-                _runs_since_new += 1
-            result.runs_since_new_edge = _runs_since_new
+            # -- Post-exploration: fault ablation --
+            if shrink:
+                from ordeal.trace import ablate_faults as _ablate
 
-            # Update swarm config energy + coverage-directed gap files
-            if self.rule_swarm:
-                self._update_swarm_energy(new_edges_this_run)
-                # Refresh gap files every 50 runs for coverage-directed swarm
-                if (
-                    use_coverage
-                    and self.target_modules
-                    and result.total_runs % 50 == 0
-                    and _lines_hit_all
-                ):
-                    gaps, _, _ = _compute_coverage_gaps(
-                        _lines_hit_all, self.target_modules, result.total_runs
-                    )
-                    self._gap_files = {g["file"] for g in gaps}
+                _assertions.tracker.reset()
+                for failure in result.failures:
+                    if failure.trace and failure.trace.steps:
+                        failure.necessary_faults = _ablate(failure.trace, self.test_class)
 
-            # Progress callback
-            if progress:
-                elapsed_now = _time.monotonic() - start
-                progress(
-                    ProgressSnapshot(
-                        elapsed=elapsed_now,
-                        total_runs=result.total_runs,
-                        total_steps=result.total_steps,
-                        unique_edges=len(self._total_edges),
-                        checkpoints=len(self._checkpoints),
-                        failures=len(result.failures),
-                        runs_per_second=result.total_runs / max(elapsed_now, 0.001),
-                    )
+            # -- Post-exploration: save failing traces to seed corpus --
+            for failure in result.failures:
+                if failure.trace:
+                    self._save_seed(failure.trace)
+
+            result.unique_edges = len(self._total_edges)
+            result.duration_seconds = _time.monotonic() - start
+
+            # -- Post-exploration: coverage gap analysis --
+            if use_coverage and _lines_hit_all and self.target_modules:
+                gaps, covered, total = _compute_coverage_gaps(
+                    _lines_hit_all, self.target_modules, result.total_runs
                 )
+                result.coverage_gaps = gaps
+                result.lines_covered = covered
+                result.lines_total = total
 
-        # Restore test class and original params after exploration
-        self.test_class = _original_test_class
-        _assertions.tracker.active = _tracker_was_active
-        self.fault_toggle_prob = _orig_fault_prob
-        self.checkpoint_strategy = _orig_cp_strategy
-        result.unique_states = len(self._total_states)
+            # Save state for future resumption
+            if save_state_to is not None:
+                self.save_state(save_state_to)
 
-        # Propagate strategy failures to result for diagnostics
-        result.strategy_failures = dict(self._strategy_failures)
+            return result
+        finally:
+            self.test_class = _original_test_class
+            _assertions.tracker.restore(_tracker_snapshot)
+            self.fault_toggle_prob = _orig_fault_prob
+            self.checkpoint_strategy = _orig_cp_strategy
+            try:
+                from hypothesis import settings
+                from hypothesis.database import InMemoryExampleDatabase
 
-        # Clean up Hypothesis state so next Explorer starts fresh.
-        # Prevents strategy cache and PRNG state from leaking into
-        # subsequent Explorer.run() calls in the same process.
-        try:
-            from hypothesis import settings
-            from hypothesis.database import InMemoryExampleDatabase
-
-            settings.default.database = InMemoryExampleDatabase()
-        except Exception:
-            pass
-
-        # -- Post-exploration: shrink failures --
-        if shrink:
-            for failure in result.failures:
-                if failure.trace and failure.trace.steps:
-                    failure.trace = _shrink_trace(
-                        failure.trace,
-                        self.test_class,
-                        max_time=max_shrink_time,
-                    )
-
-        # -- Post-exploration: fault ablation --
-        if shrink:
-            from ordeal.trace import ablate_faults as _ablate
-
-            for failure in result.failures:
-                if failure.trace and failure.trace.steps:
-                    failure.necessary_faults = _ablate(failure.trace, self.test_class)
-
-        # -- Post-exploration: save failing traces to seed corpus --
-        for failure in result.failures:
-            if failure.trace:
-                self._save_seed(failure.trace)
-
-        result.unique_edges = len(self._total_edges)
-        result.duration_seconds = _time.monotonic() - start
-
-        # -- Post-exploration: coverage gap analysis --
-        if use_coverage and _lines_hit_all and self.target_modules:
-            gaps, covered, total = _compute_coverage_gaps(
-                _lines_hit_all, self.target_modules, result.total_runs
-            )
-            result.coverage_gaps = gaps
-            result.lines_covered = covered
-            result.lines_total = total
-
-        # Save state for future resumption
-        if save_state_to is not None:
-            self.save_state(save_state_to)
-
-        return result
+                settings.default.database = InMemoryExampleDatabase()
+            except Exception:
+                pass
 
     # -- Parallel execution -------------------------------------------------
+
+    def _parallel_retry_reason(
+        self,
+        worker_results: list[dict[str, Any]],
+        result: ExplorationResult,
+    ) -> str | None:
+        """Detect suspicious parallel outcomes that deserve a single-worker rerun."""
+        issues: list[str] = []
+        worker_count = max(1, len(worker_results))
+        worker_errors = [wr["worker_error"] for wr in worker_results if wr.get("worker_error")]
+        all_failures = list(worker_errors)
+        for wr in worker_results:
+            all_failures.extend(wr.get("failures", []))
+
+        if worker_errors:
+            issues.append(f"{len(worker_errors)} worker bootstrap failure(s)")
+
+        if self.target_paths and result.total_runs > 0 and result.unique_edges == 0:
+            issues.append("0 edges discovered")
+
+        elif all_failures:
+            step_zero_failures = sum(1 for f in all_failures if int(f.get("step", 0)) <= 0)
+            if step_zero_failures >= max(3, worker_count):
+                issues.append(f"{step_zero_failures} step-0 failure(s)")
+
+            spam_count = Counter(_parallel_failure_signature(f) for f in all_failures).most_common(1)[
+                0
+            ][1]
+            if spam_count >= max(3, worker_count):
+                issues.append(f"{spam_count} identical crash(es)")
+
+        if not issues:
+            return None
+        return ", ".join(issues)
+
+    def _rerun_sequential_after_parallel(
+        self,
+        *,
+        reason: str,
+        max_time: float,
+        max_runs: int | None,
+        steps_per_run: int,
+        shrink: bool,
+        max_shrink_time: float,
+        patience: int,
+        progress: Callable[[ProgressSnapshot], None] | None,
+    ) -> ExplorationResult:
+        """Run the same exploration config with workers=1 after a suspicious parallel result."""
+        explorer = Explorer(
+            self.test_class,
+            target_modules=self.target_modules,
+            seed=self.seed,
+            max_checkpoints=self.max_checkpoints,
+            checkpoint_prob=self.checkpoint_prob,
+            checkpoint_strategy=self.checkpoint_strategy,
+            fault_toggle_prob=self.fault_toggle_prob,
+            record_traces=self.record_traces,
+            workers=1,
+            share_edges=False,
+            share_checkpoints=False,
+            mutation_targets=list(self.mutation_targets),
+            seed_mutation_prob=self.seed_mutation_prob,
+            seed_mutation_respect_strategies=self.seed_mutation_respect_strategies,
+            ngram=self.ngram,
+            corpus_dir=self.corpus_dir,
+            rule_swarm=self.rule_swarm,
+        )
+        result = explorer.run(
+            max_time=max_time,
+            max_runs=max_runs,
+            steps_per_run=steps_per_run,
+            shrink=shrink,
+            max_shrink_time=max_shrink_time,
+            patience=patience,
+            progress=None,
+        )
+        result.parallel_fallback_reason = reason
+        return result
 
     def _run_parallel(
         self,
@@ -2442,6 +2662,22 @@ class Explorer:
 
         start = _time.monotonic()
         class_path = f"{self.test_class.__module__}.{self.test_class.__qualname__}"
+        worker_count = self.workers
+        if max_runs is not None:
+            worker_count = max(1, min(worker_count, max_runs))
+        if worker_count <= 1:
+            result = self._rerun_sequential_after_parallel(
+                reason="",
+                max_time=max_time,
+                max_runs=max_runs,
+                steps_per_run=steps_per_run,
+                shrink=shrink,
+                max_shrink_time=max_shrink_time,
+                patience=patience,
+                progress=progress,
+            )
+            result.parallel_fallback_reason = ""
+            return result
 
         # Create shared edge bitmap (65536 bytes, one per edge hash)
         shm: SharedMemory | None = None
@@ -2467,45 +2703,58 @@ class Explorer:
             # SharedMemory is zeroed on creation (POSIX shm_open + ftruncate)
             ring_shm_name = ring_shm.name
 
-        slots_per_worker = _POOL_NUM_SLOTS // max(self.workers, 1)
+        slots_per_worker = max(1, _POOL_NUM_SLOTS // max(worker_count, 1))
 
         try:
             worker_args = []
-            for i in range(self.workers):
+            base_runs = (max_runs // worker_count) if max_runs is not None else None
+            extra_runs = (max_runs % worker_count) if max_runs is not None else 0
+            for i in range(worker_count):
+                worker_max_runs = None
+                if max_runs is not None:
+                    worker_max_runs = base_runs + (1 if i < extra_runs else 0)
                 worker_args.append(
                     {
                         "class_path": class_path,
                         "target_modules": self.target_modules,
                         "seed": self.seed + i * 7919,
                         "max_time": max_time,
-                        "max_runs": max_runs,
+                        "max_runs": worker_max_runs,
                         "steps_per_run": steps_per_run,
                         "max_checkpoints": self.max_checkpoints,
                         "checkpoint_prob": self.checkpoint_prob,
                         "checkpoint_strategy": self.checkpoint_strategy,
                         "fault_toggle_prob": self.fault_toggle_prob,
                         "record_traces": self.record_traces,
+                        "mutation_targets": list(self.mutation_targets),
+                        "seed_mutation_prob": self.seed_mutation_prob,
+                        "seed_mutation_respect_strategies": (
+                            self.seed_mutation_respect_strategies
+                        ),
                         "shrink": shrink,
                         "max_shrink_time": max_shrink_time,
                         "patience": patience,
+                        "corpus_dir": str(self.corpus_dir) if self.corpus_dir is not None else None,
+                        "rule_swarm": self.rule_swarm,
                         "shared_edges_name": shm_name,
                         "shared_state_name": state_shm_name,
                         "ring_shm_name": ring_shm_name,
                         "worker_id": i,
-                        "num_workers": self.workers,
+                        "num_workers": worker_count,
                         "slots_per_worker": slots_per_worker,
                         "ngram": self.ngram,
                     }
                 )
 
             ctx = mp.get_context("fork" if sys.platform != "win32" else "spawn")
-            with ctx.Pool(self.workers) as pool:
+            with ctx.Pool(worker_count) as pool:
                 worker_results = pool.map(_worker_fn, worker_args)
 
             # Aggregate results
             result = ExplorationResult()
             result.ngram = self.ngram
             all_edges: set[int] = set()
+            seen_failures: set[tuple[Any, ...]] = set()
 
             for wr in worker_results:
                 result.total_runs += wr["total_runs"]
@@ -2513,21 +2762,36 @@ class Explorer:
                 result.checkpoints_saved += wr["checkpoints_saved"]
                 result.edge_log.extend(wr["edge_log"])
                 all_edges.update(wr["edges"])
-
-                for finfo in wr["failures"]:
-                    result.failures.append(
-                        Failure(
-                            error=RuntimeError(finfo["error_message"]),
-                            step=finfo["step"],
-                            run_id=finfo["run_id"],
-                            active_faults=finfo["active_faults"],
-                            rule_log=finfo["rule_log"],
-                        )
+                if self.record_traces:
+                    result.traces.extend(
+                        Trace.from_dict(trace_payload) for trace_payload in wr.get("traces", [])
                     )
+                payloads: list[dict[str, Any]] = []
+                if wr.get("worker_error") is not None:
+                    payloads.append(wr["worker_error"])
+                payloads.extend(wr["failures"])
+                for finfo in payloads:
+                    signature = _parallel_failure_signature(finfo)
+                    if signature in seen_failures:
+                        continue
+                    seen_failures.add(signature)
+                    result.failures.append(_deserialize_failure_payload(finfo))
 
             result.unique_edges = len(all_edges)
             self._total_edges = all_edges
             result.duration_seconds = _time.monotonic() - start
+            reason = self._parallel_retry_reason(worker_results, result)
+            if reason is not None:
+                return self._rerun_sequential_after_parallel(
+                    reason=reason,
+                    max_time=max_time,
+                    max_runs=max_runs,
+                    steps_per_run=steps_per_run,
+                    shrink=shrink,
+                    max_shrink_time=max_shrink_time,
+                    patience=patience,
+                    progress=progress,
+                )
             return result
         finally:
             if shm is not None:
@@ -2550,49 +2814,60 @@ def _worker_fn(args: dict[str, Any]) -> dict[str, Any]:
     """
     from multiprocessing.shared_memory import SharedMemory
 
-    class_path = args["class_path"]
-    module_path, _, class_name = class_path.rpartition(".")
-    mod = importlib.import_module(module_path)
-    test_class = getattr(mod, class_name)
-
-    explorer = Explorer(
-        test_class,
-        target_modules=args.get("target_modules"),
-        seed=args["seed"],
-        max_checkpoints=args["max_checkpoints"],
-        checkpoint_prob=args["checkpoint_prob"],
-        checkpoint_strategy=args["checkpoint_strategy"],
-        fault_toggle_prob=args["fault_toggle_prob"],
-        record_traces=args.get("record_traces", False),
-        workers=1,  # each worker runs sequentially
-        ngram=args.get("ngram", 2),
-    )
-
-    # Attach to shared edge bitmap
     shm: SharedMemory | None = None
-    shm_name = args.get("shared_edges_name")
-    if shm_name:
-        shm = SharedMemory(name=shm_name, create=False)
-        explorer._shared_bitmap = shm.buf
-
-    # Attach to shared state bitmap
     state_shm: SharedMemory | None = None
-    state_name = args.get("shared_state_name")
-    if state_name:
-        state_shm = SharedMemory(name=state_name, create=False)
-        explorer._shared_state_bitmap = state_shm.buf
-
-    # Attach to shared ring buffer for checkpoint exchange
     ring_shm: SharedMemory | None = None
-    ring_name = args.get("ring_shm_name")
-    if ring_name:
-        ring_shm = SharedMemory(name=ring_name, create=False)
-        explorer._pool_ring = ring_shm.buf
-        explorer._worker_id = args.get("worker_id", 0)
-        explorer._pool_num_workers = args.get("num_workers", 1)
-        explorer._pool_slots_per_worker = args.get("slots_per_worker", _POOL_NUM_SLOTS)
+    worker_id = int(args.get("worker_id", 0))
+    explorer: Explorer | None = None
 
     try:
+        class_path = args["class_path"]
+        module_path, _, class_name = class_path.rpartition(".")
+        mod = importlib.import_module(module_path)
+        test_class = getattr(mod, class_name)
+
+        explorer = Explorer(
+            test_class,
+            target_modules=args.get("target_modules"),
+            seed=args["seed"],
+            max_checkpoints=args["max_checkpoints"],
+            checkpoint_prob=args["checkpoint_prob"],
+            checkpoint_strategy=args["checkpoint_strategy"],
+            fault_toggle_prob=args["fault_toggle_prob"],
+            record_traces=args.get("record_traces", False),
+            workers=1,  # each worker runs sequentially
+            mutation_targets=args.get("mutation_targets"),
+            seed_mutation_prob=args.get("seed_mutation_prob"),
+            seed_mutation_respect_strategies=args.get(
+                "seed_mutation_respect_strategies",
+                False,
+            ),
+            ngram=args.get("ngram", 2),
+            corpus_dir=args.get("corpus_dir"),
+            rule_swarm=args.get("rule_swarm", False),
+        )
+
+        # Attach to shared edge bitmap
+        shm_name = args.get("shared_edges_name")
+        if shm_name:
+            shm = SharedMemory(name=shm_name, create=False)
+            explorer._shared_bitmap = shm.buf
+
+        # Attach to shared state bitmap
+        state_name = args.get("shared_state_name")
+        if state_name:
+            state_shm = SharedMemory(name=state_name, create=False)
+            explorer._shared_state_bitmap = state_shm.buf
+
+        # Attach to shared ring buffer for checkpoint exchange
+        ring_name = args.get("ring_shm_name")
+        if ring_name:
+            ring_shm = SharedMemory(name=ring_name, create=False)
+            explorer._pool_ring = ring_shm.buf
+            explorer._worker_id = worker_id
+            explorer._pool_num_workers = args.get("num_workers", 1)
+            explorer._pool_slots_per_worker = args.get("slots_per_worker", _POOL_NUM_SLOTS)
+
         result = explorer.run(
             max_time=args["max_time"],
             max_runs=args.get("max_runs"),
@@ -2602,28 +2877,57 @@ def _worker_fn(args: dict[str, Any]) -> dict[str, Any]:
             patience=args.get("patience", 0),
         )
 
-        # Serialize — exceptions and traces don't pickle cleanly across processes
         serialized_failures = []
         for f in result.failures:
             serialized_failures.append(
-                {
-                    "error_message": str(f.error)[:500],
-                    "step": f.step,
-                    "run_id": f.run_id,
-                    "active_faults": f.active_faults,
-                    "rule_log": f.rule_log,
-                }
+                _serialize_failure_payload(
+                    f.error,
+                    worker_id=worker_id,
+                    run_id=f.run_id,
+                    step=f.step,
+                    active_faults=f.active_faults,
+                    rule_log=f.rule_log,
+                    trace=f.trace,
+                    error_traceback=f.error_traceback,
+                )
             )
 
         return {
+            "worker_id": worker_id,
             "total_runs": result.total_runs,
             "total_steps": result.total_steps,
             "unique_edges": result.unique_edges,
             "checkpoints_saved": result.checkpoints_saved,
             "duration_seconds": result.duration_seconds,
             "failures": serialized_failures,
+            "worker_error": None,
             "edge_log": result.edge_log,
             "edges": list(explorer._total_edges),
+            "traces": (
+                [trace.to_dict() for trace in result.traces] if args.get("record_traces", False) else []
+            ),
+        }
+    except Exception as exc:
+        return {
+            "worker_id": worker_id,
+            "total_runs": 0,
+            "total_steps": 0,
+            "unique_edges": 0,
+            "checkpoints_saved": 0,
+            "duration_seconds": 0.0,
+            "failures": [],
+            "worker_error": _serialize_failure_payload(
+                exc,
+                worker_id=worker_id,
+                run_id=-1,
+                step=0,
+                active_faults=[],
+                rule_log=[f"[worker {worker_id}]"],
+                trace=None,
+            ),
+            "edge_log": [],
+            "edges": list(explorer._total_edges) if explorer is not None else [],
+            "traces": [],
         }
     finally:
         if shm is not None:

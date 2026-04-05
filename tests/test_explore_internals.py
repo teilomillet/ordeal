@@ -9,6 +9,7 @@ import hypothesis.strategies as st
 from hypothesis import settings as hsettings
 from hypothesis.stateful import invariant, rule
 
+import ordeal.explore as explore_mod
 from ordeal.chaos import ChaosTest
 from ordeal.explore import (
     CoverageCollector,
@@ -17,9 +18,11 @@ from ordeal.explore import (
     ProgressSnapshot,
     _DataProxy,
     _RuleInfo,
+    _deserialize_failure_payload,
+    _serialize_failure_payload,
 )
 from ordeal.faults import LambdaFault
-from ordeal.trace import Trace
+from ordeal.trace import Trace, TraceFailure
 
 # ============================================================================
 # CoverageCollector._is_target
@@ -446,6 +449,140 @@ class TestFailureStr:
         )
         s = str(f)
         assert "err" in s
+
+
+class TestParallelHardeningHelpers:
+    def test_resolve_worker_count_caps_auto_mode(self, monkeypatch):
+        monkeypatch.setattr(explore_mod.os, "cpu_count", lambda: 512)
+        assert explore_mod._resolve_worker_count(0) == min(
+            explore_mod._AUTO_WORKER_CAP,
+            explore_mod._POOL_NUM_SLOTS,
+        )
+
+    def test_serialized_failure_preserves_type_traceback_and_trace(self):
+        trace = Trace(
+            run_id=7,
+            seed=42,
+            test_class="tests.fake:Chaos",
+            from_checkpoint=None,
+            steps=[],
+            failure=TraceFailure(error_type="ValueError", error_message="boom", step=0),
+        )
+        payload = explore_mod._serialize_failure_payload(
+            ValueError("boom"),
+            worker_id=3,
+            run_id=7,
+            step=0,
+            active_faults=["flip"],
+            rule_log=["tick"],
+            trace=trace,
+        )
+
+        failure = explore_mod._deserialize_failure_payload(payload)
+
+        assert isinstance(failure.error, ValueError)
+        assert failure.error_traceback
+        assert failure.trace is not None
+        assert failure.trace.failure is not None
+        assert failure.trace.failure.error_type == "ValueError"
+
+    def test_parallel_retry_reason_flags_zero_edges_and_crash_spam(self):
+        explorer = explore_mod.Explorer(_CounterChaos, target_modules=["tests"], workers=8)
+        result = ExplorationResult(total_runs=8, unique_edges=0)
+        crash = explore_mod._serialize_failure_payload(
+            RuntimeError("boom"),
+            worker_id=0,
+            run_id=1,
+            step=0,
+            active_faults=[],
+            rule_log=["tick"],
+            trace=None,
+        )
+        worker_results = [
+            {
+                "worker_error": None,
+                "failures": [dict(crash, worker_id=i)],
+                "total_runs": 1,
+                "total_steps": 1,
+                "checkpoints_saved": 0,
+                "edge_log": [],
+                "edges": [],
+            }
+            for i in range(8)
+        ]
+
+        reason = explorer._parallel_retry_reason(worker_results, result)
+
+        assert reason is not None
+        assert "0 edges discovered" in reason
+
+    def test_run_parallel_reruns_sequential_on_suspicious_result(self, monkeypatch):
+        crash = explore_mod._serialize_failure_payload(
+            RuntimeError("boom"),
+            worker_id=0,
+            run_id=1,
+            step=0,
+            active_faults=[],
+            rule_log=["tick"],
+            trace=None,
+        )
+        worker_results = [
+            {
+                "worker_id": i,
+                "worker_error": None,
+                "failures": [dict(crash, worker_id=i)],
+                "total_runs": 1,
+                "total_steps": 1,
+                "checkpoints_saved": 0,
+                "duration_seconds": 0.1,
+                "edge_log": [],
+                "edges": [],
+                "traces": [],
+            }
+            for i in range(2)
+        ]
+
+        class _DummyPool:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def map(self, fn, args):
+                return worker_results
+
+        class _DummyContext:
+            def Pool(self, worker_count):
+                return _DummyPool()
+
+        monkeypatch.setattr(explore_mod.mp, "get_context", lambda _: _DummyContext())
+
+        def _fake_rerun(self, **kwargs):
+            result = ExplorationResult(total_runs=1, total_steps=1, unique_edges=1)
+            result.parallel_fallback_reason = kwargs["reason"]
+            return result
+
+        monkeypatch.setattr(explore_mod.Explorer, "_rerun_sequential_after_parallel", _fake_rerun)
+
+        explorer = explore_mod.Explorer(
+            _CounterChaos,
+            target_modules=["tests"],
+            workers=2,
+            share_edges=False,
+            share_checkpoints=False,
+        )
+        result = explorer._run_parallel(
+            max_time=1.0,
+            max_runs=2,
+            steps_per_run=1,
+            shrink=False,
+            max_shrink_time=1.0,
+            patience=0,
+            progress=None,
+        )
+
+        assert "0 edges discovered" in result.parallel_fallback_reason
 
 
 class TestProgressSnapshot:

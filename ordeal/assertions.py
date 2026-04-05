@@ -40,6 +40,7 @@ Each function is simple by default and unlocks depth through parameters::
 
 from __future__ import annotations
 
+import copy
 import threading
 import warnings
 from collections.abc import Callable
@@ -114,6 +115,18 @@ class PropertyTracker:
     def reset(self) -> None:
         with self._lock:
             self._properties.clear()
+
+    def snapshot(self) -> tuple[bool, dict[str, Property]]:
+        """Return a deep-copied snapshot for temporary lifecycle overrides."""
+        with self._lock:
+            return self._active, copy.deepcopy(self._properties)
+
+    def restore(self, snapshot: tuple[bool, dict[str, Property]]) -> None:
+        """Restore a snapshot previously returned by ``snapshot()``."""
+        active, properties = snapshot
+        with self._lock:
+            self._properties = copy.deepcopy(properties)
+            self._active = active
 
     def record(
         self,

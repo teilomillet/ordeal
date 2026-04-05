@@ -476,6 +476,13 @@ Explorer(
     record_traces: bool = False,
     workers: int = 1,                           # 0 = auto (os.cpu_count())
     share_edges: bool = True,                   # shared-memory edge bitmap for workers
+    share_checkpoints: bool = True,             # shared checkpoint ring for workers
+    mutation_targets: list[str] | None = None,
+    seed_mutation_prob: float | None = None,
+    seed_mutation_respect_strategies: bool = False,
+    ngram: int = 2,
+    corpus_dir: str | Path | None = ".ordeal/seeds",
+    rule_swarm: bool = False,
 )
 ```
 
@@ -1536,6 +1543,7 @@ Load and validate an `ordeal.toml`. Raises `FileNotFoundError` if missing, `Conf
 | `steps_per_run` | `int` | `50` |
 | `fault_toggle_prob` | `float` | `0.3` |
 | `workers` | `int` | `1` |
+| `seed_mutation_respect_strategies` | `bool` | `False` |
 
 ### TestConfig
 

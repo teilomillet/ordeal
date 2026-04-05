@@ -26,6 +26,7 @@ class TestLoadConfig:
         cfg = load_config(tmp_toml('[explorer]\ntarget_modules = ["myapp"]\n'))
         assert cfg.explorer.target_modules == ["myapp"]
         assert cfg.explorer.max_time == 60.0  # default
+        assert cfg.explorer.workers == 0
 
     def test_full(self, tmp_toml):
         cfg = load_config(
@@ -39,6 +40,7 @@ checkpoint_prob = 0.6
 checkpoint_strategy = "recent"
 steps_per_run = 30
 fault_toggle_prob = 0.5
+seed_mutation_respect_strategies = true
 
 [[tests]]
 class = "tests.test_chaos:CounterChaos"
@@ -55,6 +57,7 @@ verbose = true
         )
         assert cfg.explorer.seed == 99
         assert cfg.explorer.checkpoint_strategy == "recent"
+        assert cfg.explorer.seed_mutation_respect_strategies is True
         assert len(cfg.tests) == 1
         assert cfg.tests[0].class_path == "tests.test_chaos:CounterChaos"
         assert cfg.tests[0].swarm is True
@@ -89,6 +92,12 @@ verbose = true
     def test_explorer_verbose_alias_sets_report_verbose(self, tmp_toml):
         cfg = load_config(tmp_toml("[explorer]\nverbose = true\n"))
         assert cfg.report.verbose is True
+
+    def test_explorer_seed_mutation_respect_strategies(self, tmp_toml):
+        cfg = load_config(
+            tmp_toml("[explorer]\nseed_mutation_respect_strategies = true\n")
+        )
+        assert cfg.explorer.seed_mutation_respect_strategies is True
 
     def test_test_missing_class(self, tmp_toml):
         with pytest.raises(ConfigError, match="missing required 'class'"):

@@ -416,6 +416,33 @@ class ChaosTest(RuleBasedStateMachine):
         """
         return 0
 
+    def checkpoint_snapshot_filter(self, name: str, value: Any) -> bool:
+        """Return whether *name* should be included in Explorer checkpoints.
+
+        Override this to skip ephemeral resources such as temp dirs,
+        open file handles, subprocess clients, or sockets that should be
+        rebuilt when a checkpoint is restored.
+
+        The default keeps user state and skips ChaosTest internals that
+        are always reinitialized on a fresh machine instance.
+        """
+        return name not in {
+            "_faults",
+            "_coverage_collector",
+            "_fault_energy",
+            "_last_toggled_fault",
+            "_edges_before",
+        }
+
+    def restore_checkpoint_state(self, snapshot: dict[str, Any]) -> None:
+        """Restore Explorer checkpoint state onto this machine instance.
+
+        Override this when the raw snapshot needs post-processing, such as
+        recreating temporary directories or reconnecting clients before
+        the saved state is written back.
+        """
+        self.__dict__.update(snapshot)
+
     def __repr__(self) -> str:
         cls = self.__class__
         active = [f.name for f in self._faults if f.active]

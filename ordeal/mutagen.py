@@ -242,10 +242,325 @@ def _mutate_dict(value: dict, rng: _random.Random, intensity: float) -> dict:
     return result
 
 
+def _lazy_strategy_parts(strategy: Any) -> tuple[str | None, tuple[Any, ...], dict[str, Any]]:
+    """Extract Hypothesis LazyStrategy metadata without forcing evaluation."""
+    fn = getattr(strategy, "function", None)
+    name = getattr(fn, "__name__", None)
+    args = tuple(getattr(strategy, "_LazyStrategy__args", ()))
+    kwargs = dict(getattr(strategy, "_LazyStrategy__kwargs", {}))
+    return name, args, kwargs
+
+
+def extract_strategy_constraint(strategy: Any) -> dict[str, Any] | None:
+    """Return a lightweight mutation constraint for a Hypothesis strategy.
+
+    The returned constraint is intentionally small and only covers the
+    common strategies that Explorer seed mutation needs to keep values
+    "nearby but still valid": integers, floats, text, lists, booleans,
+    and sampled/just strategies.
+    """
+    elements = getattr(strategy, "elements", None)
+    if elements is not None:
+        return {"kind": "choices", "choices": tuple(elements)}
+
+    name, args, kwargs = _lazy_strategy_parts(strategy)
+    if name == "integers":
+        min_value = args[0] if len(args) > 0 else None
+        max_value = args[1] if len(args) > 1 else None
+        return {"kind": "int", "min": min_value, "max": max_value}
+    if name == "floats":
+        min_value = args[0] if len(args) > 0 else None
+        max_value = args[1] if len(args) > 1 else None
+        return {
+            "kind": "float",
+            "min": min_value,
+            "max": max_value,
+            "allow_nan": kwargs.get("allow_nan", True),
+            "allow_infinity": kwargs.get("allow_infinity", True),
+        }
+    if name == "text":
+        return {
+            "kind": "text",
+            "min_size": kwargs.get("min_size", 0),
+            "max_size": kwargs.get("max_size"),
+        }
+    if name == "binary":
+        return {
+            "kind": "bytes",
+            "min_size": kwargs.get("min_size", 0),
+            "max_size": kwargs.get("max_size"),
+        }
+    if name == "lists":
+        element = extract_strategy_constraint(args[0]) if args else None
+        return {
+            "kind": "list",
+            "min_size": kwargs.get("min_size", 0),
+            "max_size": kwargs.get("max_size"),
+            "element": element,
+        }
+    if name == "tuples":
+        return {
+            "kind": "tuple",
+            "items": tuple(extract_strategy_constraint(arg) for arg in args),
+        }
+    if name == "fixed_dictionaries":
+        required = args[0] if args and isinstance(args[0], dict) else {}
+        optional = kwargs.get("optional") if isinstance(kwargs.get("optional"), dict) else {}
+        return {
+            "kind": "dict",
+            "required": {
+                key: constraint
+                for key, strategy in required.items()
+                if (constraint := extract_strategy_constraint(strategy)) is not None
+            },
+            "optional": {
+                key: constraint
+                for key, strategy in optional.items()
+                if (constraint := extract_strategy_constraint(strategy)) is not None
+            },
+        }
+    if name == "booleans":
+        return {"kind": "bool"}
+    if name == "just" and args:
+        return {"kind": "choices", "choices": (args[0],)}
+    return None
+
+
+def _default_for_constraint(constraint: dict[str, Any], rng: _random.Random) -> Any:
+    """Construct a simple valid value when repair has no usable baseline."""
+    kind = constraint.get("kind")
+    if kind == "choices":
+        choices = tuple(constraint.get("choices", ()))
+        return rng.choice(choices) if choices else None
+    if kind == "bool":
+        return False
+    if kind == "int":
+        min_value = constraint.get("min")
+        max_value = constraint.get("max")
+        if min_value is not None and max_value is not None:
+            return max(int(min_value), min(int(max_value), 0))
+        if min_value is not None:
+            return int(min_value)
+        if max_value is not None:
+            return int(max_value)
+        return 0
+    if kind == "float":
+        min_value = constraint.get("min")
+        max_value = constraint.get("max")
+        if min_value is not None and max_value is not None:
+            return max(float(min_value), min(float(max_value), 0.0))
+        if min_value is not None:
+            return float(min_value)
+        if max_value is not None:
+            return float(max_value)
+        return 0.0
+    if kind == "text":
+        return "x" * int(constraint.get("min_size", 0))
+    if kind == "bytes":
+        return b"\x00" * int(constraint.get("min_size", 0))
+    if kind == "list":
+        return []
+    if kind == "tuple":
+        items = tuple(constraint.get("items", ()))
+        return tuple(
+            _default_for_constraint(item, rng) if item is not None else None for item in items
+        )
+    if kind == "dict":
+        required = dict(constraint.get("required", {}))
+        return {key: _default_for_constraint(item, rng) for key, item in required.items()}
+    return None
+
+
+def _repair_to_constraint(
+    value: Any,
+    original: Any,
+    constraint: dict[str, Any],
+    rng: _random.Random,
+) -> Any:
+    """Project a mutated value back into the declared strategy envelope."""
+    kind = constraint.get("kind")
+
+    if kind == "choices":
+        choices = tuple(constraint.get("choices", ()))
+        if value in choices:
+            return value
+        if original in choices:
+            return original
+        return rng.choice(choices) if choices else original
+
+    if kind == "bool":
+        return bool(value)
+
+    if kind == "int":
+        candidate = value if isinstance(value, int) and not isinstance(value, bool) else original
+        if not isinstance(candidate, int) or isinstance(candidate, bool):
+            candidate = _default_for_constraint(constraint, rng)
+        min_value = constraint.get("min")
+        max_value = constraint.get("max")
+        if min_value is not None:
+            candidate = max(candidate, int(min_value))
+        if max_value is not None:
+            candidate = min(candidate, int(max_value))
+        return candidate
+
+    if kind == "float":
+        candidate = value if isinstance(value, (int, float)) and not isinstance(value, bool) else original
+        if not isinstance(candidate, (int, float)) or isinstance(candidate, bool):
+            candidate = _default_for_constraint(constraint, rng)
+        candidate = float(candidate)
+        if math.isnan(candidate) and not constraint.get("allow_nan", True):
+            candidate = float(_default_for_constraint(constraint, rng))
+        if math.isinf(candidate) and not constraint.get("allow_infinity", True):
+            candidate = float(_default_for_constraint(constraint, rng))
+        min_value = constraint.get("min")
+        max_value = constraint.get("max")
+        if min_value is not None and math.isfinite(candidate):
+            candidate = max(candidate, float(min_value))
+        if max_value is not None and math.isfinite(candidate):
+            candidate = min(candidate, float(max_value))
+        return candidate
+
+    if kind == "text":
+        candidate = (
+            value
+            if isinstance(value, str)
+            else (original if isinstance(original, str) else _default_for_constraint(constraint, rng))
+        )
+        min_size = int(constraint.get("min_size", 0))
+        max_size = constraint.get("max_size")
+        if max_size is not None and len(candidate) > int(max_size):
+            candidate = candidate[: int(max_size)]
+        if len(candidate) < min_size:
+            pad_char = original[0] if isinstance(original, str) and original else "x"
+            candidate = candidate + pad_char * (min_size - len(candidate))
+        return candidate
+
+    if kind == "bytes":
+        candidate = (
+            value
+            if isinstance(value, bytes)
+            else (
+                original
+                if isinstance(original, bytes)
+                else _default_for_constraint(constraint, rng)
+            )
+        )
+        min_size = int(constraint.get("min_size", 0))
+        max_size = constraint.get("max_size")
+        if max_size is not None and len(candidate) > int(max_size):
+            candidate = candidate[: int(max_size)]
+        if len(candidate) < min_size:
+            candidate = candidate + (b"\x00" * (min_size - len(candidate)))
+        return candidate
+
+    if kind == "list":
+        if isinstance(value, list):
+            candidate = list(value)
+        elif isinstance(original, list):
+            candidate = list(original)
+        else:
+            candidate = []
+        min_size = int(constraint.get("min_size", 0))
+        max_size = constraint.get("max_size")
+        element_constraint = constraint.get("element")
+        if element_constraint is not None:
+            repaired: list[Any] = []
+            originals = list(original) if isinstance(original, list) else []
+            for idx, item in enumerate(candidate):
+                baseline = originals[idx] if idx < len(originals) else item
+                repaired.append(_repair_to_constraint(item, baseline, element_constraint, rng))
+            candidate = repaired
+        if max_size is not None and len(candidate) > int(max_size):
+            candidate = candidate[: int(max_size)]
+        if len(candidate) < min_size:
+            originals = list(original) if isinstance(original, list) else []
+            while len(candidate) < min_size:
+                if len(candidate) < len(originals):
+                    baseline = originals[len(candidate)]
+                elif originals:
+                    baseline = originals[-1]
+                else:
+                    baseline = _default_for_constraint(element_constraint, rng) if element_constraint else None
+                if element_constraint is not None:
+                    candidate.append(_repair_to_constraint(baseline, baseline, element_constraint, rng))
+                else:
+                    candidate.append(baseline)
+        return candidate
+
+    if kind == "tuple":
+        item_constraints = tuple(constraint.get("items", ()))
+        candidate_values = tuple(value) if isinstance(value, (tuple, list)) else ()
+        original_values = tuple(original) if isinstance(original, tuple) else ()
+        repaired_items: list[Any] = []
+        for idx, item_constraint in enumerate(item_constraints):
+            baseline = (
+                candidate_values[idx]
+                if idx < len(candidate_values)
+                else (
+                    original_values[idx]
+                    if idx < len(original_values)
+                    else (
+                        _default_for_constraint(item_constraint, rng)
+                        if item_constraint is not None
+                        else None
+                    )
+                )
+            )
+            if item_constraint is None:
+                repaired_items.append(baseline)
+            else:
+                original_item = original_values[idx] if idx < len(original_values) else baseline
+                repaired_items.append(
+                    _repair_to_constraint(baseline, original_item, item_constraint, rng)
+                )
+        return tuple(repaired_items)
+
+    if kind == "dict":
+        candidate = dict(value) if isinstance(value, dict) else {}
+        original_dict = dict(original) if isinstance(original, dict) else {}
+        repaired: dict[str, Any] = {}
+        required = dict(constraint.get("required", {}))
+        optional = dict(constraint.get("optional", {}))
+
+        for key, subconstraint in required.items():
+            baseline = candidate.get(key, original_dict.get(key))
+            if baseline is None:
+                baseline = _default_for_constraint(subconstraint, rng)
+            repaired[key] = _repair_to_constraint(
+                baseline,
+                original_dict.get(key, baseline),
+                subconstraint,
+                rng,
+            )
+
+        for key, subconstraint in optional.items():
+            if key not in candidate and key not in original_dict:
+                continue
+            baseline = candidate.get(key, original_dict.get(key))
+            repaired[key] = _repair_to_constraint(
+                baseline,
+                original_dict.get(key, baseline),
+                subconstraint,
+                rng,
+            )
+
+        for key, item in candidate.items():
+            if key not in repaired:
+                repaired[key] = item
+        return repaired
+
+    return value
+
+
 def mutate_inputs(
     inputs: dict[str, Any],
     rng: _random.Random,
     intensity: float = 0.3,
+    *,
+    strategies: dict[str, Any] | None = None,
+    respect_strategies: bool | None = None,
+    constraints: dict[str, dict[str, Any]] | None = None,
+    stay_within_bounds: bool = False,
 ) -> dict[str, Any]:
     """Mutate a full kwargs dict — used by mine() and Explorer's seed mutation loop.
 
@@ -266,8 +581,39 @@ def mutate_inputs(
         inputs: Function kwargs to mutate (e.g. ``{"x": 42, "mode": "admin"}``).
         rng: Seeded RNG for deterministic mutation.
         intensity: Mutation aggressiveness (0.0-1.0).
+        strategies: Optional Hypothesis strategies keyed by parameter name.
+            When provided, common bounds are extracted automatically.
+        respect_strategies: Backward-compatible alias for
+            ``stay_within_bounds`` when callers are thinking in terms of
+            declared strategies rather than explicit constraints.
+        constraints: Optional per-parameter strategy constraints extracted
+            from Hypothesis strategies.
+        stay_within_bounds: If ``True``, project each mutated value back into
+            its declared strategy bounds.  Useful for config/control-plane
+            systems where "nearby but still valid" beats boundary-breaking
+            mutations.
 
     Returns:
         A new dict with mutated values.  Keys are preserved.
     """
-    return {key: mutate_value(val, rng, intensity) for key, val in inputs.items()}
+    if respect_strategies is not None:
+        stay_within_bounds = respect_strategies
+    if constraints is None and strategies is not None:
+        constraints = {
+            key: constraint
+            for key, strategy in strategies.items()
+            if (constraint := extract_strategy_constraint(strategy)) is not None
+        }
+
+    mutated = {key: mutate_value(val, rng, intensity) for key, val in inputs.items()}
+    if not stay_within_bounds or not constraints:
+        return mutated
+
+    repaired: dict[str, Any] = {}
+    for key, original in inputs.items():
+        value = mutated.get(key, original)
+        constraint = constraints.get(key)
+        repaired[key] = (
+            _repair_to_constraint(value, original, constraint, rng) if constraint else value
+        )
+    return repaired

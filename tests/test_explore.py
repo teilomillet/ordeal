@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import warnings
+
 import pytest
 from hypothesis.stateful import invariant, rule
 
 from ordeal.chaos import ChaosTest
+from ordeal.assertions import sometimes, tracker
 from ordeal.explore import Checkpoint, CoverageCollector, Explorer, _DataProxy
 from ordeal.faults import LambdaFault
 from tests._explore_target import BranchyService
@@ -63,6 +66,24 @@ class FailingChaos(ChaosTest):
         self.counter += 1
         if self.counter >= 3:
             raise ValueError("counter overflow")
+
+
+class SometimesFailingChaos(ChaosTest):
+    faults = []
+
+    def __init__(self):
+        super().__init__()
+        self.counter = 0
+
+    @rule()
+    def tick(self):
+        self.counter += 1
+        if self.counter >= 2:
+            raise ValueError("boom")
+
+    @invariant()
+    def observed_progress(self):
+        sometimes(self.counter > 0, "progress observed")
 
 
 # ============================================================================
@@ -202,6 +223,21 @@ class TestExplorerExecution:
         elapsed = time.monotonic() - start
         assert elapsed < 3.0  # generous bound
         assert result.total_runs > 0
+
+    def test_tracker_stays_active_during_shrink_and_replay(self):
+        tracker.active = False
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            explorer = Explorer(SometimesFailingChaos, seed=42, record_traces=True)
+            result = explorer.run(max_runs=3, steps_per_run=3, shrink=True, max_shrink_time=0.2)
+
+        assert result.failures
+        assert tracker.active is False
+        assert not [
+            warning
+            for warning in caught
+            if "tracker is inactive" in str(warning.message)
+        ]
 
 
 class TestExplorerResult:

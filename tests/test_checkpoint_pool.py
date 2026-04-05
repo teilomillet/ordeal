@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import pickle
+from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
@@ -23,6 +24,7 @@ from ordeal.explore import (
     _ring_write,
 )
 from ordeal.faults import Fault, LambdaFault
+from ordeal.trace import Trace, TraceFailure, TraceStep
 from tests._deep_target import DeepService
 
 # ============================================================================
@@ -68,6 +70,30 @@ class DeepServiceChaos(ChaosTest):
     def teardown(self):
         self.service = DeepService()
         super().teardown()
+
+
+class SnapshotHookChaos(ChaosTest):
+    """ChaosTest that exercises snapshot filtering and restore hooks."""
+
+    faults: ClassVar[list[Fault]] = []
+
+    def __init__(self):
+        super().__init__()
+        self.state = "idle"
+        self.ephemeral = object()
+        self.restore_marker = False
+
+    @rule()
+    def tick(self):
+        self.state = "busy"
+
+    def checkpoint_snapshot_filter(self, name: str, value: object) -> bool:
+        return name != "ephemeral"
+
+    def restore_checkpoint_state(self, state: dict[str, object]) -> None:
+        self.__dict__.update(state)
+        self.ephemeral = "recreated"
+        self.restore_marker = True
 
 
 # ============================================================================
@@ -142,6 +168,53 @@ class TestStatePickleRoundTrip:
         restored.service.climb()
         restored.service.strike()
         assert restored.service.bug_triggered
+
+    def test_snapshot_hooks_filter_and_restore_ephemeral_state(self):
+        explorer = Explorer(SnapshotHookChaos, workers=1)
+        machine = SnapshotHookChaos()
+        machine.tick()
+
+        snapshot = explorer._snapshot_machine(machine)
+        assert "ephemeral" not in snapshot.state_dict
+
+        restored = explorer._restore_machine(snapshot)
+        assert restored.state == "busy"
+        assert restored.ephemeral == "recreated"
+        assert restored.restore_marker is True
+
+
+class _HookedSnapshotChaos(ChaosTest):
+    """ChaosTest exercising explicit checkpoint snapshot/restore hooks."""
+
+    faults: ClassVar[list[Fault]] = []
+
+    def __init__(self):
+        super().__init__()
+        self.counter = 3
+        self.client = object()
+        self.rebuilt = False
+
+    def checkpoint_snapshot_filter(self, name: str, value: object) -> bool:
+        return super().checkpoint_snapshot_filter(name, value) and name != "client"
+
+    def restore_checkpoint_state(self, snapshot: dict[str, object]) -> None:
+        super().restore_checkpoint_state(snapshot)
+        self.client = "recreated"
+        self.rebuilt = True
+
+
+class TestCheckpointHooks:
+    def test_snapshot_filter_and_restore_hook(self):
+        explorer = Explorer(_HookedSnapshotChaos, workers=1)
+        machine = _HookedSnapshotChaos()
+
+        snapshot = explorer._snapshot_machine(machine)
+        restored = explorer._restore_machine(snapshot)
+
+        assert "client" not in snapshot.state_dict
+        assert restored.counter == 3
+        assert restored.client == "recreated"
+        assert restored.rebuilt is True
 
 
 # ============================================================================
@@ -430,6 +503,211 @@ class TestParallelWithPool:
         result = explorer.run(max_time=3, steps_per_run=20)
         assert result.total_runs > 0
         assert result.total_steps > 0
+
+
+class _FakePool:
+    def __init__(self, results, captured_args):
+        self._results = results
+        self._captured_args = captured_args
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def map(self, fn, worker_args):
+        self._captured_args.extend(worker_args)
+        return self._results
+
+
+class _FakeContext:
+    def __init__(self, results, captured_args):
+        self._results = results
+        self._captured_args = captured_args
+
+    def Pool(self, workers):
+        return _FakePool(self._results, self._captured_args)
+
+
+class TestParallelAggregation:
+    def test_parallel_splits_max_runs_across_workers(self, monkeypatch):
+        captured_args = []
+        worker_results = [
+            {
+                "worker_id": i,
+                "total_runs": 1,
+                "total_steps": 2,
+                "unique_edges": 1,
+                "checkpoints_saved": 0,
+                "duration_seconds": 0.1,
+                "failures": [],
+                "worker_error": None,
+                "edge_log": [],
+                "edges": [i],
+            }
+            for i in range(3)
+        ]
+        monkeypatch.setattr(
+            "ordeal.explore.mp.get_context",
+            lambda method: _FakeContext(worker_results, captured_args),
+        )
+
+        explorer = Explorer(
+            DeepServiceChaos,
+            target_modules=["tests._deep_target"],
+            workers=4,
+            seed=42,
+            share_edges=False,
+            share_checkpoints=False,
+        )
+        result = explorer._run_parallel(
+            max_time=1.0,
+            max_runs=3,
+            steps_per_run=5,
+            shrink=False,
+            max_shrink_time=0.1,
+            patience=0,
+            progress=None,
+        )
+
+        assert [arg["max_runs"] for arg in captured_args] == [1, 1, 1]
+        assert result.total_runs == 3
+
+    def test_parallel_deduplicates_failures_and_preserves_trace(self, monkeypatch):
+        captured_args = []
+        trace = Trace(
+            run_id=7,
+            seed=42,
+            test_class="tests.test_checkpoint_pool:DeepServiceChaos",
+            from_checkpoint=None,
+            steps=[TraceStep(kind="rule", name="do_accumulate", params={})],
+            failure=TraceFailure(error_type="ValueError", error_message="boom", step=0),
+        )
+        payload = {
+            "worker_id": 0,
+            "run_id": 7,
+            "step": 1,
+            "active_faults": [],
+            "rule_log": ["do_accumulate"],
+            "error_type": "ValueError",
+            "error_module": "builtins",
+            "error_qualname": "ValueError",
+            "error_message": "boom",
+            "error_traceback": "Traceback: boom",
+            "trace": trace.to_dict(),
+            "trace_hash": trace.content_hash(),
+        }
+        worker_results = [
+            {
+                "worker_id": i,
+                "total_runs": 1,
+                "total_steps": 1,
+                "unique_edges": 1,
+                "checkpoints_saved": 0,
+                "duration_seconds": 0.1,
+                "failures": [payload],
+                "worker_error": None,
+                "edge_log": [],
+                "edges": [i],
+            }
+            for i in range(2)
+        ]
+        monkeypatch.setattr(
+            "ordeal.explore.mp.get_context",
+            lambda method: _FakeContext(worker_results, captured_args),
+        )
+
+        explorer = Explorer(
+            DeepServiceChaos,
+            target_modules=["tests._deep_target"],
+            workers=2,
+            seed=42,
+            share_edges=False,
+            share_checkpoints=False,
+            record_traces=True,
+        )
+        monkeypatch.setattr(explorer, "_parallel_retry_reason", lambda worker_results, result: None)
+        result = explorer._run_parallel(
+            max_time=1.0,
+            max_runs=2,
+            steps_per_run=5,
+            shrink=False,
+            max_shrink_time=0.1,
+            patience=0,
+            progress=None,
+        )
+
+        assert len(result.failures) == 1
+        assert "ValueError" in str(result.failures[0])
+        assert result.failures[0].trace is not None
+        assert result.failures[0].error_traceback == "Traceback: boom"
+
+    def test_parallel_zero_edge_result_falls_back_to_sequential(self, monkeypatch):
+        captured_args = []
+        worker_results = [
+            {
+                "worker_id": i,
+                "total_runs": 1,
+                "total_steps": 1,
+                "unique_edges": 0,
+                "checkpoints_saved": 0,
+                "duration_seconds": 0.1,
+                "failures": [],
+                "worker_error": None,
+                "edge_log": [],
+                "edges": [],
+            }
+            for i in range(4)
+        ]
+        monkeypatch.setattr(
+            "ordeal.explore.mp.get_context",
+            lambda method: _FakeContext(worker_results, captured_args),
+        )
+
+        reason_box = {}
+
+        def _fake_rerun(**kwargs):
+            reason_box["reason"] = kwargs["reason"]
+            return SimpleNamespace(
+                total_runs=1,
+                total_steps=1,
+                checkpoints_saved=0,
+                unique_edges=2,
+                failures=[],
+                edge_log=[],
+                traces=[],
+                duration_seconds=0.1,
+                ngram=2,
+                seed_replays=[],
+                coverage_gaps=[],
+                lines_covered=0,
+                lines_total=0,
+                parallel_fallback_reason=kwargs["reason"],
+            )
+
+        explorer = Explorer(
+            DeepServiceChaos,
+            target_modules=["tests._deep_target"],
+            workers=4,
+            seed=42,
+            share_edges=False,
+            share_checkpoints=False,
+        )
+        monkeypatch.setattr(explorer, "_rerun_sequential_after_parallel", _fake_rerun)
+
+        result = explorer._run_parallel(
+            max_time=1.0,
+            max_runs=4,
+            steps_per_run=5,
+            shrink=False,
+            max_shrink_time=0.1,
+            patience=0,
+            progress=None,
+        )
+
+        assert result.parallel_fallback_reason == "0 edges discovered"
+        assert reason_box["reason"] == "0 edges discovered"
 
 
 @pytest.mark.slow

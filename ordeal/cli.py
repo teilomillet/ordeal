@@ -2570,6 +2570,9 @@ def _cmd_explore(args: argparse.Namespace) -> int:
             fault_toggle_prob=cfg.explorer.fault_toggle_prob,
             record_traces=cfg.report.traces or bool(args.generate_tests),
             workers=cfg.explorer.workers,
+            seed_mutation_respect_strategies=getattr(
+                cfg.explorer, "seed_mutation_respect_strategies", False
+            ),
             ngram=cfg.explorer.ngram,
             corpus_dir=corpus_dir,
             rule_swarm=cfg.explorer.rule_swarm,
@@ -2578,7 +2581,7 @@ def _cmd_explore(args: argparse.Namespace) -> int:
         result = explorer.run(
             max_time=cfg.explorer.max_time,
             max_runs=cfg.explorer.max_runs,
-            steps_per_run=test_cfg.steps_per_run or cfg.explorer.steps_per_run,
+            steps_per_run=getattr(test_cfg, "steps_per_run", None) or cfg.explorer.steps_per_run,
             shrink=not args.no_shrink,
             progress=_ProgressPrinter() if verbose else None,
             resume_from=args.resume,
@@ -2588,13 +2591,30 @@ def _cmd_explore(args: argparse.Namespace) -> int:
         if verbose:
             _stderr("\n")  # newline after progress
 
-        # Report seed replay results
         if result.seed_replays:
-            for sr in result.seed_replays:
-                if sr["reproduced"]:
-                    _stderr(f"  REGRESSION  {sr['seed_name']}: {sr['error']}\n")
-                else:
-                    _stderr(f"  fixed       {sr['seed_name']}: no longer reproduces\n")
+            reproduced = sum(1 for sr in result.seed_replays if sr["reproduced"])
+            fixed = len(result.seed_replays) - reproduced
+            if verbose:
+                for sr in result.seed_replays:
+                    if sr["reproduced"]:
+                        _stderr(f"  REGRESSION  {sr['seed_name']}: {sr['error']}\n")
+                    else:
+                        _stderr(f"  fixed       {sr['seed_name']}: no longer reproduces\n")
+            else:
+                _stderr(f"  Seed replay: {fixed} fixed, {reproduced} reproduced\n")
+            if args.prune_fixed_seeds and fixed:
+                pruned = 0
+                for sr in result.seed_replays:
+                    if sr["reproduced"]:
+                        continue
+                    try:
+                        Path(sr["path"]).unlink()
+                    except FileNotFoundError:
+                        continue
+                    else:
+                        pruned += 1
+                if pruned:
+                    _stderr(f"  Pruned {pruned} fixed seed(s).\n")
 
         all_results.append((test_cfg.class_path, result))
 
@@ -7358,6 +7378,11 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                 _arg("--verbose", "-v", action="store_true", help="Live progress"),
                 _arg("--no-shrink", action="store_true", help="Skip shrinking"),
                 _arg("--no-seeds", action="store_true", help="Skip seed corpus replay"),
+                _arg(
+                    "--prune-fixed-seeds",
+                    action="store_true",
+                    help="Delete replayed seeds that no longer reproduce",
+                ),
                 _arg(
                     "--workers",
                     "-w",

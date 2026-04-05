@@ -35,6 +35,11 @@ steps_per_run = 50
 # Probability of a nemesis action (fault toggle) per step.
 fault_toggle_prob = 0.3
 
+# When true, seed mutation stays within common bounds implied by your
+# declared Hypothesis strategies. Useful for config/control-plane tests
+# where "nearby but still valid" is better than unconstrained fuzzing.
+# seed_mutation_respect_strategies = true
+
 # N-gram depth for edge coverage hashing (AFL++ NGRAM model).
 #   1 = classic AFL single-edge (prev XOR cur).
 #   2 = path-context: hashes the last 2 locations with the current one.

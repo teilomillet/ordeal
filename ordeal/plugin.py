@@ -529,20 +529,20 @@ def pytest_terminal_summary(
     # -- Seed corpus replay results --
     if _seed_replay_results:
         terminalreporter.section("Ordeal Seed Corpus")
+        reproduced = sum(1 for s in _seed_replay_results if s["reproduced"])
+        fixed = len(_seed_replay_results) - reproduced
+        terminalreporter.line(
+            f"  {len(_seed_replay_results)} seed(s) replayed: "
+            f"{fixed} fixed, {reproduced} reproduced",
+            green=(reproduced == 0),
+            red=(reproduced > 0),
+        )
         for sr in _seed_replay_results:
             if sr["reproduced"]:
                 terminalreporter.line(
                     f"  REGRESSION  {sr['seed_name']}: {sr['test_class']} — {sr['error']}",
                     red=True,
                 )
-            else:
-                terminalreporter.line(
-                    f"  fixed       {sr['seed_name']}: {sr['test_class']} — no longer reproduces",
-                    green=True,
-                )
-        reproduced = sum(1 for s in _seed_replay_results if s["reproduced"])
-        if reproduced:
-            terminalreporter.line(f"\n  {reproduced} regression(s) still reproduce", red=True)
         _seed_replay_results.clear()
 
     # -- Mutation results (from @pytest.mark.mutate tests) --

@@ -55,6 +55,7 @@ class ExplorerConfig:
     steps_per_run: int = 50
     fault_toggle_prob: float = 0.3
     workers: int = 0  # 0 = auto (os.cpu_count())
+    seed_mutation_respect_strategies: bool = False
     ngram: int = 2  # N-gram depth for edge coverage (1=classic AFL, 2+=path-context)
     rule_swarm: bool = False  # random rule subsets per run (swarm testing for rules)
     rule_timeout: float = 30.0  # per-rule timeout in seconds (0 to disable)
@@ -412,7 +413,10 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
         checkpoint_strategy=explorer_raw.get("checkpoint_strategy", "energy"),
         steps_per_run=int(explorer_raw.get("steps_per_run", 50)),
         fault_toggle_prob=float(explorer_raw.get("fault_toggle_prob", 0.3)),
-        workers=int(explorer_raw.get("workers", 1)),
+        workers=int(explorer_raw.get("workers", 0)),
+        seed_mutation_respect_strategies=bool(
+            explorer_raw.get("seed_mutation_respect_strategies", False)
+        ),
         ngram=ngram_val,
         rule_swarm=explorer_raw.get("rule_swarm", False),
         rule_timeout=float(explorer_raw.get("rule_timeout", 30.0)),

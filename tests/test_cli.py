@@ -3185,6 +3185,148 @@ verbose = false
         # JSON report should exist
         assert (tmp_path / "report.json").exists()
 
+    def test_explore_seed_replay_details_require_verbose(self, monkeypatch, capsys):
+        class _FakeTestCfg:
+            class_path = "tests.fake:Chaos"
+            steps_per_run = None
+
+            def resolve(self):
+                return object
+
+        cfg = SimpleNamespace(
+            tests=[_FakeTestCfg()],
+            explorer=SimpleNamespace(
+                target_modules=["tests._explore_target"],
+                seed=42,
+                max_checkpoints=32,
+                checkpoint_prob=0.4,
+                checkpoint_strategy="energy",
+                fault_toggle_prob=0.3,
+                ngram=2,
+                steps_per_run=10,
+                max_time=1.0,
+                max_runs=1,
+                workers=1,
+                rule_swarm=False,
+                seed_mutation_respect_strategies=False,
+            ),
+            report=SimpleNamespace(
+                format="text",
+                output="ordeal-report.json",
+                verbose=False,
+                traces=False,
+                traces_dir=".ordeal/traces",
+                corpus_dir=".ordeal/seeds",
+            ),
+        )
+
+        class _FakeExplorer:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def run(self, **kwargs):
+                return SimpleNamespace(
+                    seed_replays=[
+                        {"seed_name": "seed-fixed", "reproduced": False, "error": None},
+                        {
+                            "seed_name": "seed-bad",
+                            "reproduced": True,
+                            "error": "ValueError: boom",
+                        },
+                    ],
+                    failures=[],
+                    traces=[],
+                )
+
+        monkeypatch.setattr(cli, "load_config", lambda path: cfg)
+        monkeypatch.setattr(cli, "Explorer", _FakeExplorer)
+        monkeypatch.setattr(cli, "_print_report", lambda all_results, cfg: None)
+
+        assert main(["explore", "--config", "ordeal.toml"]) == 0
+        err = capsys.readouterr().err
+        assert "Seed replay: 1 fixed, 1 reproduced" in err
+        assert "fixed       seed-fixed" not in err
+        assert "REGRESSION  seed-bad" not in err
+
+        assert main(["explore", "--config", "ordeal.toml", "--verbose"]) == 0
+        err = capsys.readouterr().err
+        assert "fixed       seed-fixed" in err
+        assert "REGRESSION  seed-bad" in err
+
+    def test_explore_can_prune_fixed_seeds(self, monkeypatch, tmp_path, capsys):
+        fixed_seed = tmp_path / "seed-fixed.json"
+        fixed_seed.write_text("{}", encoding="utf-8")
+        live_seed = tmp_path / "seed-live.json"
+        live_seed.write_text("{}", encoding="utf-8")
+
+        class _FakeTestCfg:
+            class_path = "tests.fake:Chaos"
+            steps_per_run = None
+
+            def resolve(self):
+                return object
+
+        cfg = SimpleNamespace(
+            tests=[_FakeTestCfg()],
+            explorer=SimpleNamespace(
+                target_modules=[],
+                seed=42,
+                max_checkpoints=32,
+                checkpoint_prob=0.4,
+                checkpoint_strategy="energy",
+                fault_toggle_prob=0.3,
+                ngram=2,
+                steps_per_run=10,
+                max_time=1.0,
+                max_runs=1,
+                workers=1,
+                rule_swarm=False,
+                seed_mutation_respect_strategies=False,
+            ),
+            report=SimpleNamespace(
+                format="text",
+                output="ordeal-report.json",
+                verbose=False,
+                traces=False,
+                traces_dir=".ordeal/traces",
+                corpus_dir=str(tmp_path),
+            ),
+        )
+
+        class _FakeExplorer:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def run(self, **kwargs):
+                return SimpleNamespace(
+                    seed_replays=[
+                        {
+                            "seed_name": "seed-fixed",
+                            "path": str(fixed_seed),
+                            "reproduced": False,
+                            "error": None,
+                        },
+                        {
+                            "seed_name": "seed-live",
+                            "path": str(live_seed),
+                            "reproduced": True,
+                            "error": "ValueError: boom",
+                        },
+                    ],
+                    failures=[],
+                    traces=[],
+                )
+
+        monkeypatch.setattr(cli, "load_config", lambda path: cfg)
+        monkeypatch.setattr(cli, "Explorer", _FakeExplorer)
+        monkeypatch.setattr(cli, "_print_report", lambda all_results, cfg: None)
+
+        assert main(["explore", "--config", "ordeal.toml", "--prune-fixed-seeds"]) == 0
+        err = capsys.readouterr().err
+        assert "Pruned 1 fixed seed(s)." in err
+        assert not fixed_seed.exists()
+        assert live_seed.exists()
+
     def test_benchmark_reports_anytime_signal(self, monkeypatch, capsys):
         class _FakeTestCfg:
             class_path = "tests.fake:Chaos"

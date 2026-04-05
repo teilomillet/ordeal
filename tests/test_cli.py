@@ -1401,6 +1401,72 @@ scan_max_examples = 12
         assert "direct" in out
         assert "selected=no" in out
 
+    def test_scan_list_targets_marks_cli_target_selectors_on_package_root(
+        self,
+        capsys,
+    ):
+        rc = main(
+            [
+                "scan",
+                "ordeal",
+                "--list-targets",
+                "--target",
+                "mutate",
+                "--target",
+                "audit_*",
+            ]
+        )
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        mutate_line = next(
+            line for line in out.splitlines() if line.lstrip().startswith("mutate ")
+        )
+        scan_module_line = next(
+            line for line in out.splitlines() if line.lstrip().startswith("scan_module ")
+        )
+        assert "selected=yes" in mutate_line
+        assert "selected=no" in scan_module_line
+
+    def test_scan_cli_target_selectors_override_toml_targets(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "ordeal.toml").write_text(
+            "[[scan]]\n"
+            'module = "ordeal"\n'
+            'targets = ["fuzz"]\n',
+            encoding="utf-8",
+        )
+
+        calls: dict[str, object] = {}
+
+        def fake_explore(module: str, **kwargs):
+            calls["module"] = module
+            calls.update(kwargs)
+            return SimpleNamespace(
+                module=module,
+                confidence=0.0,
+                functions={},
+                supervisor_info={},
+                tree=SimpleNamespace(size=0),
+                findings=[],
+                frontier={},
+                skipped=[],
+            )
+
+        monkeypatch.setattr(ordeal_state, "explore", fake_explore)
+
+        rc = main(["scan", "ordeal", "--target", "mutate", "--target", "audit_*"])
+
+        assert rc == 0
+        assert calls["module"] == "ordeal"
+        assert calls["scan_targets"] == ["mutate", "audit_*"]
+        assert "Scanning ordeal" in capsys.readouterr().err
+
     def test_scan_list_targets_reports_state_factory_metadata(
         self,
         monkeypatch,
@@ -1850,6 +1916,101 @@ scan_max_examples = 12
         assert '"... +2 more item(s)"' in report
         assert "Regression test stub:" in report
         assert "replay_args['xs'] = first" in report
+        assert "Scan report saved:" in captured.err
+
+    def test_scan_report_file_renders_structured_proof_bundle(self, monkeypatch, tmp_path, capsys):
+        report_path = tmp_path / "scan-proof.md"
+        state = SimpleNamespace(
+            module="pkg.mod",
+            confidence=0.82,
+            functions={"divide": object()},
+            supervisor_info={"seed": 42, "trajectory_steps": 4},
+            tree=SimpleNamespace(size=2),
+            findings=["divide: crashes on realistic inputs"],
+            frontier={"divide": ["crash safety failed"]},
+            finding_details=[
+                {
+                    "kind": "crash",
+                    "category": "likely_bug",
+                    "function": "divide",
+                    "summary": "divide: crash safety failed",
+                    "error": "ZeroDivisionError: division by zero",
+                    "failing_args": {"a": 1.0, "b": 0.0},
+                    "replayable": True,
+                    "replay_attempts": 2,
+                    "replay_matches": 2,
+                    "contract_fit": 0.92,
+                    "reachability": 0.8,
+                    "realism": 1.0,
+                    "proof_bundle": {
+                        "version": 2,
+                        "witness": {"input": {"a": 1.0, "b": 0.0}, "source": "boundary"},
+                        "contract_basis": {
+                            "category": "likely_bug",
+                            "fit": 0.92,
+                            "reachability": 0.8,
+                            "realism": 1.0,
+                            "fixture_completeness": 1.0,
+                            "basis": ["b: reaches boundary mined from code"],
+                        },
+                        "confidence_breakdown": {
+                            "replayability": 1.0,
+                            "contract_fit": 0.92,
+                            "reachability": 0.8,
+                            "realism": 1.0,
+                            "fixture_completeness": 1.0,
+                            "replay_attempts": 2,
+                            "replay_matches": 2,
+                        },
+                        "minimal_reproduction": {
+                            "target": "pkg.mod:divide",
+                            "command": (
+                                "uv run ordeal scan pkg.mod --mode real_bug "
+                                "--targets pkg.mod:divide -n 1"
+                            ),
+                            "python_snippet": (
+                                "from importlib import import_module\n"
+                                "mod = import_module('pkg.mod')\n"
+                                "args = {'a': 1.0, 'b': 0.0}\n"
+                                "mod.divide(**args)"
+                            ),
+                            "direct_call_supported": True,
+                            "note": None,
+                        },
+                        "failure_path": {
+                            "target": "pkg.mod.divide",
+                            "error_type": "ZeroDivisionError",
+                            "error": "division by zero",
+                            "traceback": ["_auto_target.py:12:divide"],
+                        },
+                        "impact": {
+                            "summary": "valid inputs reach an unchecked divide-by-zero boundary",
+                            "class": "likely_bug",
+                            "sink_categories": [],
+                        },
+                        "verdict": {
+                            "category": "likely_bug",
+                            "promoted": True,
+                            "demotion_reason": None,
+                        },
+                    },
+                }
+            ],
+        )
+
+        monkeypatch.setattr(ordeal_state, "explore", lambda *args, **kwargs: state)
+
+        rc = main(["scan", "pkg.mod", "--report-file", str(report_path), "-n", "10"])
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        report = report_path.read_text()
+        assert "Contract basis:" in report
+        assert "Confidence breakdown:" in report
+        assert "Minimal reproduction:" in report
+        assert "Python snippet:" in report
+        assert "Failure path:" in report
+        assert "Likely impact: valid inputs reach an unchecked divide-by-zero boundary" in report
         assert "Scan report saved:" in captured.err
 
     def test_scan_write_regression_writes_pytest_file(self, monkeypatch, tmp_path, capsys):

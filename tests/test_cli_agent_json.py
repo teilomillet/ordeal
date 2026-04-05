@@ -115,6 +115,131 @@ class TestCLIAgentJson:
         assert payload["findings"][0]["details"]["category"] == "speculative_crash"
         assert payload["findings"][0]["details"]["replayable"] is False
 
+    def test_scan_json_replayable_speculative_crash_has_exploratory_summary(
+        self, monkeypatch, capsys
+    ):
+        state = SimpleNamespace(
+            module="pkg.mod",
+            confidence=0.31,
+            functions={"decode": object()},
+            supervisor_info={"seed": 42, "trajectory_steps": 1},
+            tree=SimpleNamespace(size=0),
+            findings=[],
+            frontier={"decode": ["crash replayed but not promoted"]},
+            finding_details=[
+                {
+                    "kind": "crash",
+                    "category": "speculative_crash",
+                    "function": "decode",
+                    "summary": "decode: replayable crash on semi-valid inputs, still exploratory",
+                    "error": "boom",
+                    "failing_args": {"x": 0},
+                    "replayable": True,
+                    "replay_attempts": 2,
+                    "replay_matches": 2,
+                }
+            ],
+        )
+        monkeypatch.setattr(ordeal_state, "explore", lambda *args, **kwargs: state)
+
+        rc = main(["scan", "pkg.mod", "--json", "-n", "10"])
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "exploratory"
+        assert (
+            payload["findings"][0]["summary"]
+            == "decode: replayable crash on semi-valid inputs, still exploratory"
+        )
+
+    def test_scan_json_includes_structured_proof_bundle_for_crash(self, monkeypatch, capsys):
+        state = SimpleNamespace(
+            module="pkg.mod",
+            confidence=0.82,
+            functions={"divide": object()},
+            supervisor_info={"seed": 42, "trajectory_steps": 4},
+            tree=SimpleNamespace(size=2),
+            findings=["divide: crashes on realistic inputs"],
+            frontier={"divide": ["crash safety failed"]},
+            finding_details=[
+                {
+                    "kind": "crash",
+                    "category": "likely_bug",
+                    "function": "divide",
+                    "summary": "divide: crash safety failed",
+                    "error": "ZeroDivisionError: division by zero",
+                    "failing_args": {"a": 1.0, "b": 0.0},
+                    "replayable": True,
+                    "replay_attempts": 2,
+                    "replay_matches": 2,
+                    "contract_fit": 0.92,
+                    "reachability": 0.8,
+                    "realism": 1.0,
+                    "proof_bundle": {
+                        "version": 2,
+                        "witness": {"input": {"a": 1.0, "b": 0.0}, "source": "boundary"},
+                        "contract_basis": {
+                            "category": "likely_bug",
+                            "fit": 0.92,
+                            "reachability": 0.8,
+                            "realism": 1.0,
+                            "fixture_completeness": 1.0,
+                            "basis": ["b: reaches boundary mined from code"],
+                        },
+                        "confidence_breakdown": {
+                            "replayability": 1.0,
+                            "contract_fit": 0.92,
+                            "reachability": 0.8,
+                            "realism": 1.0,
+                            "fixture_completeness": 1.0,
+                        },
+                        "minimal_reproduction": {
+                            "target": "pkg.mod:divide",
+                            "command": (
+                                "uv run ordeal scan pkg.mod --mode real_bug "
+                                "--targets pkg.mod:divide -n 1"
+                            ),
+                            "python_snippet": (
+                                "from importlib import import_module\n"
+                                "mod = import_module('pkg.mod')\n"
+                                "args = {'a': 1.0, 'b': 0.0}\n"
+                                "mod.divide(**args)"
+                            ),
+                            "direct_call_supported": True,
+                            "note": None,
+                        },
+                        "failure_path": {
+                            "target": "pkg.mod.divide",
+                            "error_type": "ZeroDivisionError",
+                            "error": "division by zero",
+                            "traceback": ["_auto_target.py:12:divide"],
+                        },
+                        "impact": {
+                            "summary": "valid inputs reach an unchecked divide-by-zero boundary",
+                            "class": "likely_bug",
+                            "sink_categories": [],
+                        },
+                        "verdict": {
+                            "category": "likely_bug",
+                            "promoted": True,
+                            "demotion_reason": None,
+                        },
+                    },
+                }
+            ],
+        )
+        monkeypatch.setattr(ordeal_state, "explore", lambda *args, **kwargs: state)
+
+        rc = main(["scan", "pkg.mod", "--json", "-n", "10"])
+
+        assert rc == 1
+        payload = json.loads(capsys.readouterr().out)
+        proof = payload["findings"][0]["details"]["proof_bundle"]
+        assert proof["version"] == 2
+        assert proof["verdict"]["promoted"] is True
+        assert proof["confidence_breakdown"]["contract_fit"] == 0.92
+        assert proof["minimal_reproduction"]["target"] == "pkg.mod:divide"
+
     def test_mine_json_outputs_agent_envelope(self, monkeypatch, capsys):
         result = MineResult(
             function="normalize",
@@ -255,6 +380,39 @@ class TestCLIAgentJson:
         assert env_row["factory_required"] is True
         assert env_row["factory_configured"] is True
         assert env_row["selected"] is True
+
+    def test_scan_json_list_targets_expands_package_root_lazy_exports(self, capsys):
+        rc = main(["scan", "ordeal", "--json", "--list-targets"])
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        rows = payload["raw_details"]["targets"]
+        names = {row["name"] for row in rows}
+        assert "scan_module" in names
+        assert "fuzz" in names
+        assert "mutate" in names
+
+    def test_scan_json_list_targets_marks_selected_rows_for_cli_target_selectors(self, capsys):
+        rc = main(
+            [
+                "scan",
+                "ordeal",
+                "--json",
+                "--list-targets",
+                "--target",
+                "mutate",
+                "--target",
+                "audit_*",
+            ]
+        )
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        rows = payload["raw_details"]["targets"]
+        by_name = {row["name"]: row for row in rows}
+        assert by_name["mutate"]["selected"] is True
+        assert by_name["audit_report"]["selected"] is True
+        assert by_name["scan_module"]["selected"] is False
 
     def test_audit_json_list_targets_outputs_callable_metadata(
         self, monkeypatch, tmp_path, capsys

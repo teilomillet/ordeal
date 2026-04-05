@@ -85,7 +85,7 @@ Declare modules for auto-scan testing. The pytest plugin auto-collects these and
 |---|---|---|---|
 | `module` | `str` | required | Dotted module path to scan |
 | `max_examples` | `int` | `50` | Hypothesis examples per function |
-| `targets` | `list[str]` | `[]` | Optional explicit callable targets such as `pkg.mod:Env.build_env_vars` |
+| `targets` | `list[str]` | `[]` | Optional callable selectors such as `score`, `Env.*`, or `pkg.mod:Env.build_env_vars` |
 | `include_private` | `bool` | `false` | Include single-underscore callables |
 | `fixtures` | `dict[str, str]` | `{}` | Strategy specs for untyped parameters, such as comma-separated `sampled_from` values |
 | `expected_failures` | `list[str]` | `[]` | Function names whose failure is expected behavior |
@@ -113,6 +113,10 @@ relation_overrides = { normalize = ["equivalent"] }
 ```
 
 When you run `pytest --chaos`, ordeal auto-discovers these entries and smoke-tests every public function in each module. Functions without type hints are skipped unless fixtures are provided or a registry supplies them. Known preconditions stay separate from likely bugs so the output stays epistemic.
+
+`targets` now acts as a first-class selector list, not just an exact-callable allowlist. Exact names still work, and glob patterns let package-root scans focus on a subset of exported callables without rewriting the module target.
+
+When `proof_bundles = true` (the default), promoted crash findings also carry a structured witness, contract basis, confidence breakdown, minimal reproduction, failure path, and likely-impact summary in the saved report and JSON bundle.
 
 ### `[[objects]]`
 

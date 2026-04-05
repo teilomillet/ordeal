@@ -69,6 +69,7 @@ Explore one module and optionally save reports, regressions, or the full bug bun
 ```bash
 ordeal scan myapp.scoring
 ordeal scan myapp.scoring --json
+ordeal scan ordeal --target mutate --target "audit_*"
 ordeal scan myapp.scoring --report-file findings/scoring.md
 ordeal scan myapp.scoring --write-regression
 ordeal scan myapp.scoring --save-artifacts
@@ -78,13 +79,16 @@ Use `--save-artifacts` when you want the full handoff package: `.ordeal/findings
 
 `scan` promotes replayable crashes as likely bugs and keeps the rest of the evidence exploratory. That includes unreplayed crashes, weaker mined properties, and expected precondition failures. If `[[scan]]` or `[[objects]]` leave fixture completeness too low for the module, `scan` will report that as a block instead of pretending it has real leverage. In that case, add a factory, `state_factory`, or `harness = "stateful"` before expecting useful output. If you need stronger validation for a mature codebase, prefer `ordeal audit` for coverage and mutation comparison, and `ordeal mutate` for direct mutation scoring.
 
-Use `--list-targets` when you want to inspect how ordeal sees functions and methods before choosing a target. The listing shows the callable kind, whether it is async or sync, whether a factory is required or configured, and any skip reason if ordeal cannot run it yet.
+Promoted crash findings now carry a proof bundle in Markdown, JSON, and agent output: witness input, contract basis, confidence breakdown, minimal reproduction, failure path, and likely impact. Demoted crashes keep the same structure plus an explicit demotion reason.
+
+Use `--list-targets` when you want to inspect how ordeal sees functions and methods before choosing a target. The listing shows the callable kind, whether it is async or sync, whether a factory is required or configured, and any skip reason if ordeal cannot run it yet. Use `--target` to limit a module scan to one or more callable selectors. Selectors accept local names, explicit targets, and globs like `mutate`, `Env.*`, or `ordeal:mut*`.
 
 Most of the tuning knobs for `scan` live in `[[scan]]` inside `ordeal.toml`. Use `[fixtures].registries` for project-wide fixture registrations, `fixture_registries` for scan-specific registry imports, `ignore_properties` and `ignore_relations` to suppress noisy laws, and `property_overrides` or `relation_overrides` when one function needs a narrower set of checks. `expected_failures` keeps known preconditions from being promoted as bugs. For stateful OO code, `[[objects]]` supplies bound-instance factories, `state_factory`, `teardown`, and `harness = "stateful"` when a class needs persistent lifecycle setup; `[[contracts]]` adds explicit shell/path/env probes.
 
 | Flag | Default | Description |
 |---|---|---|
 | `target` | required | Module path or explicit callable target such as `myapp.scoring` or `myapp.scoring:Env.build_env_vars` |
+| `--target` | `[]` | Repeatable callable selector filter for module scans; accepts exact names, explicit targets, or glob patterns |
 | `--seed` | `42` | RNG seed for reproducibility |
 | `--max-examples`, `-n` | `50` | Examples per function |
 | `--workers`, `-w` | `1` | Parallel workers for mutation testing |

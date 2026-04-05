@@ -61,6 +61,26 @@ class TestExplorationStateSerialization:
         assert restored.functions["normalize"].scan_crash_category == "likely_bug"
         assert restored.functions["flaky"].scan_crash_category == "speculative_crash"
 
+    def test_replayable_speculative_crash_stays_exploratory_but_not_unreplayed(self):
+        state = ExplorationState("pkg.mod")
+
+        replayed = state.function("decode")
+        replayed.scanned = True
+        replayed.crash_free = False
+        replayed.scan_error = "boom"
+        replayed.scan_replayable = True
+        replayed.scan_crash_category = "speculative_crash"
+
+        assert (
+            "decode: replayable crash on semi-valid inputs, still exploratory"
+            in state.exploratory_findings
+        )
+        detail = next(item for item in state.finding_details if item["function"] == "decode")
+        assert (
+            detail["summary"]
+            == "decode: replayable crash on semi-valid inputs, still exploratory"
+        )
+
     def test_finding_details_preserve_scan_evidence_payloads(self):
         state = ExplorationState("pkg.mod")
         fs = state.function("render")

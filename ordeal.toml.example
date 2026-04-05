@@ -118,9 +118,9 @@ verbose = true
 # max_examples = 50
 # include_private = false
 #
-# # Optional: focus scan on explicit OO/stateful targets instead of the whole
-# # module surface.
-# targets = ["myapp.scoring:Scorer.score", "myapp.scoring:Scorer.normalize"]
+# # Optional: focus scan on a subset of callables instead of the whole module
+# # surface. Exact names and glob selectors both work.
+# targets = ["myapp.scoring:Scorer.score", "normalize", "Scorer.*"]
 #
 # # Load project-specific fixture registrations from importable modules that
 # # call register_fixture(). This supplements local conftest.py discovery.

@@ -295,6 +295,7 @@ def _callable_listing_rows(
         _REGISTERED_OBJECT_SETUPS,
         _REGISTERED_OBJECT_STATE_FACTORIES,
         _REGISTERED_OBJECT_TEARDOWNS,
+        _callable_matches_target_selector,
         _infer_strategies,
         _mine_object_harness_hints,
         _resolve_module,
@@ -335,19 +336,7 @@ def _callable_listing_rows(
         object_teardowns=merged_teardowns,
         object_harnesses=merged_harnesses,
     )
-    selected_names: set[str] = set()
-    for raw_target in selected_targets or ():
-        raw = str(raw_target)
-        if ":" in raw:
-            base_module, explicit = raw.split(":", 1)
-            if base_module == module_name:
-                selected_names.add(explicit)
-            continue
-        dotted_prefix = f"{module_name}."
-        if raw.startswith(dotted_prefix):
-            selected_names.add(raw[len(dotted_prefix) :])
-        else:
-            selected_names.add(raw)
+    selectors = [str(raw).strip() for raw in selected_targets or () if str(raw).strip()]
 
     rows: list[dict[str, Any]] = []
     for name, func in discovered:
@@ -424,7 +413,14 @@ def _callable_listing_rows(
                 "target": f"{module_name}.{name}",
                 "kind": kind,
                 "async": _callable_listing_async_state(func),
-                "selected": not selected_names or name in selected_names,
+                "selected": (
+                    True
+                    if not selectors
+                    else any(
+                        _callable_matches_target_selector(module_name, name, selector)
+                        for selector in selectors
+                    )
+                ),
                 "factory_required": factory_required,
                 "factory_configured": factory_configured,
                 "setup_configured": setup_configured,
@@ -439,6 +435,20 @@ def _callable_listing_rows(
                 "runnable": skip_reason is None,
                 "skip_reason": skip_reason,
             }
+        )
+
+    unmatched_selectors = [
+        selector
+        for selector in selectors
+        if not any(
+            _callable_matches_target_selector(module_name, str(row.get("name", "")), selector)
+            for row in rows
+        )
+    ]
+    if unmatched_selectors:
+        missing = ", ".join(repr(selector) for selector in unmatched_selectors)
+        raise ValueError(
+            f"target selector(s) {missing} matched no callables in module {module_name!r}"
         )
 
     return rows
@@ -1871,6 +1881,16 @@ def _check_contract_names(args: argparse.Namespace) -> list[str]:
     return names
 
 
+def _scan_target_selectors(args: argparse.Namespace) -> list[str]:
+    """Normalize repeated ``--target`` selector values for ``scan``."""
+    selectors: list[str] = []
+    for raw in list(getattr(args, "scan_targets", []) or []):
+        selector = str(raw).strip()
+        if selector and selector not in selectors:
+            selectors.append(selector)
+    return selectors
+
+
 def _build_explicit_contract_checks(func: Any, names: Sequence[str]) -> list[Any]:
     """Build direct built-in contract checks for one resolved callable."""
     from ordeal.auto import _boundary_smoke_inputs, _unwrap, builtin_contract_check
@@ -2063,7 +2083,15 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         else runtime_defaults.min_realism
     )
     explicit_target = ":" in scan_target
-    scan_targets = [scan_target] if explicit_target else list(runtime_defaults.targets)
+    cli_target_selectors = _scan_target_selectors(args)
+    if explicit_target and cli_target_selectors:
+        _stderr("Cannot combine an explicit callable target with --target selectors.\n")
+        return 2
+    scan_targets = (
+        [scan_target]
+        if explicit_target
+        else list(cli_target_selectors or runtime_defaults.targets)
+    )
     inc_private = bool(getattr(args, "include_private", False) or runtime_defaults.include_private)
     scan_ignore_properties = _merge_unique_strings(
         runtime_defaults.ignore_properties,
@@ -3343,7 +3371,9 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
                         "module": module,
                         "function": function.name,
                         "qualname": qualname,
-                        "summary": f"{qualname}: crash safety failed",
+                        "summary": _scan_crash_summary(
+                            qualname, "likely_bug", function.replayable
+                        ),
                         "error": function.error,
                         "failing_args": function.failing_args,
                         "contract_fit": function.contract_fit,
@@ -3362,14 +3392,8 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
                         "module": module,
                         "function": function.name,
                         "qualname": qualname,
-                        "summary": (
-                            f"{qualname}: crash still looks like a coverage gap"
-                            if crash_category == "coverage_gap"
-                            else (
-                                f"{qualname}: crash currently looks driven by invalid input"
-                                if crash_category == "invalid_input_crash"
-                                else f"{qualname}: unreplayed crash on random inputs"
-                            )
+                        "summary": _scan_crash_summary(
+                            qualname, crash_category, function.replayable
                         ),
                         "error": function.error,
                         "failing_args": function.failing_args,
@@ -4577,17 +4601,50 @@ def _append_proof_bundle(lines: list[str], detail: dict[str, Any]) -> None:
     proof = detail.get("proof_bundle")
     if not isinstance(proof, Mapping):
         return
-    witness = proof.get("valid_input_witness")
-    failing_path = proof.get("failing_path")
-    impact = proof.get("likely_impact")
+    witness = proof.get("witness") or proof.get("valid_input_witness")
+    contract_basis = proof.get("contract_basis")
+    confidence_breakdown = proof.get("confidence_breakdown")
+    reproduction = proof.get("minimal_reproduction") or proof.get("reproduction")
+    failure_path = proof.get("failure_path") or proof.get("failing_path")
+    impact = proof.get("impact") or proof.get("likely_impact")
+    verdict = proof.get("verdict")
     if witness:
         lines.extend(["", "Proof bundle:"])
         lines.extend(_json_block(witness))
-    if failing_path:
-        lines.extend(["", "Failing path:"])
-        lines.extend(_json_block(failing_path))
+    if contract_basis:
+        lines.extend(["", "Contract basis:"])
+        lines.extend(_json_block(contract_basis))
+    if confidence_breakdown:
+        lines.extend(["", "Confidence breakdown:"])
+        lines.extend(_json_block(confidence_breakdown))
+    if reproduction:
+        lines.extend(["", "Minimal reproduction:"])
+        if isinstance(reproduction, Mapping):
+            rendered = dict(reproduction)
+            snippet = rendered.pop("python_snippet", None)
+            if rendered:
+                lines.extend(_json_block(rendered))
+            if snippet:
+                lines.extend(["", "Python snippet:"])
+                lines.extend(_python_block(str(snippet)))
+        else:
+            lines.extend(_json_block(reproduction))
+    if failure_path:
+        lines.extend(["", "Failure path:"])
+        lines.extend(_json_block(failure_path))
     if impact:
-        lines.append(f"- Likely impact: {impact}")
+        if isinstance(impact, Mapping):
+            summary = impact.get("summary")
+            if summary:
+                lines.append(f"- Likely impact: {summary}")
+            extra = {key: value for key, value in impact.items() if key != "summary"}
+            if extra:
+                lines.extend(["", "Impact details:"])
+                lines.extend(_json_block(extra))
+        else:
+            lines.append(f"- Likely impact: {impact}")
+    if isinstance(verdict, Mapping) and verdict.get("demotion_reason"):
+        lines.append(f"- Demotion reason: {verdict['demotion_reason']}")
 
 
 def _render_finding_section(detail: dict[str, Any]) -> list[str]:
@@ -5231,6 +5288,19 @@ def _detail_confidence(detail: Mapping[str, Any]) -> float | None:
         except (TypeError, ValueError):
             return None
     return None
+
+
+def _scan_crash_summary(qualname: str, category: str, replayable: bool | None) -> str:
+    """Return the CLI summary string for one scan crash."""
+    if category == "likely_bug":
+        return f"{qualname}: crash safety failed"
+    if category == "coverage_gap":
+        return f"{qualname}: crash still looks like a coverage gap"
+    if category == "invalid_input_crash":
+        return f"{qualname}: crash currently looks driven by invalid input"
+    if replayable:
+        return f"{qualname}: replayable crash on semi-valid inputs, still exploratory"
+    return f"{qualname}: unreplayed crash on random inputs"
 
 
 def _detail_location(detail: Mapping[str, Any]) -> str | None:
@@ -6691,6 +6761,8 @@ def _scan_command_description() -> str:
         "For stronger signals on a mature codebase, prefer `ordeal audit` and `ordeal mutate`.\n"
         "Use `--list-targets` to inspect how ordeal sees functions, methods, async callables,\n"
         " and whether object factories are configured.\n"
+        "Use `--target` to limit module scans to specific callable selectors or globs such as\n"
+        " `mutate`, `Env.*`, or `pkg.mod:Env.run`.\n"
         "Use `--ignore-property`, `--ignore-relation`, `--property-override`, and\n"
         " `--relation-override` to suppress noisy mined signals without changing code.\n"
         "Use explicit targets like `pkg.mod:Env.build_env_vars`, shared `[[objects]]`,\n"
@@ -6803,7 +6875,25 @@ def _command_specs() -> tuple[CommandSpec, ...]:
             description=_scan_command_description,
             formatter_class=argparse.RawDescriptionHelpFormatter,
             arguments=(
-                _arg("target", help="Module path (e.g. myapp.scoring)"),
+                _arg(
+                    "target",
+                    help=(
+                        "Module or explicit callable target "
+                        "(e.g. myapp.scoring or myapp:Env.run)"
+                    ),
+                ),
+                _arg(
+                    "--target",
+                    dest="scan_targets",
+                    action="append",
+                    default=None,
+                    metavar="SELECTOR",
+                    help=(
+                        "Limit a module scan to callable selector(s); accepts local names, "
+                        "explicit targets, or glob patterns like mutate, Env.*, or ordeal:mut* "
+                        "(repeatable)"
+                    ),
+                ),
                 _arg(
                     "--seed",
                     type=int,

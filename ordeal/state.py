@@ -58,6 +58,19 @@ def _json_ready(value: Any) -> Any:
     return repr(value)
 
 
+def _crash_summary(name: str, category: str, replayable: bool | None) -> str:
+    """Return the human-facing summary for one scan crash category."""
+    if category == "likely_bug":
+        return f"{name}: crashes on realistic inputs"
+    if category == "coverage_gap":
+        return f"{name}: plausible crash but evidence still looks like a gap"
+    if category == "invalid_input_crash":
+        return f"{name}: crash currently looks driven by invalid input"
+    if replayable:
+        return f"{name}: replayable crash on semi-valid inputs, still exploratory"
+    return f"{name}: unreplayed crash on random inputs"
+
+
 @dataclass
 class FunctionState:
     """Exploration state for a single function."""
@@ -315,7 +328,7 @@ class ExplorationState:
                 elif category == "invalid_input_crash":
                     results.append(f"{name}: crash currently looks driven by invalid input")
                 else:
-                    results.append(f"{name}: unreplayed crash on random inputs")
+                    results.append(_crash_summary(name, category, fs.scan_replayable))
             for v in fs.property_violations:
                 results.append(f"{name}: {v}")
             for note in fs.contract_violations:
@@ -335,17 +348,7 @@ class ExplorationState:
                         "category": category,
                         "function": name,
                         "summary": (
-                            f"{name}: crashes on realistic inputs"
-                            if category == "likely_bug"
-                            else (
-                                f"{name}: plausible crash but evidence still looks like a gap"
-                                if category == "coverage_gap"
-                                else (
-                                    f"{name}: crash currently looks driven by invalid input"
-                                    if category == "invalid_input_crash"
-                                    else f"{name}: unreplayed crash on random inputs"
-                                )
-                            )
+                            _crash_summary(name, category, fs.scan_replayable)
                         ),
                         "error": fs.scan_error,
                         "failing_args": fs.failing_args,

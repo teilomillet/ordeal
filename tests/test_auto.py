@@ -2,16 +2,26 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 import sys
 import types
 from pathlib import Path
 
 import hypothesis.strategies as st
+import pytest
 
+import ordeal
 import ordeal.auto as auto_mod
 import tests._auto_target as target
-from ordeal.auto import ContractCheck, _test_one_function, chaos_for, fuzz, scan_module
+from ordeal.auto import (
+    ContractCheck,
+    _get_public_functions,
+    _test_one_function,
+    chaos_for,
+    fuzz,
+    scan_module,
+)
 from ordeal.invariants import finite
 from ordeal.mine import MinedProperty
 
@@ -226,6 +236,50 @@ class TestScanModule:
             assert "direct" in names
             assert "Env.build_env_vars" in names
             assert "PhantomExport" not in names
+        finally:
+            del sys.modules[mod.__name__]
+
+    def test_target_selectors_filter_scan_module_by_exact_and_glob_names(self):
+        import sys
+        import types
+
+        mod = types.ModuleType("_test_target_selectors")
+        exec(
+            "def alpha(x: int) -> int:\n"
+            "    return x\n"
+            "\n"
+            "def beta(x: int) -> int:\n"
+            "    return x\n"
+            "\n"
+            "def gamma(x: int) -> int:\n"
+            "    return x\n",
+            mod.__dict__,
+        )
+        sys.modules[mod.__name__] = mod
+        try:
+            result = scan_module(mod, max_examples=2, targets=["a*", "gamma"])
+            assert [f.name for f in result.functions] == ["alpha", "gamma"]
+            assert result.skipped == []
+        finally:
+            del sys.modules[mod.__name__]
+
+    def test_target_selector_error_is_explicit_when_no_callables_match(self):
+        import sys
+        import types
+
+        mod = types.ModuleType("_test_target_selector_error")
+        exec(
+            "def alpha(x: int) -> int:\n"
+            "    return x\n",
+            mod.__dict__,
+        )
+        sys.modules[mod.__name__] = mod
+        try:
+            with pytest.raises(
+                ValueError,
+                match="target selector 'omega\\*' matched no callables",
+            ):
+                scan_module(mod, max_examples=1, targets=["omega*"])
         finally:
             del sys.modules[mod.__name__]
 
@@ -663,9 +717,24 @@ class TestScanModule:
             assert command.passed
             assert command.contract_violations
             assert command.contract_violation_details[0]["category"] == "semantic_contract"
+            proof = command.contract_violation_details[0]["proof_bundle"]
+            assert proof["version"] == 2
+            assert proof["verdict"]["promoted"] is True
+            assert proof["minimal_reproduction"]["command"] == (
+                "uv run ordeal check _test_contracts:build_command"
+                " --contract shell-safe path quoting"
+            )
             assert result.failed == 0
         finally:
             del sys.modules[mod.__name__]
+
+    def test_package_root_discovery_includes_lazy_exported_callables(self):
+        discovered = {name for name, _ in _get_public_functions(ordeal)}
+
+        assert "scan_module" in discovered
+        assert "fuzz" in discovered
+        assert "mutate" in discovered
+        assert "auto_configure" in discovered
 
     def test_filters_low_signal_property_warnings(self, monkeypatch):
         import ordeal.mine as mine_mod
@@ -711,8 +780,17 @@ class TestScanModule:
         assert divide_result.replay_matches == 2
         assert divide_result.crash_category == "likely_bug"
         assert divide_result.proof_bundle is not None
+        assert divide_result.proof_bundle["version"] == 2
+        assert divide_result.proof_bundle["verdict"]["promoted"] is True
+        assert divide_result.proof_bundle["contract_basis"]["category"] == "likely_bug"
+        assert divide_result.proof_bundle["confidence_breakdown"]["replayability"] == 1.0
+        assert divide_result.proof_bundle["minimal_reproduction"]["direct_call_supported"] is True
+        assert "import_module('tests._auto_target')" in (
+            divide_result.proof_bundle["minimal_reproduction"]["python_snippet"]
+        )
         assert divide_result.proof_bundle["valid_input_witness"]["source"] == "boundary"
         assert divide_result.proof_bundle["reproduction"]["replay_matches"] == 2
+        json.dumps(divide_result.proof_bundle)
 
     def test_marks_unreplayed_crashes_as_speculative(self):
         calls = iter(range(10_000))
@@ -752,6 +830,7 @@ class TestScanModule:
         assert result.crash_category == "invalid_input_crash"
         assert result.proof_bundle is not None
         assert result.proof_bundle["contract_validity"]["category"] == "invalid_input_crash"
+        assert result.proof_bundle["verdict"]["demotion_reason"] is not None
 
     def test_ignore_properties_suppresses_noisy_scan_warnings(self, monkeypatch):
         import ordeal.mine as mine_mod
@@ -1350,3 +1429,24 @@ class TestLiteralInScan:
             assert "choose" not in skipped_names
         finally:
             del sys.modules["_test_literal_scan"]
+
+    def test_literal_param_crash_is_ranked_without_type_error(self):
+        import sys
+        import types
+
+        mod = types.ModuleType("_test_literal_scan_crash")
+        exec(
+            "from typing import Literal\n"
+            'def choose(opt: Literal["a", "b"]) -> str:\n'
+            "    raise RuntimeError('boom')\n",
+            mod.__dict__,
+        )
+        sys.modules["_test_literal_scan_crash"] = mod
+        try:
+            result = scan_module("_test_literal_scan_crash", max_examples=1, mode="real_bug")
+            choose = next(f for f in result.functions if f.name == "choose")
+            assert choose.passed is False
+            assert choose.error_type == "RuntimeError"
+            assert choose.proof_bundle is not None
+        finally:
+            del sys.modules["_test_literal_scan_crash"]

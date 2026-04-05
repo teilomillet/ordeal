@@ -24,6 +24,7 @@ import asyncio
 import builtins
 import contextlib
 import copy
+import fnmatch
 import functools
 import importlib
 import importlib.util
@@ -36,6 +37,7 @@ import traceback
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from pprint import pformat
 from types import ModuleType
 from typing import Any, Callable, Literal, Union, get_args, get_origin
 
@@ -985,6 +987,21 @@ def _traceback_path(exc: BaseException) -> list[str]:
     for frame in traceback.extract_tb(exc.__traceback__):
         frames.append(f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}")
     return frames[-6:]
+
+
+def _json_ready_proof(value: Any) -> Any:
+    """Convert proof-bundle payloads into JSON-friendly structures."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, os.PathLike):
+        return os.fspath(value)
+    if isinstance(value, type):
+        return f"{value.__module__}.{value.__qualname__}"
+    if isinstance(value, Mapping):
+        return {str(key): _json_ready_proof(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_json_ready_proof(item) for item in value]
+    return repr(value)
 
 
 def _sink_likely_impact(sink_categories: Sequence[str], exc: BaseException) -> str:
@@ -2246,22 +2263,33 @@ def _selected_public_functions(
     discovered_map = {name: func for name, func in discovered}
     selected: list[tuple[str, Any]] = []
     seen: set[str] = set()
-    module_prefix = f"{mod.__name__}."
 
     for raw_target in targets:
         target = str(raw_target).strip()
         if not target:
             continue
-        if target in discovered_map:
-            name = target
-            func = discovered_map[target]
-        elif target.startswith(module_prefix) and target[len(module_prefix) :] in discovered_map:
-            name = target[len(module_prefix) :]
-            func = discovered_map[name]
-        elif ":" in target:
+        if ":" in target:
             base_module = target.split(":", 1)[0]
             if base_module != mod.__name__:
                 raise ValueError(f"target {target!r} does not belong to module {mod.__name__!r}")
+
+        matched_names = [
+            name
+            for name in discovered_map
+            if _callable_matches_target_selector(mod.__name__, name, target)
+        ]
+        if matched_names:
+            for name in matched_names:
+                if name in seen:
+                    continue
+                seen.add(name)
+                selected.append((name, discovered_map[name]))
+            continue
+
+        if target in discovered_map:
+            name = target
+            func = discovered_map[target]
+        elif ":" in target:
             name, func = _resolve_explicit_target(
                 target,
                 object_factories=object_factories,
@@ -2272,13 +2300,28 @@ def _selected_public_functions(
                 object_harnesses=object_harnesses,
             )
         else:
-            raise ValueError(f"target {target!r} was not discovered in module {mod.__name__!r}")
+            raise ValueError(
+                f"target selector {target!r} matched no callables in module {mod.__name__!r}"
+            )
 
         if name in seen:
             continue
         seen.add(name)
         selected.append((name, func))
     return selected
+
+
+def _callable_matches_target_selector(module_name: str, name: str, selector: str) -> bool:
+    """Return whether *selector* matches discovered callable *name*."""
+    raw_selector = str(selector).strip()
+    if not raw_selector:
+        return False
+    variants = (
+        name,
+        f"{module_name}.{name}",
+        f"{module_name}:{name}",
+    )
+    return any(fnmatch.fnmatchcase(variant, raw_selector) for variant in variants)
 
 
 def _command_tokens(value: Any) -> list[str] | None:
@@ -2852,8 +2895,10 @@ def _get_public_functions(
     placeholder callables that report a missing object factory.
 
     Discovery is based on the module's own ``__dict__`` and class
-    ``__dict__`` entries so lazy package exports do not become accidental
-    scan targets or raise ``AttributeError`` during iteration.
+    ``__dict__`` entries for normal modules. Package targets also include
+    public callable exports visible via ``dir()`` when they resolve back
+    into the same package namespace, so lazy-exported APIs such as
+    ``ordeal.scan_module`` remain discoverable from the package root.
 
     Decorated functions (``@ray.remote``, ``@functools.wraps``, etc.)
     are auto-unwrapped so that ``mine()``, ``fuzz()``, and ``scan_module()``
@@ -2879,14 +2924,37 @@ def _get_public_functions(
         merged_harnesses.update(object_harnesses)
 
     results: list[tuple[str, Any]] = []
-    for name, obj in sorted(vars(mod).items()):
+    package_prefix = f"{mod.__name__}."
+    is_package = bool(getattr(mod, "__path__", None))
+    items: dict[str, Any] = dict(sorted(vars(mod).items()))
+    if is_package:
+        for name in sorted(dir(mod)):
+            if name.startswith("__"):
+                continue
+            if name.startswith("_") and not include_private:
+                continue
+            if name in items:
+                continue
+            try:
+                obj = getattr(mod, name)
+            except Exception:
+                continue
+            obj_mod = getattr(obj, "__module__", None)
+            if obj_mod == mod.__name__ or (
+                isinstance(obj_mod, str) and obj_mod.startswith(package_prefix)
+            ):
+                items[name] = obj
+
+    for name, obj in items.items():
         if name.startswith("__"):
             continue
         if name.startswith("_") and not include_private:
             continue
         if callable(obj) and not isinstance(obj, type):
             obj_mod = getattr(obj, "__module__", None)
-            if obj_mod and obj_mod != mod.__name__:
+            if obj_mod and obj_mod != mod.__name__ and not (
+                is_package and isinstance(obj_mod, str) and obj_mod.startswith(package_prefix)
+            ):
                 continue
             target = _unwrap(obj)
             if inspect.iscoroutinefunction(target):
@@ -2899,7 +2967,8 @@ def _get_public_functions(
             else:
                 results.append((name, target))
             continue
-        if not inspect.isclass(obj) or getattr(obj, "__module__", None) != mod.__name__:
+        obj_mod = getattr(obj, "__module__", None)
+        if not inspect.isclass(obj) or obj_mod != mod.__name__:
             continue
 
         for meth_name, static_attr in sorted(vars(obj).items()):
@@ -3765,6 +3834,8 @@ def _type_matches(value: Any, expected: type) -> bool:
     if expected is type(None):
         return value is None
     origin = get_origin(expected)
+    if origin is Literal:
+        return any(value == option for option in get_args(expected))
     # Union[str, None] or str | None — check each member
     is_union = origin is Union or (
         hasattr(pytypes, "UnionType") and isinstance(expected, pytypes.UnionType)
@@ -4086,10 +4157,209 @@ def _likely_impact(category: str, sink_signal: float) -> str:
     return "the function crashes on an input that matches the inferred contract."
 
 
+def _proof_target_qualname(qualname: str, profile: Mapping[str, Any]) -> str:
+    """Return the fully qualified target name for a proof bundle."""
+    module_name = str(profile.get("module") or "").strip()
+    if not module_name or qualname.startswith(f"{module_name}."):
+        return qualname
+    return f"{module_name}.{qualname}"
+
+
+def _proof_supporting_evidence(
+    failing_args: Mapping[str, Any],
+    profile: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Return structured contract evidence for the failing witness."""
+    params = profile.get("params", {})
+    evidence: list[dict[str, Any]] = []
+    for name, value in failing_args.items():
+        meta = params.get(name, {})
+        parameter_evidence: list[dict[str, Any]] = []
+        hint = meta.get("hint")
+        weak_hint = bool(meta.get("weak_hint"))
+        observed_types = list(meta.get("observed_types", []))
+        comparison_values = list(meta.get("comparison_values", []))
+        semantic = str(meta.get("semantic", "generic"))
+        if hint is not None and not weak_hint:
+            parameter_evidence.append(
+                {
+                    "kind": "type_hint",
+                    "detail": _json_ready_proof(hint),
+                }
+            )
+        elif weak_hint:
+            parameter_evidence.append(
+                {
+                    "kind": "weak_type_hint",
+                    "detail": _json_ready_proof(hint),
+                }
+            )
+        if observed_types:
+            parameter_evidence.append(
+                {
+                    "kind": "observed_types",
+                    "detail": list(observed_types),
+                    "matched": type(value).__name__ in observed_types,
+                }
+            )
+        if comparison_values and value in comparison_values:
+            parameter_evidence.append(
+                {
+                    "kind": "boundary_value",
+                    "detail": _json_ready_proof(value),
+                }
+            )
+        if meta.get("doc_mentions"):
+            parameter_evidence.append(
+                {
+                    "kind": "docstring",
+                    "detail": f"{name} is mentioned in the callable docstring",
+                }
+            )
+        if semantic != "generic":
+            parameter_evidence.append(
+                {
+                    "kind": "semantic_shape",
+                    "detail": semantic,
+                }
+            )
+        evidence.append(
+            {
+                "parameter": name,
+                "value": _json_ready_proof(value),
+                "value_type": type(value).__name__,
+                "checks": parameter_evidence,
+            }
+        )
+    return evidence
+
+
+def _profile_fixture_completeness(profile: Mapping[str, Any]) -> float:
+    """Estimate how well the inferred profile covers the callable inputs."""
+    params = profile.get("params", {})
+    if not params:
+        return 1.0
+    scores: list[float] = []
+    for meta in params.values():
+        hint = meta.get("hint")
+        weak_hint = bool(meta.get("weak_hint"))
+        has_runtime_evidence = bool(
+            meta.get("observed_types") or meta.get("comparison_values") or meta.get("doc_mentions")
+        )
+        has_strong_hint = hint is not None and hint is not Any and not weak_hint
+        if has_runtime_evidence:
+            scores.append(1.0)
+        elif has_strong_hint:
+            scores.append(0.6)
+        elif weak_hint:
+            scores.append(0.2)
+        else:
+            scores.append(0.0)
+    completeness = sum(scores) / len(scores)
+    if any(
+        getattr(example, "source", None) in {"test", "fixture", "pytest_seed", "call_site"}
+        for example in profile.get("seed_examples", [])
+    ):
+        completeness = min(completeness + 0.1, 1.0)
+    return completeness
+
+
+def _proof_demotion_reason(
+    *,
+    category: str,
+    replayable: bool,
+    contract_fit: float,
+    reachability: float,
+    realism: float,
+    min_contract_fit: float,
+    min_reachability: float,
+    min_realism: float,
+) -> str | None:
+    """Return the concrete reason a finding was not promoted as a real bug."""
+    if category in {"likely_bug", "semantic_contract", "lifecycle_contract"}:
+        return None
+    if category == "expected_precondition_failure":
+        return "the raised exception matches a documented precondition instead of a bug."
+    reasons: list[str] = []
+    if not replayable:
+        reasons.append("replay did not confirm the failure")
+    if contract_fit < min_contract_fit:
+        reasons.append(
+            "contract fit stayed below the promotion bar "
+            f"({contract_fit:.0%} < {min_contract_fit:.0%})"
+        )
+    if reachability < min_reachability:
+        reasons.append(
+            "the witness did not come from a strong reachable seed "
+            f"({reachability:.0%} < {min_reachability:.0%})"
+        )
+    if realism < min_realism:
+        reasons.append(
+            f"the input realism stayed below the promotion bar ({realism:.0%} < {min_realism:.0%})"
+        )
+    if category == "invalid_input_crash":
+        reasons.append("the crash still looks driven by out-of-contract input")
+    elif category == "coverage_gap":
+        reasons.append("current evidence points to missing coverage more than a defect")
+    elif category == "speculative_crash" and not replayable:
+        reasons.append("the crash remains exploratory because it is not replayable")
+    return "; ".join(dict.fromkeys(reasons)) or None
+
+
+def _proof_minimal_reproduction(
+    *,
+    qualname: str,
+    failing_args: Mapping[str, Any],
+    profile: Mapping[str, Any],
+    harness_mode: str | None,
+    callable_kind: str | None,
+    contract_check: str | None = None,
+) -> dict[str, Any]:
+    """Build a deterministic reproduction payload for reports and JSON bundles."""
+    module_name = str(profile.get("module") or "").strip()
+    explicit_target = f"{module_name}:{qualname}" if module_name else qualname
+    direct_call_supported = callable_kind != "instance"
+    snippet_lines = [
+        "from importlib import import_module",
+        f"mod = import_module({module_name!r})" if module_name else "mod = None",
+        f"args = {pformat(_json_ready_proof(dict(failing_args)), width=88, sort_dicts=False)}",
+    ]
+    if direct_call_supported and module_name:
+        expr = "mod"
+        for part in [part for part in qualname.split(".") if part]:
+            expr = f"{expr}.{part}"
+        snippet_lines.append(f"{expr}(**args)")
+    else:
+        snippet_lines.append(
+            "# This target requires the configured object harness before invoking the method."
+        )
+    if contract_check is not None:
+        command = f"uv run ordeal check {explicit_target} --contract {contract_check}"
+    elif module_name:
+        command = (
+            f"uv run ordeal scan {module_name} --mode real_bug --targets {explicit_target} -n 1"
+        )
+    else:
+        command = None
+    note = None
+    if not direct_call_supported:
+        note = (
+            "Bound instance method: replay requires the configured object factory/setup/scenario "
+            f"(harness={harness_mode or 'fresh'})."
+        )
+    return {
+        "target": explicit_target,
+        "command": command,
+        "python_snippet": "\n".join(snippet_lines),
+        "direct_call_supported": direct_call_supported,
+        "note": note,
+    }
+
+
 def _build_proof_bundle(
     *,
     qualname: str,
-    error: Exception,
+    error: Exception | None,
     failing_args: Mapping[str, Any],
     input_source: str | None,
     contract_fit: float,
@@ -4103,8 +4373,15 @@ def _build_proof_bundle(
     profile: Mapping[str, Any],
     sink_signal: float,
     sink_categories: Sequence[str] = (),
+    min_contract_fit: float = 0.6,
+    min_reachability: float = 0.5,
+    min_realism: float = 0.55,
+    harness_mode: str | None = None,
+    callable_kind: str | None = None,
+    contract_check: str | None = None,
 ) -> dict[str, Any]:
     """Build the proof payload carried through reports and agent output."""
+    full_qualname = _proof_target_qualname(qualname, profile)
     matched_sources = [
         {
             "source": example.source,
@@ -4113,39 +4390,114 @@ def _build_proof_bundle(
         for example in profile.get("seed_examples", [])
         if getattr(example, "kwargs", None) == dict(failing_args)
     ]
+    supporting_evidence = _proof_supporting_evidence(failing_args, profile)
+    fixture_completeness = _profile_fixture_completeness(profile)
+    replayability_score = (
+        replay_matches / replay_attempts if replay_attempts > 0 else (1.0 if replayable else 0.0)
+    )
+    demotion_reason = _proof_demotion_reason(
+        category=category,
+        replayable=replayable,
+        contract_fit=contract_fit,
+        reachability=reachability,
+        realism=realism,
+        min_contract_fit=min_contract_fit,
+        min_reachability=min_reachability,
+        min_realism=min_realism,
+    )
+    witness = {
+        "input": _json_ready_proof(dict(failing_args)),
+        "source": input_source,
+        "seed_sources": matched_sources,
+        "supporting_evidence": supporting_evidence,
+    }
+    contract_basis = {
+        "category": category,
+        "fit": round(contract_fit, 4),
+        "reachability": round(reachability, 4),
+        "realism": round(realism, 4),
+        "fixture_completeness": round(fixture_completeness, 4),
+        "basis": list(rationale),
+        "likely_contract": _json_ready_proof(profile.get("params", {})),
+        "supporting_evidence": supporting_evidence,
+        "input_source": input_source,
+        "matched_seed_sources": matched_sources,
+    }
+    failure_path = {
+        "target": full_qualname,
+        "qualname": full_qualname,
+    }
+    if error is not None:
+        failure_path["error_type"] = type(error).__name__
+        failure_path["error"] = str(error)[:300]
+        failure_path["traceback"] = _traceback_path(error)
+    if contract_check is not None:
+        failure_path["contract_check"] = contract_check
+    impact_summary = (
+        _sink_likely_impact(sink_categories, error)
+        if sink_categories and error is not None
+        else _likely_impact(category, sink_signal)
+    )
+    minimal_reproduction = _proof_minimal_reproduction(
+        qualname=qualname,
+        failing_args=failing_args,
+        profile=profile,
+        harness_mode=harness_mode,
+        callable_kind=callable_kind,
+        contract_check=contract_check,
+    )
     return {
+        "version": 2,
+        "witness": witness,
         "valid_input_witness": {
-            "input": dict(failing_args),
-            "source": input_source,
-            "seed_sources": matched_sources,
+            **witness,
             "contract_fit": round(contract_fit, 4),
             "reachability": round(reachability, 4),
             "realism": round(realism, 4),
             "rationale": list(rationale),
         },
-        "failing_path": {
-            "qualname": qualname,
-            "error_type": type(error).__name__,
-            "error": str(error)[:300],
-            "traceback": _traceback_path(error),
-        },
+        "contract_basis": contract_basis,
         "contract_validity": {
             "category": category,
-            "likely_contract": profile.get("params", {}),
+            "likely_contract": _json_ready_proof(profile.get("params", {})),
             "rationale": list(rationale),
+            "supporting_evidence": supporting_evidence,
         },
+        "confidence_breakdown": {
+            "replayability": round(replayability_score, 4),
+            "contract_fit": round(contract_fit, 4),
+            "reachability": round(reachability, 4),
+            "realism": round(realism, 4),
+            "fixture_completeness": round(fixture_completeness, 4),
+            "replay_attempts": replay_attempts,
+            "replay_matches": replay_matches,
+        },
+        "failure_path": failure_path,
+        "failing_path": failure_path,
+        "minimal_reproduction": minimal_reproduction,
         "reproduction": {
             "replayable": replayable,
             "replay_attempts": replay_attempts,
             "replay_matches": replay_matches,
-            "failing_args": dict(failing_args),
+            "failing_args": _json_ready_proof(dict(failing_args)),
+            **minimal_reproduction,
+        },
+        "impact": {
+            "summary": impact_summary,
+            "class": (
+                "lifecycle"
+                if category == "lifecycle_contract"
+                else (list(sink_categories)[0] if sink_categories else category)
+            ),
+            "sink_categories": list(sink_categories),
         },
         "sink_categories": list(sink_categories),
-        "likely_impact": (
-            _sink_likely_impact(sink_categories, error)
-            if sink_categories
-            else _likely_impact(category, sink_signal)
-        ),
+        "likely_impact": impact_summary,
+        "verdict": {
+            "category": category,
+            "promoted": category in {"likely_bug", "semantic_contract", "lifecycle_contract"},
+            "demotion_reason": demotion_reason,
+        },
     }
 
 
@@ -4434,45 +4786,31 @@ def _evaluate_contract_checks(
             detail["error"] = error[:300]
             if error_obj is not None:
                 detail["error_type"] = type(error_obj).__name__
-        detail["proof_bundle"] = {
-            "valid_input_witness": {
-                "input": dict(kwargs),
-                "source": "explicit_contract",
-                "contract_fit": round(contract_fit, 4),
-                "reachability": 1.0,
-                "realism": round(realism, 4),
-                "rationale": list(rationale),
-            },
-            "failing_path": {
-                "qualname": qualname,
-                "contract_check": check.name,
-            },
-            "contract_validity": {
-                "category": detail_category,
-                "likely_contract": profile.get("params", {}),
-                "rationale": list(rationale),
-            },
-            "reproduction": {
-                "replayable": True,
-                "replay_attempts": 1,
-                "replay_matches": 1,
-                "failing_args": dict(kwargs),
-            },
-            "likely_impact": (
-                "violates an explicit lifecycle contract on a configured harness."
-                if call_context and call_context.get("lifecycle_probe") is not None
-                else _likely_impact("likely_bug", max(sink_signal, 1.0))
-            ),
-        }
+        detail["proof_bundle"] = _build_proof_bundle(
+            qualname=qualname,
+            error=error_obj,
+            failing_args=kwargs,
+            input_source="explicit_contract",
+            contract_fit=contract_fit,
+            reachability=1.0,
+            realism=realism,
+            rationale=rationale,
+            replayable=True,
+            replay_attempts=1,
+            replay_matches=1,
+            category=detail_category,
+            profile=profile,
+            sink_signal=max(sink_signal, 1.0),
+            sink_categories=profile.get("sink_categories", ()),
+            min_contract_fit=0.0,
+            min_reachability=0.0,
+            min_realism=0.0,
+            harness_mode=getattr(func, "__ordeal_harness__", None),
+            callable_kind=getattr(func, "__ordeal_kind__", None),
+            contract_check=check.name,
+        )
         if call_context and call_context.get("lifecycle_probe") is not None:
             detail["proof_bundle"]["lifecycle"] = dict(call_context["lifecycle_probe"])
-        if error_obj is not None:
-            detail["proof_bundle"]["failing_path"] = {
-                "qualname": qualname,
-                "contract_check": check.name,
-                "error_type": type(error_obj).__name__,
-                "error": str(error_obj)[:300],
-            }
         details.append(detail)
 
     return violations, details
@@ -4825,6 +5163,11 @@ def _test_one_function(
                 profile=profile,
                 sink_signal=sink_signal,
                 sink_categories=sink_categories,
+                min_contract_fit=min_contract_fit,
+                min_reachability=min_reachability,
+                min_realism=min_realism,
+                harness_mode=getattr(func, "__ordeal_harness__", None),
+                callable_kind=getattr(func, "__ordeal_kind__", None),
             )
             call_context = getattr(func, "__ordeal_last_call_context__", None)
             if call_context:

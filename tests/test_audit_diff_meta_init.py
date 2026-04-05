@@ -23,6 +23,8 @@ class TestAuditReport:
         report = audit_report(["ordeal.demo"])
         assert "ordeal audit" in report
         assert "ordeal.demo" in report
+        assert "current suite:" in report
+        assert "generated incremental:" in report
 
     def test_multi_module_totals(self):
         """audit_report with multiple modules shows total summary."""
@@ -30,8 +32,8 @@ class TestAuditReport:
 
         report = audit_report(["ordeal.demo", "ordeal.demo"])
         assert "total:" in report
-        assert "current:" in report
-        assert "migrated:" in report
+        assert "current suite:" in report
+        assert "generated incremental:" in report
 
     def test_empty_module_list(self):
         """audit_report with empty list produces just header."""

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import ordeal.audit as audit_mod
 import ordeal.auto as ordeal_auto
+import ordeal.cli as cli
 import ordeal.mine as mine_mod
 import ordeal.mutations as mutations_mod
 import ordeal.state as ordeal_state
@@ -413,6 +414,68 @@ class TestCLIAgentJson:
         assert by_name["mutate"]["selected"] is True
         assert by_name["audit_report"]["selected"] is True
         assert by_name["scan_module"]["selected"] is False
+
+    def test_scan_json_reports_surface_sampling_for_package_root(
+        self, monkeypatch, capsys
+    ):
+        rows = [
+            {
+                "module": "ordeal",
+                "source_module": f"ordeal.source_{index % 4}",
+                "name": f"target_{index}",
+                "target": f"ordeal.target_{index}",
+                "selected": True,
+                "runnable": True,
+            }
+            for index in range(12)
+        ]
+        monkeypatch.setattr(cli, "_callable_listing_rows", lambda *args, **kwargs: rows)
+        monkeypatch.setattr(
+            cli,
+            "_package_root_scan_sample",
+            lambda *args, **kwargs: {
+                "kind": "package_root_sample",
+                "module": "ordeal",
+                "limit": 10,
+                "sampled": 2,
+                "total_runnable": 12,
+                "source_modules": 4,
+                "targets": ["target_1", "target_9"],
+            },
+        )
+        monkeypatch.setattr(
+            ordeal_state,
+            "explore",
+            lambda *args, **kwargs: SimpleNamespace(
+                module="ordeal",
+                confidence=1.0,
+                functions={"target_1": object(), "target_9": object()},
+                supervisor_info={"seed": 42, "trajectory_steps": 2},
+                tree=SimpleNamespace(size=1),
+                findings=[],
+                frontier={},
+                skipped=[],
+            ),
+        )
+
+        rc = main(["scan", "ordeal", "--json", "-n", "1"])
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["suggested_commands"][0] == "ordeal scan ordeal --list-targets"
+        assert (
+            payload["raw_details"]["report"]["summary"][1]
+            == "Surface sampling: 2/12 runnable exports checked"
+        )
+        assert payload["raw_details"]["state"]["supervisor_info"]["scan_sampling"] == {
+            "kind": "package_root_sample",
+            "module": "ordeal",
+            "limit": 10,
+            "sampled": 2,
+            "total_runnable": 12,
+            "source_modules": 4,
+            "targets": ["target_1", "target_9"],
+        }
 
     def test_audit_json_list_targets_outputs_callable_metadata(
         self, monkeypatch, tmp_path, capsys

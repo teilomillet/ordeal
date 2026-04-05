@@ -1428,6 +1428,72 @@ scan_max_examples = 12
         assert "selected=yes" in mutate_line
         assert "selected=no" in scan_module_line
 
+    def test_package_root_scan_sample_prefers_distinct_source_modules(self, monkeypatch):
+        package = types.ModuleType("samplepkg")
+        package.__path__ = ["samplepkg"]
+        monkeypatch.setattr(ordeal_auto, "_resolve_module", lambda name: package)
+
+        sample = cli._package_root_scan_sample(
+            "samplepkg",
+            [
+                {"name": "alpha_first", "runnable": True, "source_module": "samplepkg.alpha"},
+                {"name": "alpha_second", "runnable": True, "source_module": "samplepkg.alpha"},
+                {"name": "beta_first", "runnable": True, "source_module": "samplepkg.beta"},
+                {"name": "gamma_first", "runnable": True, "source_module": "samplepkg.gamma"},
+            ],
+            limit=3,
+        )
+
+        assert sample is not None
+        assert sample["sampled"] == 3
+        assert sample["total_runnable"] == 4
+        assert sample["targets"] == ["alpha_first", "beta_first", "gamma_first"]
+
+    def test_package_root_scan_sample_deprioritizes_orchestration_exports(self, monkeypatch):
+        package = types.ModuleType("samplepkg")
+        package.__path__ = ["samplepkg"]
+        monkeypatch.setattr(ordeal_auto, "_resolve_module", lambda name: package)
+
+        sample = cli._package_root_scan_sample(
+            "samplepkg",
+            [
+                {
+                    "name": "mutate",
+                    "runnable": True,
+                    "source_module": "samplepkg.core",
+                    "kind": "function",
+                },
+                {
+                    "name": "benchmark",
+                    "runnable": True,
+                    "source_module": "samplepkg.core",
+                    "kind": "function",
+                },
+                {
+                    "name": "auto_configure",
+                    "runnable": True,
+                    "source_module": "samplepkg.core",
+                    "kind": "function",
+                },
+                {
+                    "name": "always",
+                    "runnable": True,
+                    "source_module": "samplepkg.core",
+                    "kind": "function",
+                },
+                {
+                    "name": "report",
+                    "runnable": True,
+                    "source_module": "samplepkg.core",
+                    "kind": "function",
+                },
+            ],
+            limit=3,
+        )
+
+        assert sample is not None
+        assert set(sample["targets"]) == {"auto_configure", "always", "report"}
+
     def test_scan_cli_target_selectors_override_toml_targets(
         self,
         monkeypatch,
@@ -1463,7 +1529,179 @@ scan_max_examples = 12
         assert rc == 0
         assert calls["module"] == "ordeal"
         assert calls["scan_targets"] == ["mutate", "audit_*"]
+        assert calls["run_mine"] is False
+        assert calls["run_scan"] is True
+        assert calls["run_mutate"] is False
+        assert calls["run_chaos"] is False
         assert "Scanning ordeal" in capsys.readouterr().err
+
+    def test_scan_broad_package_root_uses_lightweight_defaults(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        calls: dict[str, object] = {}
+        monkeypatch.chdir(tmp_path)
+
+        rows = [
+            {
+                "name": f"fn_{index}",
+                "selected": True,
+                "runnable": True,
+            }
+            for index in range(25)
+        ]
+
+        def fake_explore(module: str, **kwargs):
+            calls["module"] = module
+            calls.update(kwargs)
+            return SimpleNamespace(
+                module=module,
+                confidence=0.0,
+                functions={},
+                supervisor_info={},
+                tree=SimpleNamespace(size=0),
+                findings=[],
+                frontier={},
+                skipped=[],
+            )
+
+        monkeypatch.setattr(cli, "_callable_listing_rows", lambda *args, **kwargs: rows)
+        monkeypatch.setattr(ordeal_state, "explore", fake_explore)
+
+        rc = main(["scan", "ordeal"])
+        captured = capsys.readouterr()
+        out = captured.out
+        err = captured.err
+
+        assert rc == 0
+        assert calls["module"] == "ordeal"
+        assert len(calls["scan_targets"]) == cli._PACKAGE_ROOT_SCAN_LIMIT
+        assert set(calls["scan_targets"]).issubset({row["name"] for row in rows})
+        assert calls["max_examples"] == 5
+        assert calls["scan_seed_from_call_sites"] is False
+        assert (
+            "surface sample: "
+            f"{cli._PACKAGE_ROOT_SCAN_LIMIT}/25 runnable exports across 1 source module(s)"
+            in out
+        )
+        assert (
+            "Package-root scan sampled "
+            f"{cli._PACKAGE_ROOT_SCAN_LIMIT}/25 runnable exports" in err
+        )
+        assert "Broad package-root scan disabled call-site seed mining for speed" in err
+        assert "Broad package-root scan capped max_examples to 5 per target" in err
+
+    def test_scan_json_reports_package_root_sampling_metadata(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        monkeypatch.chdir(tmp_path)
+        rows = [
+            {
+                "name": f"fn_{index}",
+                "selected": True,
+                "runnable": True,
+                "source_module": f"ordeal.subpkg_{index % 4}",
+            }
+            for index in range(18)
+        ]
+
+        def fake_explore(module: str, **kwargs):
+            return SimpleNamespace(
+                module=module,
+                confidence=0.0,
+                functions={name: object() for name in kwargs["scan_targets"]},
+                supervisor_info={"seed": 123, "trajectory_steps": 4},
+                tree=SimpleNamespace(size=0),
+                findings=[],
+                frontier={},
+                skipped=[],
+            )
+
+        monkeypatch.setattr(cli, "_callable_listing_rows", lambda *args, **kwargs: rows)
+        monkeypatch.setattr(ordeal_state, "explore", fake_explore)
+
+        rc = main(["scan", "ordeal", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 0
+        sampling = payload["raw_details"]["state"]["supervisor_info"]["scan_sampling"]
+        assert sampling["sampled"] == cli._PACKAGE_ROOT_SCAN_LIMIT
+        assert sampling["total_runnable"] == 18
+        assert sampling["source_modules"] == 4
+        assert any(
+            item
+            == (
+                "Surface sampling: "
+                f"{cli._PACKAGE_ROOT_SCAN_LIMIT}/18 runnable exports checked"
+            )
+            for item in payload["raw_details"]["report"]["summary"]
+        )
+        assert payload["suggested_commands"][:2] == [
+            "ordeal scan ordeal --list-targets",
+            "ordeal scan ordeal --target <selector>",
+        ]
+
+    def test_scan_package_root_sampling_limits_targets_and_reports_scope(
+        self,
+        monkeypatch,
+        capsys,
+    ):
+        calls: dict[str, object] = {}
+
+        rows = [
+            {
+                "module": "ordeal",
+                "source_module": f"ordeal.source_{index % 4}",
+                "name": f"target_{index}",
+                "target": f"ordeal.target_{index}",
+                "selected": True,
+                "runnable": True,
+            }
+            for index in range(12)
+        ]
+
+        def fake_explore(module: str, **kwargs):
+            calls["module"] = module
+            calls.update(kwargs)
+            return SimpleNamespace(
+                module=module,
+                confidence=1.0,
+                functions={"target_1": object(), "target_9": object()},
+                supervisor_info={"seed": 42, "trajectory_steps": 2},
+                tree=SimpleNamespace(size=1),
+                findings=[],
+                frontier={},
+                skipped=[],
+            )
+
+        monkeypatch.setattr(cli, "_callable_listing_rows", lambda *args, **kwargs: rows)
+        monkeypatch.setattr(
+            cli,
+            "_package_root_scan_sample",
+            lambda *args, **kwargs: {
+                "kind": "package_root_sample",
+                "module": "ordeal",
+                "limit": 10,
+                "sampled": 2,
+                "total_runnable": 12,
+                "source_modules": 4,
+                "targets": ["target_1", "target_9"],
+            },
+        )
+        monkeypatch.setattr(ordeal_state, "explore", fake_explore)
+
+        rc = main(["scan", "ordeal", "-n", "1"])
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert calls["scan_targets"] == ["target_1", "target_9"]
+        assert "note: Package-root scan sampled 2/12 runnable exports" in captured.err
+        assert "sampled 2/12 runnable exports" in captured.out
 
     def test_scan_list_targets_reports_state_factory_metadata(
         self,

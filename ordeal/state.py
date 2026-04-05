@@ -35,6 +35,8 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+_ALL_EXPLORATION_DIMENSIONS = ("mine", "scan", "mutate", "chaos")
+
 
 def _source_hash(func: Any) -> str | None:
     """Hash a function's source code.  Returns ``None`` if unavailable."""
@@ -64,6 +66,8 @@ def _crash_summary(name: str, category: str, replayable: bool | None) -> str:
         return f"{name}: crashes on realistic inputs"
     if category == "coverage_gap":
         return f"{name}: plausible crash but evidence still looks like a gap"
+    if category == "beyond_declared_contract_robustness":
+        return f"{name}: crash sits just beyond the declared contract"
     if category == "invalid_input_crash":
         return f"{name}: crash currently looks driven by invalid input"
     if replayable:
@@ -123,18 +127,22 @@ class FunctionState:
 
     @property
     def confidence(self) -> float:
+        return self.confidence_for(_ALL_EXPLORATION_DIMENSIONS)
+
+    def confidence_for(self, dimensions: set[str] | tuple[str, ...] | list[str]) -> float:
         """Per-function exploration confidence [0, 1].
 
         Combines coverage across dimensions. Each dimension contributes
         independently — more exploration = higher confidence.
         """
+        enabled = set(dimensions)
         scores: list[float] = []
-        if self.mined:
+        if "mine" in enabled and self.mined:
             # High confidence if many properties hold universally
             total = len(self.properties)
             universal = sum(1 for p in self.properties if p.get("universal", False))
             scores.append(universal / total if total > 0 else 0.5)
-        if self.mutated and self.mutation_score is not None:
+        if "mutate" in enabled and self.mutated and self.mutation_score is not None:
             # Hardening boosts effective mutation score: verified kills
             # close gaps that the original test suite missed.
             effective = self.mutation_score
@@ -142,9 +150,9 @@ class FunctionState:
                 total = self.killed_mutants + self.survived_mutants
                 effective = (self.killed_mutants + self.hardened_kills) / total
             scores.append(min(effective, 1.0))
-        if self.scanned:
+        if "scan" in enabled and self.scanned:
             scores.append(1.0 if self.crash_free else 0.0)
-        if self.chaos_tested:
+        if "chaos" in enabled and self.chaos_tested:
             scores.append(min(1.0, len(self.faults_tested) / 3))
         return sum(scores) / max(len(scores), 1)
 
@@ -187,26 +195,30 @@ class FunctionState:
 
     @property
     def frontier(self) -> list[str]:
+        return self.frontier_for(_ALL_EXPLORATION_DIMENSIONS)
+
+    def frontier_for(self, dimensions: set[str] | tuple[str, ...] | list[str]) -> list[str]:
         """What's unexplored for this function."""
+        enabled = set(dimensions)
         gaps: list[str] = []
-        if not self.mined:
+        if "mine" in enabled and not self.mined:
             gaps.append("not mined")
-        elif self.saturated:
+        elif "mine" in enabled and self.saturated:
             gaps.append(f"mining saturated ({self.edges_discovered} edges)")
-        if not self.mutated:
+        if "mutate" in enabled and not self.mutated:
             gaps.append("not mutation-tested")
-        elif self.mutation_score is not None and self.mutation_score < 0.8:
+        elif "mutate" in enabled and self.mutation_score is not None and self.mutation_score < 0.8:
             gaps.append(f"mutation score {self.mutation_score:.0%}")
             unhardened = self.survived_mutants - self.hardened_kills
             if unhardened > 0:
                 gaps.append(f"{unhardened} unhardened survivor(s)")
-        if not self.scanned:
+        if "scan" in enabled and not self.scanned:
             gaps.append("not scanned")
-        elif self.crash_free is False and not self.scan_replayable:
+        elif "scan" in enabled and self.crash_free is False and not self.scan_replayable:
             gaps.append("crash not replayed")
         for note in self.contract_violations:
             gaps.append(note)
-        if not self.chaos_tested:
+        if "chaos" in enabled and not self.chaos_tested:
             gaps.append("no chaos testing")
         for v in self.property_violations:
             gaps.append(f"property: {v}")
@@ -230,6 +242,7 @@ class ExplorationState:
     supervisor_info: dict[str, Any] = field(default_factory=dict)
     tree: Any = field(default=None, repr=False)
     scan_mode: str = "coverage_gap"
+    active_dimensions: tuple[str, ...] = _ALL_EXPLORATION_DIMENSIONS
 
     def function(self, name: str) -> FunctionState:
         """Get or create state for a function."""
@@ -278,12 +291,18 @@ class ExplorationState:
         """Aggregate confidence across all functions."""
         if not self.functions:
             return 0.0
-        return sum(f.confidence for f in self.functions.values()) / len(self.functions)
+        return sum(
+            f.confidence_for(self.active_dimensions) for f in self.functions.values()
+        ) / len(self.functions)
 
     @property
     def frontier(self) -> dict[str, list[str]]:
         """Per-function gaps — what's unexplored."""
-        return {name: fs.frontier for name, fs in self.functions.items() if fs.frontier}
+        return {
+            name: gaps
+            for name, fs in self.functions.items()
+            if (gaps := fs.frontier_for(self.active_dimensions))
+        }
 
     @property
     def findings(self) -> list[str]:
@@ -300,14 +319,8 @@ class ExplorationState:
                 for detail in fs.contract_violation_details
             ):
                 results.append(f"{name}: violates an explicit semantic contract")
-            if fs.crash_free is False and (
-                fs.scan_crash_category == "likely_bug"
-                or (self.scan_mode != "real_bug" and fs.scan_crash_category == "coverage_gap")
-            ):
-                if fs.scan_crash_category == "coverage_gap":
-                    results.append(f"{name}: crashes on plausible but under-verified inputs")
-                else:
-                    results.append(f"{name}: crashes on realistic inputs")
+            if fs.crash_free is False and fs.scan_crash_category == "likely_bug":
+                results.append(f"{name}: crashes on realistic inputs")
         return results
 
     @property
@@ -320,10 +333,15 @@ class ExplorationState:
                 category == "speculative_crash"
                 or category == "coverage_gap"
                 or category == "invalid_input_crash"
+                or category == "beyond_declared_contract_robustness"
             ):
                 if category == "coverage_gap":
                     results.append(
                         f"{name}: plausible crash but current evidence still looks like a gap"
+                    )
+                elif category == "beyond_declared_contract_robustness":
+                    results.append(
+                        f"{name}: crash sits just beyond the declared contract"
                     )
                 elif category == "invalid_input_crash":
                     results.append(f"{name}: crash currently looks driven by invalid input")
@@ -488,6 +506,7 @@ class ExplorationState:
             "exploration_time": round(self.exploration_time, 2),
             "seed": self.supervisor_info.get("seed"),
             "scan_mode": self.scan_mode,
+            "active_dimensions": list(self.active_dimensions),
             "supervisor_info": _json_ready(self.supervisor_info),
         }
 
@@ -499,6 +518,7 @@ class ExplorationState:
         state.edge_coverage = raw.get("edge_coverage")
         state.exploration_time = raw.get("exploration_time", 0.0)
         state.scan_mode = raw.get("scan_mode", "coverage_gap")
+        state.active_dimensions = tuple(raw.get("active_dimensions", _ALL_EXPLORATION_DIMENSIONS))
         state.supervisor_info = raw.get("supervisor_info", {})
         for name, fdata in raw.get("functions", {}).items():
             fs = FunctionState(**fdata)
@@ -623,8 +643,13 @@ def explore_scan(
     object_teardowns: dict[str, Any] | None = None,
     object_harnesses: dict[str, str] | None = None,
     expected_failures: list[str] | None = None,
+    expected_preconditions: dict[str, list[str]] | None = None,
+    ignore_contracts: list[str] | None = None,
     ignore_properties: list[str] | None = None,
     ignore_relations: list[str] | None = None,
+    contract_overrides: dict[str, list[str]] | None = None,
+    expected_properties: dict[str, list[str]] | None = None,
+    expected_relations: dict[str, list[str]] | None = None,
     property_overrides: dict[str, list[str]] | None = None,
     relation_overrides: dict[str, list[str]] | None = None,
     contract_checks: dict[str, list[Any]] | None = None,
@@ -657,8 +682,13 @@ def explore_scan(
         object_teardowns=object_teardowns,
         object_harnesses=object_harnesses,
         expected_failures=expected_failures,
+        expected_preconditions=expected_preconditions,
+        ignore_contracts=ignore_contracts,
         ignore_properties=ignore_properties,
         ignore_relations=ignore_relations,
+        contract_overrides=contract_overrides,
+        expected_properties=expected_properties,
+        expected_relations=expected_relations,
         property_overrides=property_overrides,
         relation_overrides=relation_overrides,
         contract_checks=contract_checks,
@@ -677,10 +707,17 @@ def explore_scan(
         min_realism=min_realism,
     )
     state.scan_mode = mode
+    if "scan" not in state.active_dimensions:
+        state.active_dimensions = tuple(dict.fromkeys((*state.active_dimensions, "scan")))
+    existing_skips = {(name, reason) for name, reason in state.skipped}
+    for name, reason in result.skipped:
+        if (name, reason) not in existing_skips:
+            state.skipped.append((name, reason))
+            existing_skips.add((name, reason))
     for fr in result.functions:
         fs = state.function(fr.name)
         fs.scanned = True
-        fs.crash_free = fr.passed
+        fs.crash_free = fr.execution_ok
         fs.scan_error = fr.error
         fs.failing_args = fr.failing_args
         fs.scan_crash_category = fr.crash_category
@@ -857,8 +894,13 @@ def explore(
     scan_object_teardowns: dict[str, Any] | None = None,
     scan_object_harnesses: dict[str, str] | None = None,
     scan_expected_failures: list[str] | None = None,
+    scan_expected_preconditions: dict[str, list[str]] | None = None,
+    scan_ignore_contracts: list[str] | None = None,
     scan_ignore_properties: list[str] | None = None,
     scan_ignore_relations: list[str] | None = None,
+    scan_contract_overrides: dict[str, list[str]] | None = None,
+    scan_expected_properties: dict[str, list[str]] | None = None,
+    scan_expected_relations: dict[str, list[str]] | None = None,
     scan_property_overrides: dict[str, list[str]] | None = None,
     scan_relation_overrides: dict[str, list[str]] | None = None,
     scan_contract_checks: dict[str, list[Any]] | None = None,
@@ -875,6 +917,10 @@ def explore(
     scan_min_contract_fit: float = 0.6,
     scan_min_reachability: float = 0.5,
     scan_min_realism: float = 0.55,
+    run_mine: bool = True,
+    run_scan: bool = True,
+    run_mutate: bool = True,
+    run_chaos: bool = True,
 ) -> ExplorationState:
     """Run all exploration strategies on a module.
 
@@ -921,6 +967,18 @@ def explore(
         # the pipeline redoes them from scratch instead of skipping.
         state.refreshed = state.refresh()
 
+    active_dimensions = tuple(
+        dimension
+        for dimension, enabled in (
+            ("mine", run_mine),
+            ("scan", run_scan),
+            ("mutate", run_mutate),
+            ("chaos", run_chaos),
+        )
+        if enabled
+    )
+    state.active_dimensions = active_dimensions or ("scan",)
+
     # Initialize supervisor and state tree if not already present
     if not hasattr(state, "supervisor") or state.supervisor is None:
         state.supervisor = None  # set below inside context
@@ -939,36 +997,38 @@ def explore(
         sup.log_transition("explore_start", state_hash=state_hash)
 
         # Step 1: Mine properties
-        state = explore_mine(
-            state,
-            max_examples=max_examples,
-            include_private=include_private,
-            targets=scan_targets,
-            object_factories=scan_object_factories,
-            object_setups=scan_object_setups,
-            object_scenarios=scan_object_scenarios,
-            object_state_factories=scan_object_state_factories,
-            object_teardowns=scan_object_teardowns,
-            object_harnesses=scan_object_harnesses,
-            ignore_properties=scan_ignore_properties,
-            ignore_relations=scan_ignore_relations,
-            property_overrides=scan_property_overrides,
-            relation_overrides=scan_relation_overrides,
-        )
-        mine_hash = hash(("mined", len(state.functions), state.confidence))
-        state.tree.checkpoint(
-            mine_hash,
-            parent=state_hash,
-            action="mine",
-            snapshot=None,
-            edges=sum(f.edges_discovered for f in state.functions.values()),
-            seed=seed,
-        )
-        sup.log_transition("explore_mine", state_hash=mine_hash)
-        prev_hash = mine_hash
+        prev_hash = state_hash
+        if run_mine:
+            state = explore_mine(
+                state,
+                max_examples=max_examples,
+                include_private=include_private,
+                targets=scan_targets,
+                object_factories=scan_object_factories,
+                object_setups=scan_object_setups,
+                object_scenarios=scan_object_scenarios,
+                object_state_factories=scan_object_state_factories,
+                object_teardowns=scan_object_teardowns,
+                object_harnesses=scan_object_harnesses,
+                ignore_properties=scan_ignore_properties,
+                ignore_relations=scan_ignore_relations,
+                property_overrides=scan_property_overrides,
+                relation_overrides=scan_relation_overrides,
+            )
+            mine_hash = hash(("mined", len(state.functions), state.confidence))
+            state.tree.checkpoint(
+                mine_hash,
+                parent=state_hash,
+                action="mine",
+                snapshot=None,
+                edges=sum(f.edges_discovered for f in state.functions.values()),
+                seed=seed,
+            )
+            sup.log_transition("explore_mine", state_hash=mine_hash)
+            prev_hash = mine_hash
 
         # Step 2: Crash safety
-        if time_limit is None or (_time.monotonic() - start) < time_limit:
+        if run_scan and (time_limit is None or (_time.monotonic() - start) < time_limit):
             state = explore_scan(
                 state,
                 max_examples=max_examples,
@@ -981,8 +1041,13 @@ def explore(
                 object_teardowns=scan_object_teardowns,
                 object_harnesses=scan_object_harnesses,
                 expected_failures=scan_expected_failures,
+                expected_preconditions=scan_expected_preconditions,
+                ignore_contracts=scan_ignore_contracts,
                 ignore_properties=scan_ignore_properties,
                 ignore_relations=scan_ignore_relations,
+                contract_overrides=scan_contract_overrides,
+                expected_properties=scan_expected_properties,
+                expected_relations=scan_expected_relations,
                 property_overrides=scan_property_overrides,
                 relation_overrides=scan_relation_overrides,
                 contract_checks=scan_contract_checks,
@@ -1011,7 +1076,7 @@ def explore(
             prev_hash = scan_hash
 
         # Step 3: Mutation testing
-        if time_limit is None or (_time.monotonic() - start) < time_limit:
+        if run_mutate and (time_limit is None or (_time.monotonic() - start) < time_limit):
             state = explore_mutate(state, workers=workers)
             mutate_hash = hash(("mutated", state.confidence))
             state.tree.checkpoint(
@@ -1024,7 +1089,7 @@ def explore(
             prev_hash = mutate_hash
 
         # Step 4: Chaos testing
-        if time_limit is None or (_time.monotonic() - start) < time_limit:
+        if run_chaos and (time_limit is None or (_time.monotonic() - start) < time_limit):
             state = explore_chaos(
                 state,
                 max_examples=max_examples,

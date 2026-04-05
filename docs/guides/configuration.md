@@ -89,9 +89,14 @@ Declare modules for auto-scan testing. The pytest plugin auto-collects these and
 | `include_private` | `bool` | `false` | Include single-underscore callables |
 | `fixtures` | `dict[str, str]` | `{}` | Strategy specs for untyped parameters, such as comma-separated `sampled_from` values |
 | `expected_failures` | `list[str]` | `[]` | Function names whose failure is expected behavior |
+| `expected_preconditions` | `list[str]` or `dict[str, list[str]]` | `[]` | Global or per-function precondition patterns that should stay visible but demoted |
 | `fixture_registries` | `list[str]` | `[]` | Importable modules that call `register_fixture()` for project-specific strategies |
+| `ignore_contracts` | `list[str]` | `[]` | Contract check names to suppress from scan feedback |
 | `ignore_properties` | `list[str]` | `[]` | Property names to suppress from mined warnings |
 | `ignore_relations` | `list[str]` | `[]` | Relation names to suppress from mined relation checks |
+| `expected_properties` | `list[str]` or `dict[str, list[str]]` | `[]` | Global or per-function property names to treat as expected semantics |
+| `expected_relations` | `list[str]` or `dict[str, list[str]]` | `[]` | Global or per-function relation names to treat as expected semantics |
+| `contract_overrides` | `dict[str, list[str]]` | `{}` | Per-function contract suppressions or overrides |
 | `property_overrides` | `dict[str, list[str]]` | `{}` | Per-function property suppressions or overrides |
 | `relation_overrides` | `dict[str, list[str]]` | `{}` | Per-function relation suppressions or overrides |
 
@@ -101,9 +106,14 @@ module = "myapp.scoring"
 max_examples = 100
 targets = ["myapp.scoring:Scorer.score"]
 fixture_registries = ["tests.support.fixtures"]
+ignore_contracts = ["quoted_paths"]
 ignore_properties = ["commutative"]
 ignore_relations = ["commutative_composition"]
 expected_failures = ["validate_input"]
+expected_preconditions = { "*" = ["ValueError"], build_env_vars = ["protected key"] }
+expected_properties = { "*" = ["ordered_arguments"] }
+expected_relations = { "*" = ["equivalent"] }
+contract_overrides = { build_env_vars = ["protected_env_keys"] }
 
 [[scan]]
 module = "myapp.pipeline"
@@ -115,6 +125,8 @@ relation_overrides = { normalize = ["equivalent"] }
 When you run `pytest --chaos`, ordeal auto-discovers these entries and smoke-tests every public function in each module. Functions without type hints are skipped unless fixtures are provided or a registry supplies them. Known preconditions stay separate from likely bugs so the output stays epistemic.
 
 `targets` now acts as a first-class selector list, not just an exact-callable allowlist. Exact names still work, and glob patterns let package-root scans focus on a subset of exported callables without rewriting the module target.
+
+The `expected_*` and `ignore_*` knobs are schema-level policy hints for the scan feedback layer. They let teams declare that some preconditions, contracts, properties, or relations are already understood in this module, without changing the underlying scan target or fixture setup.
 
 When `proof_bundles = true` (the default), promoted crash findings also carry a structured witness, contract basis, confidence breakdown, minimal reproduction, failure path, and likely-impact summary in the saved report and JSON bundle.
 

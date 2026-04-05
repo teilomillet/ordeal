@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import importlib
 import inspect
 import io
 import json
@@ -91,6 +92,7 @@ class _ProgressPrinter:
 _BENCHMARK_SIGNAL_CHECKPOINTS: tuple[float, ...] = (5.0, 10.0, 30.0)
 _DEFAULT_REGRESSION_PATH = "tests/test_ordeal_regressions.py"
 _DEFAULT_FINDINGS_DIR = ".ordeal/findings"
+_PACKAGE_ROOT_SCAN_LIMIT = 8
 CLI_CATALOG_SCHEMA_VERSION = 1
 
 
@@ -145,9 +147,14 @@ class ScanRuntimeDefaults:
     object_harnesses: dict[str, str] | None = None
     contract_checks: dict[str, list[Any]] = field(default_factory=dict)
     expected_failures: list[str] = field(default_factory=list)
+    expected_preconditions: dict[str, list[str]] = field(default_factory=dict)
     registry_warnings: list[str] = field(default_factory=list)
+    ignore_contracts: list[str] = field(default_factory=list)
     ignore_properties: list[str] = field(default_factory=list)
     ignore_relations: list[str] = field(default_factory=list)
+    contract_overrides: dict[str, list[str]] = field(default_factory=dict)
+    expected_properties: dict[str, list[str]] = field(default_factory=dict)
+    expected_relations: dict[str, list[str]] = field(default_factory=dict)
     property_overrides: dict[str, list[str]] = field(default_factory=dict)
     relation_overrides: dict[str, list[str]] = field(default_factory=dict)
 
@@ -202,6 +209,68 @@ def _scan_display_name(module_name: str, target: str) -> str:
         return explicit_target
     dotted_prefix = f"{module_name}."
     return target[len(dotted_prefix) :] if target.startswith(dotted_prefix) else target
+
+
+def _package_root_scan_sample(
+    module_name: str,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    limit: int = _PACKAGE_ROOT_SCAN_LIMIT,
+) -> dict[str, Any] | None:
+    """Return a bounded representative target sample for broad package-root scans."""
+    from ordeal.auto import _resolve_module
+
+    try:
+        mod = _resolve_module(module_name)
+    except Exception:
+        return None
+    if not getattr(mod, "__path__", None):
+        return None
+
+    runnable_rows = [row for row in rows if bool(row.get("runnable", True))]
+    if len(runnable_rows) <= limit:
+        return None
+
+    chosen: list[str] = []
+    seen_sources: set[str] = set()
+    deferred: list[str] = []
+
+    for row in sorted(runnable_rows, key=_package_root_scan_priority):
+        name = str(row.get("name", "")).strip()
+        if not name:
+            continue
+        source_module = str(row.get("source_module") or row.get("module") or module_name)
+        if source_module not in seen_sources and len(chosen) < limit:
+            chosen.append(name)
+            seen_sources.add(source_module)
+        else:
+            deferred.append(name)
+
+    if len(chosen) < limit:
+        for name in deferred:
+            if name in chosen:
+                continue
+            chosen.append(name)
+            if len(chosen) >= limit:
+                break
+
+    if len(chosen) >= len(runnable_rows):
+        return None
+
+    return {
+        "kind": "package_root_sample",
+        "module": module_name,
+        "limit": limit,
+        "sampled": len(chosen),
+        "total_runnable": len(runnable_rows),
+        "source_modules": len(
+            {
+                str(row.get("source_module") or row.get("module") or module_name)
+                for row in runnable_rows
+            }
+        ),
+        "targets": chosen,
+    }
 
 
 def _resolve_symbol_path(path: str) -> Any:
@@ -409,6 +478,7 @@ def _callable_listing_rows(
         rows.append(
             {
                 "module": module_name,
+                "source_module": getattr(_unwrap(func), "__module__", module_name),
                 "name": name,
                 "target": f"{module_name}.{name}",
                 "kind": kind,
@@ -1610,219 +1680,196 @@ def _resolve_scan_runtime_defaults(
 ) -> ScanRuntimeDefaults:
     """Load fixture registries and optional ``[[scan]]`` defaults for *target*."""
     module_name = _scan_base_module(target)
-    warnings = []
-    effective_examples = requested_examples
-    mode = "coverage_gap"
-    seed_from_tests = True
-    seed_from_fixtures = True
-    seed_from_docstrings = True
-    seed_from_code = True
-    seed_from_call_sites = True
-    treat_any_as_weak = True
-    proof_bundles = True
-    require_replayable = True
-    auto_contracts: list[str] = []
-    min_contract_fit = 0.55
-    min_reachability = 0.45
-    min_realism = 0.55
-    min_fixture_completeness = 0.0
-    targets: list[str] = []
-    include_private = False
-    fixtures = None
-    object_factories: dict[str, Any] | None = None
-    object_setups: dict[str, Any] | None = None
-    object_scenarios: dict[str, Any] | None = None
-    object_state_factories: dict[str, Any] | None = None
-    object_teardowns: dict[str, Any] | None = None
-    object_harnesses: dict[str, str] | None = None
-    contract_checks: dict[str, list[Any]] = {}
-    expected_failures: list[str] = []
-    ignore_properties: list[str] = []
-    ignore_relations: list[str] = []
-    property_overrides: dict[str, list[str]] = {}
-    relation_overrides: dict[str, list[str]] = {}
+    warnings: list[str] = []
+
+    values: dict[str, Any] = {
+        "max_examples": requested_examples,
+        "mode": "coverage_gap",
+        "seed_from_tests": True,
+        "seed_from_fixtures": True,
+        "seed_from_docstrings": True,
+        "seed_from_code": True,
+        "seed_from_call_sites": True,
+        "treat_any_as_weak": True,
+        "proof_bundles": True,
+        "require_replayable": True,
+        "auto_contracts": [],
+        "min_contract_fit": 0.55,
+        "min_reachability": 0.45,
+        "min_realism": 0.55,
+        "min_fixture_completeness": 0.0,
+        "fixtures": None,
+        "targets": [],
+        "include_private": False,
+        "object_factories": None,
+        "object_setups": None,
+        "object_scenarios": None,
+        "object_state_factories": None,
+        "object_teardowns": None,
+        "object_harnesses": None,
+        "contract_checks": {},
+        "expected_failures": [],
+        "expected_preconditions": {},
+        "ignore_contracts": [],
+        "ignore_properties": [],
+        "ignore_relations": [],
+        "contract_overrides": {},
+        "expected_properties": {},
+        "expected_relations": {},
+        "property_overrides": {},
+        "relation_overrides": {},
+    }
+
+    def _build_defaults() -> ScanRuntimeDefaults:
+        return ScanRuntimeDefaults(
+            max_examples=int(values["max_examples"]),
+            mode=str(values["mode"]),
+            seed_from_tests=bool(values["seed_from_tests"]),
+            seed_from_fixtures=bool(values["seed_from_fixtures"]),
+            seed_from_docstrings=bool(values["seed_from_docstrings"]),
+            seed_from_code=bool(values["seed_from_code"]),
+            seed_from_call_sites=bool(values["seed_from_call_sites"]),
+            treat_any_as_weak=bool(values["treat_any_as_weak"]),
+            proof_bundles=bool(values["proof_bundles"]),
+            require_replayable=bool(values["require_replayable"]),
+            auto_contracts=list(values["auto_contracts"]),
+            min_contract_fit=float(values["min_contract_fit"]),
+            min_reachability=float(values["min_reachability"]),
+            min_realism=float(values["min_realism"]),
+            min_fixture_completeness=float(values["min_fixture_completeness"]),
+            fixtures=values["fixtures"],
+            targets=list(values["targets"]),
+            include_private=bool(values["include_private"]),
+            object_factories=values["object_factories"],
+            object_setups=values["object_setups"],
+            object_scenarios=values["object_scenarios"],
+            object_state_factories=values["object_state_factories"],
+            object_teardowns=values["object_teardowns"],
+            object_harnesses=values["object_harnesses"],
+            contract_checks=dict(values["contract_checks"]),
+            expected_failures=list(values["expected_failures"]),
+            expected_preconditions={
+                str(name): list(items)
+                for name, items in dict(values["expected_preconditions"]).items()
+            },
+            registry_warnings=list(warnings),
+            ignore_contracts=list(values["ignore_contracts"]),
+            ignore_properties=list(values["ignore_properties"]),
+            ignore_relations=list(values["ignore_relations"]),
+            contract_overrides={
+                str(name): list(items)
+                for name, items in dict(values["contract_overrides"]).items()
+            },
+            expected_properties={
+                str(name): list(items)
+                for name, items in dict(values["expected_properties"]).items()
+            },
+            expected_relations={
+                str(name): list(items)
+                for name, items in dict(values["expected_relations"]).items()
+            },
+            property_overrides={
+                str(name): list(items)
+                for name, items in dict(values["property_overrides"]).items()
+            },
+            relation_overrides={
+                str(name): list(items)
+                for name, items in dict(values["relation_overrides"]).items()
+            },
+        )
 
     config_path = Path("ordeal.toml")
     if not config_path.exists():
-        return ScanRuntimeDefaults(
-            max_examples=effective_examples,
-            mode=mode,
-            seed_from_tests=seed_from_tests,
-            seed_from_fixtures=seed_from_fixtures,
-            seed_from_docstrings=seed_from_docstrings,
-            seed_from_code=seed_from_code,
-            seed_from_call_sites=seed_from_call_sites,
-            treat_any_as_weak=treat_any_as_weak,
-            proof_bundles=proof_bundles,
-            require_replayable=require_replayable,
-            auto_contracts=list(auto_contracts),
-            min_contract_fit=min_contract_fit,
-            min_reachability=min_reachability,
-            min_realism=min_realism,
-            min_fixture_completeness=min_fixture_completeness,
-            targets=targets,
-            include_private=include_private,
-            fixtures=fixtures,
-            object_factories=object_factories,
-            object_setups=object_setups,
-            object_scenarios=object_scenarios,
-            object_state_factories=object_state_factories,
-            object_teardowns=object_teardowns,
-            object_harnesses=object_harnesses,
-            contract_checks=contract_checks,
-            expected_failures=expected_failures,
-            registry_warnings=warnings,
-        )
+        return _build_defaults()
 
     try:
         cfg = load_config(config_path)
     except (FileNotFoundError, ConfigError):
         warnings.extend(_load_fixture_registry_warnings())
-        return ScanRuntimeDefaults(
-            max_examples=effective_examples,
-            mode=mode,
-            seed_from_tests=seed_from_tests,
-            seed_from_fixtures=seed_from_fixtures,
-            seed_from_docstrings=seed_from_docstrings,
-            seed_from_code=seed_from_code,
-            seed_from_call_sites=seed_from_call_sites,
-            treat_any_as_weak=treat_any_as_weak,
-            proof_bundles=proof_bundles,
-            require_replayable=require_replayable,
-            auto_contracts=list(auto_contracts),
-            min_contract_fit=min_contract_fit,
-            min_reachability=min_reachability,
-            min_realism=min_realism,
-            min_fixture_completeness=min_fixture_completeness,
-            targets=targets,
-            include_private=include_private,
-            fixtures=fixtures,
-            object_factories=object_factories,
-            object_setups=object_setups,
-            object_scenarios=object_scenarios,
-            object_state_factories=object_state_factories,
-            object_teardowns=object_teardowns,
-            object_harnesses=object_harnesses,
-            contract_checks=contract_checks,
-            expected_failures=expected_failures,
-            registry_warnings=warnings,
-        )
+        return _build_defaults()
 
     warnings.extend(_load_fixture_registry_warnings(shared_modules=cfg.fixtures.registries))
     shared_object_specs = _config_object_specs_for_module(cfg, module_name)
     try:
         (
-            object_factories,
-            object_setups,
-            object_scenarios,
-            object_state_factories,
-            object_teardowns,
-            object_harnesses,
+            values["object_factories"],
+            values["object_setups"],
+            values["object_scenarios"],
+            values["object_state_factories"],
+            values["object_teardowns"],
+            values["object_harnesses"],
         ) = _object_runtime_maps(shared_object_specs)
     except Exception as exc:
         warnings.append(f"object factory config failed for {module_name}: {exc}")
-        object_factories, object_setups, object_scenarios = {}, {}, {}
-        object_state_factories, object_teardowns, object_harnesses = {}, {}, {}
+        (
+            values["object_factories"],
+            values["object_setups"],
+            values["object_scenarios"],
+        ) = ({}, {}, {})
+        (
+            values["object_state_factories"],
+            values["object_teardowns"],
+            values["object_harnesses"],
+        ) = (
+            {},
+            {},
+            {},
+        )
     try:
-        contract_checks = _config_contract_checks_for_module(cfg, module_name)
+        values["contract_checks"] = _config_contract_checks_for_module(cfg, module_name)
     except Exception as exc:
         warnings.append(f"contract config failed for {module_name}: {exc}")
-        contract_checks = {}
+        values["contract_checks"] = {}
 
     match = next((entry for entry in cfg.scan if entry.module == module_name), None)
     if match is None:
-        return ScanRuntimeDefaults(
-            max_examples=effective_examples,
-            mode=mode,
-            seed_from_tests=seed_from_tests,
-            seed_from_fixtures=seed_from_fixtures,
-            seed_from_docstrings=seed_from_docstrings,
-            seed_from_code=seed_from_code,
-            seed_from_call_sites=seed_from_call_sites,
-            treat_any_as_weak=treat_any_as_weak,
-            proof_bundles=proof_bundles,
-            require_replayable=require_replayable,
-            auto_contracts=list(auto_contracts),
-            min_contract_fit=min_contract_fit,
-            min_reachability=min_reachability,
-            min_realism=min_realism,
-            min_fixture_completeness=min_fixture_completeness,
-            targets=targets,
-            include_private=include_private,
-            fixtures=fixtures,
-            object_factories=object_factories,
-            object_setups=object_setups,
-            object_scenarios=object_scenarios,
-            object_state_factories=object_state_factories,
-            object_teardowns=object_teardowns,
-            object_harnesses=object_harnesses,
-            contract_checks=contract_checks,
-            expected_failures=expected_failures,
-            registry_warnings=warnings,
-        )
+        return _build_defaults()
 
     if allow_config_override:
-        effective_examples = match.max_examples
-    mode = match.mode
-    seed_from_tests = bool(match.seed_from_tests)
-    seed_from_fixtures = bool(match.seed_from_fixtures)
-    seed_from_docstrings = bool(match.seed_from_docstrings)
-    seed_from_code = bool(match.seed_from_code)
-    seed_from_call_sites = bool(match.seed_from_call_sites)
-    treat_any_as_weak = bool(match.treat_any_as_weak)
-    proof_bundles = bool(match.proof_bundles)
-    require_replayable = bool(match.require_replayable)
-    auto_contracts = list(match.auto_contracts)
-    min_contract_fit = float(match.min_contract_fit)
-    min_reachability = float(match.min_reachability)
-    min_realism = float(getattr(match, "min_realism", 0.55))
-    min_fixture_completeness = float(getattr(match, "min_fixture_completeness", 0.0))
-    targets = list(match.targets)
-    include_private = bool(match.include_private)
-    fixtures = _parse_scan_fixture_specs(match.fixtures)
-    expected_failures = list(match.expected_failures)
-    warnings.extend(_load_fixture_registry_warnings(extra_modules=match.fixture_registries))
-    ignore_properties = list(match.ignore_properties)
-    ignore_relations = list(match.ignore_relations)
-    property_overrides = {
-        str(name): list(values) for name, values in match.property_overrides.items()
-    }
-    relation_overrides = {
-        str(name): list(values) for name, values in match.relation_overrides.items()
-    }
-    return ScanRuntimeDefaults(
-        max_examples=effective_examples,
-        mode=mode,
-        seed_from_tests=seed_from_tests,
-        seed_from_fixtures=seed_from_fixtures,
-        seed_from_docstrings=seed_from_docstrings,
-        seed_from_code=seed_from_code,
-        seed_from_call_sites=seed_from_call_sites,
-        treat_any_as_weak=treat_any_as_weak,
-        proof_bundles=proof_bundles,
-        require_replayable=require_replayable,
-        auto_contracts=list(auto_contracts),
-        min_contract_fit=min_contract_fit,
-        min_reachability=min_reachability,
-        min_realism=min_realism,
-        min_fixture_completeness=min_fixture_completeness,
-        targets=targets,
-        include_private=include_private,
-        fixtures=fixtures,
-        object_factories=object_factories,
-        object_setups=object_setups,
-        object_scenarios=object_scenarios,
-        object_state_factories=object_state_factories,
-        object_teardowns=object_teardowns,
-        object_harnesses=object_harnesses,
-        contract_checks=contract_checks,
-        expected_failures=expected_failures,
-        registry_warnings=warnings,
-        ignore_properties=ignore_properties,
-        ignore_relations=ignore_relations,
-        property_overrides=property_overrides,
-        relation_overrides=relation_overrides,
+        values["max_examples"] = match.max_examples
+    values["mode"] = match.mode
+    values["seed_from_tests"] = bool(match.seed_from_tests)
+    values["seed_from_fixtures"] = bool(match.seed_from_fixtures)
+    values["seed_from_docstrings"] = bool(match.seed_from_docstrings)
+    values["seed_from_code"] = bool(match.seed_from_code)
+    values["seed_from_call_sites"] = bool(match.seed_from_call_sites)
+    values["treat_any_as_weak"] = bool(match.treat_any_as_weak)
+    values["proof_bundles"] = bool(match.proof_bundles)
+    values["require_replayable"] = bool(match.require_replayable)
+    values["auto_contracts"] = list(match.auto_contracts)
+    values["min_contract_fit"] = float(match.min_contract_fit)
+    values["min_reachability"] = float(match.min_reachability)
+    values["min_realism"] = float(getattr(match, "min_realism", 0.55))
+    values["min_fixture_completeness"] = float(
+        getattr(match, "min_fixture_completeness", 0.0)
     )
+    values["targets"] = list(match.targets)
+    values["include_private"] = bool(match.include_private)
+    values["fixtures"] = _parse_scan_fixture_specs(match.fixtures)
+    values["expected_failures"] = list(match.expected_failures)
+    values["expected_preconditions"] = {
+        str(name): list(items) for name, items in match.expected_preconditions.items()
+    }
+    warnings.extend(_load_fixture_registry_warnings(extra_modules=match.fixture_registries))
+    values["ignore_contracts"] = list(match.ignore_contracts)
+    values["ignore_properties"] = list(match.ignore_properties)
+    values["ignore_relations"] = list(match.ignore_relations)
+    values["contract_overrides"] = {
+        str(name): list(items) for name, items in match.contract_overrides.items()
+    }
+    values["expected_properties"] = {
+        str(name): list(items) for name, items in match.expected_properties.items()
+    }
+    values["expected_relations"] = {
+        str(name): list(items) for name, items in match.expected_relations.items()
+    }
+    values["property_overrides"] = {
+        str(name): list(items) for name, items in match.property_overrides.items()
+    }
+    values["relation_overrides"] = {
+        str(name): list(items) for name, items in match.relation_overrides.items()
+    }
+    return _build_defaults()
 
 
 def _resolve_check_runtime_defaults(
@@ -1889,6 +1936,111 @@ def _scan_target_selectors(args: argparse.Namespace) -> list[str]:
         if selector and selector not in selectors:
             selectors.append(selector)
     return selectors
+
+
+_BROAD_PACKAGE_SCAN_DEFAULT_MAX_EXAMPLES = 5
+_PACKAGE_ROOT_ORCHESTRATION_PREFIXES = (
+    "audit",
+    "benchmark",
+    "chaos_for",
+    "explore",
+    "fuzz",
+    "mine",
+    "mutate",
+    "replay",
+    "scan",
+    "verify",
+)
+_PACKAGE_ROOT_HELPER_NAMES = {
+    "auto_configure",
+    "always",
+    "bounded",
+    "catalog",
+    "declare",
+    "finite",
+    "reachable",
+    "report",
+    "sometimes",
+    "unreachable",
+}
+_PACKAGE_ROOT_HEAVY_MODULE_PREFIXES = (
+    "ordeal.audit",
+    "ordeal.cli",
+    "ordeal.explore",
+    "ordeal.mine",
+    "ordeal.mutations",
+    "ordeal.scaling",
+    "ordeal.state",
+    "ordeal.trace",
+)
+
+
+def _is_package_module(module_name: str) -> bool:
+    """Return whether *module_name* resolves to a package root module."""
+    try:
+        mod = importlib.import_module(module_name)
+    except Exception:
+        return False
+    if getattr(mod, "__path__", None):
+        return True
+    module_file = getattr(mod, "__file__", "") or ""
+    return Path(module_file).name == "__init__.py"
+
+
+def _package_root_scan_priority(row: Mapping[str, Any]) -> tuple[float, str, str]:
+    """Return a descending priority key for representative package-root scan targets."""
+    name = str(row.get("name", "")).strip()
+    source_module = str(row.get("source_module") or row.get("module") or "")
+    score = 0.0
+    if bool(row.get("runnable", False)):
+        score += 50.0
+    if not bool(row.get("factory_required", False)):
+        score += 8.0
+    if bool(row.get("factory_configured", False)):
+        score += 2.0
+    if str(row.get("kind", "")) == "function":
+        score += 2.0
+    if str(row.get("async", "")) == "async":
+        score -= 1.0
+    if name in _PACKAGE_ROOT_HELPER_NAMES:
+        score += 10.0
+    if name in {"chaos_test"}:
+        score += 4.0
+    if any(name.startswith(prefix) for prefix in _PACKAGE_ROOT_ORCHESTRATION_PREFIXES) or name in {
+        "generate_starter_tests",
+        "init_project",
+    }:
+        score -= 12.0
+    if source_module.startswith(_PACKAGE_ROOT_HEAVY_MODULE_PREFIXES):
+        score -= 6.0
+    if any(
+        token in name
+        for token in (
+            "classify",
+            "extract",
+            "filter",
+            "prove",
+            "fit",
+            "analyze",
+            "validate",
+        )
+    ):
+        score += 6.0
+    if source_module.startswith("hypothesis_temporary_module_"):
+        score -= 20.0
+    if name.startswith("register_"):
+        score -= 8.0
+    if name == "builtin_contract_check":
+        score -= 10.0
+    if name.endswith("_contract"):
+        # Contract-builder exports are useful when targeted explicitly, but
+        # broad package-root scans should prefer concrete implementation helpers.
+        score -= 4.0
+    if name.endswith("_strategy"):
+        score -= 6.0
+    if name in {"activate", "deactivate", "set_seed"}:
+        score -= 4.0
+    return (-score, source_module, name)
 
 
 def _build_explicit_contract_checks(func: Any, names: Sequence[str]) -> list[Any]:
@@ -2036,8 +2188,13 @@ def _run_configured_scans(
             "object_teardowns": object_teardowns,
             "object_harnesses": object_harnesses,
             "expected_failures": scan_cfg.expected_failures,
+            "expected_preconditions": scan_cfg.expected_preconditions,
+            "ignore_contracts": scan_cfg.ignore_contracts,
             "ignore_properties": scan_cfg.ignore_properties,
             "ignore_relations": scan_cfg.ignore_relations,
+            "contract_overrides": scan_cfg.contract_overrides,
+            "expected_properties": scan_cfg.expected_properties,
+            "expected_relations": scan_cfg.expected_relations,
             "property_overrides": scan_cfg.property_overrides,
             "relation_overrides": scan_cfg.relation_overrides,
             "contract_checks": contract_checks,
@@ -2142,6 +2299,51 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     selected_scan_rows = [
         row for row in scan_target_rows if bool(row.get("selected", True))
     ] or scan_target_rows
+    sampling: dict[str, Any] | None = None
+    if (
+        not explicit_target
+        and not cli_target_selectors
+        and not runtime_defaults.targets
+        and not getattr(args, "list_targets", False)
+    ):
+        sampling = _package_root_scan_sample(module_name, selected_scan_rows)
+        if sampling is not None:
+            sampled_targets = list(sampling.get("targets", ()))
+            sampled_names = set(sampled_targets)
+            selected_scan_rows = [
+                row
+                for row in selected_scan_rows
+                if str(row.get("name", "")).strip() in sampled_names
+            ]
+            scan_targets = sampled_targets
+    scan_notes: list[str] = []
+    scan_max_examples = int(runtime_defaults.max_examples)
+    scan_seed_from_call_sites = runtime_defaults.seed_from_call_sites
+    broad_package_root_scan = sampling is not None
+    if sampling is not None:
+        scan_notes.append(
+            "Package-root scan sampled "
+            f"{sampling['sampled']}/{sampling['total_runnable']} runnable exports "
+            f"across {sampling['source_modules']} source module(s); "
+            "use --list-targets or --target for exhaustive coverage."
+        )
+    if broad_package_root_scan and scan_seed_from_call_sites:
+        scan_seed_from_call_sites = False
+        scan_notes.append(
+            "Broad package-root scan disabled call-site seed mining for speed; "
+            "use --target for deeper realism."
+        )
+    if (
+        broad_package_root_scan
+        and args.max_examples == 50
+        and runtime_defaults.max_examples == 50
+        and scan_max_examples > _BROAD_PACKAGE_SCAN_DEFAULT_MAX_EXAMPLES
+    ):
+        scan_max_examples = _BROAD_PACKAGE_SCAN_DEFAULT_MAX_EXAMPLES
+        scan_notes.append(
+            "Broad package-root scan capped max_examples to "
+            f"{scan_max_examples} per target; pass -n or use --target for a deeper scan."
+        )
     if getattr(args, "list_targets", False):
         groups = [{"module": module_name, "targets": scan_target_rows}]
         if args.json:
@@ -2194,11 +2396,13 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         _stderr(f"Scanning {scan_target} (seed={args.seed})...\n")
         for warning in runtime_defaults.registry_warnings:
             _stderr(f"warning: {warning}\n")
+        for note in scan_notes:
+            _stderr(f"note: {note}\n")
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         state = explore(
             module_name,
             seed=args.seed,
-            max_examples=runtime_defaults.max_examples,
+            max_examples=scan_max_examples,
             workers=args.workers,
             time_limit=args.time_limit,
             include_private=inc_private,
@@ -2211,8 +2415,13 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             scan_object_teardowns=runtime_defaults.object_teardowns,
             scan_object_harnesses=runtime_defaults.object_harnesses,
             scan_expected_failures=runtime_defaults.expected_failures,
+            scan_expected_preconditions=runtime_defaults.expected_preconditions,
+            scan_ignore_contracts=runtime_defaults.ignore_contracts,
             scan_ignore_properties=scan_ignore_properties,
             scan_ignore_relations=scan_ignore_relations,
+            scan_contract_overrides=runtime_defaults.contract_overrides,
+            scan_expected_properties=runtime_defaults.expected_properties,
+            scan_expected_relations=runtime_defaults.expected_relations,
             scan_property_overrides=scan_property_overrides,
             scan_relation_overrides=scan_relation_overrides,
             scan_contract_checks=runtime_defaults.contract_checks,
@@ -2221,7 +2430,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             scan_seed_from_fixtures=runtime_defaults.seed_from_fixtures,
             scan_seed_from_docstrings=runtime_defaults.seed_from_docstrings,
             scan_seed_from_code=runtime_defaults.seed_from_code,
-            scan_seed_from_call_sites=runtime_defaults.seed_from_call_sites,
+            scan_seed_from_call_sites=scan_seed_from_call_sites,
             scan_treat_any_as_weak=runtime_defaults.treat_any_as_weak,
             scan_proof_bundles=runtime_defaults.proof_bundles,
             scan_require_replayable=runtime_defaults.require_replayable,
@@ -2229,7 +2438,17 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             scan_min_contract_fit=scan_min_contract_fit,
             scan_min_reachability=scan_min_reachability,
             scan_min_realism=scan_min_realism,
+            run_mine=False,
+            run_scan=True,
+            run_mutate=False,
+            run_chaos=False,
         )
+    if sampling is not None:
+        state.supervisor_info = dict(getattr(state, "supervisor_info", {}) or {})
+        state.supervisor_info["scan_sampling"] = dict(sampling)
+    if scan_notes:
+        state.supervisor_info = dict(getattr(state, "supervisor_info", {}) or {})
+        state.supervisor_info["scan_scope_notes"] = list(scan_notes)
 
     if not args.json:
         print(_format_scan_summary(state))
@@ -3328,6 +3547,7 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
                 "min_realism": runtime_defaults.min_realism,
                 "fixtures": runtime_defaults.fixtures,
                 "expected_failures": runtime_defaults.expected_failures,
+                "expected_preconditions": runtime_defaults.expected_preconditions,
             }
             if runtime_defaults.object_factories:
                 scan_kwargs["object_factories"] = runtime_defaults.object_factories
@@ -3343,10 +3563,18 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
                 scan_kwargs["object_harnesses"] = runtime_defaults.object_harnesses
             if runtime_defaults.contract_checks:
                 scan_kwargs["contract_checks"] = runtime_defaults.contract_checks
+            if runtime_defaults.ignore_contracts:
+                scan_kwargs["ignore_contracts"] = runtime_defaults.ignore_contracts
             if runtime_defaults.ignore_properties:
                 scan_kwargs["ignore_properties"] = runtime_defaults.ignore_properties
             if runtime_defaults.ignore_relations:
                 scan_kwargs["ignore_relations"] = runtime_defaults.ignore_relations
+            if runtime_defaults.contract_overrides:
+                scan_kwargs["contract_overrides"] = runtime_defaults.contract_overrides
+            if runtime_defaults.expected_properties:
+                scan_kwargs["expected_properties"] = runtime_defaults.expected_properties
+            if runtime_defaults.expected_relations:
+                scan_kwargs["expected_relations"] = runtime_defaults.expected_relations
             if runtime_defaults.property_overrides:
                 scan_kwargs["property_overrides"] = runtime_defaults.property_overrides
             if runtime_defaults.relation_overrides:
@@ -3363,7 +3591,7 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
         for function in result.functions:
             qualname = f"{module}.{function.name}"
             crash_category = getattr(function, "crash_category", None) or "speculative_crash"
-            if not function.passed and crash_category == "likely_bug":
+            if function.promoted and crash_category == "likely_bug":
                 findings.append(
                     {
                         "kind": "crash",
@@ -3384,7 +3612,7 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
                         "proof_bundle": function.proof_bundle,
                     }
                 )
-            elif not function.passed:
+            elif not function.execution_ok:
                 findings.append(
                     {
                         "kind": "crash",
@@ -4201,6 +4429,11 @@ def _format_scan_summary(state: Any) -> str:
     invalid_inputs = [
         detail for detail in details if detail.get("category") == "invalid_input_crash"
     ]
+    robustness = [
+        detail
+        for detail in details
+        if detail.get("category") == "beyond_declared_contract_robustness"
+    ]
     exploratory_crashes = [
         detail for detail in details if detail.get("category") == "speculative_crash"
     ]
@@ -4216,6 +4449,8 @@ def _format_scan_summary(state: Any) -> str:
         status = "coverage gaps found"
     elif exploratory_crashes or exploratory_properties:
         status = "exploratory findings"
+    elif robustness:
+        status = "robustness findings observed"
     elif invalid_inputs:
         status = "invalid-input crashes observed"
     elif expected:
@@ -4226,6 +4461,14 @@ def _format_scan_summary(state: Any) -> str:
     lines.append(f"  confidence: {state.confidence:.0%}")
 
     lines.append(f"  checked: {', '.join(_scan_checked_items(state))}")
+    sampling = getattr(state, "supervisor_info", {}).get("scan_sampling")
+    if isinstance(sampling, Mapping):
+        lines.append(
+            "  surface sample: "
+            f"{sampling.get('sampled', 0)}/{sampling.get('total_runnable', 0)} runnable exports "
+            f"across {sampling.get('source_modules', 0)} source module(s); "
+            "use --list-targets or --target for exhaustive coverage"
+        )
 
     if state.findings:
         lines.append("  findings:")
@@ -4240,6 +4483,10 @@ def _format_scan_summary(state: Any) -> str:
         if invalid_inputs:
             lines.append("  invalid-input crashes:")
             for detail in invalid_inputs[:5]:
+                lines.append(f"    - {detail.get('summary', detail.get('function', '?'))}")
+        if robustness:
+            lines.append("  beyond-contract robustness:")
+            for detail in robustness[:5]:
                 lines.append(f"    - {detail.get('summary', detail.get('function', '?'))}")
         if exploratory_crashes:
             lines.append("  exploratory crashes:")
@@ -4284,6 +4531,7 @@ _SPECULATIVE_SCAN_CATEGORIES = {
     "speculative_crash",
     "speculative_property",
     "invalid_input_crash",
+    "beyond_declared_contract_robustness",
     "coverage_gap",
 }
 
@@ -4296,6 +4544,12 @@ def _is_speculative_scan_detail(detail: Mapping[str, Any]) -> bool:
 def _scan_checked_items(state: Any) -> list[str]:
     """Return the coarse coverage summary for a scan report."""
     checked = [f"{len(state.functions)} functions"]
+    sampling = getattr(state, "supervisor_info", {}).get("scan_sampling")
+    if isinstance(sampling, Mapping):
+        checked.append(
+            "sampled "
+            f"{sampling.get('sampled', 0)}/{sampling.get('total_runnable', 0)} runnable exports"
+        )
     if getattr(state, "supervisor_info", None):
         checked.append(f"{state.supervisor_info.get('trajectory_steps', 0)} transitions")
     tree = getattr(state, "tree", None)
@@ -4876,6 +5130,12 @@ def _build_scan_report(state: Any) -> dict[str, Any]:
     replayability = evidence["replayability"]
     mutation_strength = evidence["mutation_strength"]
     fixture_completeness = evidence["fixture_completeness"]
+    sampling = getattr(state, "supervisor_info", {}).get("scan_sampling")
+    scope_notes = [
+        str(note)
+        for note in getattr(state, "supervisor_info", {}).get("scan_scope_notes", ())
+        if note
+    ]
     details = [
         {
             **detail,
@@ -4895,6 +5155,11 @@ def _build_scan_report(state: Any) -> dict[str, Any]:
     invalid_input_count = sum(
         1 for detail in details if detail.get("category") == "invalid_input_crash"
     )
+    robustness_count = sum(
+        1
+        for detail in details
+        if detail.get("category") == "beyond_declared_contract_robustness"
+    )
     exploratory_crash_count = sum(
         1 for detail in details if detail.get("category") == "speculative_crash"
     )
@@ -4906,77 +5171,114 @@ def _build_scan_report(state: Any) -> dict[str, Any]:
     )
     if promoted_count:
         status = "findings found"
-    elif exploratory_crash_count or exploratory_property_count:
+    elif exploratory_crash_count or exploratory_property_count or robustness_count:
         status = "exploratory findings"
     elif expected_count:
         status = "expected preconditions observed"
     else:
         status = "no findings yet"
+    summary = [
+        f"Checked: {', '.join(_scan_checked_items(state))}",
+        f"Promoted findings: {promoted_count}",
+        f"Lifecycle contracts: {lifecycle_contract_count}",
+        f"Semantic contracts: {semantic_contract_count}",
+        f"Coverage gaps: {coverage_gap_count}",
+        f"Invalid-input crashes: {invalid_input_count}",
+        f"Beyond-contract robustness: {robustness_count}",
+        f"Exploratory crashes: {exploratory_crash_count}",
+        f"Exploratory properties: {exploratory_property_count}",
+        f"Expected precondition failures: {expected_count}",
+        f"Gaps: {sum(len(v) for v in state.frontier.values()) if state.frontier else 0}",
+        (
+            "Evidence:"
+            f" search depth={search_depth['functions']} functions/"
+            f"{search_depth['transitions']} transitions/"
+            f"{search_depth['checkpoints']} checkpoints,"
+            f" replayability={replayability['replayable_findings']}/"
+            f"{replayability['total_findings']},"
+            f" mutation strength="
+            f"{(f'{mutation_strength:.0%}' if mutation_strength is not None else 'n/a')},"
+            f" fixture completeness={fixture_completeness:.0%}"
+        ),
+    ]
+    if isinstance(sampling, Mapping):
+        summary.insert(
+            1,
+            "Surface sampling: "
+            f"{sampling.get('sampled', 0)}/{sampling.get('total_runnable', 0)} "
+            "runnable exports checked",
+        )
+    suggested_commands = [
+        f"ordeal scan {state.module}",
+        f"ordeal mine {state.module} -n 200",
+        f"ordeal mutate {state.module}",
+    ]
+    extra_sections: list[tuple[str, list[str]]] = []
+    if isinstance(sampling, Mapping):
+        sampling_notes = [
+            note for note in scope_notes if not note.startswith("Package-root scan sampled ")
+        ]
+        extra_sections.append(
+            (
+                "Surface Sampling",
+                [
+                    "Package-root scan sampled "
+                    f"{sampling.get('sampled', 0)} of "
+                    f"{sampling.get('total_runnable', 0)} runnable exports across "
+                    f"{sampling.get('source_modules', 0)} source module(s).",
+                    "Use `--list-targets` to inspect the full exported surface.",
+                    "Use `--target` to run an exhaustive check on a specific callable or glob.",
+                    *sampling_notes,
+                ],
+            )
+        )
+        suggested_commands = [
+            f"ordeal scan {state.module} --list-targets",
+            f"ordeal scan {state.module} --target <selector>",
+            f"ordeal scan {state.module} -n 50 --target <selector>",
+        ]
+    elif scope_notes:
+        extra_sections.append(("Scope Notes", scope_notes))
+    extra_sections.append(
+        (
+            "Evidence Dimensions",
+            [
+                (
+                    "search depth: "
+                    f"{search_depth['functions']} functions, "
+                    f"{search_depth['transitions']} transitions, "
+                    f"{search_depth['checkpoints']} checkpoints"
+                ),
+                (
+                    "replayability: "
+                    f"{replayability['replayable_findings']}/"
+                    f"{replayability['total_findings']} findings have concrete inputs"
+                ),
+                (
+                    "mutation strength: "
+                    + (
+                        f"{mutation_strength:.0%}"
+                        if mutation_strength is not None
+                        else "not measured yet"
+                    )
+                ),
+                f"fixture completeness: {fixture_completeness:.0%}",
+            ],
+        )
+    )
     return {
         "target": state.module,
         "tool": "scan",
         "status": status,
         "confidence": f"{state.confidence:.0%}",
         "seed": getattr(state, "supervisor_info", {}).get("seed"),
-        "summary": [
-            f"Checked: {', '.join(_scan_checked_items(state))}",
-            f"Promoted findings: {promoted_count}",
-            f"Lifecycle contracts: {lifecycle_contract_count}",
-            f"Semantic contracts: {semantic_contract_count}",
-            f"Coverage gaps: {coverage_gap_count}",
-            f"Invalid-input crashes: {invalid_input_count}",
-            f"Exploratory crashes: {exploratory_crash_count}",
-            f"Exploratory properties: {exploratory_property_count}",
-            f"Expected precondition failures: {expected_count}",
-            f"Gaps: {sum(len(v) for v in state.frontier.values()) if state.frontier else 0}",
-            (
-                "Evidence:"
-                f" search depth={search_depth['functions']} functions/"
-                f"{search_depth['transitions']} transitions/"
-                f"{search_depth['checkpoints']} checkpoints,"
-                f" replayability={replayability['replayable_findings']}/"
-                f"{replayability['total_findings']},"
-                f" mutation strength="
-                f"{(f'{mutation_strength:.0%}' if mutation_strength is not None else 'n/a')},"
-                f" fixture completeness={fixture_completeness:.0%}"
-            ),
-        ],
+        "summary": summary,
         "details": details,
         "gaps": [
             f"`{state.module}.{name}`: {', '.join(gaps)}" for name, gaps in state.frontier.items()
         ],
-        "suggested_commands": [
-            f"ordeal scan {state.module}",
-            f"ordeal mine {state.module} -n 200",
-            f"ordeal mutate {state.module}",
-        ],
-        "extra_sections": [
-            (
-                "Evidence Dimensions",
-                [
-                    (
-                        "search depth: "
-                        f"{search_depth['functions']} functions, "
-                        f"{search_depth['transitions']} transitions, "
-                        f"{search_depth['checkpoints']} checkpoints"
-                    ),
-                    (
-                        "replayability: "
-                        f"{replayability['replayable_findings']}/"
-                        f"{replayability['total_findings']} findings have concrete inputs"
-                    ),
-                    (
-                        "mutation strength: "
-                        + (
-                            f"{mutation_strength:.0%}"
-                            if mutation_strength is not None
-                            else "not measured yet"
-                        )
-                    ),
-                    f"fixture completeness: {fixture_completeness:.0%}",
-                ],
-            )
-        ],
+        "suggested_commands": suggested_commands,
+        "extra_sections": extra_sections,
     }
 
 
@@ -5296,6 +5598,8 @@ def _scan_crash_summary(qualname: str, category: str, replayable: bool | None) -
         return f"{qualname}: crash safety failed"
     if category == "coverage_gap":
         return f"{qualname}: crash still looks like a coverage gap"
+    if category == "beyond_declared_contract_robustness":
+        return f"{qualname}: crash sits just beyond the declared contract"
     if category == "invalid_input_crash":
         return f"{qualname}: crash currently looks driven by invalid input"
     if replayable:

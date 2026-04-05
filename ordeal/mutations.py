@@ -540,6 +540,18 @@ class Mutant:
         return f"L{self.line}:{self.col}"
 
     @property
+    def site_summary(self) -> str:
+        """Return the exact source site for this mutant."""
+        if self.source_line:
+            return f"{self.location} | {self.source_line}"
+        return self.location
+
+    @property
+    def report_label(self) -> str:
+        """Return a compact, review-friendly label for this mutant."""
+        return f"{self.site_summary} [{self.operator}] {self.description}"
+
+    @property
     def remediation(self) -> str:
         """Actionable guidance for killing this mutant."""
         advice = _REMEDIATION.get(self.operator, "")
@@ -721,28 +733,31 @@ def _mutant_semantic_tags(
     metadata: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """Infer coarse semantic tags for a surviving mutant."""
-    lowered = (
-        f"{target or ''} {mutant.qualname or ''} {mutant.description} {mutant.source_line}"
-    ).lower()
+    target_bits = f"{target or ''} {mutant.qualname or ''}".lower()
+    source_bits = f"{mutant.description} {mutant.source_line}".lower()
     tags: list[str] = []
     tags.extend(_metadata_semantic_tags(metadata or mutant.metadata))
     tags.extend(_target_semantic_tags(target or ""))
-    if any(token in lowered for token in {"cleanup", "teardown", "rollout", "setup", "stop"}):
+    if any(
+        token in f"{target_bits} {source_bits}"
+        for token in {"cleanup", "teardown", "rollout", "setup", "stop"}
+    ):
         tags.append("lifecycle")
-    if any(token in lowered for token in {"shell", "argv", "execute_command", "subprocess"}):
+    if any(token in target_bits for token in {"shell", "argv", "execute_command", "subprocess"}):
         tags.append("shell")
-    if any(token in lowered for token in {"path", "quote", "cwd", "workdir", "upload"}):
+    if any(token in target_bits for token in {"path", "quote", "cwd", "workdir", "upload"}):
         tags.append("path")
-    if any(token in lowered for token in {"env", "environ", "setdefault", "home", "path="}):
+    if any(token in target_bits for token in {"env", "environ", "setdefault", "home", "path="}):
         tags.append("env")
-    if any(token in lowered for token in {"json", "payload", "tool_call", "normalize"}):
+    if any(token in target_bits for token in {"json", "tool_call"}):
         tags.append("json")
-    if any(token in lowered for token in {"http", "headers", "request", "response", "body"}):
+    if any(token in target_bits for token in {"http"}):
         tags.append("http")
-    if any(token in lowered for token in {"sql", "select ", "insert ", "update ", "delete "}):
+    if any(token in target_bits for token in {"sql", "select ", "insert ", "update ", "delete "}):
         tags.append("sql")
     if mutant.operator in {"boundary", "comparison", "constant"} or any(
-        token in lowered for token in {"<", ">", "<=", ">=", "timeout", "limit", "count", "size"}
+        token in source_bits
+        for token in {"<", ">", "<=", ">=", "timeout", "limit", "count", "size"}
     ):
         tags.append("boundary")
     if mutant.operator in {"logical", "negate", "remove_not", "swap_if_else"}:
@@ -1153,11 +1168,9 @@ class MutationResult:
                 "but none cluster strongly enough to promote beyond test-gap guidance."
             )
         for m in self.survived:
-            header = f"  GAP {m.location} [{m.operator}] {m.description}"
+            header = f"  GAP {m.report_label}"
             if m.qualname:
                 header += f"  @  {m.qualname}"
-            if m.source_line:
-                header += f"  |  {m.source_line}"
             lines.append(header)
             context_note = _contract_context_summary(
                 _merge_semantic_context(self.contract_context, m.metadata)
@@ -1237,7 +1250,7 @@ class MutationResult:
             lines.append("")
             lines.append(f"def {test_name}():")
             lines.append("    # Review this draft before pinning it as a regression.")
-            lines.append(f"    # Mutant: {m.operator}: {m.description} at {m.location}")
+            lines.append(f"    # Mutant: {m.report_label}")
             if m.qualname:
                 lines.append(f"    # Owner: {m.qualname}")
             contract_note = _contract_context_summary(context)
@@ -1589,6 +1602,7 @@ def _mutant_to_dict(m: Mutant) -> dict:
         "description": m.description,
         "line": m.line,
         "col": m.col,
+        "site_summary": m.site_summary,
         "killed": m.killed,
         "error": m.error,
         "source_line": m.source_line,

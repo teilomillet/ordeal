@@ -97,6 +97,59 @@ def test_review_signature_and_summary_keep_method_targets_explicit(
         _clear_module_family("reviewpkg")
 
 
+def test_mutant_report_label_includes_exact_source_site():
+    mutant = mutations.Mutant(
+        operator="comparison",
+        description="<= -> <",
+        line=12,
+        col=4,
+        source_line="if timeout <= limit:",
+        qualname="Service.build_env_vars",
+    )
+
+    assert mutant.site_summary == "L12:4 | if timeout <= limit:"
+    assert mutant.report_label == "L12:4 | if timeout <= limit: [comparison] <= -> <"
+    result = mutations.MutationResult(target="pkg.mod.Service.build", mutants=[mutant])
+    assert "GAP L12:4 | if timeout <= limit: [comparison] <= -> <" in result.summary()
+
+
+def test_mutant_semantic_tags_do_not_infer_transport_semantics_from_source_text():
+    mutant = mutations.Mutant(
+        operator="delete_statement",
+        description="remove return",
+        line=1,
+        col=0,
+        source_line="return response",
+        qualname="Service.process",
+    )
+
+    tags = mutations._mutant_semantic_tags(mutant, target="reviewpkg.mod.Service.process")
+
+    assert "json" not in tags
+    assert "http" not in tags
+    assert "shell" not in tags
+
+
+def test_mutant_semantic_tags_do_not_infer_transport_semantics_from_generic_target_text():
+    mutant = mutations.Mutant(
+        operator="delete_statement",
+        description="remove return",
+        line=1,
+        col=0,
+        source_line="return result",
+        qualname="Service.normalize",
+    )
+
+    tags = mutations._mutant_semantic_tags(
+        mutant,
+        target="reviewpkg.mod.Service.normalize_payload",
+    )
+
+    assert "json" not in tags
+    assert "http" not in tags
+    assert "shell" not in tags
+
+
 def test_review_signature_refreshes_shadowed_local_modules(tmp_path_factory, monkeypatch):
     first_root = tmp_path_factory.mktemp("reviewpkg_first")
     first_pkg = first_root / "reviewpkg"
@@ -322,6 +375,23 @@ def test_mutation_result_uses_explicit_shell_path_env_tags():
     assert cluster["coherent_boundary"] is True
     summary = result.summary()
     assert "Service.build_env_vars -> shell/argv construction" in summary
+
+
+def test_mutant_semantic_tags_still_honor_explicit_contract_metadata():
+    mutant = mutations.Mutant(
+        operator="delete_statement",
+        description="remove return",
+        line=1,
+        col=0,
+        source_line="return response",
+        qualname="Service.process",
+        metadata={"contract_tags": ["json", "http"]},
+    )
+
+    tags = mutations._mutant_semantic_tags(mutant, target="reviewpkg.mod.Service.process")
+
+    assert "json" in tags
+    assert "http" in tags
 
 
 def test_mutation_metadata_and_contract_context_round_trip_through_cache(

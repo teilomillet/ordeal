@@ -741,6 +741,7 @@ def test_generate_test_stubs_qualifies_local_types(tmp_path: Path, monkeypatch):
 
     assert "import reviewpkg.mod as _ordeal_target" in stubs
     assert "Reviewed signature: process(config: reviewpkg.types.PolicyConfig)" in stubs
+    assert "Mutant: L3:4 | return config [arithmetic] + -> -" in stubs
     assert "# assert result == ..." in stubs
 
 

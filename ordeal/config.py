@@ -108,17 +108,22 @@ class ScanConfig:
     seed_from_call_sites: bool = True
     treat_any_as_weak: bool = True
     auto_contracts: list[str] = field(default_factory=list)
+    ignore_contracts: list[str] = field(default_factory=list)
     targets: list[str] = field(default_factory=list)
     include_private: bool = False
     fixtures: dict[str, str] = field(default_factory=dict)
     # fixture values are sampled_from specs like "violence,cyber,sexual"
     expected_failures: list[str] = field(default_factory=list)
+    expected_preconditions: dict[str, list[str]] = field(default_factory=dict)
     # function names where failure is correct behavior (e.g. input validation)
     fixture_registries: list[str] = field(default_factory=list)
     ignore_properties: list[str] = field(default_factory=list)
     ignore_relations: list[str] = field(default_factory=list)
+    expected_properties: dict[str, list[str]] = field(default_factory=dict)
+    expected_relations: dict[str, list[str]] = field(default_factory=dict)
     property_overrides: dict[str, list[str]] = field(default_factory=dict)
     relation_overrides: dict[str, list[str]] = field(default_factory=dict)
+    contract_overrides: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -345,6 +350,17 @@ def _warn_unknown_keys(section: str, data: dict, known: set[str]) -> None:
         )
 
 
+def _map_of_lists(value: object, *, key_name: str) -> dict[str, list[str]]:
+    """Normalize either ``{name=[...]}`` or ``[...]`` into a dict of string lists."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return {str(name): [str(item) for item in items] for name, items in value.items()}
+    if isinstance(value, list):
+        return {"*": [str(item) for item in value]}
+    raise ConfigError(f"{key_name} must be a list or table, got {type(value).__name__}")
+
+
 # ============================================================================
 # Loader
 # ============================================================================
@@ -454,15 +470,26 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
                 seed_from_call_sites=bool(s.get("seed_from_call_sites", True)),
                 treat_any_as_weak=bool(s.get("treat_any_as_weak", True)),
                 auto_contracts=list(s.get("auto_contracts", [])),
+                ignore_contracts=list(s.get("ignore_contracts", [])),
                 targets=list(s.get("targets", [])),
                 include_private=bool(s.get("include_private", False)),
                 fixtures=s.get("fixtures", {}),
                 expected_failures=s.get("expected_failures", []),
+                expected_preconditions=_map_of_lists(
+                    s.get("expected_preconditions"), key_name="expected_preconditions"
+                ),
                 fixture_registries=list(s.get("fixture_registries", [])),
                 ignore_properties=list(s.get("ignore_properties", [])),
                 ignore_relations=list(s.get("ignore_relations", [])),
+                expected_properties=_map_of_lists(
+                    s.get("expected_properties"), key_name="expected_properties"
+                ),
+                expected_relations=_map_of_lists(
+                    s.get("expected_relations"), key_name="expected_relations"
+                ),
                 property_overrides=dict(s.get("property_overrides", {})),
                 relation_overrides=dict(s.get("relation_overrides", {})),
+                contract_overrides=dict(s.get("contract_overrides", {})),
             )
         )
         scan_cfg = scans[-1]

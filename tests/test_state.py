@@ -209,6 +209,77 @@ class TestExplorationStateSerialization:
         assert calls["object_setups"] == {"pkg.mod:Env": setup}
         assert calls["object_scenarios"] == {"pkg.mod:Env": scenario}
 
+    def test_explore_scan_records_skipped_functions(self, monkeypatch):
+        import ordeal.auto as auto_mod
+        from ordeal.state import explore_scan
+
+        monkeypatch.setattr(
+            auto_mod,
+            "scan_module",
+            lambda *args, **kwargs: ScanResult(
+                module="pkg.mod",
+                skipped=[("catalog", "missing inferable strategies")],
+            ),
+        )
+
+        state = ExplorationState("pkg.mod")
+        explored = explore_scan(state)
+
+        assert explored.skipped == [("catalog", "missing inferable strategies")]
+
+    def test_scan_only_state_ignores_mutation_and_chaos_gaps(self):
+        state = ExplorationState("pkg.mod", active_dimensions=("scan",))
+        fn = state.function("normalize")
+        fn.scanned = True
+        fn.crash_free = True
+
+        assert state.confidence == 1.0
+        assert state.frontier == {}
+
+    def test_explore_can_run_scan_dimension_only(self, monkeypatch):
+        import ordeal.state as state_mod
+        from ordeal.state import ExplorationState, explore
+
+        calls: list[str] = []
+
+        def fake_scan(state, **kwargs):
+            calls.append("scan")
+            state.function("normalize").scanned = True
+            state.function("normalize").crash_free = True
+            return state
+
+        monkeypatch.setattr(state_mod, "explore_scan", fake_scan)
+        monkeypatch.setattr(
+            state_mod,
+            "explore_mine",
+            lambda state, **kwargs: (_ for _ in ()).throw(AssertionError("mine should not run")),
+        )
+        monkeypatch.setattr(
+            state_mod,
+            "explore_mutate",
+            lambda state, **kwargs: (_ for _ in ()).throw(
+                AssertionError("mutate should not run")
+            ),
+        )
+        monkeypatch.setattr(
+            state_mod,
+            "explore_chaos",
+            lambda state, **kwargs: (_ for _ in ()).throw(AssertionError("chaos should not run")),
+        )
+
+        explored = explore(
+            "pkg.mod",
+            state=ExplorationState("pkg.mod"),
+            run_mine=False,
+            run_scan=True,
+            run_mutate=False,
+            run_chaos=False,
+        )
+
+        assert calls == ["scan"]
+        assert explored.active_dimensions == ("scan",)
+        assert explored.confidence == 1.0
+
     def test_explore_forwards_scenarios_through_runtime_paths(self, monkeypatch):
         import ordeal.state as state_mod
         from ordeal.state import ExplorationState, explore

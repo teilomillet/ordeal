@@ -108,8 +108,13 @@ module = "myapp.scoring"
 targets = ["myapp.scoring:Env.build_env_vars"]
 include_private = true
 fixture_registries = ["tests.support.fixtures"]
+ignore_contracts = ["quoted_paths"]
 ignore_properties = ["commutative"]
 ignore_relations = ["commutative_composition"]
+expected_preconditions = ["validate_input", "check_permissions"]
+expected_properties = ["ordered_arguments"]
+expected_relations = ["equivalent"]
+contract_overrides = { build_env_vars = ["protected_env_keys"] }
 property_overrides = { score = ["idempotent"] }
 relation_overrides = { normalize = ["equivalent"] }
 """
@@ -119,8 +124,15 @@ relation_overrides = { normalize = ["equivalent"] }
         assert scan.targets == ["myapp.scoring:Env.build_env_vars"]
         assert scan.include_private is True
         assert scan.fixture_registries == ["tests.support.fixtures"]
+        assert scan.ignore_contracts == ["quoted_paths"]
         assert scan.ignore_properties == ["commutative"]
         assert scan.ignore_relations == ["commutative_composition"]
+        assert scan.expected_preconditions == {
+            "*": ["validate_input", "check_permissions"]
+        }
+        assert scan.expected_properties == {"*": ["ordered_arguments"]}
+        assert scan.expected_relations == {"*": ["equivalent"]}
+        assert scan.contract_overrides == {"build_env_vars": ["protected_env_keys"]}
         assert scan.property_overrides == {"score": ["idempotent"]}
         assert scan.relation_overrides == {"normalize": ["equivalent"]}
 

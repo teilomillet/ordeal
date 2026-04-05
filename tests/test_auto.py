@@ -713,7 +713,8 @@ class TestScanModule:
                 },
             )
             command = next(f for f in result.functions if f.name == "build_command")
-            assert command.passed
+            assert command.passed is False
+            assert command.verdict == "semantic_contract"
             assert command.contract_violations
             assert command.contract_violation_details[0]["category"] == "semantic_contract"
             proof = command.contract_violation_details[0]["proof_bundle"]
@@ -723,7 +724,7 @@ class TestScanModule:
                 "uv run ordeal check _test_contracts:build_command"
                 " --contract shell-safe path quoting"
             )
-            assert result.failed == 0
+            assert result.failed == 1
         finally:
             del sys.modules[mod.__name__]
 
@@ -807,7 +808,9 @@ class TestScanModule:
             check_return_type=False,
         )
 
-        assert not result.passed
+        assert result.passed
+        assert result.execution_ok is False
+        assert result.verdict == "exploratory_crash"
         assert result.crash_category == "speculative_crash"
         assert result.replayable is False
         assert "WARN  flaky" in str(result)
@@ -826,11 +829,27 @@ class TestScanModule:
             mode="real_bug",
         )
 
-        assert result.passed is False
+        assert result.passed is True
+        assert result.execution_ok is False
+        assert result.verdict == "invalid_input_crash"
         assert result.crash_category == "invalid_input_crash"
         assert result.proof_bundle is not None
         assert result.proof_bundle["contract_validity"]["category"] == "invalid_input_crash"
         assert result.proof_bundle["verdict"]["demotion_reason"] is not None
+
+    def test_real_bug_mode_skips_property_mining_for_passing_functions(self, monkeypatch):
+        import ordeal.mine as mine_mod
+
+        def fail_mine(*args, **kwargs):
+            raise AssertionError("real_bug mode should not mine passing functions")
+
+        monkeypatch.setattr(mine_mod, "mine", fail_mine)
+
+        result = scan_module("tests._auto_target", max_examples=1, mode="real_bug")
+
+        add_result = next(f for f in result.functions if f.name == "add")
+        assert add_result.passed is True
+        assert add_result.property_violations == []
 
     def test_ignore_properties_suppresses_noisy_scan_warnings(self, monkeypatch):
         import ordeal.mine as mine_mod
@@ -1116,7 +1135,8 @@ class TestChaosFor:
             )
 
             function = next(item for item in result.functions if item.name == "Env.cleanup")
-            assert function.passed
+            assert function.passed is False
+            assert function.verdict == "lifecycle_contract"
             assert function.contract_violations
             detail = function.contract_violation_details[0]
             assert detail["category"] == "lifecycle_contract"
@@ -1446,6 +1466,7 @@ class TestLiteralInScan:
             result = scan_module("_test_literal_scan_crash", max_examples=1, mode="real_bug")
             choose = next(f for f in result.functions if f.name == "choose")
             assert choose.passed is False
+            assert choose.verdict == "promoted_real_bug"
             assert choose.error_type == "RuntimeError"
             assert choose.proof_bundle is not None
         finally:

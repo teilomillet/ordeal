@@ -128,13 +128,21 @@ verbose = true
 #
 # # Suppress noisy mined properties or relations when they are domain-shaped
 # # constraints rather than defects.
+# ignore_contracts = ["quoted_paths"]
 # ignore_properties = ["commutative"]
 # ignore_relations = ["commutative_composition"]
 #
 # # Keep expected validation failures visible without promoting them as bugs.
 # expected_failures = ["validate_input"]
+# expected_preconditions = { "*" = ["ValueError"], build_env_vars = ["protected key"] }
+#
+# # Mark domain-shaped findings as expected semantics instead of surprising
+# # exploratory output.
+# expected_properties = { "*" = ["ordered_arguments"] }
+# expected_relations = { "*" = ["equivalent"] }
 #
 # # Per-function suppression / override knobs.
+# contract_overrides = { build_env_vars = ["protected_env_keys"] }
 # property_overrides = { normalize = ["idempotent"] }
 # relation_overrides = { normalize = ["equivalent"] }
 #

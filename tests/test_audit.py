@@ -479,6 +479,29 @@ class TestModuleAuditSummary:
         s = a.summary()
         assert "mutation: 8/10 (80%)" in s
 
+    def test_summary_separates_current_generated_and_combined_views(self):
+        a = ModuleAudit(module="myapp.scoring")
+        a.current_test_count = 5
+        a.current_test_lines = 20
+        a.current_coverage = CoverageMeasurement(
+            Status.VERIFIED,
+            result=CoverageResult(45.0, 50, 10, frozenset({1}), "test"),
+        )
+        a.migrated_test_count = 8
+        a.migrated_lines = 35
+        a.migrated_coverage = CoverageMeasurement(
+            Status.VERIFIED,
+            result=CoverageResult(42.0, 50, 11, frozenset({1, 2}), "test"),
+        )
+        a.mutation_score = "3/4 (75%)"
+
+        s = a.summary()
+
+        assert "current suite:" in s
+        assert "generated incremental:" in s
+        assert "combined view:" in s
+        assert "mutation: 3/4 (75%)" in s
+
     def test_mutation_score_fraction_parses_exact_counts(self):
         a = ModuleAudit(module="myapp.scoring")
         a.mutation_score = "8/10 (80%)"
@@ -1397,6 +1420,24 @@ class TestAuditCache:
         loaded = audit_mod._load_audit_cache("demo.module", "hash123")
 
         assert loaded == result
+
+    def test_cache_serializes_evidence_views(self):
+        result = ModuleAudit(module="demo.module", validation_mode="deep")
+        result.current_test_count = 2
+        result.current_test_lines = 10
+        result.migrated_test_count = 1
+        result.migrated_lines = 6
+        result.mutation_score = "1/1 (100%)"
+
+        payload = audit_mod._module_audit_to_dict(result)
+
+        assert payload["evidence_views"]["current_suite"]["label"] == "current suite"
+        assert payload["evidence_views"]["generated_suite"]["label"] == "generated incremental"
+        assert payload["evidence_views"]["combined_view"]["label"] in {
+            "change",
+            "saving",
+            "coverage delta",
+        }
 
     def test_state_hash_changes_with_validation_mode(self, tmp_path: Path):
         test_file = tmp_path / "test__auto_target.py"

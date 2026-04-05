@@ -576,50 +576,34 @@ class ModuleAudit:
     def summary(self) -> str:
         """Human-readable one-module report with epistemic labels."""
         lines = [f"\n  {self.module}"]
+        views = self.evidence_views()
 
-        # Current
-        cur_cov = self._format_coverage(self.current_coverage)
+        current = views["current_suite"]
         lines.append(
-            f"    current:  {self.current_test_count:>4} tests "
-            f"| {self.current_test_lines:>5} lines "
-            f"| {cur_cov}"
+            f"    current suite: {current['tests']:>4} tests "
+            f"| {current['lines']:>5} lines "
+            f"| {current['coverage']}"
         )
 
-        # Migrated
-        mig_cov = self._format_coverage(self.migrated_coverage)
+        generated = views["generated_suite"]
         lines.append(
-            f"    migrated: {self.migrated_test_count:>4} tests "
-            f"| {self.migrated_lines:>5} lines "
-            f"| {mig_cov}"
+            f"    generated incremental: {generated['tests']:>4} tests "
+            f"| {generated['lines']:>5} lines "
+            f"| {generated['coverage']}"
         )
-
-        # Savings (only if both measurements succeeded)
-        cur = self.current_coverage
-        mig = self.migrated_coverage
-        if (
-            cur.status == Status.VERIFIED
-            and mig.status == Status.VERIFIED
-            and self.current_test_count > 0
-            and self.current_test_lines > 0
-        ):
-            delta = mig.percent - cur.percent
-            label, summary = _format_change_summary(
-                self.current_test_count,
-                self.migrated_test_count,
-                self.current_test_lines,
-                self.migrated_lines,
-                coverage_delta=delta,
-            )
-            lines.append(f"    {label}:   {summary}")
+        combined = views["combined_view"]
+        lines.append(
+            f"    combined view: {combined['label']}: {combined['summary']}"
+        )
 
         if self.mined_properties:
             grouped = _group_mined_properties(self.mined_properties)
             lines.append(f"    mined:    {grouped}")
 
-        if self.mutation_score:
-            lines.append(f"    mutation: {self.mutation_score}")
-        if self.mutation_score or self.validation_mode == "deep":
-            lines.append(f"    validation: {self._format_validation_mode()}")
+        if generated["mutation"]:
+            lines.append(f"    mutation: {generated['mutation']}")
+        if generated["validation"]:
+            lines.append(f"    validation: {generated['validation']}")
         if self.mutation_gaps:
             lines.append("    surviving mutants:")
             for gap in self.mutation_gaps[:DISPLAY_CAP]:
@@ -684,6 +668,50 @@ class ModuleAudit:
             lines.append(f"    warnings: {len(self.warnings)}")
 
         return "\n".join(lines)
+
+    def evidence_views(self) -> dict[str, dict[str, object]]:
+        """Return normalized current/generated/combined audit evidence views."""
+        current = {
+            "label": "current suite",
+            "tests": self.current_test_count,
+            "lines": self.current_test_lines,
+            "coverage": self._format_coverage(self.current_coverage),
+            "status": self.current_coverage.status.value,
+        }
+        generated = {
+            "label": "generated incremental",
+            "tests": self.migrated_test_count,
+            "lines": self.migrated_lines,
+            "coverage": self._format_coverage(self.migrated_coverage),
+            "status": self.migrated_coverage.status.value,
+            "mutation": self.mutation_score or "",
+            "validation": self._format_validation_mode()
+            if self.mutation_score or self.validation_mode == "deep"
+            else "",
+        }
+        combined = {"label": "coverage delta", "summary": "not measured"}
+        cur = self.current_coverage
+        mig = self.migrated_coverage
+        if (
+            cur.status == Status.VERIFIED
+            and mig.status == Status.VERIFIED
+            and self.current_test_count > 0
+            and self.current_test_lines > 0
+        ):
+            delta = mig.percent - cur.percent
+            label, summary = _format_change_summary(
+                self.current_test_count,
+                self.migrated_test_count,
+                self.current_test_lines,
+                self.migrated_lines,
+                coverage_delta=delta,
+            )
+            combined = {"label": label, "summary": summary, "coverage_delta": delta}
+        return {
+            "current_suite": current,
+            "generated_suite": generated,
+            "combined_view": combined,
+        }
 
     @staticmethod
     def _format_coverage(m: CoverageMeasurement) -> str:
@@ -844,6 +872,7 @@ def _module_audit_to_dict(result: ModuleAudit) -> dict[str, object]:
         "not_checked": result.not_checked,
         "warnings": result.warnings,
         "generated_test": result.generated_test,
+        "evidence_views": result.evidence_views(),
     }
 
 
@@ -900,8 +929,12 @@ def _render_audit_results(results: Sequence[ModuleAudit]) -> str:
 
     if len(results) > 1:
         lines.append("\n  total:")
-        lines.append(f"    current:  {total_cur_tests} tests | {total_cur_lines} lines")
-        lines.append(f"    migrated: {total_mig_tests} tests | {total_mig_lines} lines")
+        lines.append(
+            f"    current suite: {total_cur_tests} tests | {total_cur_lines} lines"
+        )
+        lines.append(
+            f"    generated incremental: {total_mig_tests} tests | {total_mig_lines} lines"
+        )
         if total_cur_tests > 0:
             label, summary = _format_change_summary(
                 total_cur_tests,

@@ -62,6 +62,8 @@ class FunctionResult:
 
     name: str
     passed: bool
+    execution_ok: bool = True
+    verdict: str = "clean"
     error: str | None = None
     error_type: str | None = None
     failing_args: dict[str, Any] | None = None
@@ -82,24 +84,89 @@ class FunctionResult:
     input_source: str | None = None
     proof_bundle: dict[str, Any] | None = None
 
+    def __post_init__(self) -> None:
+        """Normalize legacy manual constructions onto the verdict model."""
+        if self.verdict == "clean":
+            if self.crash_category is not None:
+                self.verdict = _verdict_for_crash(self.crash_category)
+            elif any(
+                detail.get("category") == "lifecycle_contract"
+                for detail in self.contract_violation_details
+            ):
+                self.verdict = "lifecycle_contract"
+            elif any(
+                detail.get("category") == "semantic_contract"
+                for detail in self.contract_violation_details
+            ):
+                self.verdict = "semantic_contract"
+            elif any(
+                detail.get("category") == "expected_precondition_failure"
+                for detail in self.contract_violation_details
+            ):
+                self.verdict = "expected_precondition_failure"
+            elif self.property_violations:
+                self.verdict = "exploratory_property"
+        if self.crash_category is not None and self.error is not None and self.execution_ok:
+            self.execution_ok = False
+        if self.verdict in _PROMOTED_SCAN_VERDICTS:
+            self.passed = False
+        elif (
+            self.verdict != "clean"
+            and not self.contract_violations
+            and self.crash_category is not None
+        ):
+            self.passed = True
+
+    @property
+    def promoted(self) -> bool:
+        """Whether this result should count as a promoted failure/finding."""
+        return self.verdict in {
+            "promoted_real_bug",
+            "semantic_contract",
+            "lifecycle_contract",
+        }
+
+    @property
+    def exploratory(self) -> bool:
+        """Whether this result is exploratory instead of promoted."""
+        return self.verdict in {
+            "exploratory_crash",
+            "exploratory_property",
+            "coverage_gap",
+            "invalid_input_crash",
+            "beyond_declared_contract_robustness",
+        }
+
     def __str__(self) -> str:
-        if self.passed and not self.property_violations and not self.contract_violations:
+        if self.execution_ok and not self.property_violations and not self.contract_violations:
             return f"  PASS  {self.name}"
-        if not self.passed:
-            label = (
-                "WARN"
-                if self.crash_category in {"speculative_crash", "invalid_input_crash"}
-                else "FAIL"
-            )
+        if not self.execution_ok:
+            label = "FAIL" if self.promoted else "WARN"
             return f"  {label}  {self.name}: {self.error}"
         if self.contract_violations:
             viols = "; ".join(self.contract_violations)
-            return f"  NOTE  {self.name}: {viols}"
+            label = "FAIL" if self.promoted else "NOTE"
+            return f"  {label}  {self.name}: {viols}"
         viols = "; ".join(self.property_violations)
         return f"  WARN  {self.name}: {viols}"
 
 
 ScanMode = Literal["coverage_gap", "real_bug"]
+
+_PROMOTED_SCAN_VERDICTS = {
+    "promoted_real_bug",
+    "semantic_contract",
+    "lifecycle_contract",
+}
+
+_CONTRACT_GROUP_ALIASES: dict[str, tuple[str, ...]] = {
+    "transport": ("json_roundtrip", "http_shape"),
+    "transport_semantics": ("json_roundtrip", "http_shape"),
+    "wire": ("json_roundtrip", "http_shape"),
+    "shell": ("shell_safe", "command_arg_stability", "subprocess_argv"),
+    "path": ("quoted_paths",),
+    "env": ("protected_env_keys",),
+}
 
 
 @dataclass(frozen=True)
@@ -156,8 +223,37 @@ class ScanResult:
             1 for f in self.functions if not f.passed and f.name not in self.expected_failure_names
         )
 
+    @property
+    def verdict_counts(self) -> dict[str, int]:
+        """Count scan results by their primary verdict."""
+        counts: dict[str, int] = {}
+        for function in self.functions:
+            counts[function.verdict] = counts.get(function.verdict, 0) + 1
+        return counts
+
     def summary(self) -> str:
-        lines = [f"scan_module({self.module!r}): {self.total} functions, {self.failed} failed"]
+        verdict_counts = self.verdict_counts
+        bits = [f"{self.total} functions"]
+        if self.failed:
+            bits.append(f"{self.failed} promoted")
+        if verdict_counts.get("coverage_gap"):
+            bits.append(f"{verdict_counts['coverage_gap']} coverage gap(s)")
+        exploratory = sum(
+            verdict_counts.get(name, 0)
+            for name in (
+                "exploratory_crash",
+                "exploratory_property",
+                "invalid_input_crash",
+                "beyond_declared_contract_robustness",
+            )
+        )
+        if exploratory:
+            bits.append(f"{exploratory} exploratory")
+        if verdict_counts.get("expected_precondition_failure"):
+            bits.append(
+                f"{verdict_counts['expected_precondition_failure']} expected precondition"
+            )
+        lines = [f"scan_module({self.module!r}): {', '.join(bits)}"]
         for f in self.functions:
             if not f.passed and f.name in self.expected_failure_names:
                 lines.append(f"  XFAIL {f.name}: {f.error}")
@@ -437,7 +533,8 @@ def _source_file_for_callable(func: Any) -> Path | None:
     return None
 
 
-def _candidate_seed_files(module_name: str) -> tuple[list[Path], list[Path]]:
+@functools.lru_cache(maxsize=128)
+def _candidate_seed_files(module_name: str) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
     """Return likely test files and project call-site files for *module_name*."""
     test_files: list[Path] = []
     project_files: list[Path] = []
@@ -465,7 +562,7 @@ def _candidate_seed_files(module_name: str) -> tuple[list[Path], list[Path]]:
             module_path = candidate / "__init__.py"
             break
     if module_path is None:
-        return test_files, project_files
+        return tuple(test_files), tuple(project_files)
 
     package_root = module_path.parent
     for path in package_root.rglob("*.py"):
@@ -479,7 +576,7 @@ def _candidate_seed_files(module_name: str) -> tuple[list[Path], list[Path]]:
         project_files.append(resolved)
         if len(project_files) >= 24:
             break
-    return test_files, project_files
+    return tuple(test_files), tuple(project_files)
 
 
 def _fixture_literals_for_params(
@@ -976,9 +1073,26 @@ def _infer_sink_categories(func: Any) -> list[str]:
         ),
     ]
     for category, tokens, param_names in checks:
-        if any(token in source for token in tokens) or params & param_names:
+        source_match = any(token in source for token in tokens)
+        param_match = bool(params & param_names)
+        if category in {"json_tool_call", "http", "sql"}:
+            matched = source_match
+        else:
+            matched = source_match or param_match
+        if matched:
             categories.append(category)
     return categories
+
+
+def _expand_contract_names(names: Sequence[str] | None) -> set[str]:
+    """Expand contract aliases like ``transport`` into concrete built-ins."""
+    expanded: set[str] = set()
+    for raw in names or ():
+        name = str(raw).strip()
+        if not name:
+            continue
+        expanded.update(_CONTRACT_GROUP_ALIASES.get(name, (name,)))
+    return expanded
 
 
 def _traceback_path(exc: BaseException) -> list[str]:
@@ -2769,11 +2883,13 @@ def _auto_contract_checks(
     seed_examples: Sequence[SeedExample],
     *,
     auto_contracts: Sequence[str] | None,
+    ignore_contracts: Sequence[str] | None = None,
 ) -> tuple[list[ContractCheck], list[str]]:
     """Infer built-in sink-aware contract probes for *func* from source and seeds."""
     sink_categories = _infer_sink_categories(func)
 
     enabled = set(auto_contracts or _DEFAULT_AUTO_CONTRACTS)
+    ignored = _expand_contract_names(ignore_contracts)
     probe_kwargs = dict(seed_examples[0].kwargs) if seed_examples else _contract_seed_kwargs(func)
     tracked_params = list(probe_kwargs)
     env_param = next(
@@ -2832,7 +2948,7 @@ def _auto_contract_checks(
 
     checks: list[ContractCheck] = []
     for name in dict.fromkeys(contract_names):
-        if name not in enabled or not probe_kwargs:
+        if name not in enabled or name in ignored or not probe_kwargs:
             continue
         followup_phases: list[str] | None = None
         phase = None
@@ -3680,6 +3796,7 @@ def _boundary_smoke_inputs(
     func: Any,
     *,
     fixtures: dict[str, st.SearchStrategy[Any]] | None = None,
+    seed_examples: Sequence[SeedExample] | None = None,
     seed_from_tests: bool = True,
     seed_from_fixtures: bool = True,
     seed_from_docstrings: bool = True,
@@ -3688,9 +3805,8 @@ def _boundary_smoke_inputs(
 ) -> list[dict[str, Any]]:
     """Build deterministic boundary and observed inputs for one callable."""
     target = _unwrap(func)
-    seeds: list[dict[str, Any]] = [
-        dict(example.kwargs)
-        for example in _seed_examples_for_callable(
+    observed_examples = list(seed_examples) if seed_examples is not None else list(
+        _seed_examples_for_callable(
             target,
             seed_from_tests=seed_from_tests,
             seed_from_fixtures=seed_from_fixtures,
@@ -3698,6 +3814,10 @@ def _boundary_smoke_inputs(
             seed_from_code=seed_from_code,
             seed_from_call_sites=seed_from_call_sites,
         )
+    )
+    seeds: list[dict[str, Any]] = [
+        dict(example.kwargs)
+        for example in observed_examples
     ]
 
     if fixtures and seeds:
@@ -3753,6 +3873,7 @@ def _candidate_inputs(
     *,
     fixtures: dict[str, st.SearchStrategy[Any]] | None = None,
     mutate_observed_inputs: bool = True,
+    seed_examples: Sequence[SeedExample] | None = None,
     seed_from_tests: bool = True,
     seed_from_fixtures: bool = True,
     seed_from_docstrings: bool = True,
@@ -3761,17 +3882,20 @@ def _candidate_inputs(
 ) -> list[CandidateInput]:
     """Return deterministic candidate inputs with provenance metadata."""
     target = _unwrap(func)
+    observed_examples = list(seed_examples) if seed_examples is not None else list(
+        _seed_examples_for_callable(
+            target,
+            seed_from_tests=seed_from_tests,
+            seed_from_fixtures=seed_from_fixtures,
+            seed_from_docstrings=seed_from_docstrings,
+            seed_from_code=seed_from_code,
+            seed_from_call_sites=seed_from_call_sites,
+        )
+    )
     candidates: list[CandidateInput] = []
     seen: set[str] = set()
 
-    for example in _seed_examples_for_callable(
-        target,
-        seed_from_tests=seed_from_tests,
-        seed_from_fixtures=seed_from_fixtures,
-        seed_from_docstrings=seed_from_docstrings,
-        seed_from_code=seed_from_code,
-        seed_from_call_sites=seed_from_call_sites,
-    ):
+    for example in observed_examples:
         key = repr(sorted(example.kwargs.items()))
         if key in seen:
             continue
@@ -3787,6 +3911,7 @@ def _candidate_inputs(
     for kwargs in _boundary_smoke_inputs(
         target,
         fixtures=fixtures,
+        seed_examples=observed_examples,
         seed_from_tests=seed_from_tests,
         seed_from_fixtures=seed_from_fixtures,
         seed_from_docstrings=seed_from_docstrings,
@@ -3880,28 +4005,41 @@ def _documented_precondition_failure(
     func: Any,
     exc: Exception,
     kwargs: dict[str, Any],
+    *,
+    expected_patterns: Sequence[str] | None = None,
 ) -> dict[str, Any] | None:
     """Return a detail dict when *exc* matches a documented precondition."""
     doc = inspect.getdoc(func) or ""
     lowered_doc = doc.lower()
-    if "raise" not in lowered_doc:
-        return None
 
     exc_name = type(exc).__name__
     exc_name_lower = exc_name.lower()
-    if exc_name_lower not in lowered_doc:
-        return None
 
     message = str(exc)
+    lowered_message = message.lower()
     message_tokens = {
         token
-        for token in re.findall(r"[a-z_]{4,}", message.lower())
+        for token in re.findall(r"[a-z_]{4,}", lowered_message)
         if token not in _DOC_STOPWORDS
     }
     doc_tokens = set(re.findall(r"[a-z_]{4,}", lowered_doc))
     param_names = {name.lower() for name in kwargs}
+    explicit_patterns = [str(item).strip().lower() for item in expected_patterns or () if item]
 
-    if not (message_tokens & doc_tokens) and not (param_names & doc_tokens):
+    doc_match = (
+        "raise" in lowered_doc
+        and exc_name_lower in lowered_doc
+        and ((message_tokens & doc_tokens) or (param_names & doc_tokens))
+    )
+    explicit_match = any(
+        pattern == exc_name_lower
+        or pattern in lowered_message
+        or pattern in lowered_doc
+        or pattern in param_names
+        for pattern in explicit_patterns
+    )
+
+    if not doc_match and not explicit_match:
         return None
 
     summary = f"expected precondition failure: {exc_name}: {message}"
@@ -3912,6 +4050,7 @@ def _documented_precondition_failure(
         "error": message[:300],
         "error_type": exc_name,
         "failing_args": dict(kwargs),
+        "source": "explicit_annotation" if explicit_match and not doc_match else "docstring",
     }
 
 
@@ -4062,6 +4201,9 @@ def _score_contract_fit(
             if _type_matches(value, hint):
                 score += 0.55
                 reasons.append(f"{name}: matches type hint")
+                if get_origin(hint) is Literal:
+                    score += 0.1
+                    reasons.append(f"{name}: matches a constrained Literal contract")
             else:
                 score -= 0.35
                 reasons.append(f"{name}: mismatches type hint")
@@ -4082,6 +4224,11 @@ def _score_contract_fit(
             score += 0.05
 
         semantic_score = _semantic_value_score(semantic, value)
+        if hint is not None and not weak_hint and _type_matches(value, hint):
+            semantic_score = max(
+                semantic_score,
+                0.75 if get_origin(hint) is Literal else 0.6,
+            )
         realism_scores.append(semantic_score)
         sink_scores.append(1.0 if semantic in {"path", "shell", "json", "mapping"} else 0.0)
         score += (semantic_score - 0.5) * 0.4
@@ -4094,6 +4241,36 @@ def _score_contract_fit(
     realism = sum(realism_scores) / len(realism_scores) if realism_scores else 0.0
     sink_signal = max(sink_scores, default=0.0)
     return contract_fit, realism, sink_signal, reasons[:6]
+
+
+def _looks_like_declared_contract_robustness(
+    kwargs: Mapping[str, Any],
+    profile: Mapping[str, Any],
+    *,
+    realism: float,
+    reachability: float,
+) -> bool:
+    """Return whether a witness is near the declared contract but still outside it."""
+    params = profile.get("params", {})
+    strong_mismatch = False
+    strong_match = False
+    observed_shape = False
+    for name, value in kwargs.items():
+        meta = params.get(name, {})
+        hint = meta.get("hint")
+        weak_hint = bool(meta.get("weak_hint"))
+        if hint is not None and hint is not Any and not weak_hint:
+            if _type_matches(value, hint):
+                strong_match = True
+            else:
+                strong_mismatch = True
+        if type(value).__name__ in list(meta.get("observed_types", [])):
+            observed_shape = True
+        if value in list(meta.get("comparison_values", [])):
+            observed_shape = True
+    return strong_mismatch and (
+        strong_match or observed_shape or realism >= 0.55 or reachability >= 0.75
+    )
 
 
 def _reachability_score(
@@ -4129,6 +4306,7 @@ def _classify_crash(
     contract_fit: float,
     reachability: float,
     realism: float,
+    robustness_case: bool,
     min_contract_fit: float,
     min_reachability: float,
     min_realism: float,
@@ -4145,9 +4323,22 @@ def _classify_crash(
         and realism >= min_realism
     ):
         return "likely_bug"
+    if robustness_case:
+        return "beyond_declared_contract_robustness"
     if contract_fit <= _WEAK_CONTRACT_FIT or realism < 0.35:
         return "invalid_input_crash"
     return "coverage_gap" if mode == "coverage_gap" else "speculative_crash"
+
+
+def _verdict_for_crash(category: str) -> str:
+    """Map one crash category to the coarse scan verdict bucket."""
+    return {
+        "likely_bug": "promoted_real_bug",
+        "coverage_gap": "coverage_gap",
+        "speculative_crash": "exploratory_crash",
+        "invalid_input_crash": "invalid_input_crash",
+        "beyond_declared_contract_robustness": "beyond_declared_contract_robustness",
+    }.get(category, "exploratory_crash")
 
 
 def _likely_impact(category: str, sink_signal: float) -> str:
@@ -4156,6 +4347,8 @@ def _likely_impact(category: str, sink_signal: float) -> str:
         return "reaches a path/shell/json/env shaping sink with a contract-valid input."
     if category == "coverage_gap":
         return "the input looks partially valid, but current evidence points to missing coverage."
+    if category == "beyond_declared_contract_robustness":
+        return "the failure sits just beyond the declared contract and is best read as robustness."
     if category == "invalid_input_crash":
         return "the crash currently looks driven by out-of-contract input rather than a bug."
     return "the function crashes on an input that matches the inferred contract."
@@ -4303,6 +4496,10 @@ def _proof_demotion_reason(
         )
     if category == "invalid_input_crash":
         reasons.append("the crash still looks driven by out-of-contract input")
+    elif category == "beyond_declared_contract_robustness":
+        reasons.append(
+            "the witness sits beyond the declared contract, so treat this as robustness"
+        )
     elif category == "coverage_gap":
         reasons.append("current evidence points to missing coverage more than a defect")
     elif category == "speculative_crash" and not replayable:
@@ -4840,11 +5037,16 @@ def scan_module(
     object_teardowns: dict[str, Any] | None = None,
     object_harnesses: dict[str, str] | None = None,
     expected_failures: list[str] | None = None,
+    expected_preconditions: dict[str, list[str]] | None = None,
     ignore_properties: list[str] | None = None,
     ignore_relations: list[str] | None = None,
     property_overrides: dict[str, list[str]] | None = None,
     relation_overrides: dict[str, list[str]] | None = None,
+    expected_properties: dict[str, list[str]] | None = None,
+    expected_relations: dict[str, list[str]] | None = None,
     contract_checks: dict[str, list[ContractCheck]] | None = None,
+    ignore_contracts: list[str] | None = None,
+    contract_overrides: dict[str, list[str]] | None = None,
     mode: ScanMode = "coverage_gap",
     seed_from_tests: bool = True,
     seed_from_fixtures: bool = True,
@@ -4908,13 +5110,21 @@ def scan_module(
         expected_failures: Function names that are expected to fail.
             Failures from these functions are tracked separately and
             do not cause ``result.passed`` to be ``False``.
+        expected_preconditions: Per-function exception/docstring tokens that
+            should count as expected contract preconditions instead of bugs.
         ignore_properties: Property names to suppress in mined warnings.
         ignore_relations: Relation names to suppress in mined warnings.
         property_overrides: Per-function property suppressions.
         relation_overrides: Per-function relation suppressions.
+        expected_properties: Per-function expected property annotations. These
+            are merged into ``property_overrides`` as suppressions.
+        expected_relations: Per-function expected relation annotations. These
+            are merged into ``relation_overrides`` as suppressions.
         contract_checks: Explicit semantic contract probes keyed by
             callable name. Each probe runs with explicit ``kwargs`` and
             reports a contract violation when its predicate fails.
+        ignore_contracts: Auto-inferred contract probes to suppress globally.
+        contract_overrides: Per-function auto-contract suppressions.
         mode: ``"coverage_gap"`` promotes plausible crashes plus gaps;
             ``"real_bug"`` promotes only high-fit bug candidates.
         seed_from_tests: Learn valid input shapes from adjacent pytest files.
@@ -4978,18 +5188,35 @@ def scan_module(
             ignore_properties=sorted(
                 {
                     *(ignore_properties or []),
+                    *(expected_properties or {}).get("*", []),
                     *(property_overrides or {}).get(name, []),
+                    *(expected_properties or {}).get(name, []),
                 }
             ),
             ignore_relations=sorted(
                 {
                     *(ignore_relations or []),
+                    *(expected_relations or {}).get("*", []),
                     *(relation_overrides or {}).get(name, []),
+                    *(expected_relations or {}).get(name, []),
                 }
             ),
             property_overrides=property_overrides,
             relation_overrides=relation_overrides,
             contract_checks=(contract_checks or {}).get(name),
+            expected_preconditions=sorted(
+                {
+                    *((expected_preconditions or {}).get("*", [])),
+                    *((expected_preconditions or {}).get(name, [])),
+                }
+            ),
+            ignore_contracts=sorted(
+                {
+                    *(ignore_contracts or []),
+                    *(contract_overrides or {}).get("*", []),
+                    *(contract_overrides or {}).get(name, []),
+                }
+            ),
             mode=mode,
             seed_from_tests=seed_from_tests,
             seed_from_fixtures=seed_from_fixtures,
@@ -5023,6 +5250,8 @@ def _test_one_function(
     property_overrides: dict[str, list[str]] | None = None,
     relation_overrides: dict[str, list[str]] | None = None,
     contract_checks: list[ContractCheck] | None = None,
+    expected_preconditions: list[str] | None = None,
+    ignore_contracts: list[str] | None = None,
     mode: ScanMode = "coverage_gap",
     seed_from_tests: bool = True,
     seed_from_fixtures: bool = True,
@@ -5071,6 +5300,7 @@ def _test_one_function(
         func,
         seed_examples,
         auto_contracts=auto_contracts,
+        ignore_contracts=ignore_contracts,
     )
     effective_contract_checks = [*(contract_checks or []), *auto_checks]
 
@@ -5092,6 +5322,7 @@ def _test_one_function(
                     seed_from_call_sites,
                 )
             ),
+            seed_examples=seed_examples,
             seed_from_tests=seed_from_tests,
             seed_from_fixtures=seed_from_fixtures,
             seed_from_docstrings=seed_from_docstrings,
@@ -5125,30 +5356,51 @@ def _test_one_function(
 
         test()
     except Exception as e:
-        precondition = _documented_precondition_failure(func, e, last_kwargs)
+        precondition = _documented_precondition_failure(
+            func,
+            e,
+            last_kwargs,
+            expected_patterns=expected_preconditions,
+        )
         if precondition is not None:
             return FunctionResult(
                 name=name,
                 passed=True,
+                execution_ok=True,
+                verdict="expected_precondition_failure",
                 error_type=precondition["error_type"],
                 failing_args=last_kwargs or None,
                 contract_violations=[str(precondition["summary"])],
                 contract_violation_details=[precondition],
+                sink_categories=sink_categories,
+                input_sources=[
+                    {"source": example.source, "evidence": example.evidence}
+                    for example in profile.get("seed_examples", [])
+                ],
+                input_source=last_input_source,
             )
         replayable, replay_attempts, replay_matches = _replay_failure(e)
         contract_fit, realism, sink_signal, rationale = _score_contract_fit(last_kwargs, profile)
         reachability = _reachability_score(last_input_source, last_kwargs, profile)
+        robustness_case = _looks_like_declared_contract_robustness(
+            last_kwargs,
+            profile,
+            realism=realism,
+            reachability=reachability,
+        )
         crash_category = _classify_crash(
             mode=mode,
             replayable=replayable,
             contract_fit=contract_fit,
             reachability=reachability,
             realism=realism,
+            robustness_case=robustness_case,
             min_contract_fit=min_contract_fit,
             min_reachability=min_reachability,
             min_realism=min_realism,
             require_replayable=require_replayable,
         )
+        verdict = _verdict_for_crash(crash_category)
         proof_bundle = None
         if proof_bundles:
             proof_bundle = _build_proof_bundle(
@@ -5186,7 +5438,9 @@ def _test_one_function(
                     proof_bundle["lifecycle"] = lifecycle_details
         return FunctionResult(
             name=name,
-            passed=False,
+            passed=verdict not in _PROMOTED_SCAN_VERDICTS,
+            execution_ok=False,
+            verdict=verdict,
             error=str(e)[:300],
             error_type=type(e).__name__,
             failing_args=last_kwargs or None,
@@ -5207,44 +5461,53 @@ def _test_one_function(
             proof_bundle=proof_bundle,
         )
 
-    # Mine properties to detect semantic anomalies (not just crashes)
-    violations: list[str] = []
-    details: list[dict[str, Any]] = []
-    try:
-        from ordeal.mine import _is_suspicious_property, mine
-
-        mine_result = mine(
-            func,
-            max_examples=min(max_examples, 30),
-            ignore_properties=ignore_properties or [],
-            ignore_relations=ignore_relations or [],
-            property_overrides=property_overrides or {},
-            relation_overrides=relation_overrides or {},
-        )
-        for prop in mine_result.properties:
-            if _is_suspicious_property(prop):
-                label = f"{prop.name} ({prop.confidence:.0%})"
-                violations.append(label)
-                details.append(
-                    {
-                        "name": prop.name,
-                        "summary": label,
-                        "confidence": round(prop.confidence, 4),
-                        "holds": prop.holds,
-                        "total": prop.total,
-                        "counterexample": prop.counterexample,
-                    }
-                )
-    except Exception:
-        pass  # mining failed — still report crash-safety pass
-
     contract_violations, contract_details = _evaluate_contract_checks(
         func,
         effective_contract_checks,
     )
+    violations: list[str] = []
+    details: list[dict[str, Any]] = []
+    if mode != "real_bug":
+        try:
+            from ordeal.mine import _is_suspicious_property, mine
+
+            mine_result = mine(
+                func,
+                max_examples=min(max_examples, 30),
+                ignore_properties=ignore_properties or [],
+                ignore_relations=ignore_relations or [],
+                property_overrides=property_overrides or {},
+                relation_overrides=relation_overrides or {},
+            )
+            for prop in mine_result.properties:
+                if _is_suspicious_property(prop):
+                    label = f"{prop.name} ({prop.confidence:.0%})"
+                    violations.append(label)
+                    details.append(
+                        {
+                            "name": prop.name,
+                            "summary": label,
+                            "confidence": round(prop.confidence, 4),
+                            "holds": prop.holds,
+                            "total": prop.total,
+                            "counterexample": prop.counterexample,
+                        }
+                    )
+        except Exception:
+            pass  # mining failed — still report crash-safety pass
     return FunctionResult(
         name=name,
-        passed=True,
+        passed=not bool(contract_violations),
+        execution_ok=True,
+        verdict=(
+            "lifecycle_contract"
+            if any(detail.get("category") == "lifecycle_contract" for detail in contract_details)
+            else "semantic_contract"
+            if contract_violations
+            else "exploratory_property"
+            if violations
+            else "clean"
+        ),
         property_violations=violations,
         property_violation_details=details,
         contract_violations=contract_violations,

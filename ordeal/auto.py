@@ -2952,8 +2952,12 @@ def _get_public_functions(
             continue
         if callable(obj) and not isinstance(obj, type):
             obj_mod = getattr(obj, "__module__", None)
-            if obj_mod and obj_mod != mod.__name__ and not (
-                is_package and isinstance(obj_mod, str) and obj_mod.startswith(package_prefix)
+            if (
+                obj_mod
+                and obj_mod != mod.__name__
+                and not (
+                    is_package and isinstance(obj_mod, str) and obj_mod.startswith(package_prefix)
+                )
             ):
                 continue
             target = _unwrap(obj)

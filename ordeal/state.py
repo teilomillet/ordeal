@@ -347,9 +347,7 @@ class ExplorationState:
                         "kind": "crash",
                         "category": category,
                         "function": name,
-                        "summary": (
-                            _crash_summary(name, category, fs.scan_replayable)
-                        ),
+                        "summary": (_crash_summary(name, category, fs.scan_replayable)),
                         "error": fs.scan_error,
                         "failing_args": fs.failing_args,
                         "replayable": fs.scan_replayable,

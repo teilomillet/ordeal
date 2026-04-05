@@ -1436,9 +1436,7 @@ scan_max_examples = 12
     ):
         monkeypatch.chdir(tmp_path)
         (tmp_path / "ordeal.toml").write_text(
-            "[[scan]]\n"
-            'module = "ordeal"\n'
-            'targets = ["fuzz"]\n',
+            '[[scan]]\nmodule = "ordeal"\ntargets = ["fuzz"]\n',
             encoding="utf-8",
         )
 

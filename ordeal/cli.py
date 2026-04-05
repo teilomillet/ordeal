@@ -6878,8 +6878,7 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                 _arg(
                     "target",
                     help=(
-                        "Module or explicit callable target "
-                        "(e.g. myapp.scoring or myapp:Env.run)"
+                        "Module or explicit callable target (e.g. myapp.scoring or myapp:Env.run)"
                     ),
                 ),
                 _arg(

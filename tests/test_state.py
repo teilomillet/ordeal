@@ -77,8 +77,7 @@ class TestExplorationStateSerialization:
         )
         detail = next(item for item in state.finding_details if item["function"] == "decode")
         assert (
-            detail["summary"]
-            == "decode: replayable crash on semi-valid inputs, still exploratory"
+            detail["summary"] == "decode: replayable crash on semi-valid inputs, still exploratory"
         )
 
     def test_finding_details_preserve_scan_evidence_payloads(self):

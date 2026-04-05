@@ -269,8 +269,7 @@ class TestScanModule:
 
         mod = types.ModuleType("_test_target_selector_error")
         exec(
-            "def alpha(x: int) -> int:\n"
-            "    return x\n",
+            "def alpha(x: int) -> int:\n    return x\n",
             mod.__dict__,
         )
         sys.modules[mod.__name__] = mod
@@ -785,8 +784,9 @@ class TestScanModule:
         assert divide_result.proof_bundle["contract_basis"]["category"] == "likely_bug"
         assert divide_result.proof_bundle["confidence_breakdown"]["replayability"] == 1.0
         assert divide_result.proof_bundle["minimal_reproduction"]["direct_call_supported"] is True
-        assert "import_module('tests._auto_target')" in (
-            divide_result.proof_bundle["minimal_reproduction"]["python_snippet"]
+        assert (
+            "import_module('tests._auto_target')"
+            in (divide_result.proof_bundle["minimal_reproduction"]["python_snippet"])
         )
         assert divide_result.proof_bundle["valid_input_witness"]["source"] == "boundary"
         assert divide_result.proof_bundle["reproduction"]["replay_matches"] == 2

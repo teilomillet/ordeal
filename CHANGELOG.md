@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.15
+
+**Features:**
+
+- add explicit contracts and richer object scenarios
+- harden lifecycle contract harnessing
+
+
 ## 0.3.14
 
 **Features:**

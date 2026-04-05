@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.21
+
+**Fixes:**
+
+- stabilize unified explorer and mutation paths
+- harden parallel explorer and replay lifecycle
+
+
 ## 0.3.20
 
 **Features:**

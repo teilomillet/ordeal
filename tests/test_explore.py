@@ -233,11 +233,7 @@ class TestExplorerExecution:
 
         assert result.failures
         assert tracker.active is False
-        assert not [
-            warning
-            for warning in caught
-            if "tracker is inactive" in str(warning.message)
-        ]
+        assert not [warning for warning in caught if "tracker is inactive" in str(warning.message)]
 
 
 class TestExplorerResult:

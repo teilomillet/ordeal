@@ -94,9 +94,7 @@ verbose = true
         assert cfg.report.verbose is True
 
     def test_explorer_seed_mutation_respect_strategies(self, tmp_toml):
-        cfg = load_config(
-            tmp_toml("[explorer]\nseed_mutation_respect_strategies = true\n")
-        )
+        cfg = load_config(tmp_toml("[explorer]\nseed_mutation_respect_strategies = true\n"))
         assert cfg.explorer.seed_mutation_respect_strategies is True
 
     def test_test_missing_class(self, tmp_toml):

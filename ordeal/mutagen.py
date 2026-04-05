@@ -405,9 +405,7 @@ def _repair_to_constraint(
 
     if kind == "float":
         candidate = (
-            value
-            if isinstance(value, (int, float)) and not isinstance(value, bool)
-            else original
+            value if isinstance(value, (int, float)) and not isinstance(value, bool) else original
         )
         if not isinstance(candidate, (int, float)) or isinstance(candidate, bool):
             candidate = _default_for_constraint(constraint, rng)
@@ -429,9 +427,7 @@ def _repair_to_constraint(
             value
             if isinstance(value, str)
             else (
-                original
-                if isinstance(original, str)
-                else _default_for_constraint(constraint, rng)
+                original if isinstance(original, str) else _default_for_constraint(constraint, rng)
             )
         )
         min_size = int(constraint.get("min_size", 0))

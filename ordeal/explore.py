@@ -824,8 +824,7 @@ class ExplorationResult:
             lines.append(f"Adapted: {self.adaptation_phase} phase(s) of escalation")
         if self.parallel_fallback_reason:
             lines.append(
-                "Parallel fallback: reran with workers=1 after "
-                f"{self.parallel_fallback_reason}"
+                f"Parallel fallback: reran with workers=1 after {self.parallel_fallback_reason}"
             )
         if self.unique_edges > 0 and self.total_runs > 0:
             if self.saturated:
@@ -2584,10 +2583,9 @@ class Explorer:
             if step_zero_failures >= max(3, worker_count):
                 issues.append(f"{step_zero_failures} step-0 failure(s)")
 
-            spam_count = (
-                Counter(_parallel_failure_signature(f) for f in all_failures)
-                .most_common(1)[0][1]
-            )
+            spam_count = Counter(_parallel_failure_signature(f) for f in all_failures).most_common(
+                1
+            )[0][1]
             if spam_count >= max(3, worker_count):
                 issues.append(f"{spam_count} identical crash(es)")
 
@@ -2736,9 +2734,7 @@ class Explorer:
                         "max_shrink_time": max_shrink_time,
                         "patience": patience,
                         "corpus_dir": (
-                            str(self.corpus_dir)
-                            if self.corpus_dir is not None
-                            else None
+                            str(self.corpus_dir) if self.corpus_dir is not None else None
                         ),
                         "rule_swarm": self.rule_swarm,
                         "shared_edges_name": shm_name,

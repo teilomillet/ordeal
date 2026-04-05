@@ -51,3 +51,13 @@ class TestGenerateCIWorkflow:
         yml = _generate_ci_workflow("pkg")
         assert "push:" in yml
         assert "pull_request:" in yml
+
+
+class TestCheckedInCIWorkflow:
+    def test_bump_and_publish_refreshes_lockfile(self):
+        yml = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+        assert "bump-and-publish:" in yml
+        assert "uses: astral-sh/setup-uv@v7" in yml
+        assert "- name: Refresh lockfile" in yml
+        assert "run: uv lock" in yml
+        assert "git add pyproject.toml uv.lock CHANGELOG.md" in yml

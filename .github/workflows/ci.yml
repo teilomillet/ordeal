@@ -127,6 +127,8 @@ jobs:
         with:
           python-version: "3.12"
 
+      - uses: astral-sh/setup-uv@v7
+
       - name: Bump patch version
         run: |
           git fetch --tags
@@ -143,6 +145,9 @@ jobs:
           done
           sed -i "s/^version = \"$CURRENT\"/version = \"$NEW\"/" pyproject.toml
           echo "NEW_VERSION=$NEW" >> "$GITHUB_ENV"
+
+      - name: Refresh lockfile
+        run: uv lock
 
       - name: Update changelog
         run: |
@@ -198,7 +203,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add pyproject.toml CHANGELOG.md
+          git add pyproject.toml uv.lock CHANGELOG.md
           git commit -m "chore: bump version to v$NEW_VERSION [skip ci]"
           git tag "v$NEW_VERSION"
           git push

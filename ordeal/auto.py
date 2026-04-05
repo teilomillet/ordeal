@@ -3036,8 +3036,7 @@ def _call_contract_predicate(
 
     kwargs_to_pass: dict[str, Any] = {}
     has_var_keywords = any(
-        param.kind is inspect.Parameter.VAR_KEYWORD
-        for param in signature.parameters.values()
+        param.kind is inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()
     )
     for name, param in signature.parameters.items():
         if param.kind is inspect.Parameter.VAR_KEYWORD:

@@ -860,9 +860,7 @@ def _module_audit_from_dict(data: dict[str, object]) -> ModuleAudit:
         mutation_gap_stubs=list(data.get("mutation_gap_stubs", [])),
         contract_findings=list(data.get("contract_findings", [])),
         blocking_reason=(
-            str(data["blocking_reason"])
-            if data.get("blocking_reason") is not None
-            else None
+            str(data["blocking_reason"]) if data.get("blocking_reason") is not None else None
         ),
         not_checked=list(data.get("not_checked", [])),
         warnings=list(data.get("warnings", [])),
@@ -3584,8 +3582,7 @@ def _generated_callable_helper(
             imports.add(import_line)
             lines.append(f"        _ordeal_bound = instance.{method}")
             lines.append(
-                "        _ordeal_call_args, _ordeal_call_kwargs = "
-                "_prepare_bound_method_call("
+                "        _ordeal_call_args, _ordeal_call_kwargs = _prepare_bound_method_call("
             )
             lines.append("            _ordeal_bound,")
             lines.append("            (),")

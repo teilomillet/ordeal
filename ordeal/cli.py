@@ -343,11 +343,14 @@ def _callable_listing_rows(
         resolved_scenario = (
             _resolve_object_hook(owner, merged_scenarios) if owner is not None else None
         )
-        state_param = str(
-            getattr(func, "__ordeal_state_param__", None)
-            or (_state_param_name_for_callable(_unwrap(func)) if owner is not None else "")
-            or ""
-        ).strip() or None
+        state_param = (
+            str(
+                getattr(func, "__ordeal_state_param__", None)
+                or (_state_param_name_for_callable(_unwrap(func)) if owner is not None else "")
+                or ""
+            ).strip()
+            or None
+        )
         state_factory_configured = bool(
             state_param
             and owner is not None
@@ -5256,7 +5259,7 @@ def _build_audit_agent_envelope(
                 f"ordeal mine {module} -n 200",
                 f"ordeal mutate {module}",
             ]
-    )
+        )
     seen: set[str] = set()
     deduped_commands = [cmd for cmd in suggested_commands if not (cmd in seen or seen.add(cmd))]
     blocked_count = sum(1 for result in results if getattr(result, "blocking_reason", None))

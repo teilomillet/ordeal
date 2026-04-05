@@ -127,9 +127,7 @@ relation_overrides = { normalize = ["equivalent"] }
         assert scan.ignore_contracts == ["quoted_paths"]
         assert scan.ignore_properties == ["commutative"]
         assert scan.ignore_relations == ["commutative_composition"]
-        assert scan.expected_preconditions == {
-            "*": ["validate_input", "check_permissions"]
-        }
+        assert scan.expected_preconditions == {"*": ["validate_input", "check_permissions"]}
         assert scan.expected_properties == {"*": ["ordered_arguments"]}
         assert scan.expected_relations == {"*": ["equivalent"]}
         assert scan.contract_overrides == {"build_env_vars": ["protected_env_keys"]}

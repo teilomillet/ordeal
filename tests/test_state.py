@@ -257,9 +257,7 @@ class TestExplorationStateSerialization:
         monkeypatch.setattr(
             state_mod,
             "explore_mutate",
-            lambda state, **kwargs: (_ for _ in ()).throw(
-                AssertionError("mutate should not run")
-            ),
+            lambda state, **kwargs: (_ for _ in ()).throw(AssertionError("mutate should not run")),
         )
         monkeypatch.setattr(
             state_mod,

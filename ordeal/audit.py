@@ -592,9 +592,7 @@ class ModuleAudit:
             f"| {generated['coverage']}"
         )
         combined = views["combined_view"]
-        lines.append(
-            f"    combined view: {combined['label']}: {combined['summary']}"
-        )
+        lines.append(f"    combined view: {combined['label']}: {combined['summary']}")
 
         if self.mined_properties:
             grouped = _group_mined_properties(self.mined_properties)
@@ -929,9 +927,7 @@ def _render_audit_results(results: Sequence[ModuleAudit]) -> str:
 
     if len(results) > 1:
         lines.append("\n  total:")
-        lines.append(
-            f"    current suite: {total_cur_tests} tests | {total_cur_lines} lines"
-        )
+        lines.append(f"    current suite: {total_cur_tests} tests | {total_cur_lines} lines")
         lines.append(
             f"    generated incremental: {total_mig_tests} tests | {total_mig_lines} lines"
         )

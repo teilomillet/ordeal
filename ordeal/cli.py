@@ -1840,9 +1840,7 @@ def _resolve_scan_runtime_defaults(
     values["min_contract_fit"] = float(match.min_contract_fit)
     values["min_reachability"] = float(match.min_reachability)
     values["min_realism"] = float(getattr(match, "min_realism", 0.55))
-    values["min_fixture_completeness"] = float(
-        getattr(match, "min_fixture_completeness", 0.0)
-    )
+    values["min_fixture_completeness"] = float(getattr(match, "min_fixture_completeness", 0.0))
     values["targets"] = list(match.targets)
     values["include_private"] = bool(match.include_private)
     values["fixtures"] = _parse_scan_fixture_specs(match.fixtures)
@@ -5156,9 +5154,7 @@ def _build_scan_report(state: Any) -> dict[str, Any]:
         1 for detail in details if detail.get("category") == "invalid_input_crash"
     )
     robustness_count = sum(
-        1
-        for detail in details
-        if detail.get("category") == "beyond_declared_contract_robustness"
+        1 for detail in details if detail.get("category") == "beyond_declared_contract_robustness"
     )
     exploratory_crash_count = sum(
         1 for detail in details if detail.get("category") == "speculative_crash"

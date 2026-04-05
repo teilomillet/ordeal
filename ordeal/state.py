@@ -340,9 +340,7 @@ class ExplorationState:
                         f"{name}: plausible crash but current evidence still looks like a gap"
                     )
                 elif category == "beyond_declared_contract_robustness":
-                    results.append(
-                        f"{name}: crash sits just beyond the declared contract"
-                    )
+                    results.append(f"{name}: crash sits just beyond the declared contract")
                 elif category == "invalid_input_crash":
                     results.append(f"{name}: crash currently looks driven by invalid input")
                 else:

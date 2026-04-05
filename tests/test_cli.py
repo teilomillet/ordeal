@@ -1583,12 +1583,10 @@ scan_max_examples = 12
         assert calls["scan_seed_from_call_sites"] is False
         assert (
             "surface sample: "
-            f"{cli._PACKAGE_ROOT_SCAN_LIMIT}/25 runnable exports across 1 source module(s)"
-            in out
+            f"{cli._PACKAGE_ROOT_SCAN_LIMIT}/25 runnable exports across 1 source module(s)" in out
         )
         assert (
-            "Package-root scan sampled "
-            f"{cli._PACKAGE_ROOT_SCAN_LIMIT}/25 runnable exports" in err
+            f"Package-root scan sampled {cli._PACKAGE_ROOT_SCAN_LIMIT}/25 runnable exports" in err
         )
         assert "Broad package-root scan disabled call-site seed mining for speed" in err
         assert "Broad package-root scan capped max_examples to 5 per target" in err
@@ -1635,10 +1633,7 @@ scan_max_examples = 12
         assert sampling["source_modules"] == 4
         assert any(
             item
-            == (
-                "Surface sampling: "
-                f"{cli._PACKAGE_ROOT_SCAN_LIMIT}/18 runnable exports checked"
-            )
+            == (f"Surface sampling: {cli._PACKAGE_ROOT_SCAN_LIMIT}/18 runnable exports checked")
             for item in payload["raw_details"]["report"]["summary"]
         )
         assert payload["suggested_commands"][:2] == [

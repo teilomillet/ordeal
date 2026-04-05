@@ -415,9 +415,7 @@ class TestCLIAgentJson:
         assert by_name["audit_report"]["selected"] is True
         assert by_name["scan_module"]["selected"] is False
 
-    def test_scan_json_reports_surface_sampling_for_package_root(
-        self, monkeypatch, capsys
-    ):
+    def test_scan_json_reports_surface_sampling_for_package_root(self, monkeypatch, capsys):
         rows = [
             {
                 "module": "ordeal",

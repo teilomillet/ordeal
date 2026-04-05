@@ -250,9 +250,7 @@ class ScanResult:
         if exploratory:
             bits.append(f"{exploratory} exploratory")
         if verdict_counts.get("expected_precondition_failure"):
-            bits.append(
-                f"{verdict_counts['expected_precondition_failure']} expected precondition"
-            )
+            bits.append(f"{verdict_counts['expected_precondition_failure']} expected precondition")
         lines = [f"scan_module({self.module!r}): {', '.join(bits)}"]
         for f in self.functions:
             if not f.passed and f.name in self.expected_failure_names:
@@ -3805,20 +3803,21 @@ def _boundary_smoke_inputs(
 ) -> list[dict[str, Any]]:
     """Build deterministic boundary and observed inputs for one callable."""
     target = _unwrap(func)
-    observed_examples = list(seed_examples) if seed_examples is not None else list(
-        _seed_examples_for_callable(
-            target,
-            seed_from_tests=seed_from_tests,
-            seed_from_fixtures=seed_from_fixtures,
-            seed_from_docstrings=seed_from_docstrings,
-            seed_from_code=seed_from_code,
-            seed_from_call_sites=seed_from_call_sites,
+    observed_examples = (
+        list(seed_examples)
+        if seed_examples is not None
+        else list(
+            _seed_examples_for_callable(
+                target,
+                seed_from_tests=seed_from_tests,
+                seed_from_fixtures=seed_from_fixtures,
+                seed_from_docstrings=seed_from_docstrings,
+                seed_from_code=seed_from_code,
+                seed_from_call_sites=seed_from_call_sites,
+            )
         )
     )
-    seeds: list[dict[str, Any]] = [
-        dict(example.kwargs)
-        for example in observed_examples
-    ]
+    seeds: list[dict[str, Any]] = [dict(example.kwargs) for example in observed_examples]
 
     if fixtures and seeds:
         return list(seeds)
@@ -3882,14 +3881,18 @@ def _candidate_inputs(
 ) -> list[CandidateInput]:
     """Return deterministic candidate inputs with provenance metadata."""
     target = _unwrap(func)
-    observed_examples = list(seed_examples) if seed_examples is not None else list(
-        _seed_examples_for_callable(
-            target,
-            seed_from_tests=seed_from_tests,
-            seed_from_fixtures=seed_from_fixtures,
-            seed_from_docstrings=seed_from_docstrings,
-            seed_from_code=seed_from_code,
-            seed_from_call_sites=seed_from_call_sites,
+    observed_examples = (
+        list(seed_examples)
+        if seed_examples is not None
+        else list(
+            _seed_examples_for_callable(
+                target,
+                seed_from_tests=seed_from_tests,
+                seed_from_fixtures=seed_from_fixtures,
+                seed_from_docstrings=seed_from_docstrings,
+                seed_from_code=seed_from_code,
+                seed_from_call_sites=seed_from_call_sites,
+            )
         )
     )
     candidates: list[CandidateInput] = []

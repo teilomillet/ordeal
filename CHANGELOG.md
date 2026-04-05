@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.13
+
+**Features:**
+
+- add precision-first real bug scanning
+
+
 ## 0.3.12
 
 **Features:**

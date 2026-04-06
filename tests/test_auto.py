@@ -20,6 +20,7 @@ from ordeal.auto import (
     SeedExample,
     _candidate_inputs,
     _get_public_functions,
+    _python_source_path_to_module_name,
     _test_one_function,
     chaos_for,
     fuzz,
@@ -591,6 +592,15 @@ class TestScanModule:
 
         assert tests_dir / "test_feature.py" in seed_files
         assert all(".venv" not in str(path) for path in seed_files)
+
+    def test_python_source_path_to_module_name_falls_back_to_package_structure(self, tmp_path):
+        package_dir = tmp_path / "demo_pkg"
+        package_dir.mkdir()
+        (package_dir / "__init__.py").write_text("", encoding="utf-8")
+        module_path = package_dir / "feature.py"
+        module_path.write_text("def ping() -> str:\n    return 'ok'\n", encoding="utf-8")
+
+        assert _python_source_path_to_module_name(str(module_path)) == "demo_pkg.feature"
 
     def test_method_scenarios_apply_after_setup_for_scan_fuzz_and_chaos(self):
         import sys

@@ -2696,6 +2696,14 @@ def _python_source_path_to_module_name(path_str: str) -> str | None:
             rel_parts = rel.parts[:-1] if rel.name == "__init__.py" else rel.with_suffix("").parts
             if rel_parts:
                 return ".".join(rel_parts)
+    resolved = path.resolve()
+    module_parts = [] if resolved.name == "__init__.py" else [resolved.stem]
+    parent = resolved.parent
+    while (parent / "__init__.py").exists():
+        module_parts.append(parent.name)
+        parent = parent.parent
+    if len(module_parts) > 1:
+        return ".".join(reversed(module_parts))
     return None
 
 

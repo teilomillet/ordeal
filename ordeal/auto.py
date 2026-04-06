@@ -1981,95 +1981,164 @@ def _apply_state_store_pack(instance: Any) -> Any:
     )
 
 
+def _apply_subprocess_pack(instance: Any) -> Any:
+    """Attach a stable subprocess/runner collaborator pack to *instance*."""
+    return _apply_collaborator_pack(
+        instance,
+        attr_names=(
+            "subprocess",
+            "runner",
+            "command_runner",
+            "process_runner",
+            "executor",
+        ),
+        method_behaviors={
+            "run": _subprocess_response_stub,
+            "execute_command": _subprocess_response_stub,
+            "check_output": lambda *args, **kwargs: "",
+            "popen": _subprocess_response_stub,
+            "call": lambda *args, **kwargs: 0,
+        },
+    )
+
+
+def _apply_sandbox_pack(instance: Any) -> Any:
+    """Attach a stable sandbox-client collaborator pack to *instance*."""
+    return _apply_collaborator_pack(
+        instance,
+        attr_names=("sandbox_client", "sandbox", "client"),
+        method_behaviors={
+            "execute_command": _subprocess_response_stub,
+            "run": _subprocess_response_stub,
+            "upload_content": lambda *args, **kwargs: SimpleNamespace(
+                ok=True,
+                uploaded=True,
+            ),
+            "download_content": lambda *args, **kwargs: b"",
+            "fetch_content": lambda *args, **kwargs: b"",
+            "list_files": lambda *args, **kwargs: [],
+        },
+    )
+
+
+def _apply_upload_download_pack(instance: Any) -> Any:
+    """Attach a stable upload/download collaborator pack to *instance*."""
+    return _apply_collaborator_pack(
+        instance,
+        attr_names=(
+            "upload_download",
+            "storage_client",
+            "artifact_client",
+            "uploader",
+            "downloader",
+            "client",
+        ),
+        method_behaviors={
+            "upload": lambda *args, **kwargs: SimpleNamespace(
+                ok=True,
+                uploaded=True,
+            ),
+            "upload_content": lambda *args, **kwargs: SimpleNamespace(
+                ok=True,
+                uploaded=True,
+            ),
+            "download": lambda *args, **kwargs: b"",
+            "download_content": lambda *args, **kwargs: b"",
+            "fetch_content": lambda *args, **kwargs: b"",
+            "list_files": lambda *args, **kwargs: [],
+        },
+    )
+
+
+def _apply_http_pack(instance: Any) -> Any:
+    """Attach a stable HTTP client collaborator pack to *instance*."""
+    return _apply_collaborator_pack(
+        instance,
+        attr_names=("http_client", "session", "transport", "client"),
+        method_behaviors={
+            "request": _http_response_stub,
+            "get": _http_response_stub,
+            "post": _http_response_stub,
+            "put": _http_response_stub,
+            "patch": _http_response_stub,
+            "delete": _http_response_stub,
+            "send": _http_response_stub,
+        },
+    )
+
+
+_BUILTIN_OBJECT_SCENARIO_LIBRARY_SPECS: dict[str, dict[str, Any]] = {
+    "subprocess": {
+        "aliases": ("subprocess_runner",),
+        "description": (
+            "Stub subprocess-style runners and command executors "
+            "with successful no-op results."
+        ),
+        "hook": _apply_subprocess_pack,
+    },
+    "sandbox": {
+        "aliases": ("sandbox_client",),
+        "description": (
+            "Stub sandbox clients with upload/download helpers "
+            "and successful command execution."
+        ),
+        "hook": _apply_sandbox_pack,
+    },
+    "upload_download": {
+        "aliases": (
+            "upload_download_client",
+            "upload",
+            "upload_client",
+            "download",
+            "download_client",
+        ),
+        "description": (
+            "Stub storage, upload, and download collaborators "
+            "with safe in-memory responses."
+        ),
+        "hook": _apply_upload_download_pack,
+    },
+    "http": {
+        "aliases": ("http_client",),
+        "description": "Stub HTTP clients and transports with stable 200-style response objects.",
+        "hook": _apply_http_pack,
+    },
+    "state_store": {
+        "aliases": (),
+        "description": (
+            "Attach an in-memory key/value store for cache "
+            "or session-style collaborators."
+        ),
+        "hook": _apply_state_store_pack,
+    },
+}
+_BUILTIN_OBJECT_SCENARIO_LIBRARY_ALIASES = {
+    alias: name
+    for name, spec in _BUILTIN_OBJECT_SCENARIO_LIBRARY_SPECS.items()
+    for alias in (name, *spec["aliases"])
+}
+
+
+def available_object_scenario_libraries() -> tuple[dict[str, Any], ...]:
+    """Return the canonical built-in collaborator scenario library catalog."""
+    return tuple(
+        {
+            "name": name,
+            "aliases": list(spec["aliases"]),
+            "description": str(spec["description"]),
+        }
+        for name, spec in _BUILTIN_OBJECT_SCENARIO_LIBRARY_SPECS.items()
+    )
+
+
 def _builtin_object_scenario_hook(name: str) -> Callable[[Any], Any] | None:
     """Return a named collaborator scenario pack hook, if known."""
     normalized = str(name).strip().lower()
-    match normalized:
-        case "subprocess" | "subprocess_runner":
-            return lambda instance: _apply_collaborator_pack(
-                instance,
-                attr_names=(
-                    "subprocess",
-                    "runner",
-                    "command_runner",
-                    "process_runner",
-                    "executor",
-                ),
-                method_behaviors={
-                    "run": _subprocess_response_stub,
-                    "execute_command": _subprocess_response_stub,
-                    "check_output": lambda *args, **kwargs: "",
-                    "popen": _subprocess_response_stub,
-                    "call": lambda *args, **kwargs: 0,
-                },
-            )
-        case "sandbox_client" | "sandbox":
-            return lambda instance: _apply_collaborator_pack(
-                instance,
-                attr_names=("sandbox_client", "sandbox", "client"),
-                method_behaviors={
-                    "execute_command": _subprocess_response_stub,
-                    "run": _subprocess_response_stub,
-                    "upload_content": lambda *args, **kwargs: SimpleNamespace(
-                        ok=True,
-                        uploaded=True,
-                    ),
-                    "download_content": lambda *args, **kwargs: b"",
-                    "fetch_content": lambda *args, **kwargs: b"",
-                    "list_files": lambda *args, **kwargs: [],
-                },
-            )
-        case (
-            "upload_download"
-            | "upload_download_client"
-            | "upload"
-            | "upload_client"
-            | "download"
-            | "download_client"
-        ):
-            return lambda instance: _apply_collaborator_pack(
-                instance,
-                attr_names=(
-                    "upload_download",
-                    "storage_client",
-                    "artifact_client",
-                    "uploader",
-                    "downloader",
-                    "client",
-                ),
-                method_behaviors={
-                    "upload": lambda *args, **kwargs: SimpleNamespace(
-                        ok=True,
-                        uploaded=True,
-                    ),
-                    "upload_content": lambda *args, **kwargs: SimpleNamespace(
-                        ok=True,
-                        uploaded=True,
-                    ),
-                    "download": lambda *args, **kwargs: b"",
-                    "download_content": lambda *args, **kwargs: b"",
-                    "fetch_content": lambda *args, **kwargs: b"",
-                    "list_files": lambda *args, **kwargs: [],
-                },
-            )
-        case "http" | "http_client":
-            return lambda instance: _apply_collaborator_pack(
-                instance,
-                attr_names=("http_client", "session", "transport", "client"),
-                method_behaviors={
-                    "request": _http_response_stub,
-                    "get": _http_response_stub,
-                    "post": _http_response_stub,
-                    "put": _http_response_stub,
-                    "patch": _http_response_stub,
-                    "delete": _http_response_stub,
-                    "send": _http_response_stub,
-                },
-            )
-        case "state_store":
-            return _apply_state_store_pack
-        case _:
-            return None
+    canonical = _BUILTIN_OBJECT_SCENARIO_LIBRARY_ALIASES.get(normalized)
+    if canonical is None:
+        return None
+    spec = _BUILTIN_OBJECT_SCENARIO_LIBRARY_SPECS[canonical]
+    return spec["hook"]
 
 
 def _scenario_hook_from_spec(spec: Mapping[str, Any]) -> Callable[[Any], Any]:

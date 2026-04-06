@@ -1,18 +1,26 @@
 ---
 title: Bug Bundle
-description: Save a shareable finding report, a JSON bundle, a pytest regression, and scan history from one command.
+description: Save a shareable finding report, review scaffolds, replay notes, a pytest regression, and scan history from one command.
 ---
 
 # Bug Bundle
 
 `ordeal scan --save-artifacts` is the shortest path from "interesting bug" to "fixed and locked in".
 
-It does four things when `scan` finds something:
+It does the core four things when `scan` finds something:
 
 - Writes a Markdown dossier under `.ordeal/findings/`
 - Writes a machine-readable JSON bundle with stable finding IDs under `.ordeal/findings/`
 - Writes or updates `tests/test_ordeal_regressions.py`
 - Appends a history entry to `.ordeal/findings/index.json`
+
+When ordeal has enough evidence to scaffold follow-up work, the same command also writes review-first sidecars next to the report:
+
+- `.ordeal/findings/<module>.ordeal.toml`
+- `.ordeal/findings/<module>.ordeal_support.py`
+- `.ordeal/findings/<module>.proofs.json`
+- `.ordeal/findings/<module>.replay.md`
+- `.ordeal/findings/<module>.scenarios.md`
 
 ## Try it on the demo
 
@@ -29,10 +37,17 @@ artifacts:
   report: .ordeal/findings/ordeal/demo.md
   bundle: .ordeal/findings/ordeal/demo.json
   regression: tests/test_ordeal_regressions.py
+  config: .ordeal/findings/ordeal/demo.ordeal.toml
+  support: .ordeal/findings/ordeal/demo.ordeal_support.py
+  proofs: .ordeal/findings/ordeal/demo.proofs.json
+  replay: .ordeal/findings/ordeal/demo.replay.md
+  scenarios: .ordeal/findings/ordeal/demo.scenarios.md
   index: .ordeal/findings/index.json
 available:
   verify: uv run ordeal verify fnd_dcb0fc0808d3
   pytest: uv run pytest tests/test_ordeal_regressions.py -q
+  review-config: cat .ordeal/findings/ordeal/demo.ordeal.toml
+  review-support: cat .ordeal/findings/ordeal/demo.ordeal_support.py
   rescan: uv run ordeal scan ordeal.demo --save-artifacts
 ```
 
@@ -41,6 +56,11 @@ available:
 - `.ordeal/findings/ordeal/demo.md` is the human-readable bug dossier. Share it in a PR, issue, or LLM handoff.
 - `.ordeal/findings/ordeal/demo.json` is the machine-readable bundle. It carries stable `finding_id` and `fingerprint` fields so agents can correlate the same issue across runs.
 - `tests/test_ordeal_regressions.py` is the runnable pytest file generated from concrete findings. It should fail before the fix and pass after.
+- `.ordeal/findings/ordeal/demo.ordeal.toml` is the ready-to-review config bundle. Copy the parts you want into `ordeal.toml`.
+- `.ordeal/findings/ordeal/demo.ordeal_support.py` is the review scaffold for factory/setup/scenario helpers that ordeal inferred from the scanned surface.
+- `.ordeal/findings/ordeal/demo.proofs.json` extracts the proof bundle for each finding into a smaller machine-readable artifact.
+- `.ordeal/findings/ordeal/demo.replay.md` collects minimal repro commands/snippets for the concrete findings from that scan.
+- `.ordeal/findings/ordeal/demo.scenarios.md` lists inferred reusable scenario libraries plus the built-in packs you can use directly in `[[objects]].scenarios`.
 - `.ordeal/findings/index.json` is the append-only local history for saved scan runs. It records the module, findings, paths, and suggested commands.
 
 ## Close the loop

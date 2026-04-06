@@ -3852,6 +3852,8 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         rows=selected_scan_rows,
         details=_scan_report_details(state),
     )
+    support_suggestions = _scan_support_suggestions(module_name, selected_scan_rows)
+    scenario_libraries = _scan_scenario_library_records(module_name, selected_scan_rows)
     if sampling is not None:
         state.supervisor_info = dict(getattr(state, "supervisor_info", {}) or {})
         state.supervisor_info["scan_sampling"] = dict(sampling)
@@ -3861,6 +3863,12 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     if config_suggestions:
         state.supervisor_info = dict(getattr(state, "supervisor_info", {}) or {})
         state.supervisor_info["config_suggestions"] = config_suggestions
+    if support_suggestions:
+        state.supervisor_info = dict(getattr(state, "supervisor_info", {}) or {})
+        state.supervisor_info["support_suggestions"] = support_suggestions
+    if scenario_libraries:
+        state.supervisor_info = dict(getattr(state, "supervisor_info", {}) or {})
+        state.supervisor_info["scenario_libraries"] = scenario_libraries
 
     if not args.json:
         print(_format_scan_summary(state))
@@ -3880,6 +3888,11 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     regression_path = args.write_regression
     written_report_path: Path | None = None
     written_regression_path: Path | None = None
+    written_config_path: Path | None = None
+    written_support_path: Path | None = None
+    written_proofs_path: Path | None = None
+    written_replay_path: Path | None = None
+    written_scenario_library_path: Path | None = None
     index_path: Path | None = None
     has_details = bool(state.findings or _scan_report_details(state))
     if save_artifacts and has_details:
@@ -3892,11 +3905,26 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     if save_artifacts and not has_details:
         _stderr("No findings yet; no artifacts written.\n")
     if save_artifacts and has_details and written_report_path is not None:
+        report = _build_scan_report(state)
+        written_review_artifacts = _write_scan_review_bundle_artifacts(
+            state,
+            report=report,
+        )
+        written_config_path = written_review_artifacts.get("config")
+        written_support_path = written_review_artifacts.get("support")
+        written_proofs_path = written_review_artifacts.get("proofs")
+        written_replay_path = written_review_artifacts.get("replay")
+        written_scenario_library_path = written_review_artifacts.get("scenarios")
         bundle_path, bundle = _write_scan_bundle(
             state,
             path_str=_artifact_bundle_path(str(written_report_path)),
             report_path=written_report_path,
             regression_path=written_regression_path,
+            config_path=written_config_path,
+            support_path=written_support_path,
+            proofs_path=written_proofs_path,
+            replay_path=written_replay_path,
+            scenario_library_path=written_scenario_library_path,
         )
         index_path = _write_scan_artifact_index(
             bundle=bundle,
@@ -3909,6 +3937,11 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                 bundle_path=bundle_path,
                 finding_ids=[finding["finding_id"] for finding in bundle["findings"]],
                 regression_path=written_regression_path,
+                config_path=written_config_path,
+                support_path=written_support_path,
+                proofs_path=written_proofs_path,
+                replay_path=written_replay_path,
+                scenario_library_path=written_scenario_library_path,
                 index_path=index_path,
             )
 
@@ -3918,6 +3951,11 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                 state,
                 written_report_path=written_report_path,
                 written_regression_path=written_regression_path,
+                written_config_path=written_config_path,
+                written_support_path=written_support_path,
+                written_proofs_path=written_proofs_path,
+                written_replay_path=written_replay_path,
+                written_scenario_library_path=written_scenario_library_path,
                 index_path=index_path,
             ).to_json()
         )
@@ -6175,6 +6213,36 @@ def _default_scan_bundle_path(module: str) -> str:
     return "/".join([_DEFAULT_FINDINGS_DIR, *parts[:-1], parts[-1] + ".json"])
 
 
+def _default_scan_review_config_path(module: str) -> str:
+    """Return the default review-only TOML suggestion path for a scanned module."""
+    parts = module.split(".")
+    return "/".join([_DEFAULT_FINDINGS_DIR, *parts[:-1], parts[-1] + ".ordeal.toml"])
+
+
+def _default_scan_support_bundle_path(module: str) -> str:
+    """Return the default review-only support scaffold path for a scanned module."""
+    parts = module.split(".")
+    return "/".join([_DEFAULT_FINDINGS_DIR, *parts[:-1], parts[-1] + ".ordeal_support.py"])
+
+
+def _default_scan_replay_notes_path(module: str) -> str:
+    """Return the default replay-note artifact path for a scanned module."""
+    parts = module.split(".")
+    return "/".join([_DEFAULT_FINDINGS_DIR, *parts[:-1], parts[-1] + ".replay.md"])
+
+
+def _default_scan_proofs_path(module: str) -> str:
+    """Return the default proof-bundle JSON path for a scanned module."""
+    parts = module.split(".")
+    return "/".join([_DEFAULT_FINDINGS_DIR, *parts[:-1], parts[-1] + ".proofs.json"])
+
+
+def _default_scan_scenario_library_path(module: str) -> str:
+    """Return the default scenario-library note path for a scanned module."""
+    parts = module.split(".")
+    return "/".join([_DEFAULT_FINDINGS_DIR, *parts[:-1], parts[-1] + ".scenarios.md"])
+
+
 def _default_artifact_index_path() -> str:
     """Return the default artifact index path for saved scan findings."""
     return f"{_DEFAULT_FINDINGS_DIR}/index.json"
@@ -6193,6 +6261,209 @@ def _shell_command(*parts: str) -> str:
 def _artifact_bundle_path(report_path: str) -> str:
     """Derive the JSON bundle path from a Markdown report path."""
     return str(Path(report_path).with_suffix(".json"))
+
+
+def _resolve_qualname_attr(module_name: str, qualname: str) -> Any | None:
+    """Resolve one dotted qualname from an importable module."""
+    try:
+        obj: Any = importlib.import_module(module_name)
+        for part in qualname.split("."):
+            obj = getattr(obj, part)
+        return obj
+    except Exception:
+        return None
+
+
+def _scan_bootstrap_targets_from_rows(
+    module_name: str,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    test_dir: str = "tests",
+) -> list[dict[str, Any]]:
+    """Build review-first support-target scaffolds from scan callable rows."""
+    support_module = _bootstrap_support_module_name(test_dir)
+    support_path = _bootstrap_support_file_path(test_dir)
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not bool(row.get("selected", True)):
+            continue
+        if str(row.get("kind", "")) != "instance":
+            continue
+        name = str(row.get("name", "")).strip()
+        if "." not in name:
+            continue
+        owner_name, method_name = name.rsplit(".", 1)
+        class_name = owner_name.rsplit(".", 1)[-1]
+        key = f"{module_name}:{owner_name}"
+        bucket = grouped.setdefault(
+            key,
+            {
+                "module": module_name,
+                "target": key,
+                "class_name": class_name,
+                "methods": set(),
+                "review_scenarios": set(),
+                "support_module": support_module,
+                "support_path": support_path,
+                "support_factory": f"{support_module}:make_{_camel_to_snake(class_name)}",
+                "support_setup": None,
+                "support_state_factory": None,
+                "support_teardown": None,
+                "support_scenarios": [],
+                "scenario_libraries": [],
+                "evidence": [],
+                "harness": "fresh",
+            },
+        )
+        bucket["methods"].add(method_name)
+        owner = _resolve_qualname_attr(module_name, owner_name)
+        if isinstance(owner, type):
+            for label in _bootstrap_review_scenarios_for_method(owner, method_name):
+                bucket["review_scenarios"].add(label)
+        hints = list(row.get("harness_hints", []))
+        for hint in hints:
+            evidence = str(hint.get("evidence", "")).strip()
+            if evidence:
+                bucket["evidence"].append(evidence)
+            config = hint.get("config")
+            if not isinstance(config, Mapping):
+                continue
+            key_name = str(config.get("key", "")).strip()
+            value = _normalize_hint_config_value(config.get("value"))
+            if key_name == "scenarios":
+                values = value if isinstance(value, list) else [value]
+                libraries = [
+                    str(item)
+                    for item in values
+                    if isinstance(item, str) and ":" not in item and "." not in item
+                ]
+                for library in libraries:
+                    if library not in bucket["scenario_libraries"]:
+                        bucket["scenario_libraries"].append(library)
+            elif key_name == "setup":
+                bucket["support_setup"] = f"{support_module}:prime_{_camel_to_snake(class_name)}"
+            elif key_name == "state_factory":
+                bucket["support_state_factory"] = (
+                    f"{support_module}:make_{_camel_to_snake(class_name)}_state"
+                )
+            elif key_name == "teardown":
+                bucket["support_teardown"] = (
+                    f"{support_module}:cleanup_{_camel_to_snake(class_name)}"
+                )
+            elif key_name == "harness" and str(value) == "stateful":
+                bucket["harness"] = "stateful"
+        if row.get("setup_configured") and bucket["support_setup"] is None:
+            bucket["support_setup"] = f"{support_module}:prime_{_camel_to_snake(class_name)}"
+        if row.get("state_param") and bucket["support_state_factory"] is None:
+            bucket["support_state_factory"] = (
+                f"{support_module}:make_{_camel_to_snake(class_name)}_state"
+            )
+        if row.get("teardown_configured") and bucket["support_teardown"] is None:
+            bucket["support_teardown"] = (
+                f"{support_module}:cleanup_{_camel_to_snake(class_name)}"
+            )
+        if str(row.get("harness", "fresh")) == "stateful":
+            bucket["harness"] = "stateful"
+        if (
+            bucket["support_setup"] is None
+            and (hints or row.get("scenario_count") or row.get("setup_configured"))
+        ):
+            bucket["support_setup"] = f"{support_module}:prime_{_camel_to_snake(class_name)}"
+
+    results: list[dict[str, Any]] = []
+    for bucket in grouped.values():
+        results.append(
+            {
+                **bucket,
+                "methods": sorted(bucket["methods"]),
+                "review_scenarios": sorted(bucket["review_scenarios"]),
+                "support_scenarios": list(bucket["support_scenarios"]),
+                "scenario_libraries": list(bucket["scenario_libraries"]),
+                "evidence": list(dict.fromkeys(bucket["evidence"]))[:5],
+            }
+        )
+    return sorted(results, key=lambda item: str(item["target"]))
+
+
+def _scan_support_suggestions(
+    module_name: str,
+    rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build review scaffolds for scan-discovered bound methods."""
+    bootstrap_targets = _scan_bootstrap_targets_from_rows(module_name, rows)
+    if not bootstrap_targets:
+        return []
+    return _audit_bootstrap_support_suggestions(
+        [{"module": module_name, "bootstrap_targets": bootstrap_targets}],
+        validation_mode="fast",
+    )
+
+
+def _scan_scenario_library_records(
+    module_name: str,
+    rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build one scenario-library review payload from selected callable rows."""
+    from ordeal.auto import available_object_scenario_libraries
+
+    relevant_rows = [
+        row
+        for row in rows
+        if bool(row.get("selected", True))
+        and (
+            str(row.get("kind", "")) == "instance"
+            or list(row.get("harness_hints", ()))
+            or int(row.get("scenario_count", 0)) > 0
+        )
+    ]
+    if not relevant_rows:
+        return []
+
+    available = list(available_object_scenario_libraries())
+    inferred: dict[str, dict[str, Any]] = {}
+    for row in relevant_rows:
+        name = str(row.get("name", "")).strip()
+        for hint in list(row.get("harness_hints", ())):
+            config = hint.get("config")
+            if not isinstance(config, Mapping) or str(config.get("key", "")) != "scenarios":
+                continue
+            value = _normalize_hint_config_value(config.get("value"))
+            values = value if isinstance(value, list) else [value]
+            for item in values:
+                if not isinstance(item, str) or ":" in item or "." in item:
+                    continue
+                pack = str(item).strip()
+                if not pack:
+                    continue
+                bucket = inferred.setdefault(
+                    pack,
+                    {
+                        "name": pack,
+                        "targets": [],
+                        "evidence": [],
+                    },
+                )
+                bucket["targets"].append(name)
+                evidence = str(hint.get("evidence", "")).strip()
+                if evidence:
+                    bucket["evidence"].append(evidence)
+
+    return [
+        {
+            "title": f"Reusable scenario libraries for {module_name}",
+            "filename": _default_scan_scenario_library_path(module_name),
+            "target": module_name,
+            "available": available,
+            "inferred": [
+                {
+                    "name": name,
+                    "targets": list(dict.fromkeys(item["targets"])),
+                    "evidence": list(dict.fromkeys(item["evidence"]))[:5],
+                }
+                for name, item in sorted(inferred.items())
+            ],
+        }
+    ]
 
 
 def _finding_identity(detail: dict[str, Any]) -> dict[str, Any]:
@@ -6216,8 +6487,10 @@ def _annotate_finding(detail: dict[str, Any]) -> dict[str, Any]:
     fingerprint = _finding_fingerprint(detail)
     module = detail.get("module")
     stub = _render_regression_stub(module, detail, trim=False) if module else None
+    category = detail.get("category")
     return {
         **detail,
+        "evidence_class": _evidence_class_for_category(str(category)) if category else None,
         "finding_id": f"fnd_{fingerprint[:12]}",
         "fingerprint": fingerprint,
         "status": "open",
@@ -6644,10 +6917,306 @@ def _render_findings_report_markdown(report: dict[str, Any]) -> str:
             lines.append("```")
             lines.append("")
 
+    support_suggestions = list(report.get("support_suggestions", []))
+    if support_suggestions:
+        lines.extend(["## Suggested Review Scaffolds", ""])
+        for suggestion in support_suggestions:
+            title = str(suggestion.get("title", "")).strip() or str(
+                suggestion.get("filename", "support scaffold")
+            )
+            reason = str(suggestion.get("reason", "")).strip()
+            filename = str(suggestion.get("filename", "")).strip()
+            target = str(suggestion.get("target", "")).strip()
+            suggested_command = str(suggestion.get("suggested_command", "")).strip()
+            evidence = [str(item) for item in suggestion.get("evidence", []) if str(item).strip()]
+            lines.append(f"### {title}")
+            lines.append("")
+            if reason:
+                lines.append(reason)
+                lines.append("")
+            if filename:
+                lines.append(f"Intended file: `{filename}`")
+            if target:
+                lines.append(f"Target: `{target}`")
+            if evidence:
+                lines.append("")
+                lines.append("Evidence:")
+                lines.extend(f"- `{item}`" for item in evidence[:5])
+            lines.append("")
+            lines.append("```python")
+            lines.extend(str(suggestion.get("snippet", "")).rstrip().splitlines())
+            lines.append("```")
+            if suggested_command:
+                lines.append("")
+                lines.append(f"Suggested command: `{suggested_command}`")
+            lines.append("")
+
+    scenario_libraries = list(report.get("scenario_libraries", []))
+    if scenario_libraries:
+        lines.extend(["## Scenario Libraries", ""])
+        for artifact in scenario_libraries:
+            title = str(artifact.get("title", "")).strip() or "Scenario libraries"
+            lines.append(f"### {title}")
+            lines.append("")
+            inferred = list(artifact.get("inferred", []))
+            if inferred:
+                lines.append("Inferred for this target:")
+                for item in inferred:
+                    targets = ", ".join(str(name) for name in item.get("targets", []))
+                    lines.append(f"- `{item.get('name')}` for {targets}")
+                lines.append("")
+            lines.append("Available built-ins:")
+            for item in artifact.get("available", []):
+                aliases = list(item.get("aliases", []))
+                alias_text = f" (aliases: {', '.join(aliases)})" if aliases else ""
+                lines.append(f"- `{item.get('name')}`{alias_text}: {item.get('description', '')}")
+            lines.append("")
+
     lines.extend(["## Suggested Commands", ""])
     for command in report.get("suggested_commands", []):
         lines.append(f"- `{command}`")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_scan_review_config_artifact(
+    *,
+    module: str,
+    suggestions: Sequence[Mapping[str, Any]],
+) -> str:
+    """Render a review-only TOML artifact from config suggestions."""
+    lines = [
+        "# Generated by `ordeal scan --save-artifacts`.",
+        f"# Target: {module}",
+        "# Review these snippets before copying them into ordeal.toml.",
+        "",
+    ]
+    for index, suggestion in enumerate(suggestions, start=1):
+        title = str(suggestion.get("title", "")).strip()
+        reason = str(suggestion.get("reason", "")).strip()
+        target = str(suggestion.get("target", "")).strip()
+        if index > 1:
+            lines.append("")
+        lines.append(f"# [{index}] {title}")
+        if reason:
+            lines.append(f"# {reason}")
+        if target:
+            lines.append(f"# Target: {target}")
+        evidences = [
+            str(item) for item in suggestion.get("evidence", []) if str(item).strip()
+        ]
+        for evidence in evidences:
+            lines.append(f"# Evidence: {evidence}")
+        lines.extend(str(suggestion.get("snippet", "")).rstrip().splitlines())
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_scan_support_artifact(
+    *,
+    module: str,
+    suggestions: Sequence[Mapping[str, Any]],
+) -> str:
+    """Render one review-only support scaffold artifact from saved suggestions."""
+    lines = [
+        '"""Generated review scaffolds from `ordeal scan --save-artifacts`.',
+        "",
+        f"Target: {module}",
+        "",
+        "Review the placeholders before copying selected pieces into your test support module.",
+        '"""',
+        "",
+    ]
+    for index, suggestion in enumerate(suggestions, start=1):
+        filename = str(suggestion.get("filename", "")).strip()
+        title = str(suggestion.get("title", "")).strip()
+        if index > 1:
+            lines.extend(["", "", "# " + "-" * 72, ""])
+        lines.append(f"# [{index}] {title}")
+        if filename:
+            lines.append(f"# Intended file: {filename}")
+        evidences = [
+            str(item) for item in suggestion.get("evidence", []) if str(item).strip()
+        ]
+        for evidence in evidences:
+            lines.append(f"# Evidence: {evidence}")
+        suggested_command = str(suggestion.get("suggested_command", "")).strip()
+        if suggested_command:
+            lines.append(f"# Suggested command: {suggested_command}")
+        snippet_lines = str(suggestion.get("snippet", "")).rstrip().splitlines()
+        if snippet_lines:
+            lines.extend(["", *snippet_lines])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_scan_replay_notes_artifact(
+    *,
+    module: str,
+    findings: Sequence[Mapping[str, Any]],
+) -> str:
+    """Render a compact Markdown replay dossier from scan findings."""
+    lines = ["# Replay Notes", "", f"Target: `{module}`", ""]
+    concrete = [
+        finding
+        for finding in findings
+        if (
+            finding.get("proof_bundle")
+            or finding.get("failing_args")
+            or finding.get("counterexample")
+        )
+    ]
+    if not concrete:
+        lines.append("No concrete replay notes were available for this scan.")
+        return "\n".join(lines).rstrip() + "\n"
+    for finding in concrete:
+        title = str(
+            finding.get("summary")
+            or finding.get("name")
+            or finding.get("kind", "finding")
+        )
+        finding_id = str(finding.get("finding_id", "")).strip()
+        lines.extend([f"## {title}", ""])
+        if finding_id:
+            lines.append(f"- Finding ID: `{finding_id}`")
+        proof = finding.get("proof_bundle")
+        if isinstance(proof, Mapping):
+            impact = proof.get("impact")
+            if isinstance(impact, Mapping) and impact.get("summary"):
+                lines.append(f"- Impact: {impact['summary']}")
+            reproduction = proof.get("minimal_reproduction") or proof.get("reproduction")
+            if isinstance(reproduction, Mapping):
+                command = reproduction.get("command")
+                snippet = reproduction.get("python_snippet")
+                if command:
+                    lines.append(f"- Command: `{command}`")
+                if snippet:
+                    lines.extend(["", "```python", str(snippet).rstrip(), "```"])
+            elif reproduction:
+                lines.append(f"- Reproduction: `{reproduction}`")
+        failing_args = finding.get("failing_args")
+        if failing_args:
+            lines.extend(
+                [
+                    "",
+                    "```json",
+                    json.dumps(_trim_report_value(failing_args), indent=2),
+                    "```",
+                ]
+            )
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _scan_proof_bundle_payload(findings: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Extract proof bundles into a compact machine-readable artifact."""
+    entries = []
+    for finding in findings:
+        proof = finding.get("proof_bundle")
+        if not isinstance(proof, Mapping):
+            continue
+        entries.append(
+            {
+                "finding_id": finding.get("finding_id"),
+                "qualname": finding.get("qualname"),
+                "summary": finding.get("summary"),
+                "evidence_class": finding.get("evidence_class"),
+                "proof_bundle": dict(proof),
+            }
+        )
+    return {"version": 1, "entries": entries}
+
+
+def _render_scan_scenario_library_artifact(
+    *,
+    module: str,
+    records: Sequence[Mapping[str, Any]],
+) -> str:
+    """Render a Markdown note describing inferred and available scenario libraries."""
+    lines = ["# Scenario Libraries", "", f"Target: `{module}`", ""]
+    for record in records:
+        inferred = list(record.get("inferred", []))
+        if inferred:
+            lines.append("## Inferred packs")
+            lines.append("")
+            for item in inferred:
+                lines.append(
+                    f"- `{item.get('name')}` for "
+                    + ", ".join(str(name) for name in item.get("targets", []))
+                )
+                evidences = [
+                    str(value) for value in item.get("evidence", []) if str(value).strip()
+                ]
+                for evidence in evidences:
+                    lines.append(f"  evidence: {evidence}")
+            lines.append("")
+        lines.append("## Built-in libraries")
+        lines.append("")
+        for item in record.get("available", []):
+            aliases = list(item.get("aliases", []))
+            alias_text = f" (aliases: {', '.join(aliases)})" if aliases else ""
+            lines.append(f"- `{item.get('name')}`{alias_text}: {item.get('description', '')}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _write_text_artifact(path_str: str, content: str, *, label: str) -> Path:
+    """Write one UTF-8 text artifact and report its path."""
+    path = Path(path_str)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    _stderr(f"{label} saved: {path}\n")
+    return path
+
+
+def _write_scan_review_bundle_artifacts(
+    state: Any,
+    *,
+    report: Mapping[str, Any],
+) -> dict[str, Path]:
+    """Write extra review artifacts for `scan --save-artifacts`."""
+    findings = [_annotate_finding(detail) for detail in report.get("details", [])]
+    config_suggestions = list(report.get("config_suggestions", []))
+    support_suggestions = list(report.get("support_suggestions", []))
+    scenario_records = list(report.get("scenario_libraries", []))
+    written: dict[str, Path] = {}
+    if config_suggestions:
+        written["config"] = _write_text_artifact(
+            _default_scan_review_config_path(state.module),
+            _render_scan_review_config_artifact(
+                module=state.module,
+                suggestions=config_suggestions,
+            ),
+            label="Scan config suggestions",
+        )
+    if support_suggestions:
+        written["support"] = _write_text_artifact(
+            _default_scan_support_bundle_path(state.module),
+            _render_scan_support_artifact(
+                module=state.module,
+                suggestions=support_suggestions,
+            ),
+            label="Scan support scaffold",
+        )
+    proof_payload = _scan_proof_bundle_payload(findings)
+    if proof_payload["entries"]:
+        path = Path(_default_scan_proofs_path(state.module))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json_file(path, proof_payload)
+        _stderr(f"Scan proof bundles saved: {path}\n")
+        written["proofs"] = path
+        written["replay"] = _write_text_artifact(
+            _default_scan_replay_notes_path(state.module),
+            _render_scan_replay_notes_artifact(module=state.module, findings=findings),
+            label="Scan replay notes",
+        )
+    if scenario_records:
+        written["scenarios"] = _write_text_artifact(
+            _default_scan_scenario_library_path(state.module),
+            _render_scan_scenario_library_artifact(
+                module=state.module,
+                records=scenario_records,
+            ),
+            label="Scan scenario libraries",
+        )
+    return written
 
 
 def _build_scan_report(state: Any) -> dict[str, Any]:
@@ -6665,6 +7234,12 @@ def _build_scan_report(state: Any) -> dict[str, Any]:
     ]
     config_suggestions = _dedupe_config_suggestions(
         getattr(state, "supervisor_info", {}).get("config_suggestions", ())
+    )
+    support_suggestions = list(
+        getattr(state, "supervisor_info", {}).get("support_suggestions", ())
+    )
+    scenario_libraries = list(
+        getattr(state, "supervisor_info", {}).get("scenario_libraries", ())
     )
     details = [
         {
@@ -6738,6 +7313,15 @@ def _build_scan_report(state: Any) -> dict[str, Any]:
         )
     if config_line := _config_suggestions_summary(config_suggestions):
         summary.append(config_line)
+    if support_suggestions:
+        count = len(support_suggestions)
+        noun = "scaffold" if count == 1 else "scaffolds"
+        summary.append(f"Review scaffolds: {count} support-file {noun}")
+    if scenario_libraries:
+        inferred = sum(len(list(item.get("inferred", ()))) for item in scenario_libraries)
+        summary.append(
+            f"Scenario libraries: {inferred} inferred pack(s), reusable library notes available"
+        )
     suggested_commands = [
         f"ordeal scan {state.module}",
         f"ordeal mine {state.module} -n 200",
@@ -6810,6 +7394,8 @@ def _build_scan_report(state: Any) -> dict[str, Any]:
         "suggested_commands": suggested_commands,
         "extra_sections": extra_sections,
         "config_suggestions": config_suggestions,
+        "support_suggestions": support_suggestions,
+        "scenario_libraries": scenario_libraries,
     }
 
 
@@ -6823,6 +7409,11 @@ def _build_scan_bundle(
     *,
     report_path: Path,
     regression_path: Path | None,
+    config_path: Path | None = None,
+    support_path: Path | None = None,
+    proofs_path: Path | None = None,
+    replay_path: Path | None = None,
+    scenario_library_path: Path | None = None,
 ) -> dict[str, Any]:
     """Build the machine-readable scan artifact bundle."""
     report = _build_scan_report(state)
@@ -6841,10 +7432,20 @@ def _build_scan_bundle(
         "gaps": report["gaps"],
         "finding_count": len(findings),
         "findings": findings,
+        "config_suggestions": list(report.get("config_suggestions", [])),
+        "support_suggestions": list(report.get("support_suggestions", [])),
+        "scenario_libraries": list(report.get("scenario_libraries", [])),
         "artifacts": {
             "report": _display_path(report_path),
             "bundle": None,
             "regression": _display_path(regression_path) if regression_path else None,
+            "config": _display_path(config_path) if config_path else None,
+            "support": _display_path(support_path) if support_path else None,
+            "proofs": _display_path(proofs_path) if proofs_path else None,
+            "replay": _display_path(replay_path) if replay_path else None,
+            "scenario_libraries": (
+                _display_path(scenario_library_path) if scenario_library_path else None
+            ),
             "index": _display_path(Path(_default_artifact_index_path())),
         },
         "commands": {
@@ -7321,6 +7922,11 @@ def _build_scan_agent_envelope(
     *,
     written_report_path: Path | None = None,
     written_regression_path: Path | None = None,
+    written_config_path: Path | None = None,
+    written_support_path: Path | None = None,
+    written_proofs_path: Path | None = None,
+    written_replay_path: Path | None = None,
+    written_scenario_library_path: Path | None = None,
     index_path: Path | None = None,
 ) -> Any:
     """Build the agent-facing JSON envelope for `ordeal scan`."""
@@ -7335,6 +7941,38 @@ def _build_scan_agent_envelope(
     if written_regression_path is not None:
         artifacts.append(
             _agent_artifact("regression", written_regression_path, "generated pytest regressions")
+        )
+    if written_config_path is not None:
+        artifacts.append(
+            _agent_artifact(
+                "config-suggestion",
+                written_config_path,
+                "review-only ordeal.toml snippets",
+            )
+        )
+    if written_support_path is not None:
+        artifacts.append(
+            _agent_artifact(
+                "support-scaffold",
+                written_support_path,
+                "review-only support scaffold",
+            )
+        )
+    if written_proofs_path is not None:
+        artifacts.append(
+            _agent_artifact("proof-bundle", written_proofs_path, "machine-readable proof bundles")
+        )
+    if written_replay_path is not None:
+        artifacts.append(
+            _agent_artifact("replay-notes", written_replay_path, "minimal replay notes")
+        )
+    if written_scenario_library_path is not None:
+        artifacts.append(
+            _agent_artifact(
+                "scenario-library",
+                written_scenario_library_path,
+                "reusable collaborator scenario libraries",
+            )
         )
     if index_path is not None:
         artifacts.append(_agent_artifact("index", index_path, "artifact index"))
@@ -8205,6 +8843,11 @@ def _write_scan_bundle(
     path_str: str,
     report_path: Path,
     regression_path: Path | None,
+    config_path: Path | None = None,
+    support_path: Path | None = None,
+    proofs_path: Path | None = None,
+    replay_path: Path | None = None,
+    scenario_library_path: Path | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     """Write a machine-readable JSON finding bundle for `ordeal scan`."""
     path = Path(path_str)
@@ -8213,6 +8856,11 @@ def _write_scan_bundle(
         state,
         report_path=report_path,
         regression_path=regression_path,
+        config_path=config_path,
+        support_path=support_path,
+        proofs_path=proofs_path,
+        replay_path=replay_path,
+        scenario_library_path=scenario_library_path,
     )
     bundle["artifacts"]["bundle"] = _display_path(path)
     path.write_text(json.dumps(bundle, indent=2) + "\n", encoding="utf-8")
@@ -8314,6 +8962,11 @@ def _print_scan_artifact_workflow(
     bundle_path: Path,
     finding_ids: list[str],
     regression_path: Path | None,
+    config_path: Path | None,
+    support_path: Path | None,
+    proofs_path: Path | None,
+    replay_path: Path | None,
+    scenario_library_path: Path | None,
     index_path: Path,
 ) -> None:
     """Print available artifacts and commands after saving scan artifacts."""
@@ -8325,6 +8978,16 @@ def _print_scan_artifact_workflow(
         print(f"  regression: {_display_path(regression_path)}")
     else:
         print("  regression: not generated from current findings")
+    if config_path is not None:
+        print(f"  config: {_display_path(config_path)}")
+    if support_path is not None:
+        print(f"  support: {_display_path(support_path)}")
+    if proofs_path is not None:
+        print(f"  proofs: {_display_path(proofs_path)}")
+    if replay_path is not None:
+        print(f"  replay: {_display_path(replay_path)}")
+    if scenario_library_path is not None:
+        print(f"  scenarios: {_display_path(scenario_library_path)}")
     print(f"  index: {_display_path(index_path)}")
     print("available:")
     if len(finding_ids) == 1 and regression_path is not None:
@@ -8333,6 +8996,10 @@ def _print_scan_artifact_workflow(
     if regression_path is not None:
         run_cmd = _shell_command("uv", "run", "pytest", _display_path(regression_path), "-q")
         print(f"  pytest: {run_cmd}")
+    if config_path is not None:
+        print(f"  review-config: {_shell_command('cat', _display_path(config_path))}")
+    if support_path is not None:
+        print(f"  review-support: {_shell_command('cat', _display_path(support_path))}")
     rescan = _shell_command("uv", "run", "ordeal", "scan", module, "--save-artifacts")
     print(f"  rescan: {rescan}")
 
@@ -8633,9 +9300,12 @@ def _scan_command_description() -> str:
         " `--relation-override` to suppress noisy mined signals without changing code.\n"
         "Use explicit targets like `pkg.mod:Env.build_env_vars`, shared `[[objects]]`,\n"
         " and `[[contracts]]` in ordeal.toml for stateful OO code and shell/path/env checks.\n"
-        f"Use --save-artifacts to save both {_default_scan_report_path('mymod')} and"
-        f" {_default_scan_bundle_path('mymod')} + {_DEFAULT_REGRESSION_PATH},"
-        f" then update {_default_artifact_index_path()}.\n"
+        "Use --save-artifacts to save the dossier, machine-readable bundle, review-only\n"
+        f" config/support sidecars ({_default_scan_report_path('mymod')},"
+        f" {_default_scan_bundle_path('mymod')},"
+        f" {_default_scan_review_config_path('mymod')},"
+        f" {_default_scan_support_bundle_path('mymod')}) +"
+        f" {_DEFAULT_REGRESSION_PATH}, then update {_default_artifact_index_path()}.\n"
         "When one finding is saved, the workflow prints an exact"
         " `ordeal verify <finding-id>` follow-up command.\n"
         "Use --report-file report.md to save a shareable Markdown bug report.\n"
@@ -8858,9 +9528,13 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     action="store_true",
                     help=(
                         "When findings exist, write the default Markdown dossier, JSON bundle,"
-                        f" and regression file ({_default_scan_report_path('mymod')},"
-                        f" {_default_scan_bundle_path('mymod')}, {_DEFAULT_REGRESSION_PATH})"
-                        f" and update {_default_artifact_index_path()}"
+                        " review scaffolds, and regression file "
+                        f"({_default_scan_report_path('mymod')},"
+                        f" {_default_scan_bundle_path('mymod')},"
+                        f" {_default_scan_review_config_path('mymod')},"
+                        f" {_default_scan_support_bundle_path('mymod')},"
+                        f" {_DEFAULT_REGRESSION_PATH}) and update"
+                        f" {_default_artifact_index_path()}"
                     ),
                 ),
                 _arg(

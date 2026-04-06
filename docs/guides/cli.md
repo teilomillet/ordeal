@@ -77,7 +77,7 @@ ordeal scan myapp.scoring --write-regression
 ordeal scan myapp.scoring --save-artifacts
 ```
 
-Use `--save-artifacts` when you want the full handoff package: `.ordeal/findings/<module>.md`, `.ordeal/findings/<module>.json`, `tests/test_ordeal_regressions.py`, and `.ordeal/findings/index.json`. See [Bug Bundle](bug-bundle.md) for the artifact layout.
+Use `--save-artifacts` when you want the full handoff package. In addition to the Markdown dossier, JSON bundle, regression file, and artifact index, ordeal now saves review-first sidecars for the same scan when it has enough evidence: `.ordeal/findings/<module>.ordeal.toml`, `.ordeal/findings/<module>.ordeal_support.py`, `.ordeal/findings/<module>.proofs.json`, `.ordeal/findings/<module>.replay.md`, and `.ordeal/findings/<module>.scenarios.md`. See [Bug Bundle](bug-bundle.md) for the artifact layout.
 
 `scan` is evidence-first. In `--mode evidence`, it surfaces replayable crashes, weaker exploratory properties, and expected precondition failures without flattening them into one verdict. `--mode candidate` keeps the same search but ranks only the strongest contract-valid issue candidates at the top. If `[[scan]]` or `[[objects]]` leave fixture completeness too low for the module, `scan` will report that as a block instead of pretending it has real leverage. In that case, add a factory, `state_factory`, or `harness = "stateful"` before expecting useful output. If you need stronger validation for a mature codebase, prefer `ordeal audit` for coverage and mutation comparison, and `ordeal mutate` for direct mutation scoring.
 
@@ -87,7 +87,7 @@ Use `--list-targets` when you want to inspect how ordeal sees functions and meth
 
 Most of the tuning knobs for `scan` live in `[[scan]]` inside `ordeal.toml`. Use `[fixtures].registries` for project-wide fixture registrations, `fixture_registries` for scan-specific registry imports, `ignore_properties` and `ignore_relations` to suppress noisy laws, and `property_overrides` or `relation_overrides` when one function needs a narrower set of checks. `expected_failures` keeps known preconditions visible without ranking them as issue candidates. For stateful OO code, `[[objects]]` supplies bound-instance factories, `state_factory`, `teardown`, and `harness = "stateful"` when a class needs persistent lifecycle setup; `[[contracts]]` adds explicit shell/path/env probes.
 
-`scan` now surfaces ready-to-paste `ordeal.toml` suggestions too. The text summary prints a `Suggested ordeal.toml:` block, and the JSON envelope includes `raw_details.config_suggestions`. Package-root sampled scans emit a repeatable `[[scan]]` block with the sampled targets, while method-heavy runs can also suggest `[[objects]]` or `[[contracts]]` blocks derived from the observed surface and findings.
+`scan` now surfaces ready-to-paste `ordeal.toml` suggestions too. The text summary prints a `Suggested ordeal.toml:` block, the JSON envelope includes `raw_details.config_suggestions`, and `--save-artifacts` persists the same review bundle to `.ordeal/findings/<module>.ordeal.toml`. Package-root sampled scans emit a repeatable `[[scan]]` block with the sampled targets, while method-heavy runs can also suggest `[[objects]]` or `[[contracts]]` blocks derived from the observed surface and findings, plus a review scaffold for `tests/ordeal_support.py`.
 
 | Flag | Default | Description |
 |---|---|---|

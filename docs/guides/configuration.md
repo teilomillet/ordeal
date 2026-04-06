@@ -161,11 +161,13 @@ scenarios = ["subprocess", "sandbox"]
 methods = ["build_env_vars"]
 ```
 
-Use `factory` for construction, `state_factory` when the object needs a separate state payload, `setup` for one-time preparation, `teardown` for cleanup, and `scenarios` for collaborator behavior that should be layered on top of the object before the listed methods are exercised. `harness = "stateful"` tells ordeal to reuse the same instance across a stateful run instead of rebuilding it for every call. Built-in scenario libraries now work directly in TOML:
+Use `factory` for construction, `state_factory` when the object needs a separate state payload, `setup` for one-time preparation, `teardown` for cleanup, and `scenarios` for collaborator behavior that should be layered on top of the object before the listed methods are exercised. `harness = "stateful"` tells ordeal to reuse the same instance across a stateful run instead of rebuilding it for every call. Built-in scenario libraries now work directly in TOML, and `scan --save-artifacts` will write a `.scenarios.md` note when it infers a good pack for the current target:
 
 ```toml
 scenarios = ["subprocess", "sandbox", "upload_download", "http", "state_store"]
 ```
+
+Alias names like `subprocess_runner`, `sandbox_client`, `upload_download_client`, and `http_client` still resolve to the same built-in libraries when you need the more explicit spelling.
 
 Inline scenario tables still cover small collaborator tweaks directly in TOML:
 

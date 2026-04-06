@@ -110,6 +110,126 @@ class TestCLIAgentJson:
         assert payload["raw_details"]["config_suggestions"][0]["section"] == "[[scan]]"
         assert 'module = "pkg.mod"' in payload["raw_details"]["config_suggestions"][0]["snippet"]
 
+    def test_scan_json_save_artifacts_includes_review_bundle_artifacts(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        monkeypatch.chdir(tmp_path)
+        state = SimpleNamespace(
+            module="pkg.mod",
+            confidence=0.71,
+            functions={"normalize": object()},
+            supervisor_info={"seed": 42, "trajectory_steps": 3},
+            tree=SimpleNamespace(size=1),
+            findings=["normalize: candidate issue on contract-valid inputs"],
+            frontier={"normalize": ["candidate issue on contract-valid inputs"]},
+            finding_details=[
+                {
+                    "kind": "crash",
+                    "category": "semantic_contract",
+                    "function": "normalize",
+                    "summary": "command args drift under quoting edge case",
+                    "error": "RuntimeError: command drift",
+                    "failing_args": {"value": "demo path"},
+                    "proof_bundle": {
+                        "minimal_reproduction": {
+                            "command": (
+                                "uv run ordeal check pkg.mod.normalize "
+                                "--contract command_arg_stability"
+                            ),
+                        },
+                        "impact": {"summary": "shell command argument stability regression"},
+                    },
+                }
+            ],
+        )
+        rows = [
+            {
+                "module": "pkg.mod",
+                "source_module": "pkg.mod",
+                "name": "Env.rollout",
+                "target": "pkg.mod.Env.rollout",
+                "kind": "instance",
+                "async": "sync",
+                "selected": True,
+                "factory_required": True,
+                "factory_configured": True,
+                "factory_source": "mined",
+                "setup_configured": True,
+                "setup_source": "mined",
+                "state_param": "state",
+                "state_factory_configured": True,
+                "state_factory_source": "mined",
+                "teardown_configured": True,
+                "teardown_source": "mined",
+                "harness": "stateful",
+                "harness_source": "mined",
+                "scenario_count": 1,
+                "scenario_source": "mined",
+                "auto_harness": True,
+                "contract_checks": ["command_arg_stability"],
+                "lifecycle_phase": "rollout",
+                "harness_hints": [
+                    {
+                        "kind": "factory",
+                        "suggestion": "use make_env",
+                        "evidence": "tests/support_factories.py:5:make_env",
+                        "confidence": 0.94,
+                        "config": {
+                            "section": "[[objects]]",
+                            "target": "pkg.mod:Env",
+                            "key": "factory",
+                            "value": "tests/support_factories.py:5:make_env",
+                        },
+                    },
+                    {
+                        "kind": "scenario_pack",
+                        "suggestion": "use sandbox scenario library",
+                        "evidence": "docs/lifecycle.md mentions sandbox client",
+                        "confidence": 0.82,
+                        "config": {
+                            "section": "[[objects]]",
+                            "target": "pkg.mod:Env",
+                            "key": "scenarios",
+                            "value": ["sandbox"],
+                        },
+                    },
+                ],
+                "runnable": True,
+                "skip_reason": None,
+            }
+        ]
+
+        monkeypatch.setattr(ordeal_state, "explore", lambda *args, **kwargs: state)
+        monkeypatch.setattr(cli, "_callable_listing_rows", lambda *args, **kwargs: rows)
+
+        rc = main(["scan", "pkg.mod", "--json", "--save-artifacts", "-n", "10"])
+
+        assert rc == 1
+        payload = json.loads(capsys.readouterr().out)
+        artifact_kinds = {artifact["kind"] for artifact in payload["artifacts"]}
+        expected_kinds = {
+            "report",
+            "regression",
+            "config-suggestion",
+            "support-scaffold",
+            "proof-bundle",
+            "replay-notes",
+            "scenario-library",
+            "index",
+        }
+        assert payload["tool"] == "scan"
+        assert expected_kinds <= artifact_kinds
+        assert payload["raw_details"]["report"]["support_suggestions"][0]["filename"] == (
+            "tests/ordeal_support.py"
+        )
+        assert (
+            payload["raw_details"]["report"]["scenario_libraries"][0]["inferred"][0]["name"]
+            == "sandbox"
+        )
+
     def test_scan_json_marks_unreplayed_crashes_as_speculative(self, monkeypatch, capsys):
         state = SimpleNamespace(
             module="pkg.mod",

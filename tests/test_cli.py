@@ -2792,6 +2792,180 @@ scan_max_examples = 12
             == artifact_index["entries"][1]["findings"][0]["fingerprint"]
         )
 
+    def test_scan_save_artifacts_writes_review_bundle_and_scenario_notes(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        monkeypatch.chdir(tmp_path)
+        state = SimpleNamespace(
+            module="pkg.mod",
+            confidence=0.74,
+            functions={"normalize": object()},
+            supervisor_info={"seed": 7, "trajectory_steps": 4},
+            tree=SimpleNamespace(size=2),
+            findings=["normalize: candidate issue on contract-valid inputs"],
+            frontier={"normalize": ["candidate issue on contract-valid inputs"]},
+            finding_details=[
+                {
+                    "kind": "crash",
+                    "category": "semantic_contract",
+                    "function": "normalize",
+                    "summary": "command args drift under quoting edge case",
+                    "error": "RuntimeError: command drift",
+                    "failing_args": {"value": "demo path"},
+                    "replayable": True,
+                    "replay_attempts": 2,
+                    "replay_matches": 2,
+                    "contract_fit": 0.91,
+                    "reachability": 0.77,
+                    "realism": 0.88,
+                    "proof_bundle": {
+                        "witness": {"value": "demo path"},
+                        "contract_basis": {"source": "test-derived seed"},
+                        "confidence_breakdown": {
+                            "contract_fit": 0.91,
+                            "reachability": 0.77,
+                            "realism": 0.88,
+                        },
+                        "minimal_reproduction": {
+                            "command": (
+                                "uv run ordeal check pkg.mod.normalize "
+                                "--contract command_arg_stability"
+                            ),
+                            "python_snippet": (
+                                "from pkg.mod import normalize\n"
+                                "normalize(value='demo path')\n"
+                            ),
+                        },
+                        "failure_path": {"exception": "RuntimeError: command drift"},
+                        "impact": {"summary": "shell command argument stability regression"},
+                    },
+                }
+            ],
+        )
+        rows = [
+            {
+                "module": "pkg.mod",
+                "source_module": "pkg.mod",
+                "name": "Env.rollout",
+                "target": "pkg.mod.Env.rollout",
+                "kind": "instance",
+                "async": "sync",
+                "selected": True,
+                "factory_required": True,
+                "factory_configured": True,
+                "factory_source": "mined",
+                "setup_configured": True,
+                "setup_source": "mined",
+                "state_param": "state",
+                "state_factory_configured": True,
+                "state_factory_source": "mined",
+                "teardown_configured": True,
+                "teardown_source": "mined",
+                "harness": "stateful",
+                "harness_source": "mined",
+                "scenario_count": 1,
+                "scenario_source": "mined",
+                "auto_harness": True,
+                "contract_checks": ["command_arg_stability"],
+                "lifecycle_phase": "rollout",
+                "harness_hints": [
+                    {
+                        "kind": "factory",
+                        "suggestion": "use make_env",
+                        "evidence": "tests/support_factories.py:5:make_env",
+                        "confidence": 0.94,
+                        "config": {
+                            "section": "[[objects]]",
+                            "target": "pkg.mod:Env",
+                            "key": "factory",
+                            "value": "tests/support_factories.py:5:make_env",
+                        },
+                    },
+                    {
+                        "kind": "state_factory",
+                        "suggestion": "use make_env_state",
+                        "evidence": "tests/support_factories.py:9:make_env_state",
+                        "confidence": 0.88,
+                        "config": {
+                            "section": "[[objects]]",
+                            "target": "pkg.mod:Env",
+                            "key": "state_factory",
+                            "value": "tests/support_factories.py:9:make_env_state",
+                        },
+                    },
+                    {
+                        "kind": "teardown",
+                        "suggestion": "use teardown_env",
+                        "evidence": "tests/support_factories.py:12:teardown_env",
+                        "confidence": 0.8,
+                        "config": {
+                            "section": "[[objects]]",
+                            "target": "pkg.mod:Env",
+                            "key": "teardown",
+                            "value": "tests/support_factories.py:12:teardown_env",
+                        },
+                    },
+                    {
+                        "kind": "scenario_pack",
+                        "suggestion": "use sandbox scenario library",
+                        "evidence": "docs/lifecycle.md mentions sandbox client",
+                        "confidence": 0.82,
+                        "config": {
+                            "section": "[[objects]]",
+                            "target": "pkg.mod:Env",
+                            "key": "scenarios",
+                            "value": ["sandbox"],
+                        },
+                    },
+                ],
+                "runnable": True,
+                "skip_reason": None,
+            }
+        ]
+
+        monkeypatch.setattr(ordeal_state, "explore", lambda *args, **kwargs: state)
+        monkeypatch.setattr(cli, "_callable_listing_rows", lambda *args, **kwargs: rows)
+
+        rc = main(["scan", "pkg.mod", "--save-artifacts", "-n", "10"])
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        config_path = tmp_path / ".ordeal" / "findings" / "pkg" / "mod.ordeal.toml"
+        support_path = tmp_path / ".ordeal" / "findings" / "pkg" / "mod.ordeal_support.py"
+        proofs_path = tmp_path / ".ordeal" / "findings" / "pkg" / "mod.proofs.json"
+        replay_path = tmp_path / ".ordeal" / "findings" / "pkg" / "mod.replay.md"
+        scenarios_path = tmp_path / ".ordeal" / "findings" / "pkg" / "mod.scenarios.md"
+        bundle_path = tmp_path / ".ordeal" / "findings" / "pkg" / "mod.json"
+        assert config_path.exists()
+        assert support_path.exists()
+        assert proofs_path.exists()
+        assert replay_path.exists()
+        assert scenarios_path.exists()
+        bundle = json.loads(bundle_path.read_text())
+        assert bundle["artifacts"]["config"] == ".ordeal/findings/pkg/mod.ordeal.toml"
+        assert bundle["artifacts"]["support"] == ".ordeal/findings/pkg/mod.ordeal_support.py"
+        assert bundle["artifacts"]["proofs"] == ".ordeal/findings/pkg/mod.proofs.json"
+        assert bundle["artifacts"]["replay"] == ".ordeal/findings/pkg/mod.replay.md"
+        assert (
+            bundle["artifacts"]["scenario_libraries"] == ".ordeal/findings/pkg/mod.scenarios.md"
+        )
+        assert bundle["config_suggestions"][0]["section"] == "[[scan]]"
+        assert bundle["support_suggestions"][0]["filename"] == "tests/ordeal_support.py"
+        assert bundle["scenario_libraries"][0]["inferred"][0]["name"] == "sandbox"
+        assert "[[objects]]" in config_path.read_text()
+        assert "def make_env() -> Env:" in support_path.read_text()
+        assert "tests/ordeal_support.py" in support_path.read_text()
+        assert "shell command argument stability regression" in replay_path.read_text()
+        assert "`sandbox`" in scenarios_path.read_text()
+        assert "config: .ordeal/findings/pkg/mod.ordeal.toml" in captured.out
+        assert "support: .ordeal/findings/pkg/mod.ordeal_support.py" in captured.out
+        assert "proofs: .ordeal/findings/pkg/mod.proofs.json" in captured.out
+        assert "replay: .ordeal/findings/pkg/mod.replay.md" in captured.out
+        assert "scenarios: .ordeal/findings/pkg/mod.scenarios.md" in captured.out
+
     def test_verify_marks_finding_verified(self, monkeypatch, tmp_path, capsys):
         index_path, bundle_path, finding_id = _write_verify_fixture(tmp_path)
         calls: dict[str, object] = {}

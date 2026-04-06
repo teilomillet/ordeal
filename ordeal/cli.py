@@ -6359,14 +6359,11 @@ def _scan_bootstrap_targets_from_rows(
                 f"{support_module}:make_{_camel_to_snake(class_name)}_state"
             )
         if row.get("teardown_configured") and bucket["support_teardown"] is None:
-            bucket["support_teardown"] = (
-                f"{support_module}:cleanup_{_camel_to_snake(class_name)}"
-            )
+            bucket["support_teardown"] = f"{support_module}:cleanup_{_camel_to_snake(class_name)}"
         if str(row.get("harness", "fresh")) == "stateful":
             bucket["harness"] = "stateful"
-        if (
-            bucket["support_setup"] is None
-            and (hints or row.get("scenario_count") or row.get("setup_configured"))
+        if bucket["support_setup"] is None and (
+            hints or row.get("scenario_count") or row.get("setup_configured")
         ):
             bucket["support_setup"] = f"{support_module}:prime_{_camel_to_snake(class_name)}"
 
@@ -7001,9 +6998,7 @@ def _render_scan_review_config_artifact(
             lines.append(f"# {reason}")
         if target:
             lines.append(f"# Target: {target}")
-        evidences = [
-            str(item) for item in suggestion.get("evidence", []) if str(item).strip()
-        ]
+        evidences = [str(item) for item in suggestion.get("evidence", []) if str(item).strip()]
         for evidence in evidences:
             lines.append(f"# Evidence: {evidence}")
         lines.extend(str(suggestion.get("snippet", "")).rstrip().splitlines())
@@ -7033,9 +7028,7 @@ def _render_scan_support_artifact(
         lines.append(f"# [{index}] {title}")
         if filename:
             lines.append(f"# Intended file: {filename}")
-        evidences = [
-            str(item) for item in suggestion.get("evidence", []) if str(item).strip()
-        ]
+        evidences = [str(item) for item in suggestion.get("evidence", []) if str(item).strip()]
         for evidence in evidences:
             lines.append(f"# Evidence: {evidence}")
         suggested_command = str(suggestion.get("suggested_command", "")).strip()
@@ -7068,9 +7061,7 @@ def _render_scan_replay_notes_artifact(
         return "\n".join(lines).rstrip() + "\n"
     for finding in concrete:
         title = str(
-            finding.get("summary")
-            or finding.get("name")
-            or finding.get("kind", "finding")
+            finding.get("summary") or finding.get("name") or finding.get("kind", "finding")
         )
         finding_id = str(finding.get("finding_id", "")).strip()
         lines.extend([f"## {title}", ""])
@@ -7238,9 +7229,7 @@ def _build_scan_report(state: Any) -> dict[str, Any]:
     support_suggestions = list(
         getattr(state, "supervisor_info", {}).get("support_suggestions", ())
     )
-    scenario_libraries = list(
-        getattr(state, "supervisor_info", {}).get("scenario_libraries", ())
-    )
+    scenario_libraries = list(getattr(state, "supervisor_info", {}).get("scenario_libraries", ()))
     details = [
         {
             **detail,

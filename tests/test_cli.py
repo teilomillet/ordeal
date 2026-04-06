@@ -2835,8 +2835,7 @@ scan_max_examples = 12
                                 "--contract command_arg_stability"
                             ),
                             "python_snippet": (
-                                "from pkg.mod import normalize\n"
-                                "normalize(value='demo path')\n"
+                                "from pkg.mod import normalize\nnormalize(value='demo path')\n"
                             ),
                         },
                         "failure_path": {"exception": "RuntimeError: command drift"},
@@ -2949,9 +2948,7 @@ scan_max_examples = 12
         assert bundle["artifacts"]["support"] == ".ordeal/findings/pkg/mod.ordeal_support.py"
         assert bundle["artifacts"]["proofs"] == ".ordeal/findings/pkg/mod.proofs.json"
         assert bundle["artifacts"]["replay"] == ".ordeal/findings/pkg/mod.replay.md"
-        assert (
-            bundle["artifacts"]["scenario_libraries"] == ".ordeal/findings/pkg/mod.scenarios.md"
-        )
+        assert bundle["artifacts"]["scenario_libraries"] == ".ordeal/findings/pkg/mod.scenarios.md"
         assert bundle["config_suggestions"][0]["section"] == "[[scan]]"
         assert bundle["support_suggestions"][0]["filename"] == "tests/ordeal_support.py"
         assert bundle["scenario_libraries"][0]["inferred"][0]["name"] == "sandbox"

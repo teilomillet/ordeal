@@ -2071,16 +2071,14 @@ _BUILTIN_OBJECT_SCENARIO_LIBRARY_SPECS: dict[str, dict[str, Any]] = {
     "subprocess": {
         "aliases": ("subprocess_runner",),
         "description": (
-            "Stub subprocess-style runners and command executors "
-            "with successful no-op results."
+            "Stub subprocess-style runners and command executors with successful no-op results."
         ),
         "hook": _apply_subprocess_pack,
     },
     "sandbox": {
         "aliases": ("sandbox_client",),
         "description": (
-            "Stub sandbox clients with upload/download helpers "
-            "and successful command execution."
+            "Stub sandbox clients with upload/download helpers and successful command execution."
         ),
         "hook": _apply_sandbox_pack,
     },
@@ -2093,8 +2091,7 @@ _BUILTIN_OBJECT_SCENARIO_LIBRARY_SPECS: dict[str, dict[str, Any]] = {
             "download_client",
         ),
         "description": (
-            "Stub storage, upload, and download collaborators "
-            "with safe in-memory responses."
+            "Stub storage, upload, and download collaborators with safe in-memory responses."
         ),
         "hook": _apply_upload_download_pack,
     },
@@ -2106,8 +2103,7 @@ _BUILTIN_OBJECT_SCENARIO_LIBRARY_SPECS: dict[str, dict[str, Any]] = {
     "state_store": {
         "aliases": (),
         "description": (
-            "Attach an in-memory key/value store for cache "
-            "or session-style collaborators."
+            "Attach an in-memory key/value store for cache or session-style collaborators."
         ),
         "hook": _apply_state_store_pack,
     },

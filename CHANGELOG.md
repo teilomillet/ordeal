@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.24
+
+**Features:**
+
+- shift scan to evidence-first reporting
+
+
 ## 0.3.23
 
 **Features:**

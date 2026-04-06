@@ -249,6 +249,51 @@ env_param = "env_vars"
         assert cfg.contracts[0].protected_keys == ["PATH", "HOME"]
         assert cfg.contracts[0].env_param == "env_vars"
 
+    def test_builtin_scenario_and_contract_pack_names_round_trip(self, tmp_toml):
+        cfg = load_config(
+            tmp_toml(
+                (
+                    """
+[[objects]]
+target = "myapp.envs:ComposableEnv"
+scenarios = ["subprocess", "sandbox", "http", "state_store"]
+
+[[scan]]
+module = "myapp.scoring"
+auto_contracts = [
+  "shell_path_safety",
+  "protected_env_vars",
+  "cleanup_teardown",
+  "cancellation_safety",
+  "json_tool_call_normalization",
+]
+
+[[contracts]]
+target = "myapp.envs:ComposableEnv.build_env_vars"
+checks = [
+  "shell_path_safety",
+  "protected_env_vars",
+  "json_tool_call_normalization",
+]
+"""
+                )
+            )
+        )
+
+        assert cfg.objects[0].scenarios == ["subprocess", "sandbox", "http", "state_store"]
+        assert cfg.scan[0].auto_contracts == [
+            "shell_path_safety",
+            "protected_env_vars",
+            "cleanup_teardown",
+            "cancellation_safety",
+            "json_tool_call_normalization",
+        ]
+        assert cfg.contracts[0].checks == [
+            "shell_path_safety",
+            "protected_env_vars",
+            "json_tool_call_normalization",
+        ]
+
     def test_contract_config_supports_lifecycle_fields(self, tmp_toml):
         cfg = load_config(
             tmp_toml(

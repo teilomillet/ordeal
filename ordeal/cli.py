@@ -566,6 +566,228 @@ def _harness_hint_config_summary(hints: Sequence[Mapping[str, Any]]) -> str | No
     return "; ".join(configs[:3])
 
 
+def _config_target_for_row(module_name: str, row: Mapping[str, Any]) -> str:
+    """Return the config-friendly target string for one callable row."""
+    name = str(row.get("name", "")).strip()
+    kind = str(row.get("kind", "")).strip()
+    if not name:
+        return module_name
+    if kind in {"instance", "classmethod", "staticmethod"} and "." in name:
+        return f"{module_name}:{name}"
+    return f"{module_name}.{name}"
+
+
+def _toml_value(value: Any) -> str:
+    """Render a small TOML-compatible value literal."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return repr(value)
+    if value is None:
+        return '""'
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, Mapping):
+        items = ", ".join(
+            f"{key} = {_toml_value(item)}" for key, item in value.items()
+        )
+        return "{ " + items + " }"
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    return json.dumps(str(value))
+
+
+def _merge_config_suggestion_blocks(
+    blocks: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge suggestion fragments into stable TOML block payloads."""
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    order: list[tuple[str, str]] = []
+    for raw in blocks:
+        section = str(raw.get("section", "")).strip()
+        if not section:
+            continue
+        target = str(raw.get("target", "")).strip()
+        key = (section, target)
+        block = merged.get(key)
+        if block is None:
+            block = {"section": section}
+            if target:
+                block["target"] = target
+            if "module" in raw and str(raw.get("module", "")).strip():
+                block["module"] = str(raw.get("module"))
+            merged[key] = block
+            order.append(key)
+        for field_name, field_value in raw.items():
+            if field_name in {"section", "target"}:
+                continue
+            if field_value in (None, "", [], {}):
+                continue
+            if field_name == "methods":
+                items = [
+                    str(item)
+                    for item in field_value
+                    if str(item).strip()
+                ]
+                existing = list(block.get("methods", []))
+                for item in items:
+                    if item not in existing:
+                        existing.append(item)
+                if existing:
+                    block["methods"] = existing
+                continue
+            if field_name in {"checks", "scenarios", "tracked_params", "protected_keys"}:
+                items = [
+                    item
+                    for item in field_value
+                    if str(item).strip()
+                ]
+                existing = list(block.get(field_name, []))
+                for item in items:
+                    if item not in existing:
+                        existing.append(item)
+                if existing:
+                    block[field_name] = existing
+                continue
+            block.setdefault(field_name, field_value)
+    return [merged[key] for key in order]
+
+
+def _render_config_suggestion_blocks(blocks: Sequence[Mapping[str, Any]]) -> str:
+    """Render merged config suggestion blocks as ready-to-paste TOML."""
+    lines: list[str] = []
+    key_order = (
+        "module",
+        "target",
+        "methods",
+        "factory",
+        "state_factory",
+        "setup",
+        "teardown",
+        "harness",
+        "scenarios",
+        "checks",
+        "kwargs",
+        "tracked_params",
+        "protected_keys",
+        "env_param",
+        "phase",
+        "followup_phases",
+        "fault",
+        "handler_name",
+        "auto_contracts",
+        "targets",
+        "mode",
+        "min_contract_fit",
+    )
+    for idx, block in enumerate(blocks):
+        section = str(block.get("section", "")).strip()
+        if not section:
+            continue
+        if idx:
+            lines.append("")
+        lines.append(section)
+        remaining = [key for key in block.keys() if key != "section"]
+        ordered_keys = [
+            key for key in key_order if key in remaining
+        ] + [key for key in remaining if key not in key_order]
+        for key in ordered_keys:
+            lines.append(f"{key} = {_toml_value(block[key])}")
+    return "\n".join(lines)
+
+
+def _config_suggestion_payload(
+    blocks: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """Normalize config suggestion fragments into TOML and structured blocks."""
+    merged = _merge_config_suggestion_blocks(blocks)
+    if not merged:
+        return None
+    return {
+        "count": len(merged),
+        "blocks": merged,
+        "toml": _render_config_suggestion_blocks(merged),
+    }
+
+
+def _config_suggestions_from_rows(
+    module_name: str,
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """Build ready-to-paste TOML suggestions from callable discovery rows."""
+    blocks: list[dict[str, Any]] = []
+    selected = [row for row in rows if bool(row.get("selected", True))]
+    if selected:
+        names = [
+            str(row.get("name", "")).strip()
+            for row in selected
+            if str(row.get("name", "")).strip()
+        ]
+        if names:
+            blocks.append(
+                {
+                    "section": "[[scan]]",
+                    "module": module_name,
+                    "targets": names,
+                }
+            )
+    for row in selected or rows:
+        for hint in row.get("harness_hints", []):
+            config = hint.get("config")
+            if isinstance(config, Mapping):
+                blocks.append(dict(config))
+        contract_checks = [
+            str(item).strip()
+            for item in row.get("contract_checks", [])
+            if str(item).strip()
+        ]
+        if contract_checks:
+            blocks.append(
+                {
+                    "section": "[[contracts]]",
+                    "target": _config_target_for_row(module_name, row),
+                    "checks": contract_checks,
+                }
+            )
+    return _config_suggestion_payload(blocks)
+
+
+def _config_suggestions_from_harness_hints(
+    hints: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """Build ready-to-paste TOML suggestions from audit/check harness hints."""
+    blocks = [
+        dict(config)
+        for hint in hints
+        for config in [hint.get("config")]
+        if isinstance(config, Mapping)
+    ]
+    return _config_suggestion_payload(blocks)
+
+
+def _config_suggestions_for_contract_checks(
+    target: str,
+    checks: Sequence[Any],
+) -> dict[str, Any] | None:
+    """Build a `[[contracts]]` suggestion for explicit check invocations."""
+    names = [
+        str(getattr(check, "name", "")).strip()
+        for check in checks
+        if str(getattr(check, "name", "")).strip()
+    ]
+    if not names:
+        return None
+    kwargs = dict(getattr(checks[0], "kwargs", {}) or {})
+    block: dict[str, Any] = {
+        "section": "[[contracts]]",
+        "target": target,
+        "checks": names,
+    }
+    if kwargs:
+        block["kwargs"] = kwargs
+    return _config_suggestion_payload([block])
+
+
 def _render_target_listing_parts(row: Mapping[str, Any]) -> list[str]:
     """Return the normalized text fragments for one callable discovery row."""
     factory_text = (
@@ -607,6 +829,520 @@ def _render_target_listing_parts(row: Mapping[str, Any]) -> list[str]:
     return parts
 
 
+def _python_path_to_module_name(path_str: str) -> str | None:
+    """Convert a project-relative Python file path into an importable module name."""
+    path = Path(path_str)
+    if path.suffix != ".py":
+        return None
+    for root in (Path.cwd() / "src", Path.cwd()):
+        with contextlib.suppress(ValueError):
+            rel = path.resolve().relative_to(root.resolve())
+            rel_parts = rel.parts[:-1] if rel.name == "__init__.py" else rel.with_suffix("").parts
+            if rel_parts:
+                return ".".join(rel_parts)
+    return None
+
+
+def _normalize_hint_config_value(value: Any) -> Any:
+    """Normalize harness-hint config values into TOML-ready symbol paths when possible."""
+    if isinstance(value, list):
+        return [_normalize_hint_config_value(item) for item in value]
+    if not isinstance(value, str):
+        return value
+    match = re.match(r"^(?P<path>.+?\.py):(?P<line>\d+):(?P<name>[A-Za-z_][\w]*)$", value)
+    if not match:
+        return value
+    module_name = _python_path_to_module_name(match.group("path"))
+    if module_name is None:
+        return value
+    return f"{module_name}:{match.group('name')}"
+
+
+def _toml_key_value(key: str, value: Any) -> str:
+    """Render one TOML key/value line."""
+    if isinstance(value, bool):
+        rendered = "true" if value else "false"
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        rendered = str(value)
+    elif isinstance(value, str):
+        rendered = json.dumps(value)
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        rendered_items = [
+            _toml_key_value("", item).split(" = ", 1)[-1]
+            for item in value
+        ]
+        rendered = "[" + ", ".join(rendered_items) + "]"
+    elif isinstance(value, Mapping):
+        rendered_items = [
+            f"{name} = {_toml_key_value('', item).split(' = ', 1)[-1]}"
+            for name, item in value.items()
+        ]
+        rendered = "{ " + ", ".join(rendered_items) + " }"
+    else:
+        rendered = json.dumps(str(value))
+    return f"{key} = {rendered}" if key else rendered
+
+
+def _config_suggestion(
+    *,
+    title: str,
+    reason: str,
+    snippet_lines: Sequence[str],
+    section: str,
+    target: str | None = None,
+    evidence: Sequence[str] = (),
+    entries: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """Build one ready-to-paste ordeal.toml suggestion payload."""
+    return {
+        "title": title,
+        "reason": reason,
+        "filename": "ordeal.toml",
+        "section": section,
+        "target": target,
+        "snippet": "\n".join(snippet_lines).rstrip() + "\n",
+        "evidence": [str(item) for item in evidence if str(item).strip()],
+        "entries": [dict(item) for item in entries],
+    }
+
+
+def _dedupe_config_suggestions(
+    suggestions: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Deduplicate config suggestions while preserving order."""
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for suggestion in suggestions:
+        snippet = str(suggestion.get("snippet", "")).strip()
+        title = str(suggestion.get("title", "")).strip()
+        key = (title, snippet)
+        if not snippet or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(dict(suggestion))
+    return deduped
+
+
+def _object_config_suggestions_from_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    only_names: Sequence[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Build [[objects]] suggestions from callable listing rows with harness hints."""
+    allowed = {str(name) for name in only_names or () if str(name).strip()}
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        name = str(row.get("name", "")).strip()
+        if allowed and name not in allowed:
+            continue
+        hints = list(row.get("harness_hints", []))
+        if not hints or "." not in name:
+            continue
+        object_target = f"{row.get('module')}:{name.rsplit('.', 1)[0]}"
+        method_name = name.rsplit(".", 1)[-1]
+        bucket = grouped.setdefault(
+            object_target,
+            {
+                "target": object_target,
+                "methods": set(),
+                "fields": {},
+                "evidence": [],
+                "entries": [],
+            },
+        )
+        bucket["methods"].add(method_name)
+        if row.get("harness") == "stateful" or row.get("state_param"):
+            bucket["fields"].setdefault("harness", "stateful")
+        for hint in hints:
+            config = hint.get("config")
+            if not isinstance(config, Mapping) or str(config.get("section", "")) != "[[objects]]":
+                continue
+            key = str(config.get("key", "")).strip()
+            if not key:
+                continue
+            value = _normalize_hint_config_value(config.get("value"))
+            if key == "scenarios":
+                existing = list(bucket["fields"].get("scenarios", []))
+                for item in list(value) if isinstance(value, list) else [value]:
+                    if item not in existing:
+                        existing.append(item)
+                bucket["fields"]["scenarios"] = existing
+            else:
+                bucket["fields"].setdefault(key, value)
+            bucket["evidence"].append(str(hint.get("evidence", "")))
+            bucket["entries"].append(
+                {
+                    "section": "[[objects]]",
+                    "target": object_target,
+                    "method": method_name,
+                    "key": key,
+                    "value": value,
+                }
+            )
+
+    suggestions: list[dict[str, Any]] = []
+    for object_target, bucket in grouped.items():
+        fields = dict(bucket["fields"])
+        useful_keys = {"factory", "setup", "state_factory", "teardown", "scenarios"}
+        if not (useful_keys & fields.keys()):
+            continue
+        lines = ["[[objects]]", _toml_key_value("target", object_target)]
+        methods = sorted(bucket["methods"])
+        if methods:
+            lines.append(_toml_key_value("methods", methods))
+        if fields.get("harness") == "stateful":
+            lines.append(_toml_key_value("harness", "stateful"))
+        for key in ("factory", "setup", "state_factory", "teardown", "scenarios"):
+            if key in fields:
+                lines.append(_toml_key_value(key, fields[key]))
+        suggestions.append(
+            _config_suggestion(
+                title=f"Add an object harness for {object_target}",
+                reason="Persist the factory/setup/scenario hooks needed to reach bound methods.",
+                snippet_lines=lines,
+                section="[[objects]]",
+                target=object_target,
+                evidence=sorted(dict.fromkeys(bucket["evidence"]))[:5],
+                entries=bucket["entries"],
+            )
+        )
+    return suggestions
+
+
+def _contract_target_name(module_name: str, function_name: str) -> str:
+    """Render one config target name for a function or bound method."""
+    return (
+        f"{module_name}:{function_name}"
+        if "." in function_name and not function_name.startswith(f"{module_name}.")
+        else f"{module_name}.{function_name}"
+    )
+
+
+def _contract_suggestion_entries_from_checks(
+    target: str,
+    checks: Sequence[Any],
+) -> list[dict[str, Any]]:
+    """Build [[contracts]] suggestions from explicit ContractCheck objects."""
+    entries: list[dict[str, Any]] = []
+    for check in checks:
+        metadata = dict(getattr(check, "metadata", {}) or {})
+        kwargs = dict(getattr(check, "kwargs", {}) or {})
+        entry: dict[str, Any] = {
+            "section": "[[contracts]]",
+            "target": target,
+            "checks": [str(getattr(check, "name", "contract"))],
+        }
+        if kwargs:
+            entry["kwargs"] = kwargs
+        if entry["checks"][0] in {
+            "shell_safe",
+            "quoted_paths",
+            "command_arg_stability",
+            "subprocess_argv",
+        } and kwargs:
+            entry["tracked_params"] = list(kwargs)
+        if entry["checks"][0] == "protected_env_keys":
+            env_param = next(
+                (name for name, value in kwargs.items() if isinstance(value, Mapping)),
+                None,
+            )
+            env_value = kwargs.get(env_param) if env_param is not None else None
+            protected_keys = [
+                key
+                for key in ("PATH", "HOME", "PWD", "TMPDIR")
+                if isinstance(env_value, Mapping) and key in env_value
+            ]
+            if env_param is not None:
+                entry["env_param"] = env_param
+            if protected_keys:
+                entry["protected_keys"] = protected_keys
+        if str(metadata.get("kind")) == "lifecycle":
+            if metadata.get("phase"):
+                entry["phase"] = metadata["phase"]
+            if metadata.get("followup_phases"):
+                entry["followup_phases"] = list(metadata["followup_phases"])
+            if metadata.get("fault"):
+                entry["fault"] = metadata["fault"]
+            if metadata.get("handler_name"):
+                entry["handler_name"] = metadata["handler_name"]
+        entries.append(entry)
+    return entries
+
+
+def _contract_config_suggestions_from_checks(
+    target: str,
+    checks: Sequence[Any],
+    *,
+    reason: str,
+) -> list[dict[str, Any]]:
+    """Build ready-to-paste [[contracts]] suggestions from explicit checks."""
+    suggestions: list[dict[str, Any]] = []
+    for entry in _contract_suggestion_entries_from_checks(target, checks):
+        lines = ["[[contracts]]", _toml_key_value("target", entry["target"])]
+        lines.append(_toml_key_value("checks", entry["checks"]))
+        for key in (
+            "kwargs",
+            "tracked_params",
+            "protected_keys",
+            "env_param",
+            "phase",
+            "followup_phases",
+            "fault",
+            "handler_name",
+        ):
+            if key in entry:
+                lines.append(_toml_key_value(key, entry[key]))
+        suggestions.append(
+            _config_suggestion(
+                title=f"Persist explicit contract {entry['checks'][0]} for {target}",
+                reason=reason,
+                snippet_lines=lines,
+                section="[[contracts]]",
+                target=target,
+                entries=[entry],
+            )
+        )
+    return suggestions
+
+
+def _contract_config_suggestions_from_scan_details(
+    module_name: str,
+    details: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build [[contracts]] suggestions from scan contract findings."""
+    suggestions: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for detail in details:
+        if str(detail.get("kind")) != "contract":
+            continue
+        function_name = str(detail.get("function", "")).strip()
+        check_name = str(detail.get("name", "")).strip()
+        if not function_name or not check_name:
+            continue
+        kwargs = detail.get("failing_args")
+        target = _contract_target_name(module_name, function_name)
+        entry = {
+            "section": "[[contracts]]",
+            "target": target,
+            "checks": [check_name],
+        }
+        if isinstance(kwargs, Mapping) and kwargs:
+            entry["kwargs"] = dict(kwargs)
+        key = (target, check_name, pformat(entry.get("kwargs", {}), compact=True))
+        if key in seen:
+            continue
+        seen.add(key)
+        lines = ["[[contracts]]", _toml_key_value("target", target)]
+        lines.append(_toml_key_value("checks", [check_name]))
+        if "kwargs" in entry:
+            lines.append(_toml_key_value("kwargs", entry["kwargs"]))
+        suggestions.append(
+            _config_suggestion(
+                title=f"Persist scan contract {check_name} for {target}",
+                reason=(
+                    "Keep the failing semantic contract under versioned config for "
+                    "repeatable checks."
+                ),
+                snippet_lines=lines,
+                section="[[contracts]]",
+                target=target,
+                entries=[entry],
+            )
+        )
+    return suggestions
+
+
+def _scan_config_suggestions(
+    module_name: str,
+    *,
+    mode: str,
+    max_examples: int,
+    scan_targets: Sequence[str],
+    include_private: bool,
+    seed_from_call_sites: bool,
+    min_contract_fit: float,
+    min_reachability: float,
+    min_realism: float,
+    ignore_properties: Sequence[str],
+    ignore_relations: Sequence[str],
+    auto_contracts: Sequence[str],
+    sampling: Mapping[str, Any] | None,
+    rows: Sequence[Mapping[str, Any]],
+    details: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build config suggestions for a scan invocation."""
+    lines = ["[[scan]]", _toml_key_value("module", module_name)]
+    if sampling is not None and sampling.get("targets"):
+        lines.append(_toml_key_value("targets", list(sampling.get("targets", ()))))
+    elif scan_targets:
+        lines.append(_toml_key_value("targets", list(scan_targets)))
+    if mode != "coverage_gap":
+        lines.append(_toml_key_value("mode", mode))
+    if max_examples != 50:
+        lines.append(_toml_key_value("max_examples", max_examples))
+    if include_private:
+        lines.append(_toml_key_value("include_private", True))
+    if not seed_from_call_sites:
+        lines.append(_toml_key_value("seed_from_call_sites", False))
+    if min_contract_fit != 0.55:
+        lines.append(_toml_key_value("min_contract_fit", min_contract_fit))
+    if min_reachability != 0.45:
+        lines.append(_toml_key_value("min_reachability", min_reachability))
+    if min_realism != 0.55:
+        lines.append(_toml_key_value("min_realism", min_realism))
+    if ignore_properties:
+        lines.append(_toml_key_value("ignore_properties", list(ignore_properties)))
+    if ignore_relations:
+        lines.append(_toml_key_value("ignore_relations", list(ignore_relations)))
+    if auto_contracts:
+        lines.append(_toml_key_value("auto_contracts", list(auto_contracts)))
+    suggestions = [
+        _config_suggestion(
+            title=(
+                f"Persist the sampled scan surface for {module_name}"
+                if sampling is not None
+                else f"Persist scan defaults for {module_name}"
+            ),
+            reason=(
+                "Freeze the current sampled package-root surface for repeatable follow-up scans."
+                if sampling is not None
+                else "Keep this scan target selection and runtime policy in ordeal.toml."
+            ),
+            snippet_lines=lines,
+            section="[[scan]]",
+            target=module_name,
+            entries=[
+                {
+                    "section": "[[scan]]",
+                    "module": module_name,
+                    "targets": (
+                        list(sampling.get("targets", ()))
+                        if sampling is not None
+                        else list(scan_targets)
+                    ),
+                    "mode": mode,
+                    "max_examples": max_examples,
+                }
+            ],
+        )
+    ]
+    suggestions.extend(_object_config_suggestions_from_rows(rows))
+    suggestions.extend(_contract_config_suggestions_from_scan_details(module_name, details))
+    return _dedupe_config_suggestions(suggestions)
+
+
+def _audit_config_suggestions(
+    *,
+    modules: Sequence[str],
+    test_dir: str,
+    max_examples: int,
+    workers: int,
+    validation_mode: str,
+    min_fixture_completeness: float,
+    show_generated: bool,
+    save_generated: str | None,
+    write_gaps: str | None,
+    include_exploratory_function_gaps: bool,
+    require_direct_tests: bool,
+    target_groups: Sequence[Mapping[str, Any]],
+    results: Sequence[Any],
+) -> list[dict[str, Any]]:
+    """Build config suggestions for an audit invocation."""
+    lines = ["[audit]", _toml_key_value("modules", list(modules))]
+    if test_dir != "tests":
+        lines.append(_toml_key_value("test_dir", test_dir))
+    if max_examples != 20:
+        lines.append(_toml_key_value("max_examples", max_examples))
+    if workers != 1:
+        lines.append(_toml_key_value("workers", workers))
+    if validation_mode != "fast":
+        lines.append(_toml_key_value("validation_mode", validation_mode))
+    if min_fixture_completeness > 0.0:
+        lines.append(_toml_key_value("min_fixture_completeness", min_fixture_completeness))
+    if show_generated:
+        lines.append(_toml_key_value("show_generated", True))
+    if save_generated:
+        lines.append(_toml_key_value("save_generated", _display_path(Path(save_generated))))
+    if write_gaps:
+        lines.append(_toml_key_value("write_gaps_dir", _display_path(Path(write_gaps))))
+    if include_exploratory_function_gaps:
+        lines.append(_toml_key_value("include_exploratory_function_gaps", True))
+    if require_direct_tests:
+        lines.append(_toml_key_value("require_direct_tests", True))
+    names_to_hint = {
+        str(getattr(item, "name", ""))
+        for result in results
+        for item in getattr(result, "function_audits", [])
+        if str(getattr(item, "status", "")) != "exercised"
+    }
+    rows = [
+        row
+        for group in target_groups
+        for row in list(group.get("targets", []))
+    ]
+    suggestions = [
+        _config_suggestion(
+            title="Persist audit defaults for this verification pass",
+            reason=(
+                "Keep audit modules, gates, and output paths in ordeal.toml for "
+                "repeatable reviews."
+            ),
+            snippet_lines=lines,
+            section="[audit]",
+            target=", ".join(modules),
+            entries=[
+                {
+                    "section": "[audit]",
+                    "modules": list(modules),
+                    "test_dir": test_dir,
+                    "max_examples": max_examples,
+                    "workers": workers,
+                    "validation_mode": validation_mode,
+                    "min_fixture_completeness": min_fixture_completeness,
+                    "show_generated": show_generated,
+                    "save_generated": save_generated,
+                    "write_gaps_dir": write_gaps,
+                    "include_exploratory_function_gaps": include_exploratory_function_gaps,
+                    "require_direct_tests": require_direct_tests,
+                }
+            ],
+        )
+    ]
+    suggestions.extend(
+        _object_config_suggestions_from_rows(rows, only_names=sorted(names_to_hint))
+    )
+    return _dedupe_config_suggestions(suggestions)
+
+
+def _config_suggestions_summary(suggestions: Sequence[Mapping[str, Any]]) -> str | None:
+    """Render one summary line for config suggestions."""
+    if not suggestions:
+        return None
+    count = len(suggestions)
+    noun = "block" if count == 1 else "blocks"
+    return f"Config suggestions: {count} ready-to-paste ordeal.toml {noun}"
+
+
+def _render_config_suggestions_text(
+    suggestions: Sequence[Mapping[str, Any]],
+    *,
+    indent: str = "  ",
+) -> list[str]:
+    """Render human-readable ready-to-paste config suggestions."""
+    if not suggestions:
+        return []
+    lines = [f"{indent}Suggested ordeal.toml:"]
+    for index, suggestion in enumerate(suggestions, start=1):
+        title = str(suggestion.get("title", "")).strip()
+        reason = str(suggestion.get("reason", "")).strip()
+        lines.append(f"{indent}  {index}. {title}")
+        if reason:
+            lines.append(f"{indent}     {reason}")
+        for snippet_line in str(suggestion.get("snippet", "")).rstrip().splitlines():
+            lines.append(f"{indent}     {snippet_line}")
+    return lines
+
+
 def _render_target_listing_text(
     title: str,
     groups: Sequence[Mapping[str, Any]],
@@ -641,6 +1377,19 @@ def _build_target_listing_envelope(
     from ordeal.agent_schema import build_agent_envelope
 
     flat_targets = [row for group in groups for row in list(group.get("targets", []))]
+    config_suggestions = _config_suggestion_payload(
+        [
+            block
+            for group in groups
+            for block in (
+                _config_suggestions_from_rows(
+                    str(group.get("module", target)),
+                    list(group.get("targets", [])),
+                )
+                or {}
+            ).get("blocks", [])
+        ]
+    )
     runnable_count = sum(1 for row in flat_targets if row.get("runnable"))
     skip_count = len(flat_targets) - runnable_count
     status = "exploratory" if skip_count else "ok"
@@ -669,6 +1418,7 @@ def _build_target_listing_envelope(
             "warnings": list(warnings),
             "runnable_count": runnable_count,
             "skip_count": skip_count,
+            "config_suggestions": config_suggestions,
         },
     )
 
@@ -987,6 +1737,26 @@ def _cmd_check(args: argparse.Namespace) -> int:
                 ),
             ],
         }
+        config_suggestions = _dedupe_config_suggestions(
+            [
+                *(
+                    _object_config_suggestions_from_rows([target_listing])
+                    if target_listing is not None
+                    else []
+                ),
+                *_contract_config_suggestions_from_checks(
+                    target_name,
+                    effective_contract_checks,
+                    reason=(
+                        "Persist this explicit contract check in ordeal.toml instead of repeating"
+                        " CLI flags."
+                    ),
+                ),
+            ]
+        )
+        if config_line := _config_suggestions_summary(config_suggestions):
+            report["summary"].append(config_line)
+        report["config_suggestions"] = config_suggestions
         if getattr(args, "json", False):
             print(
                 _build_agent_envelope_from_report(
@@ -996,6 +1766,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
                     confidence_basis=("explicit contract evaluation",),
                     blocking_reason=None if not details else None,
                     raw_details={
+                        "report": report,
                         "resolved_target": resolved_name,
                         "config_path": getattr(args, "config", None),
                         "contracts": [
@@ -1022,12 +1793,16 @@ def _cmd_check(args: argparse.Namespace) -> int:
                     lifecycle = proof.get("lifecycle") if isinstance(proof, Mapping) else None
                     if lifecycle:
                         print(f"    lifecycle: {lifecycle}")
+                for line in _render_config_suggestions_text(config_suggestions):
+                    print(line)
                 return 1
             print(f"PASS explicit contracts for {resolved_name}")
             if target_listing is not None:
                 print(
                     "Target metadata: " + "  ".join(_render_target_listing_parts(target_listing))
                 )
+            for line in _render_config_suggestions_text(config_suggestions):
+                print(line)
             return 0
 
         return 1 if details else 0
@@ -1098,6 +1873,32 @@ def _cmd_check(args: argparse.Namespace) -> int:
             "details": [_property_detail(item) for item in selected],
             "suggested_commands": [f"ordeal check {target} -n {max_examples}"],
         }
+        config_suggestions = [
+            _config_suggestion(
+                title=f"Persist a focused scan for {target}",
+                reason=(
+                    "check is CLI-only for mined properties; keep the callable under versioned"
+                    " scan config for repeatable verification."
+                ),
+                snippet_lines=[
+                    "[[scan]]",
+                    _toml_key_value("module", mod_path),
+                    _toml_key_value("targets", [func_name]),
+                ],
+                section="[[scan]]",
+                target=target,
+                entries=[
+                    {
+                        "section": "[[scan]]",
+                        "module": mod_path,
+                        "targets": [func_name],
+                    }
+                ],
+            )
+        ]
+        if config_line := _config_suggestions_summary(config_suggestions):
+            report["summary"].append(config_line)
+        report["config_suggestions"] = config_suggestions
         print(
             _build_agent_envelope_from_report(
                 report,
@@ -1105,6 +1906,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
                 confidence=max((p.confidence for p in selected), default=0.0),
                 confidence_basis=("mine() property mining",),
                 raw_details={
+                    "report": report,
                     "max_examples": max_examples,
                     "properties": [
                         {
@@ -1126,6 +1928,29 @@ def _cmd_check(args: argparse.Namespace) -> int:
 
     # --contract mode: check all standard properties that catch bugs
     if not prop:
+        config_suggestions = [
+            _config_suggestion(
+                title=f"Persist a focused scan for {target}",
+                reason=(
+                    "check is CLI-only for standard mined contracts; keep the callable under"
+                    " versioned scan config for repeatable verification."
+                ),
+                snippet_lines=[
+                    "[[scan]]",
+                    _toml_key_value("module", mod_path),
+                    _toml_key_value("targets", [func_name]),
+                ],
+                section="[[scan]]",
+                target=target,
+                entries=[
+                    {
+                        "section": "[[scan]]",
+                        "module": mod_path,
+                        "targets": [func_name],
+                    }
+                ],
+            )
+        ]
         contracts = [
             "never None",
             "no NaN",
@@ -1144,6 +1969,8 @@ def _cmd_check(args: argparse.Namespace) -> int:
                 print(f"    FAIL {v.name} ({v.holds}/{v.total})")
                 if v.counterexample:
                     print(f"      input: {v.counterexample}")
+            for line in _render_config_suggestions_text(config_suggestions):
+                print(line)
             return 1
         passing = [
             p for p in result.properties if p.total > 0 and p.universal and p.name in contracts
@@ -1152,6 +1979,8 @@ def _cmd_check(args: argparse.Namespace) -> int:
             print(f"\n  {len(passing)} contract(s) verified:")
             for p in passing:
                 print(f"    PASS {p.name} ({p.holds}/{p.total})")
+        for line in _render_config_suggestions_text(config_suggestions):
+            print(line)
         return 0
 
     # Single property mode
@@ -1164,8 +1993,33 @@ def _cmd_check(args: argparse.Namespace) -> int:
         return 1
 
     violations = [p for p in matching if not p.universal]
+    config_suggestions = [
+        _config_suggestion(
+            title=f"Persist a focused scan for {target}",
+            reason=(
+                "check is CLI-only for individual mined properties; keep the callable under"
+                " versioned scan config for repeatable follow-up."
+            ),
+            snippet_lines=[
+                "[[scan]]",
+                _toml_key_value("module", mod_path),
+                _toml_key_value("targets", [func_name]),
+            ],
+            section="[[scan]]",
+            target=target,
+            entries=[
+                {
+                    "section": "[[scan]]",
+                    "module": mod_path,
+                    "targets": [func_name],
+                }
+            ],
+        )
+    ]
     if violations:
         print(f"\n  VIOLATION: {violations[0].name} ({violations[0].holds}/{violations[0].total})")
+        for line in _render_config_suggestions_text(config_suggestions):
+            print(line)
         if violations[0].counterexample:
             print(f"  Counterexample: {violations[0].counterexample}")
         return 1
@@ -1173,6 +2027,8 @@ def _cmd_check(args: argparse.Namespace) -> int:
     holds = [p for p in matching if p.universal]
     if holds:
         print(f"\n  HOLDS: {holds[0].name} ({holds[0].holds}/{holds[0].total})")
+    for line in _render_config_suggestions_text(config_suggestions):
+        print(line)
     return 0
 
 
@@ -1578,6 +2434,14 @@ def _object_runtime_maps(
     def _resolve_scenario_item(item: object) -> object:
         if isinstance(item, Mapping):
             return dict(item)
+        if isinstance(item, (str, bytes)):
+            from ordeal.auto import _builtin_object_scenario_hook
+
+            text = item.decode() if isinstance(item, bytes) else item
+            builtin = _builtin_object_scenario_hook(text)
+            if builtin is not None:
+                return builtin
+            return _resolve_symbol_path(text)
         return _resolve_symbol_path(str(item))
 
     for spec in object_specs:
@@ -1611,7 +2475,11 @@ def _config_contract_checks_for_module(
     module_name: str,
 ) -> dict[str, list[Any]]:
     """Resolve configured semantic contract probes for *module_name*."""
-    from ordeal.auto import ContractCheck, builtin_contract_check
+    from ordeal.auto import (
+        ContractCheck,
+        _expand_contract_names_ordered,
+        builtin_contract_check,
+    )
 
     checks: dict[str, list[Any]] = {}
     for spec in cfg.contracts:
@@ -1620,7 +2488,7 @@ def _config_contract_checks_for_module(
             continue
         display_name = _scan_display_name(module_name, target)
         bucket = checks.setdefault(display_name, [])
-        for check_name in spec.checks:
+        for check_name in _expand_contract_names_ordered(spec.checks):
             resolved_name = str(check_name)
             try:
                 builtin_kwargs = dict(spec.kwargs)
@@ -2043,7 +2911,12 @@ def _package_root_scan_priority(row: Mapping[str, Any]) -> tuple[float, str, str
 
 def _build_explicit_contract_checks(func: Any, names: Sequence[str]) -> list[Any]:
     """Build direct built-in contract checks for one resolved callable."""
-    from ordeal.auto import _boundary_smoke_inputs, _unwrap, builtin_contract_check
+    from ordeal.auto import (
+        _boundary_smoke_inputs,
+        _expand_contract_names_ordered,
+        _unwrap,
+        builtin_contract_check,
+    )
 
     try:
         sig = inspect.signature(func)
@@ -2063,7 +2936,7 @@ def _build_explicit_contract_checks(func: Any, names: Sequence[str]) -> list[Any
     base_kwargs = dict(smoke_inputs[0]) if smoke_inputs else {}
     followup_phases = ("cleanup", "teardown") if phase in {"setup", "rollout"} else None
     checks: list[Any] = []
-    for name in names:
+    for name in _expand_contract_names_ordered(names):
         checks.append(
             builtin_contract_check(
                 name,
@@ -2441,12 +3314,32 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             run_mutate=False,
             run_chaos=False,
         )
+    config_suggestions = _scan_config_suggestions(
+        module_name,
+        mode=scan_mode,
+        max_examples=scan_max_examples,
+        scan_targets=scan_targets,
+        include_private=inc_private,
+        seed_from_call_sites=scan_seed_from_call_sites,
+        min_contract_fit=scan_min_contract_fit,
+        min_reachability=scan_min_reachability,
+        min_realism=scan_min_realism,
+        ignore_properties=scan_ignore_properties,
+        ignore_relations=scan_ignore_relations,
+        auto_contracts=runtime_defaults.auto_contracts,
+        sampling=sampling,
+        rows=selected_scan_rows,
+        details=_scan_report_details(state),
+    )
     if sampling is not None:
         state.supervisor_info = dict(getattr(state, "supervisor_info", {}) or {})
         state.supervisor_info["scan_sampling"] = dict(sampling)
     if scan_notes:
         state.supervisor_info = dict(getattr(state, "supervisor_info", {}) or {})
         state.supervisor_info["scan_scope_notes"] = list(scan_notes)
+    if config_suggestions:
+        state.supervisor_info = dict(getattr(state, "supervisor_info", {}) or {})
+        state.supervisor_info["config_suggestions"] = config_suggestions
 
     if not args.json:
         print(_format_scan_summary(state))
@@ -2923,7 +3816,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     if audit_cfg is not None:
         object_specs.extend(audit_cfg.targets)
 
-    if getattr(args, "list_targets", False):
+    def _audit_target_groups() -> list[dict[str, Any]]:
         try:
             (
                 object_factories,
@@ -2933,23 +3826,8 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                 object_teardowns,
                 object_harnesses,
             ) = _object_runtime_maps(object_specs)
-        except Exception as exc:
-            if args.json:
-                print(
-                    _build_blocked_agent_envelope(
-                        tool="audit",
-                        target=", ".join(target_names),
-                        summary="cannot resolve callable target metadata",
-                        blocking_reason=f"target metadata resolution failed: {exc}",
-                        raw_details={
-                            "target_names": target_names,
-                            "error": str(exc),
-                        },
-                    ).to_json()
-                )
-                return 1
-            _stderr(f"Target metadata resolution failed: {exc}\n")
-            return 1
+        except Exception as exc:  # pragma: no cover - shared with list-targets/json block
+            raise RuntimeError(f"target metadata resolution failed: {exc}") from exc
 
         target_groups: list[dict[str, Any]] = []
         for target in target_names:
@@ -2965,18 +3843,43 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                 )
             except Exception:
                 module_contract_checks = {}
-            rows = _callable_listing_rows(
-                module_name,
-                include_private=module_include_private,
-                object_factories=object_factories,
-                object_setups=object_setups,
-                object_scenarios=object_scenarios,
-                object_state_factories=object_state_factories,
-                object_teardowns=object_teardowns,
-                object_harnesses=object_harnesses,
-                contract_checks=module_contract_checks,
-            )
+            try:
+                rows = _callable_listing_rows(
+                    module_name,
+                    include_private=module_include_private,
+                    object_factories=object_factories,
+                    object_setups=object_setups,
+                    object_scenarios=object_scenarios,
+                    object_state_factories=object_state_factories,
+                    object_teardowns=object_teardowns,
+                    object_harnesses=object_harnesses,
+                    contract_checks=module_contract_checks,
+                )
+            except Exception:
+                rows = []
             target_groups.append({"module": module_name, "targets": rows})
+        return target_groups
+
+    if getattr(args, "list_targets", False):
+        try:
+            target_groups = _audit_target_groups()
+        except RuntimeError as exc:
+            if args.json:
+                print(
+                    _build_blocked_agent_envelope(
+                        tool="audit",
+                        target=", ".join(target_names),
+                        summary="cannot resolve callable target metadata",
+                        blocking_reason=str(exc),
+                        raw_details={
+                            "target_names": target_names,
+                            "error": str(exc),
+                        },
+                    ).to_json()
+                )
+                return 1
+            _stderr(f"{exc}\n")
+            return 1
 
         if args.json:
             print(
@@ -3020,8 +3923,27 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         return collected
 
     results = _collect_results()
+    try:
+        audit_target_groups = _audit_target_groups()
+    except RuntimeError:
+        audit_target_groups = []
     blocked_results = [result for result in results if getattr(result, "blocking_reason", None)]
     direct_test_gate = _direct_test_gate_payload(results) if require_direct_tests else None
+    config_suggestions = _audit_config_suggestions(
+        modules=target_names,
+        test_dir=test_dir,
+        max_examples=max_examples,
+        workers=workers,
+        validation_mode=validation_mode,
+        min_fixture_completeness=min_fixture_completeness,
+        show_generated=show_generated,
+        save_generated=save_generated,
+        write_gaps=write_gaps,
+        include_exploratory_function_gaps=include_exploratory_function_gaps,
+        require_direct_tests=require_direct_tests,
+        target_groups=audit_target_groups,
+        results=results,
+    )
 
     if getattr(args, "json", False):
         saved_generated_path: Path | None = None
@@ -3042,6 +3964,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                 written_gap_files=written_gap_files,
                 include_exploratory_function_gaps=include_exploratory_function_gaps,
                 require_direct_tests=require_direct_tests,
+                config_suggestions=config_suggestions,
             ).to_json()
         )
         if blocked_results:
@@ -3084,6 +4007,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             _render_audit_report_text(
                 results,
                 include_exploratory_function_gaps=include_exploratory_function_gaps,
+                config_suggestions=config_suggestions,
             )
         )
 
@@ -4443,6 +5367,9 @@ def _format_scan_summary(state: Any) -> str:
     """Render a concise, action-oriented summary for ``ordeal scan``."""
     lines = [f"ordeal scan: {state.module}"]
     details = _scan_report_details(state)
+    config_suggestions = list(
+        getattr(state, "supervisor_info", {}).get("config_suggestions", ())
+    )
     coverage_gaps = [detail for detail in details if detail.get("category") == "coverage_gap"]
     invalid_inputs = [
         detail for detail in details if detail.get("category") == "invalid_input_crash"
@@ -4534,6 +5461,7 @@ def _format_scan_summary(state: Any) -> str:
     avail = format_suggestions(state)
     if avail:
         lines.append(avail)
+    lines.extend(_render_config_suggestions_text(config_suggestions))
     return "\n".join(lines)
 
 
@@ -5135,6 +6063,32 @@ def _render_findings_report_markdown(report: dict[str, Any]) -> str:
             lines.append(f"- {item}")
         lines.append("")
 
+    config_suggestions = list(report.get("config_suggestions", []))
+    if config_suggestions:
+        lines.extend(["## Suggested ordeal.toml", ""])
+        for suggestion in config_suggestions:
+            title = str(suggestion.get("title", "")).strip()
+            reason = str(suggestion.get("reason", "")).strip()
+            target = str(suggestion.get("target", "")).strip()
+            evidence = [str(item) for item in suggestion.get("evidence", []) if str(item).strip()]
+            if title:
+                lines.append(f"### {title}")
+                lines.append("")
+            if reason:
+                lines.append(reason)
+                lines.append("")
+            if target:
+                lines.append(f"Target: `{target}`")
+                lines.append("")
+            if evidence:
+                lines.append("Evidence:")
+                lines.extend(f"- `{item}`" for item in evidence[:5])
+                lines.append("")
+            lines.append("```toml")
+            lines.extend(str(suggestion.get("snippet", "")).rstrip().splitlines())
+            lines.append("```")
+            lines.append("")
+
     lines.extend(["## Suggested Commands", ""])
     for command in report.get("suggested_commands", []):
         lines.append(f"- `{command}`")
@@ -5154,6 +6108,9 @@ def _build_scan_report(state: Any) -> dict[str, Any]:
         for note in getattr(state, "supervisor_info", {}).get("scan_scope_notes", ())
         if note
     ]
+    config_suggestions = _dedupe_config_suggestions(
+        getattr(state, "supervisor_info", {}).get("config_suggestions", ())
+    )
     details = [
         {
             **detail,
@@ -5224,6 +6181,8 @@ def _build_scan_report(state: Any) -> dict[str, Any]:
             f"{sampling.get('sampled', 0)}/{sampling.get('total_runnable', 0)} "
             "runnable exports checked",
         )
+    if config_line := _config_suggestions_summary(config_suggestions):
+        summary.append(config_line)
     suggested_commands = [
         f"ordeal scan {state.module}",
         f"ordeal mine {state.module} -n 200",
@@ -5295,6 +6254,7 @@ def _build_scan_report(state: Any) -> dict[str, Any]:
         ],
         "suggested_commands": suggested_commands,
         "extra_sections": extra_sections,
+        "config_suggestions": config_suggestions,
     }
 
 
@@ -5756,6 +6716,11 @@ def _build_agent_envelope_from_report(
     target = str(report.get("target", ""))
     details = list(report.get("details", []))
     findings = [_agent_finding_from_detail(detail, target) for detail in details]
+    merged_raw_details = dict(raw_details or {})
+    if "config_suggestions" not in merged_raw_details and report.get("config_suggestions"):
+        merged_raw_details["config_suggestions"] = [
+            dict(item) for item in report.get("config_suggestions", [])
+        ]
     return build_agent_envelope(
         tool=str(report.get("tool", "ordeal")),
         target=target,
@@ -5771,7 +6736,7 @@ def _build_agent_envelope_from_report(
         blocking_reason=blocking_reason,
         findings=findings,
         artifacts=artifacts,
-        raw_details=dict(raw_details or {}),
+        raw_details=merged_raw_details,
     )
 
 
@@ -6115,6 +7080,7 @@ def _render_audit_report_text(
     results: Sequence[Any],
     *,
     include_exploratory_function_gaps: bool,
+    config_suggestions: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     """Render a human-readable audit report from precomputed results."""
     lines = ["ordeal audit"]
@@ -6157,6 +7123,11 @@ def _render_audit_report_text(
     if total_warnings:
         lines.append(f"\n  warnings: {total_warnings} total")
 
+    rendered_suggestions = _render_config_suggestions_text(config_suggestions)
+    if rendered_suggestions:
+        lines.append("")
+        lines.extend(rendered_suggestions)
+
     return "\n".join(lines)
 
 
@@ -6167,6 +7138,7 @@ def _build_audit_agent_envelope(
     written_gap_files: Sequence[Mapping[str, Any]] = (),
     include_exploratory_function_gaps: bool = False,
     require_direct_tests: bool = False,
+    config_suggestions: Sequence[Mapping[str, Any]] = (),
 ) -> Any:
     """Build the agent-facing JSON envelope for `ordeal audit`."""
     from ordeal.audit import _generated_test_path, _module_audit_to_dict
@@ -6217,6 +7189,8 @@ def _build_audit_agent_envelope(
         "details": details,
         "suggested_commands": deduped_commands,
     }
+    if config_line := _config_suggestions_summary(config_suggestions):
+        report["summary"].append(config_line)
     verified_measurements = sum(
         int(result.current_coverage.status.value == "verified")
         + int(result.migrated_coverage.status.value == "verified")
@@ -6301,6 +7275,16 @@ def _build_audit_agent_envelope(
                 f"fixture completeness: {evidence['fixture_completeness']:.0%}",
             ],
         ),
+        (
+            "Mutation Alignment",
+            [
+                (
+                    f"{result.module}: "
+                    f"{result.mutation_validation_view()['summary']}"
+                )
+                for result in results
+            ],
+        ),
     ]
     if written_gap_files:
         report["extra_sections"].append(
@@ -6312,6 +7296,7 @@ def _build_audit_agent_envelope(
                 ],
             )
         )
+    report["config_suggestions"] = _dedupe_config_suggestions(config_suggestions)
     artifacts: list[Any] = []
     if saved_generated_path is not None:
         artifacts.append(
@@ -6377,6 +7362,13 @@ def _build_audit_agent_envelope(
         raw_details={
             "report": report,
             "modules": [_module_audit_to_dict(result) for result in results],
+            "mutation_views": [
+                {
+                    "module": result.module,
+                    **result.mutation_validation_view(),
+                }
+                for result in results
+            ],
             "function_audits": [
                 {"module": result.module, **item}
                 for result in results
@@ -7176,7 +8168,10 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     "--contract",
                     action="append",
                     default=[],
-                    help="Repeat to check one or more named built-in contracts directly.",
+                    help=(
+                        "Repeat to check one or more built-in contracts or pack aliases "
+                        "directly."
+                    ),
                 ),
                 _arg(
                     "--max-examples",

@@ -460,3 +460,111 @@ def test_mutation_metadata_and_contract_context_round_trip_through_cache(
     assert loaded is not None
     assert loaded.contract_context == result.contract_context
     assert loaded.mutants[0].metadata == result.mutants[0].metadata
+
+
+def test_mutation_epistemic_view_keeps_contract_metadata_compact():
+    result = mutations.MutationResult(
+        target="pkg.mod.Service.cleanup",
+        contract_context={
+            "contract_name": "cleanup_after_cancellation",
+            "contract_kind": "lifecycle",
+            "harness": "stateful",
+        },
+        mutants=[
+            mutations.Mutant(
+                operator="delete_statement",
+                description="remove cleanup callback",
+                line=40,
+                col=2,
+                source_line="await hook(state)",
+                qualname="Service.cleanup",
+                metadata={"contract_kind": "lifecycle", "harness": "stateful"},
+            ),
+            mutations.Mutant(
+                operator="delete_statement",
+                description="remove second cleanup callback",
+                line=44,
+                col=2,
+                source_line="await hook(state)",
+                qualname="Service.cleanup",
+                metadata={"contract_kind": "lifecycle", "harness": "stateful"},
+            ),
+        ],
+    )
+
+    view = result.epistemic_view()
+
+    assert view["status"] == "promoted_gaps"
+    assert view["score"] == "0/2 (0%)"
+    assert view["contract"] == "cleanup_after_cancellation, lifecycle, harness=stateful"
+    assert view["promoted_boundary_count"] == 1
+    assert view["exploratory_survivors"] == 0
+    assert view["promoted_boundaries"] == [
+        {
+            "owner": "Service.cleanup",
+            "tag": "lifecycle",
+            "label": "lifecycle contract boundary",
+            "size": 2,
+            "operators": ["delete_statement"],
+            "contract": "cleanup_after_cancellation, lifecycle, harness=stateful",
+        }
+    ]
+
+
+def test_mutation_epistemic_view_reports_exploratory_survivors_and_weakest_killers():
+    result = mutations.MutationResult(
+        target="pkg.mod.normalize",
+        mutants=[
+            mutations.Mutant(
+                operator="comparison",
+                description="<= -> <",
+                line=10,
+                col=4,
+                source_line="if value <= limit:",
+                qualname="normalize",
+            ),
+            mutations.Mutant(
+                operator="arithmetic",
+                description="+ -> -",
+                line=12,
+                col=8,
+                killed=True,
+                killed_by="tests/test_normalize.py::test_limit",
+            ),
+            mutations.Mutant(
+                operator="boundary",
+                description="10 -> 11",
+                line=15,
+                col=8,
+                killed=True,
+                killed_by="tests/test_normalize.py::test_smoke",
+            ),
+            mutations.Mutant(
+                operator="logical",
+                description="and -> or",
+                line=18,
+                col=8,
+                killed=True,
+                killed_by="tests/test_normalize.py::test_smoke",
+            ),
+        ],
+    )
+
+    view = result.epistemic_view()
+
+    assert view["status"] == "exploratory_gaps"
+    assert view["score"] == "3/4 (75%)"
+    assert view["exploratory_survivors"] == 1
+    assert view["promoted_boundary_count"] == 0
+    assert view["weakest_killers"] == [
+        {
+            "test": "tests/test_normalize.py::test_limit",
+            "kills": 1,
+            "operators": ["arithmetic"],
+        },
+        {
+            "test": "tests/test_normalize.py::test_smoke",
+            "kills": 2,
+            "operators": ["boundary", "logical"],
+        },
+    ]

@@ -38,7 +38,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from pprint import pformat
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any, Callable, Literal, Union, get_args, get_origin
 
 import hypothesis.strategies as st
@@ -164,8 +164,16 @@ _CONTRACT_GROUP_ALIASES: dict[str, tuple[str, ...]] = {
     "transport_semantics": ("json_roundtrip", "http_shape"),
     "wire": ("json_roundtrip", "http_shape"),
     "shell": ("shell_safe", "command_arg_stability", "subprocess_argv"),
+    "shell_path_safety": ("shell_safe", "command_arg_stability", "subprocess_argv"),
     "path": ("quoted_paths",),
     "env": ("protected_env_keys",),
+    "protected_env_vars": ("protected_env_keys",),
+    "cleanup_teardown": ("cleanup_attempts_all", "teardown_attempts_all"),
+    "cancellation_safety": (
+        "cleanup_after_cancellation",
+        "rollout_cancellation_triggers_cleanup",
+    ),
+    "json_tool_call_normalization": ("json_roundtrip", "http_shape"),
 }
 
 
@@ -1093,6 +1101,22 @@ def _expand_contract_names(names: Sequence[str] | None) -> set[str]:
     return expanded
 
 
+def _expand_contract_names_ordered(names: Sequence[str] | None) -> list[str]:
+    """Expand contract aliases while preserving the caller's order."""
+    expanded: list[str] = []
+    seen: set[str] = set()
+    for raw in names or ():
+        name = str(raw).strip()
+        if not name:
+            continue
+        for concrete in _CONTRACT_GROUP_ALIASES.get(name, (name,)):
+            if concrete in seen:
+                continue
+            seen.add(concrete)
+            expanded.append(concrete)
+    return expanded
+
+
 def _traceback_path(exc: BaseException) -> list[str]:
     """Return a short traceback path for proof bundles."""
     frames: list[str] = []
@@ -1371,6 +1395,207 @@ def _scenario_stub_wrapper(
     return wrapper
 
 
+def _make_pack_method_stub(original: Any, behavior: Callable[..., Any]) -> Any:
+    """Wrap a collaborator method while preserving its async/sync shape."""
+    is_async = inspect.iscoroutinefunction(getattr(original, "__func__", original))
+
+    if is_async:
+
+        @functools.wraps(original)
+        async def wrapped(*args: Any, **kwargs: Any) -> Any:
+            return behavior(*args, **kwargs)
+
+    else:
+
+        @functools.wraps(original)
+        def wrapped(*args: Any, **kwargs: Any) -> Any:
+            return behavior(*args, **kwargs)
+
+    return wrapped
+
+
+def _apply_collaborator_pack(
+    instance: Any,
+    *,
+    attr_names: Sequence[str],
+    method_behaviors: Mapping[str, Callable[..., Any]],
+) -> Any:
+    """Attach a built-in fake collaborator to the first matching instance attr."""
+    for attr_name in attr_names:
+        collaborator = getattr(instance, attr_name, None)
+        if collaborator is None:
+            continue
+        fake = SimpleNamespace()
+        for method_name, behavior in method_behaviors.items():
+            original = getattr(collaborator, method_name, None)
+            if callable(original):
+                setattr(fake, method_name, _make_pack_method_stub(original, behavior))
+        if fake.__dict__:
+            setattr(instance, attr_name, fake)
+    return instance
+
+
+def _subprocess_response_stub(*args: Any, **kwargs: Any) -> SimpleNamespace:
+    """Return a stable subprocess-like response object."""
+    return SimpleNamespace(
+        args=list(args),
+        kwargs=dict(kwargs),
+        returncode=0,
+        stdout="",
+        stderr="",
+    )
+
+
+def _http_response_stub(*args: Any, **kwargs: Any) -> SimpleNamespace:
+    """Return a stable HTTP-like response object."""
+    return SimpleNamespace(
+        args=list(args),
+        kwargs=dict(kwargs),
+        status_code=200,
+        headers={},
+        text="",
+        content=b"",
+        json=lambda: {},
+    )
+
+def _apply_state_store_pack(instance: Any) -> Any:
+    """Attach a shared in-memory state store to matching instance collaborators."""
+    store: dict[str, Any] = {}
+
+    def _make_behavior(method_name: str) -> Callable[..., Any]:
+        def behavior(*args: Any, **kwargs: Any) -> Any:
+            if method_name == "get":
+                key = args[0] if args else kwargs.get("key")
+                default = args[1] if len(args) > 1 else kwargs.get("default")
+                return store.get(key, default)
+            if method_name in {"set", "put", "save"}:
+                if len(args) >= 2:
+                    key, value = args[0], args[1]
+                else:
+                    key = kwargs.get("key", kwargs.get("name", "value"))
+                    value = kwargs.get("value", args[0] if args else None)
+                store[str(key)] = _clone_scenario_value(value)
+                return value
+            if method_name == "load":
+                return dict(store)
+            if method_name == "delete":
+                key = args[0] if args else kwargs.get("key")
+                if key is not None:
+                    store.pop(str(key), None)
+                return None
+            if method_name == "clear":
+                store.clear()
+                return None
+            return dict(store)
+
+        return behavior
+
+    return _apply_collaborator_pack(
+        instance,
+        attr_names=("state_store", "store", "cache", "session_state"),
+        method_behaviors={
+            "get": _make_behavior("get"),
+            "set": _make_behavior("set"),
+            "put": _make_behavior("put"),
+            "save": _make_behavior("save"),
+            "load": _make_behavior("load"),
+            "delete": _make_behavior("delete"),
+            "clear": _make_behavior("clear"),
+        },
+    )
+
+
+def _builtin_object_scenario_hook(name: str) -> Callable[[Any], Any] | None:
+    """Return a named collaborator scenario pack hook, if known."""
+    normalized = str(name).strip().lower()
+    match normalized:
+        case "subprocess" | "subprocess_runner":
+            return lambda instance: _apply_collaborator_pack(
+                instance,
+                attr_names=(
+                    "subprocess",
+                    "runner",
+                    "command_runner",
+                    "process_runner",
+                    "executor",
+                ),
+                method_behaviors={
+                    "run": _subprocess_response_stub,
+                    "execute_command": _subprocess_response_stub,
+                    "check_output": lambda *args, **kwargs: "",
+                    "popen": _subprocess_response_stub,
+                    "call": lambda *args, **kwargs: 0,
+                },
+            )
+        case "sandbox_client" | "sandbox":
+            return lambda instance: _apply_collaborator_pack(
+                instance,
+                attr_names=("sandbox_client", "sandbox", "client"),
+                method_behaviors={
+                    "execute_command": _subprocess_response_stub,
+                    "run": _subprocess_response_stub,
+                    "upload_content": lambda *args, **kwargs: SimpleNamespace(
+                        ok=True,
+                        uploaded=True,
+                    ),
+                    "download_content": lambda *args, **kwargs: b"",
+                    "fetch_content": lambda *args, **kwargs: b"",
+                    "list_files": lambda *args, **kwargs: [],
+                },
+            )
+        case (
+            "upload_download"
+            | "upload_download_client"
+            | "upload"
+            | "upload_client"
+            | "download"
+            | "download_client"
+        ):
+            return lambda instance: _apply_collaborator_pack(
+                instance,
+                attr_names=(
+                    "upload_download",
+                    "storage_client",
+                    "artifact_client",
+                    "uploader",
+                    "downloader",
+                    "client",
+                ),
+                method_behaviors={
+                    "upload": lambda *args, **kwargs: SimpleNamespace(
+                        ok=True,
+                        uploaded=True,
+                    ),
+                    "upload_content": lambda *args, **kwargs: SimpleNamespace(
+                        ok=True,
+                        uploaded=True,
+                    ),
+                    "download": lambda *args, **kwargs: b"",
+                    "download_content": lambda *args, **kwargs: b"",
+                    "fetch_content": lambda *args, **kwargs: b"",
+                    "list_files": lambda *args, **kwargs: [],
+                },
+            )
+        case "http" | "http_client":
+            return lambda instance: _apply_collaborator_pack(
+                instance,
+                attr_names=("http_client", "session", "transport", "client"),
+                method_behaviors={
+                    "request": _http_response_stub,
+                    "get": _http_response_stub,
+                    "post": _http_response_stub,
+                    "put": _http_response_stub,
+                    "patch": _http_response_stub,
+                    "delete": _http_response_stub,
+                    "send": _http_response_stub,
+                },
+            )
+        case "state_store":
+            return _apply_state_store_pack
+        case _:
+            return None
+
+
 def _scenario_hook_from_spec(spec: Mapping[str, Any]) -> Callable[[Any], Any]:
     """Compile one TOML-friendly collaborator scenario spec into a hook."""
     kind = str(spec.get("kind") or spec.get("action") or spec.get("op") or "").strip().lower()
@@ -1379,7 +1604,10 @@ def _scenario_hook_from_spec(spec: Mapping[str, Any]) -> Callable[[Any], Any]:
             kind = "stub_raise"
         elif spec.get("path") is not None or spec.get("target") is not None:
             kind = "setattr"
+    if not kind and spec.get("pack") is not None:
+        kind = "pack"
     path = spec.get("path") or spec.get("target") or spec.get("attr") or spec.get("name")
+    pack = spec.get("pack") or spec.get("library") or spec.get("scenario")
 
     def _setattr_hook(instance: Any) -> Any:
         if path is None:
@@ -1417,9 +1645,17 @@ def _scenario_hook_from_spec(spec: Mapping[str, Any]) -> Callable[[Any], Any]:
                 error=_scenario_exception_from_spec(
                     spec.get("error", spec.get("exception", spec.get("value")))
                 ),
-            ),
-        )
+                ),
+            )
         return instance
+
+    def _pack_hook(instance: Any) -> Any:
+        if pack is None:
+            raise ValueError("scenario pack spec needs a pack name")
+        hook = _builtin_object_scenario_hook(str(pack))
+        if hook is None:
+            raise ValueError(f"unknown built-in scenario pack: {pack!r}")
+        return hook(instance)
 
     match kind:
         case "setattr" | "assign" | "set":
@@ -1428,6 +1664,8 @@ def _scenario_hook_from_spec(spec: Mapping[str, Any]) -> Callable[[Any], Any]:
             return _stub_return_hook
         case "stub_raise" | "raise" | "raises":
             return _stub_raise_hook
+        case "pack":
+            return _pack_hook
         case _:
             raise ValueError(f"unsupported scenario kind {kind!r}")
 
@@ -1436,9 +1674,16 @@ def _expand_object_scenario_hooks(hook: Any) -> tuple[Any, ...]:
     """Normalize a scenario entry into one or more executable hooks."""
     if hook is None:
         return ()
-    if callable(hook) or isinstance(hook, (str, bytes)):
+    if callable(hook):
         return (hook,)
+    if isinstance(hook, (str, bytes)):
+        builtin = _builtin_object_scenario_hook(hook.decode() if isinstance(hook, bytes) else hook)
+        if builtin is not None:
+            return (builtin,)
+        raise ValueError(f"unknown built-in scenario pack: {hook!r}")
     if isinstance(hook, Mapping):
+        if "pack" in hook or "library" in hook or "scenario" in hook:
+            return (_scenario_hook_from_spec(hook),)
         return (_scenario_hook_from_spec(hook),)
     if isinstance(hook, Sequence):
         compiled: list[Any] = []
@@ -2886,7 +3131,7 @@ def _auto_contract_checks(
     """Infer built-in sink-aware contract probes for *func* from source and seeds."""
     sink_categories = _infer_sink_categories(func)
 
-    enabled = set(auto_contracts or _DEFAULT_AUTO_CONTRACTS)
+    enabled = set(_expand_contract_names_ordered(auto_contracts or _DEFAULT_AUTO_CONTRACTS))
     ignored = _expand_contract_names(ignore_contracts)
     probe_kwargs = dict(seed_examples[0].kwargs) if seed_examples else _contract_seed_kwargs(func)
     tracked_params = list(probe_kwargs)
@@ -3872,6 +4117,7 @@ def _candidate_inputs(
     *,
     fixtures: dict[str, st.SearchStrategy[Any]] | None = None,
     mutate_observed_inputs: bool = True,
+    mode: ScanMode = "coverage_gap",
     seed_examples: Sequence[SeedExample] | None = None,
     seed_from_tests: bool = True,
     seed_from_fixtures: bool = True,
@@ -3911,7 +4157,7 @@ def _candidate_inputs(
             )
         )
 
-    for kwargs in _boundary_smoke_inputs(
+    boundary_inputs = _boundary_smoke_inputs(
         target,
         fixtures=fixtures,
         seed_examples=observed_examples,
@@ -3920,14 +4166,19 @@ def _candidate_inputs(
         seed_from_docstrings=seed_from_docstrings,
         seed_from_code=seed_from_code,
         seed_from_call_sites=seed_from_call_sites,
-    ):
-        key = repr(sorted(kwargs.items()))
-        if key in seen:
-            continue
-        seen.add(key)
-        candidates.append(CandidateInput(kwargs=dict(kwargs), origin="boundary"))
+    )
 
-    if mutate_observed_inputs:
+    def _append_boundary_inputs() -> None:
+        for kwargs in boundary_inputs:
+            key = repr(sorted(kwargs.items()))
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(CandidateInput(kwargs=dict(kwargs), origin="boundary"))
+
+    def _append_seed_mutations() -> None:
+        if not mutate_observed_inputs:
+            return
         try:
             from ordeal.mutagen import mutate_inputs
 
@@ -3955,6 +4206,13 @@ def _candidate_inputs(
                 )
         except Exception:
             pass
+
+    if mode == "real_bug" and observed_examples:
+        _append_seed_mutations()
+        _append_boundary_inputs()
+    else:
+        _append_boundary_inputs()
+        _append_seed_mutations()
 
     return candidates
 
@@ -4895,9 +5153,98 @@ def _call_contract_predicate(
     return bool(predicate(value))
 
 
+def _resolve_contract_check_entries(
+    checks: Sequence[Any] | None,
+    *,
+    probe_kwargs: dict[str, Any],
+    tracked_params: Sequence[str] | None = None,
+    protected_keys: Sequence[str] | None = None,
+    env_param: str | None = None,
+    phase: str | None = None,
+    followup_phases: Sequence[str] | None = None,
+    fault: str = "raise",
+    handler_name: str | None = None,
+) -> list[ContractCheck]:
+    """Resolve contract check objects, names, and named packs."""
+    resolved: list[ContractCheck] = []
+    resolved_env_param = env_param or next(
+        (name for name, value in probe_kwargs.items() if isinstance(value, Mapping)),
+        None,
+    )
+    resolved_protected_keys = list(protected_keys or [])
+    if not resolved_protected_keys and resolved_env_param is not None:
+        env_value = probe_kwargs.get(resolved_env_param)
+        if isinstance(env_value, Mapping):
+            resolved_protected_keys = [
+                key
+                for key in ("PATH", "HOME", "PWD", "TMPDIR")
+                if key in env_value
+            ]
+    for raw in checks or ():
+        if isinstance(raw, ContractCheck):
+            resolved.append(raw)
+            continue
+        if isinstance(raw, Mapping):
+            raw_name = str(
+                raw.get("name")
+                or raw.get("pack")
+                or raw.get("contract")
+                or raw.get("check")
+                or ""
+            ).strip()
+            if not raw_name:
+                raise ValueError("contract check spec needs a name or pack")
+            merged_kwargs = dict(probe_kwargs)
+            merged_kwargs.update(dict(raw.get("kwargs") or {}))
+            for concrete_name in _expand_contract_names_ordered([raw_name]):
+                resolved.append(
+                    builtin_contract_check(
+                        concrete_name,
+                        kwargs=merged_kwargs,
+                        tracked_params=tracked_params,
+                        protected_keys=resolved_protected_keys,
+                        env_param=resolved_env_param,
+                        phase=str(raw.get("phase") or phase or "").strip() or None,
+                        followup_phases=(
+                            list(raw.get("followup_phases") or followup_phases or [])
+                        ),
+                        fault=str(raw.get("fault") or fault),
+                        handler_name=str(raw.get("handler_name") or handler_name or "").strip()
+                        or None,
+                    )
+                )
+            continue
+        if isinstance(raw, (str, bytes)):
+            name = raw.decode() if isinstance(raw, bytes) else raw
+            for concrete_name in _expand_contract_names_ordered([name]):
+                resolved.append(
+                    builtin_contract_check(
+                        concrete_name,
+                        kwargs=probe_kwargs,
+                        tracked_params=tracked_params,
+                        protected_keys=resolved_protected_keys,
+                        env_param=resolved_env_param,
+                        phase=phase,
+                        followup_phases=followup_phases,
+                        fault=fault,
+                        handler_name=handler_name,
+                    )
+                )
+            continue
+        raise TypeError(f"unsupported contract check entry: {type(raw).__name__}")
+    return resolved
+
+
 def _evaluate_contract_checks(
     func: Any,
     contract_checks: list[ContractCheck] | None,
+    *,
+    seed_from_tests: bool = True,
+    seed_from_fixtures: bool = True,
+    seed_from_docstrings: bool = True,
+    seed_from_code: bool = True,
+    seed_from_call_sites: bool = True,
+    treat_any_as_weak: bool = True,
 ) -> tuple[list[str], list[dict[str, Any]]]:
     """Run explicit contract probes against *func* and collect violations."""
     if not contract_checks:
@@ -4905,9 +5252,38 @@ def _evaluate_contract_checks(
 
     violations: list[str] = []
     details: list[dict[str, Any]] = []
-    profile = _likely_contract_profile(func)
+    profile = _likely_contract_profile(
+        func,
+        seed_from_tests=seed_from_tests,
+        seed_from_fixtures=seed_from_fixtures,
+        seed_from_docstrings=seed_from_docstrings,
+        seed_from_code=seed_from_code,
+        seed_from_call_sites=seed_from_call_sites,
+        treat_any_as_weak=treat_any_as_weak,
+    )
     qualname = str(profile.get("qualname", getattr(func, "__qualname__", "?")))
-    for check in contract_checks:
+    seed_examples = list(profile.get("seed_examples", []))
+    probe_kwargs = dict(seed_examples[0].kwargs) if seed_examples else _contract_seed_kwargs(func)
+    tracked_params = list(probe_kwargs)
+    env_param = next(
+        (name for name, value in probe_kwargs.items() if isinstance(value, Mapping)),
+        None,
+    )
+    protected_keys = [
+        key
+        for key in ("PATH", "HOME", "PWD", "TMPDIR")
+        if env_param is not None
+        and isinstance(probe_kwargs.get(env_param), Mapping)
+        and key in probe_kwargs.get(env_param, {})
+    ]
+    resolved_checks = _resolve_contract_check_entries(
+        contract_checks,
+        probe_kwargs=probe_kwargs,
+        tracked_params=tracked_params,
+        protected_keys=protected_keys,
+        env_param=env_param,
+    )
+    for check in resolved_checks:
         kwargs = dict(check.kwargs)
         contract_fit, realism, sink_signal, rationale = _score_contract_fit(kwargs, profile)
         lifecycle_probe = _lifecycle_contract_probe(func, check)
@@ -5325,6 +5701,7 @@ def _test_one_function(
                     seed_from_call_sites,
                 )
             ),
+            mode=mode,
             seed_examples=seed_examples,
             seed_from_tests=seed_from_tests,
             seed_from_fixtures=seed_from_fixtures,
@@ -5467,6 +5844,12 @@ def _test_one_function(
     contract_violations, contract_details = _evaluate_contract_checks(
         func,
         effective_contract_checks,
+        seed_from_tests=seed_from_tests,
+        seed_from_fixtures=seed_from_fixtures,
+        seed_from_docstrings=seed_from_docstrings,
+        seed_from_code=seed_from_code,
+        seed_from_call_sites=seed_from_call_sites,
+        treat_any_as_weak=treat_any_as_weak,
     )
     violations: list[str] = []
     details: list[dict[str, Any]] = []

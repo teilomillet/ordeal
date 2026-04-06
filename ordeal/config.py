@@ -108,6 +108,8 @@ class ScanConfig:
     seed_from_code: bool = True
     seed_from_call_sites: bool = True
     treat_any_as_weak: bool = True
+    # Supports pack aliases like ``shell_path_safety`` and
+    # ``json_tool_call_normalization``.
     auto_contracts: list[str] = field(default_factory=list)
     ignore_contracts: list[str] = field(default_factory=list)
     targets: list[str] = field(default_factory=list)
@@ -189,7 +191,11 @@ class MutationConfig:
 
 @dataclass
 class ObjectConfig:
-    """One ``[[objects]]`` entry — reusable factory/setup/scenario hooks."""
+    """One ``[[objects]]`` entry — reusable factory/setup/scenario hooks.
+
+    ``scenarios`` accepts built-in pack names like ``subprocess``, ``sandbox``,
+    ``upload_download``, ``http``, and ``state_store`` in addition to symbol paths.
+    """
 
     target: str
     factory: str | None = None
@@ -220,7 +226,10 @@ class ContractConfig:
 
 @dataclass
 class AuditTargetConfig:
-    """One ``[[audit.targets]]`` entry — a module/class/method target with hooks."""
+    """One ``[[audit.targets]]`` entry — a module/class/method target with hooks.
+
+    ``scenarios`` accepts the same built-in pack names as ``[[objects]]``.
+    """
 
     target: str
     factory: str | None = None

@@ -1008,6 +1008,13 @@ class MutationResult:
         """Kill ratio: 1.0 means every mutant was caught."""
         return self.killed / self.total if self.total > 0 else 1.0
 
+    @property
+    def score_text(self) -> str:
+        """Exact mutation score rendered as ``killed/total (pct%)``."""
+        if self.total <= 0:
+            return ""
+        return f"{self.killed}/{self.total} ({self.score:.0%})"
+
     def semantic_survivor_clusters(self) -> list[dict[str, Any]]:
         """Group surviving mutants by coarse semantic boundary or sink."""
         groups: dict[tuple[str, str], dict[str, Any]] = {}
@@ -1070,6 +1077,82 @@ class MutationResult:
             for cluster in clusters
             if int(cluster["size"]) >= self.cluster_min_size or bool(cluster["coherent_boundary"])
         ]
+
+    def weakest_killers(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+        """Return compact weakest-killer metadata ordered by strength."""
+        ranked = sorted(
+            (
+                {
+                    "test": test_name,
+                    "kills": len(mutants),
+                    "operators": sorted({mutant.operator for mutant in mutants}),
+                }
+                for test_name, mutants in self.kill_attribution().items()
+            ),
+            key=lambda item: (int(item["kills"]), str(item["test"])),
+        )
+        if limit is None:
+            return ranked
+        return ranked[:limit]
+
+    def epistemic_view(self) -> dict[str, Any]:
+        """Return a tight mutation-evidence payload for reports and audit aggregation."""
+        contract_note = _contract_context_summary(self.contract_context)
+        semantic_clusters = self.semantic_survivor_clusters()
+        promoted_clusters = self.promoted_survivor_clusters()
+        promoted_keys = {
+            (str(cluster["owner"]), str(cluster["tag"])) for cluster in promoted_clusters
+        }
+        exploratory_survivors = sum(
+            int(cluster["size"])
+            for cluster in semantic_clusters
+            if (str(cluster["owner"]), str(cluster["tag"])) not in promoted_keys
+        )
+
+        if self.total <= 0:
+            status = "no_mutants"
+            summary = "no mutants were available to validate"
+        elif not self.survived:
+            status = "fully_killed"
+            summary = f"all {self.total} observed mutant(s) were killed"
+        elif promoted_clusters:
+            status = "promoted_gaps"
+            summary = (
+                f"{len(self.survived)} survivor(s) across "
+                f"{len(promoted_clusters)} promoted boundary cluster(s)"
+            )
+        else:
+            status = "exploratory_gaps"
+            summary = (
+                f"{len(self.survived)} exploratory survivor(s) "
+                "without a promoted boundary cluster"
+            )
+
+        return {
+            "target": self.target,
+            "status": status,
+            "summary": summary,
+            "score": self.score_text or None,
+            "score_fraction": self.score if self.total > 0 else None,
+            "killed": self.killed,
+            "total": self.total,
+            "survived": len(self.survived),
+            "contract": contract_note,
+            "promoted_boundary_count": len(promoted_clusters),
+            "exploratory_survivors": exploratory_survivors,
+            "promoted_boundaries": [
+                {
+                    "owner": str(cluster["owner"]),
+                    "tag": str(cluster["tag"]),
+                    "label": str(cluster["label"]),
+                    "size": int(cluster["size"]),
+                    "operators": list(cluster["operators"]),
+                    "contract": _contract_context_summary(cluster.get("contract_context")),
+                }
+                for cluster in promoted_clusters
+            ],
+            "weakest_killers": self.weakest_killers(limit=3),
+        }
 
     def filter_report(self) -> str:
         """Structured breakdown of the mutation pipeline for AI assistants.
@@ -1157,7 +1240,7 @@ class MutationResult:
                 )
             return "\n".join(lines)
 
-        lines = [f"Mutation score: {self.killed}/{self.total} ({self.score:.0%})  [{meta}]"]
+        lines = [f"Mutation score: {self.score_text}  [{meta}]"]
         if is_method:
             lines.append(f"  method target: {target_label}")
         promoted_clusters = self.promoted_survivor_clusters()

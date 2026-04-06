@@ -137,6 +137,15 @@ verbose = true
 # ignore_properties = ["commutative"]
 # ignore_relations = ["commutative_composition"]
 #
+# # Contract packs expand to the concrete built-ins ordeal already knows about.
+# auto_contracts = [
+#   "shell_path_safety",
+#   "protected_env_vars",
+#   "cleanup_teardown",
+#   "cancellation_safety",
+#   "json_tool_call_normalization",
+# ]
+#
 # # Keep expected validation failures visible without promoting them as bugs.
 # expected_failures = ["validate_input"]
 # expected_preconditions = { "*" = ["ValueError"], build_env_vars = ["protected key"] }
@@ -173,8 +182,11 @@ verbose = true
 # teardown = "tests.support.factories:cleanup_composable_env"
 # harness = "stateful"
 # scenarios = [
-#   "tests.support.scenarios:disable_network",
-#   "tests.support.scenarios:protect_env_keys",
+#   "subprocess",
+#   "sandbox",
+#   "upload_download",
+#   "http",
+#   "state_store",
 #   { kind = "stub_return", path = "sandbox_client.execute_command", value = { returncode = 0, stdout = "ok" } },
 #   { kind = "stub_raise", path = "upload_content", error = "RuntimeError: denied" },
 # ]
@@ -183,7 +195,7 @@ verbose = true
 # # Optional semantic probes for shell/path/env helpers during scan.
 # [[contracts]]
 # target = "myapp.envs:ComposableEnv.build_env_vars"
-# checks = ["shell_safe", "quoted_paths", "protected_env_keys"]
+# checks = ["shell_path_safety", "protected_env_vars", "json_tool_call_normalization"]
 # kwargs = { path = "tmp/my binary", env_vars = { PATH = "/bin", HOME = "/tmp/home" } }
 # tracked_params = ["path"]
 # protected_keys = ["PATH", "HOME"]
@@ -193,7 +205,7 @@ verbose = true
 # # matching [[objects]] factory/setup/state hooks above.
 # [[contracts]]
 # target = "myapp.envs:ComposableEnv.rollout"
-# checks = ["cleanup_after_cancellation"]
+# checks = ["cancellation_safety"]
 # kwargs = { marker = "demo" }
 # phase = "rollout"
 # followup_phases = ["cleanup", "teardown"]
@@ -225,7 +237,7 @@ verbose = true
 # setup = "tests.support.factories:prime_composable_env"
 # teardown = "tests.support.factories:cleanup_composable_env"
 # harness = "stateful"
-# scenarios = ["tests.support.scenarios:disable_network"]
+# scenarios = ["sandbox"]
 # methods = ["build_env_vars", "post_sandbox_setup"]
 #
 # # Optional outputs / gates.

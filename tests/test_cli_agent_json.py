@@ -81,6 +81,8 @@ class TestCLIAgentJson:
         assert payload["suggested_test_file"] == "tests/test_ordeal_regressions.py"
         assert payload["confidence"] == 0.63
         assert payload["findings"][0]["target"] == "pkg.mod.normalize"
+        assert payload["raw_details"]["config_suggestions"][0]["section"] == "[[scan]]"
+        assert 'module = "pkg.mod"' in payload["raw_details"]["config_suggestions"][0]["snippet"]
 
     def test_scan_json_marks_unreplayed_crashes_as_speculative(self, monkeypatch, capsys):
         state = SimpleNamespace(
@@ -115,6 +117,73 @@ class TestCLIAgentJson:
         assert payload["findings"][0]["kind"] == "crash"
         assert payload["findings"][0]["details"]["category"] == "speculative_crash"
         assert payload["findings"][0]["details"]["replayable"] is False
+
+    def test_audit_agent_envelope_surfaces_mutation_views_and_config_suggestions(self):
+        result = ModuleAudit(
+            module="pkg.mod",
+            mutation_score="3/4 (75%)",
+            mutation_gaps=[
+                {
+                    "target": "pkg.mod.normalize",
+                    "location": "L10",
+                    "description": "x < 0 branch survived",
+                }
+            ],
+            function_audits=[
+                FunctionAudit(
+                    name="normalize",
+                    status="uncovered",
+                    epistemic="none",
+                )
+            ],
+        )
+        result.mutation_targets = [
+            {
+                "target": "pkg.mod.normalize",
+                "status": "exploratory_gaps",
+                "score": "3/4 (75%)",
+                "score_fraction": 0.75,
+                "killed": 3,
+                "total": 4,
+                "survived": 1,
+                "contract": None,
+                "promoted_boundary_count": 0,
+                "exploratory_survivors": 1,
+                "promoted_boundaries": [],
+                "weakest_killers": [],
+            }
+        ]
+        result.current_coverage = CoverageMeasurement(
+            Status.VERIFIED,
+            CoverageResult(90.0, 10, 1, frozenset({10}), "coverage.py API"),
+        )
+        result.migrated_coverage = CoverageMeasurement(
+            Status.VERIFIED,
+            CoverageResult(92.0, 10, 0, frozenset(), "coverage.py API"),
+        )
+        envelope = cli._build_audit_agent_envelope(
+            [result],
+            config_suggestions=[
+                {
+                    "title": "Persist audit defaults",
+                    "reason": "Keep audit settings versioned.",
+                    "filename": "ordeal.toml",
+                    "section": "[audit]",
+                    "target": "pkg.mod",
+                    "snippet": "[audit]\nmodules = [\"pkg.mod\"]\n",
+                    "entries": [{"section": "[audit]", "modules": ["pkg.mod"]}],
+                }
+            ],
+        )
+        payload = json.loads(envelope.to_json())
+
+        assert payload["raw_details"]["mutation_views"][0]["module"] == "pkg.mod"
+        assert "status" in payload["raw_details"]["mutation_views"][0]
+        assert payload["raw_details"]["report"]["config_suggestions"][0]["section"] == "[audit]"
+        assert any(
+            section[0] == "Mutation Alignment"
+            for section in payload["raw_details"]["report"]["extra_sections"]
+        )
 
     def test_scan_json_replayable_speculative_crash_has_exploratory_summary(
         self, monkeypatch, capsys
@@ -350,6 +419,10 @@ class TestCLIAgentJson:
         assert "Function evidence:" in payload["summary"]
         assert "hidden by default" in payload["summary"]
         assert payload["raw_details"]["function_audits"][0]["module"] == "ordeal.demo"
+        assert payload["raw_details"]["config_suggestions"][0]["section"] == "[audit]"
+        assert 'modules = ["ordeal.demo"]' in payload["raw_details"]["config_suggestions"][0][
+            "snippet"
+        ]
         assert {item["status"] for item in payload["raw_details"]["function_audits"]} == {
             "uncovered",
             "exploratory",
@@ -465,6 +538,10 @@ class TestCLIAgentJson:
             payload["raw_details"]["report"]["summary"][1]
             == "Surface sampling: 2/12 runnable exports checked"
         )
+        assert payload["raw_details"]["config_suggestions"][0]["section"] == "[[scan]]"
+        assert 'targets = ["target_1", "target_9"]' in payload["raw_details"][
+            "config_suggestions"
+        ][0]["snippet"]
         assert payload["raw_details"]["state"]["supervisor_info"]["scan_sampling"] == {
             "kind": "package_root_sample",
             "module": "ordeal",
@@ -474,6 +551,44 @@ class TestCLIAgentJson:
             "source_modules": 4,
             "targets": ["target_1", "target_9"],
         }
+
+    def test_check_json_explicit_contract_outputs_config_suggestions(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        monkeypatch.delitem(sys.modules, "pkg_mod", raising=False)
+        (tmp_path / "pkg_mod.py").write_text(
+            "def build_command(path: str = 'demo files/input.txt') -> list[str]:\n"
+            "    return ['cp', path, '/tmp']\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(
+            ordeal_auto,
+            "_evaluate_contract_checks",
+            lambda *args, **kwargs: ([], []),
+        )
+
+        rc = main(
+            [
+                "check",
+                "pkg_mod.build_command",
+                "--contract",
+                "command_arg_stability",
+                "--json",
+            ]
+        )
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["tool"] == "check"
+        assert payload["status"] == "ok"
+        assert payload["raw_details"]["config_suggestions"]
+        snippets = [item["snippet"] for item in payload["raw_details"]["config_suggestions"]]
+        assert any("[[contracts]]" in snippet for snippet in snippets)
+        assert any("build_command" in snippet for snippet in snippets)
+        assert any('checks = ["command_arg_stability"]' in snippet for snippet in snippets)
 
     def test_audit_json_list_targets_outputs_callable_metadata(
         self, monkeypatch, tmp_path, capsys

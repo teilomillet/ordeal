@@ -11,6 +11,7 @@ Tests verify that the audit:
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -188,6 +189,35 @@ class TestFindTestFiles:
         monkeypatch.setattr(audit_mod, "_pytest_collected_test_files", lambda _path: [collected])
         files = _find_test_files("myapp.scoring", tmp_path)
         assert files == [collected]
+
+    def test_pytest_collection_fallback_disables_repo_addopts_and_ordeal_plugin(
+        self,
+        monkeypatch,
+        tmp_path: Path,
+    ):
+        calls: list[list[str]] = []
+
+        def fake_run(args, **kwargs):
+            calls.append(list(args))
+            return SimpleNamespace(returncode=5, stdout="")
+
+        monkeypatch.setattr(audit_mod.subprocess, "run", fake_run)
+
+        assert audit_mod._pytest_collected_test_files(tmp_path) == []
+        assert calls == [
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "--collect-only",
+                "-q",
+                "-o",
+                "addopts=",
+                "-p",
+                "no:ordeal",
+                str(tmp_path),
+            ]
+        ]
 
 
 # ============================================================================
@@ -880,6 +910,31 @@ class TestAuditIntegration:
         assert result.current_coverage.status == Status.FAILED
         assert "no test files" in (result.current_coverage.error or "")
 
+    def test_audit_empty_test_dir_skips_pytest_collection_fallback(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        import ordeal.audit as audit_mod
+
+        calls: list[Path] = []
+
+        monkeypatch.setattr(
+            audit_mod,
+            "_pytest_collected_test_files",
+            lambda path: calls.append(path) or [],
+        )
+
+        result = audit_mod.audit(
+            "tests._auto_target",
+            test_dir=str(tmp_path),
+            max_examples=5,
+        )
+
+        assert calls == []
+        assert result.current_coverage.status == Status.FAILED
+        assert "no test files" in (result.current_coverage.error or "")
+
     def test_audit_reports_function_level_epistemic_status(self, tmp_path: Path):
         test_file = tmp_path / "test__auto_target.py"
         test_file.write_text(
@@ -1292,6 +1347,7 @@ class TestModuleAuditSummaryValidation:
 
         assert "mutation: 1/1 (100%)" in summary
         assert "validation: fast replay" in summary
+        assert "mutation view: 1/1 (100%); observed mutants were killed" in summary
 
     def test_includes_deep_validation_mode_when_selected(self):
         result = ModuleAudit(
@@ -1428,16 +1484,99 @@ class TestAuditCache:
         result.migrated_test_count = 1
         result.migrated_lines = 6
         result.mutation_score = "1/1 (100%)"
+        result.mutation_targets = [
+            {
+                "target": "demo.module.normalize",
+                "status": "fully_killed",
+                "score": "1/1 (100%)",
+                "score_fraction": 1.0,
+                "killed": 1,
+                "total": 1,
+                "survived": 0,
+                "contract": "quoted_paths, path",
+                "promoted_boundary_count": 0,
+                "exploratory_survivors": 0,
+                "promoted_boundaries": [],
+                "weakest_killers": [],
+            }
+        ]
 
         payload = audit_mod._module_audit_to_dict(result)
 
         assert payload["evidence_views"]["current_suite"]["label"] == "current suite"
         assert payload["evidence_views"]["generated_suite"]["label"] == "generated incremental"
+        assert (
+            payload["evidence_views"]["mutation_validation"]["label"]
+            == "contract-aware mutation"
+        )
+        assert payload["evidence_views"]["mutation_validation"]["status"] == "fully_killed"
         assert payload["evidence_views"]["combined_view"]["label"] in {
             "change",
             "saving",
             "coverage delta",
+            "mutation convergence",
         }
+
+    def test_mutation_validation_view_aggregates_promoted_and_exploratory_targets(self):
+        result = ModuleAudit(module="demo.module", validation_mode="deep")
+        result.mutation_score = "3/5 (60%)"
+        result.mutation_targets = [
+            {
+                "target": "demo.module.cleanup",
+                "status": "promoted_gaps",
+                "score": "1/2 (50%)",
+                "score_fraction": 0.5,
+                "killed": 1,
+                "total": 2,
+                "survived": 1,
+                "contract": "cleanup_after_cancellation, lifecycle",
+                "promoted_boundary_count": 1,
+                "exploratory_survivors": 0,
+                "promoted_boundaries": [
+                    {
+                        "owner": "Env.cleanup",
+                        "tag": "lifecycle",
+                        "label": "lifecycle contract boundary",
+                        "size": 1,
+                        "operators": ["delete_statement"],
+                        "contract": "cleanup_after_cancellation, lifecycle",
+                    }
+                ],
+                "weakest_killers": [],
+            },
+            {
+                "target": "demo.module.normalize",
+                "status": "exploratory_gaps",
+                "score": "2/3 (67%)",
+                "score_fraction": 2 / 3,
+                "killed": 2,
+                "total": 3,
+                "survived": 1,
+                "contract": None,
+                "promoted_boundary_count": 0,
+                "exploratory_survivors": 1,
+                "promoted_boundaries": [],
+                "weakest_killers": [],
+            },
+        ]
+
+        view = result.mutation_validation_view()
+
+        assert view["status"] == "promoted_gaps"
+        assert view["score"] == "3/5 (60%)"
+        assert view["validation"] == "deep replay + re-mine"
+        assert view["promoted_boundary_count"] == 1
+        assert view["exploratory_survivors"] == 1
+        assert view["promoted_boundaries"] == [
+            {
+                "owner": "Env.cleanup",
+                "tag": "lifecycle",
+                "label": "lifecycle contract boundary",
+                "size": 1,
+                "operators": ["delete_statement"],
+                "contract": "cleanup_after_cancellation, lifecycle",
+            }
+        ]
 
     def test_state_hash_changes_with_validation_mode(self, tmp_path: Path):
         test_file = tmp_path / "test__auto_target.py"

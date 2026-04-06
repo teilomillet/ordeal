@@ -80,6 +80,9 @@ registries = ["tests.support.shared_fixtures"]
     Auto-scan is the fastest way to get value from ordeal, but treat it as exploratory output first. Point it at a module and it smoke-tests every public function automatically -- no test code needed. Functions with type hints get random inputs generated for free. Add `fixtures` for anything the type system can't describe, and use suppression knobs when you already know a relation is noisy rather than a bug.
 
 Declare modules for auto-scan testing. The pytest plugin auto-collects these and runs `scan_module()` on each.
+Pack aliases in `auto_contracts` expand to concrete checks, so names like
+`shell_path_safety`, `protected_env_vars`, `cleanup_teardown`,
+`cancellation_safety`, and `json_tool_call_normalization` are first-class.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -154,11 +157,17 @@ state_factory = "tests.support.factories:build_composable_state"
 setup = "tests.support.factories:prime_composable_env"
 teardown = "tests.support.factories:cleanup_composable_env"
 harness = "stateful"
-scenarios = ["tests.support.scenarios:disable_network"]
+scenarios = ["subprocess", "sandbox"]
 methods = ["build_env_vars"]
 ```
 
-Use `factory` for construction, `state_factory` when the object needs a separate state payload, `setup` for one-time preparation, `teardown` for cleanup, and `scenarios` for collaborator behavior that should be layered on top of the object before the listed methods are exercised. `harness = "stateful"` tells ordeal to reuse the same instance across a stateful run instead of rebuilding it for every call. Inline scenario tables now cover small collaborator tweaks directly in TOML:
+Use `factory` for construction, `state_factory` when the object needs a separate state payload, `setup` for one-time preparation, `teardown` for cleanup, and `scenarios` for collaborator behavior that should be layered on top of the object before the listed methods are exercised. `harness = "stateful"` tells ordeal to reuse the same instance across a stateful run instead of rebuilding it for every call. Built-in scenario libraries now work directly in TOML:
+
+```toml
+scenarios = ["subprocess", "sandbox", "upload_download", "http", "state_store"]
+```
+
+Inline scenario tables still cover small collaborator tweaks directly in TOML:
 
 ```toml
 scenarios = [
@@ -171,11 +180,14 @@ scenarios = [
 ### `[[contracts]]`
 
 Explicit semantic probes for scan targets. Use these for shell/path/env helpers where plain fuzzing is too weak.
+Pack aliases such as `shell_path_safety`, `protected_env_vars`,
+`cleanup_teardown`, `cancellation_safety`, and
+`json_tool_call_normalization` expand to concrete built-ins.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `target` | `str` | required | Callable target such as `pkg.mod:Env.build_env_vars` |
-| `checks` | `list[str]` | `[]` | Built-ins: `shell_safe`, `quoted_paths`, `command_arg_stability`, `protected_env_keys` |
+| `checks` | `list[str]` | `[]` | Built-ins and pack aliases: `shell_safe`, `quoted_paths`, `command_arg_stability`, `protected_env_keys`, `shell_path_safety`, `protected_env_vars`, `cleanup_teardown`, `cancellation_safety`, `json_tool_call_normalization` |
 | `kwargs` | `dict[str, object]` | `{}` | Concrete probe inputs |
 | `tracked_params` | `list[str]` | `[]` | String params to track in shell/path checks |
 | `protected_keys` | `list[str]` | `[]` | Env keys that must survive updates |
@@ -188,7 +200,7 @@ Explicit semantic probes for scan targets. Use these for shell/path/env helpers 
 ```toml
 [[contracts]]
 target = "myapp.envs:ComposableEnv.build_env_vars"
-checks = ["shell_safe", "quoted_paths", "protected_env_keys"]
+checks = ["shell_path_safety", "protected_env_vars", "json_tool_call_normalization"]
 kwargs = { path = "tmp/my binary", env_vars = { PATH = "/bin", HOME = "/tmp/home" } }
 tracked_params = ["path"]
 protected_keys = ["PATH", "HOME"]
@@ -196,7 +208,7 @@ env_param = "env_vars"
 
 [[contracts]]
 target = "myapp.envs:ComposableEnv.rollout"
-checks = ["cleanup_after_cancellation"]
+checks = ["cancellation_safety"]
 kwargs = { marker = "demo" }
 phase = "rollout"
 followup_phases = ["cleanup", "teardown"]
@@ -240,7 +252,7 @@ state_factory = "tests.support.factories:build_composable_state"
 setup = "tests.support.factories:prime_composable_env"
 teardown = "tests.support.factories:cleanup_composable_env"
 harness = "stateful"
-scenarios = ["tests.support.scenarios:disable_network"]
+scenarios = ["sandbox"]
 methods = ["build_env_vars", "post_sandbox_setup"]
 ```
 

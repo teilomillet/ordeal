@@ -343,7 +343,10 @@ class TestCLI:
         assert rc == 0
         assert calls["module"] == "ordeal.demo"
         assert calls["validation_mode"] == "deep"
-        assert "ordeal audit" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "ordeal audit" in out
+        assert "Suggested ordeal.toml:" in out
+        assert "[audit]" in out
 
     def test_audit_uses_config_defaults_when_modules_omitted(self, monkeypatch, tmp_path, capsys):
         import ordeal.audit as audit_mod
@@ -1244,7 +1247,8 @@ scan_max_examples = 12
         monkeypatch.setattr(ordeal_auto, "_evaluate_contract_checks", fake_evaluate)
 
         rc = main(["check", "pkg_mod:Env.build_command", "--config", str(config_path)])
-        out = capsys.readouterr().err
+        captured = capsys.readouterr()
+        out = captured.err
 
         assert rc == 0
         assert calls["target"] == "pkg_mod:Env.build_command"
@@ -1259,6 +1263,68 @@ scan_max_examples = 12
         assert "Target metadata:" in out
         assert "factory=required, configured=yes" in out
         assert "configs=" in out
+        assert "Suggested ordeal.toml:" in captured.out
+        assert '[[contracts]]' in captured.out
+        assert 'target = "pkg_mod:Env.build_command"' in captured.out
+
+    def test_check_expands_builtin_contract_packs_and_scenario_libraries(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        config_path = _write_check_contract_project(tmp_path)
+        config_path.write_text(
+            "[[objects]]\n"
+            'target = "pkg_mod:Env"\n'
+            'factory = "check_support:make_env"\n'
+            'setup = "check_support:prime_env"\n'
+            'scenarios = ["check_support:scenario_env", "subprocess"]\n'
+            "\n"
+            "[[contracts]]\n"
+            'target = "pkg_mod:Env.build_command"\n'
+            'checks = ["shell_path_safety"]\n'
+            'kwargs = { path = "demo.txt" }\n'
+            'tracked_params = ["path"]\n',
+            encoding="utf-8",
+        )
+
+        calls: dict[str, object] = {}
+
+        def fake_resolve(target: str, **kwargs):
+            calls["target"] = target
+            calls.update(kwargs)
+
+            def bound(path: str) -> list[str]:
+                return ["cp", path, "/tmp"]
+
+            return "Env.build_command", bound
+
+        def fake_evaluate(func, contract_checks):
+            calls["func_name"] = getattr(func, "__qualname__", repr(func))
+            calls["checks"] = [check.name for check in contract_checks]
+            return [], []
+
+        monkeypatch.setattr(ordeal_auto, "_resolve_explicit_target", fake_resolve)
+        monkeypatch.setattr(ordeal_auto, "_evaluate_contract_checks", fake_evaluate)
+
+        rc = main(["check", "pkg_mod:Env.build_command", "--config", str(config_path)])
+        out = capsys.readouterr().err
+
+        assert rc == 0
+        assert calls["target"] == "pkg_mod:Env.build_command"
+        scenarios = calls["object_scenarios"]["pkg_mod:Env"]
+        assert isinstance(scenarios, tuple)
+        assert len(scenarios) == 2
+        assert all(callable(hook) for hook in scenarios)
+        assert calls["checks"] == [
+            "shell_safe",
+            "command_arg_stability",
+            "subprocess_argv",
+        ]
+        assert "shell_path_safety" not in out
 
     def test_check_json_emits_agent_envelope_for_explicit_method_targets(
         self,
@@ -1293,6 +1359,12 @@ scan_max_examples = 12
             for hint in payload["raw_details"]["target_listing"]["harness_hints"]
         )
         assert payload["raw_details"]["violations"] == []
+        assert payload["raw_details"]["report"]["config_suggestions"]
+        snippets = [
+            item["snippet"] for item in payload["raw_details"]["config_suggestions"]
+        ]
+        assert any('[[contracts]]' in snippet for snippet in snippets)
+        assert any('[[objects]]' in snippet for snippet in snippets)
 
     def test_check_supports_direct_builtin_contracts_without_toml(
         self,
@@ -1327,13 +1399,16 @@ scan_max_examples = 12
                 "command_arg_stability",
             ]
         )
-        out = capsys.readouterr().err
+        captured = capsys.readouterr()
+        out = captured.err
 
         assert rc == 0
         assert calls["func_name"] == "build_command"
         assert calls["checks"] == ["command_arg_stability"]
         assert calls["kwargs"] == [{"path": "demo files/input.txt"}]
         assert "Checking pkg_mod.build_command explicit contract(s)" in out
+        assert "Suggested ordeal.toml:" in captured.out
+        assert '[[contracts]]' in captured.out
 
     def test_check_property_mode_still_uses_mine(self, monkeypatch, tmp_path, capsys):
         monkeypatch.chdir(tmp_path)
@@ -1370,6 +1445,9 @@ scan_max_examples = 12
         assert calls["func"] == "normalize"
         assert calls["max_examples"] == 5
         assert "ALWAYS" in out or "PASS" in out
+        assert "Suggested ordeal.toml:" in out
+        assert '[[scan]]' in out
+        assert 'targets = ["normalize"]' in out
 
     def test_scan_list_targets_shows_unselected_rows_when_toml_limits_targets(
         self,
@@ -1977,6 +2055,69 @@ scan_max_examples = 12
         assert "Function evidence:" in payload["summary"]
         assert "evidence_dimensions" in payload["raw_details"]
         assert payload["raw_details"]["modules"][0]["module"] == "pkg.mod"
+
+    def test_audit_config_suggestions_include_object_blocks_from_harness_hints(self):
+        from ordeal.audit import FunctionAudit, ModuleAudit
+
+        result = ModuleAudit(
+            module="pkg.mod",
+            function_audits=[
+                FunctionAudit(
+                    name="Env.rollout",
+                    status="uncovered",
+                    epistemic="none",
+                )
+            ],
+        )
+        result.harness_hints = [
+            {
+                "function": "Env.rollout",
+                "kind": "factory",
+                "suggestion": "[[objects]] factory -> tests.support:make_env",
+                "evidence": "tests/support.py:10",
+                "confidence": 0.9,
+                "config": {
+                    "section": "[[objects]]",
+                    "target": "pkg.mod:Env",
+                    "method": "rollout",
+                    "key": "factory",
+                    "value": "tests.support:make_env",
+                },
+            }
+        ]
+        target_groups = [
+            {
+                "module": "pkg.mod",
+                "targets": [
+                    {
+                        "module": "pkg.mod",
+                        "name": "Env.rollout",
+                        "harness_hints": result.harness_hints,
+                    }
+                ],
+            }
+        ]
+
+        suggestions = cli._audit_config_suggestions(
+            modules=["pkg.mod"],
+            test_dir="tests",
+            max_examples=20,
+            workers=1,
+            validation_mode="fast",
+            min_fixture_completeness=0.0,
+            show_generated=False,
+            save_generated=None,
+            write_gaps=None,
+            include_exploratory_function_gaps=False,
+            require_direct_tests=False,
+            target_groups=target_groups,
+            results=[result],
+        )
+
+        snippets = [item["snippet"] for item in suggestions]
+        assert any("[audit]" in snippet for snippet in snippets)
+        assert any("[[objects]]" in snippet for snippet in snippets)
+        assert any('target = "pkg.mod:Env"' in snippet for snippet in snippets)
 
     def test_mine_default_examples(self, capsys):
         """Default -n is 500 — just verify the flag is wired correctly."""

@@ -50,6 +50,8 @@ ordeal check myapp.envs:ComposableEnv.build_env_vars --contract quoted_paths
 
 Without `-p`, `check` verifies the standard contracts that catch real bugs quickly: `never None`, `no NaN`, `never empty`, `deterministic`, `idempotent`, and `finite`. For explicit targets, `--contract` lets you run named built-in semantic probes directly, and `--config` reuses any matching `[[objects]]` and `[[contracts]]` entries from `ordeal.toml`.
 
+`check` now also prints ready-to-paste `ordeal.toml` suggestions. Explicit contract checks emit `[[contracts]]` blocks plus any mined `[[objects]]` harness blocks; property-mode checks emit a focused `[[scan]]` block you can keep under versioned config. The JSON envelope mirrors this under `raw_details.config_suggestions`.
+
 | Flag | Default | Description |
 |---|---|---|
 | `target` | required | Dotted function path such as `myapp.scoring.normalize` |
@@ -84,6 +86,8 @@ Promoted crash findings now carry a proof bundle in Markdown, JSON, and agent ou
 Use `--list-targets` when you want to inspect how ordeal sees functions and methods before choosing a target. The listing shows the callable kind, whether it is async or sync, whether a factory is required or configured, and any skip reason if ordeal cannot run it yet. Use `--target` to limit a module scan to one or more callable selectors. Selectors accept local names, explicit targets, and globs like `mutate`, `Env.*`, or `ordeal:mut*`.
 
 Most of the tuning knobs for `scan` live in `[[scan]]` inside `ordeal.toml`. Use `[fixtures].registries` for project-wide fixture registrations, `fixture_registries` for scan-specific registry imports, `ignore_properties` and `ignore_relations` to suppress noisy laws, and `property_overrides` or `relation_overrides` when one function needs a narrower set of checks. `expected_failures` keeps known preconditions from being promoted as bugs. For stateful OO code, `[[objects]]` supplies bound-instance factories, `state_factory`, `teardown`, and `harness = "stateful"` when a class needs persistent lifecycle setup; `[[contracts]]` adds explicit shell/path/env probes.
+
+`scan` now surfaces ready-to-paste `ordeal.toml` suggestions too. The text summary prints a `Suggested ordeal.toml:` block, and the JSON envelope includes `raw_details.config_suggestions`. Package-root sampled scans emit a repeatable `[[scan]]` block with the sampled targets, while method-heavy runs can also suggest `[[objects]]` or `[[contracts]]` blocks derived from the observed surface and findings.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -227,6 +231,8 @@ Use `--list-targets` to inspect the callable surface that audit can see, includi
 `--validation-mode fast` replays mined inputs against each mutant and is the default because it is much faster. `--validation-mode deep` keeps that replay check and then re-runs `mine()` on each mutant, which is slower but keeps the broader exploratory search.
 
 `audit` now reads `[audit]` from `ordeal.toml` too. That means module lists, direct-test gates, fixture-completeness thresholds, validation depth, and gap-writing defaults can live in config and be reused by both humans and agents. Shared `[[objects]]` entries are expanded automatically, and `[[audit.targets]]` lets you override a factory, state factory, teardown, harness, or limit audit to selected methods.
+
+`audit` also emits ready-to-paste config suggestions now. The text report includes a `Suggested ordeal.toml:` block with `[audit]` defaults and any mined `[[objects]]` harness entries for uncovered or exploratory methods. The same payload is available to agents under `raw_details.config_suggestions`.
 
 The "migrated" column shows what a real ordeal test file looks like: `fuzz()` for crash safety plus explicitly mined properties (bounds, determinism, type checks). It generates the test file a developer would write after adopting ordeal.
 
@@ -439,7 +445,7 @@ ordeal mutate myapp.scoring.compute --json
 ordeal audit myapp.scoring --json
 ```
 
-The payload is a stable envelope with top-level keys like `schema_version`, `tool`, `target`, `status`, `summary`, `recommended_action`, `findings`, `artifacts`, and `raw_details`. For `scan`, `--save-artifacts` complements this with a persistent JSON bug bundle under `.ordeal/findings/`.
+The payload is a stable envelope with top-level keys like `schema_version`, `tool`, `target`, `status`, `summary`, `recommended_action`, `findings`, `artifacts`, and `raw_details`. `raw_details.config_suggestions` now carries ready-to-paste `ordeal.toml` snippets for `scan`, `audit`, and `check`. For `scan`, `--save-artifacts` complements this with a persistent JSON bug bundle under `.ordeal/findings/`.
 
 ### `ordeal skill`
 

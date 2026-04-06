@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shlex
 import sys
@@ -16,6 +17,8 @@ import ordeal.auto as auto_mod
 import tests._auto_target as target
 from ordeal.auto import (
     ContractCheck,
+    SeedExample,
+    _candidate_inputs,
     _get_public_functions,
     _test_one_function,
     chaos_for,
@@ -169,6 +172,117 @@ def _install_inline_scenario_target_module(module_name: str):
     return mod
 
 
+def _install_subprocess_pack_target_module(module_name: str):
+    mod = types.ModuleType(module_name)
+    sys.modules[module_name] = mod
+    exec(
+        "class Runner:\n"
+        "    async def run(self, command: str):\n"
+        "        raise RuntimeError('needs subprocess scenario')\n"
+        "\n"
+        "class Env:\n"
+        "    def __init__(self) -> None:\n"
+        "        self.runner = Runner()\n"
+        "\n"
+        "    async def render(self, command: str) -> str:\n"
+        "        result = await self.runner.run(command)\n"
+        "        return result.stdout\n",
+        mod.__dict__,
+    )
+    return mod
+
+
+def _install_sandbox_client_pack_target_module(module_name: str):
+    mod = types.ModuleType(module_name)
+    sys.modules[module_name] = mod
+    exec(
+        "class SandboxClient:\n"
+        "    async def execute_command(self, command: str):\n"
+        "        raise RuntimeError('needs sandbox scenario')\n"
+        "\n"
+        "    async def upload_content(self, path: str, content: bytes):\n"
+        "        raise RuntimeError('needs sandbox scenario')\n"
+        "\n"
+        "class Env:\n"
+        "    def __init__(self) -> None:\n"
+        "        self.sandbox_client = SandboxClient()\n"
+        "\n"
+        "    async def render(self, command: str, path: str, content: bytes) -> str:\n"
+        "        result = await self.sandbox_client.execute_command(command)\n"
+        "        await self.sandbox_client.upload_content(path, content)\n"
+        "        return result.stdout\n",
+        mod.__dict__,
+    )
+    return mod
+
+
+def _install_upload_download_pack_target_module(module_name: str):
+    mod = types.ModuleType(module_name)
+    sys.modules[module_name] = mod
+    exec(
+        "class Storage:\n"
+        "    def upload(self, payload: bytes):\n"
+        "        raise RuntimeError('needs upload_download scenario')\n"
+        "\n"
+        "    def download(self, receipt):\n"
+        "        raise RuntimeError('needs upload_download scenario')\n"
+        "\n"
+        "class Env:\n"
+        "    def __init__(self) -> None:\n"
+        "        self.client = Storage()\n"
+        "\n"
+        "    def render(self, payload: bytes) -> int:\n"
+        "        receipt = self.client.upload(payload)\n"
+        "        data = self.client.download(receipt)\n"
+        "        return len(data)\n",
+        mod.__dict__,
+    )
+    return mod
+
+
+def _install_http_pack_target_module(module_name: str):
+    mod = types.ModuleType(module_name)
+    sys.modules[module_name] = mod
+    exec(
+        "class Client:\n"
+        "    async def get(self, url: str):\n"
+        "        raise RuntimeError('needs http scenario')\n"
+        "\n"
+        "class Env:\n"
+        "    def __init__(self) -> None:\n"
+        "        self.session = Client()\n"
+        "\n"
+        "    async def render(self, url: str) -> int:\n"
+        "        response = await self.session.get(url)\n"
+        "        return response.status_code\n",
+        mod.__dict__,
+    )
+    return mod
+
+
+def _install_state_store_pack_target_module(module_name: str):
+    mod = types.ModuleType(module_name)
+    sys.modules[module_name] = mod
+    exec(
+        "class StateStore:\n"
+        "    def get(self, key: str, default=None):\n"
+        "        raise RuntimeError('needs state_store scenario')\n"
+        "\n"
+        "    def set(self, key: str, value: str) -> None:\n"
+        "        raise RuntimeError('needs state_store scenario')\n"
+        "\n"
+        "class Env:\n"
+        "    def __init__(self) -> None:\n"
+        "        self.state_store = StateStore()\n"
+        "\n"
+        "    def render(self, key: str, value: str) -> str:\n"
+        "        self.state_store.set(key, value)\n"
+        "        return self.state_store.get(key)\n",
+        mod.__dict__,
+    )
+    return mod
+
+
 def _install_stateful_target_module(module_name: str):
     mod = types.ModuleType(module_name)
     sys.modules[module_name] = mod
@@ -187,6 +301,31 @@ def _install_stateful_target_module(module_name: str):
 
 
 class TestScanModule:
+    def test_real_bug_prefers_observed_inputs_before_boundary_smoke(self, monkeypatch):
+        def target(value: int) -> int:
+            if value < 0:
+                raise RuntimeError("boundary")
+            return value
+
+        monkeypatch.setattr(
+            auto_mod,
+            "_seed_examples_for_callable",
+            lambda *args, **kwargs: [
+                SeedExample(kwargs={"value": 1}, source="test", evidence="observed test"),
+                SeedExample(kwargs={"value": 2}, source="fixture", evidence="observed fixture"),
+            ],
+        )
+        monkeypatch.setattr(
+            auto_mod,
+            "_boundary_smoke_inputs",
+            lambda *args, **kwargs: [{"value": -1}],
+        )
+
+        candidates = _candidate_inputs(target, mode="real_bug")
+
+        assert [candidate.origin for candidate in candidates[:2]] == ["test", "fixture"]
+        assert candidates[-1].origin == "boundary"
+
     def test_scans_typed_functions(self):
         result = scan_module("tests._auto_target", max_examples=10)
         names = [f.name for f in result.functions]
@@ -567,6 +706,43 @@ class TestScanModule:
         finally:
             del sys.modules[module_name]
 
+    @pytest.mark.parametrize(
+        ("module_factory", "pack_name"),
+        [
+            (_install_subprocess_pack_target_module, "subprocess"),
+            (_install_sandbox_client_pack_target_module, "sandbox_client"),
+            (_install_upload_download_pack_target_module, "upload_download"),
+            (_install_http_pack_target_module, "http"),
+            (_install_state_store_pack_target_module, "state_store"),
+        ],
+    )
+    def test_builtin_scenario_packs_are_resolved_by_name(
+        self,
+        module_factory,
+        pack_name,
+    ):
+        module_name = f"_test_builtin_scenario_{pack_name}"
+        mod = module_factory(module_name)
+        try:
+            hook = auto_mod._builtin_object_scenario_hook(pack_name)
+            assert hook is not None
+            instance = hook(mod.Env())
+
+            if pack_name == "subprocess":
+                assert asyncio.run(instance.render("echo hi")) == ""
+            elif pack_name == "sandbox_client":
+                assert asyncio.run(
+                    instance.render("echo hi", "/tmp/file", b"payload")
+                ) == ""
+            elif pack_name == "upload_download":
+                assert instance.render(b"payload") == 0
+            elif pack_name == "http":
+                assert asyncio.run(instance.render("https://example.test")) == 200
+            else:
+                assert instance.render("prompt", "seed") == "seed"
+        finally:
+            del sys.modules[module_name]
+
     def test_scan_module_can_limit_to_explicit_method_targets(self):
         import sys
 
@@ -660,6 +836,11 @@ class TestScanModule:
         assert state_hint.config["key"] == "state_factory"
         assert teardown_hint.config["key"] == "teardown"
 
+    def test_builtin_object_scenario_library_aliases_resolve(self):
+        assert auto_mod._builtin_object_scenario_hook("subprocess_runner") is not None
+        assert auto_mod._builtin_object_scenario_hook("upload_download_client") is not None
+        assert auto_mod._builtin_object_scenario_hook("http_client") is not None
+
     def test_documented_precondition_is_not_reported_as_crash(self):
         mod = types.ModuleType("_test_preconditions")
         exec(
@@ -727,6 +908,157 @@ class TestScanModule:
             assert result.failed == 1
         finally:
             del sys.modules[mod.__name__]
+
+    @pytest.mark.parametrize(
+        ("module_name", "target", "pack_name", "expected_contracts", "needs_factory"),
+        [
+            (
+                "_test_contract_pack_shell_path",
+                "build_command",
+                "shell_path_safety",
+                {"shell_safe", "quoted_paths", "command_arg_stability", "subprocess_argv"},
+                False,
+            ),
+            (
+                "_test_contract_pack_env",
+                "update_env",
+                "protected_env_vars",
+                {"protected_env_keys"},
+                False,
+            ),
+            (
+                "_test_contract_pack_cleanup",
+                "Env.cleanup",
+                "cleanup_teardown",
+                {"lifecycle_attempts_all"},
+                True,
+            ),
+            (
+                "_test_contract_pack_cancel",
+                "Env.rollout",
+                "cancellation_safety",
+                {"cleanup_after_cancellation", "rollout_cancellation_triggers_cleanup"},
+                True,
+            ),
+            (
+                "_test_contract_pack_json",
+                "normalize",
+                "json_tool_call_normalization",
+                {"json_roundtrip", "http_shape"},
+                False,
+            ),
+        ],
+    )
+    def test_builtin_contract_packs_are_resolved_by_name(
+        self,
+        module_name,
+        target,
+        pack_name,
+        expected_contracts,
+        needs_factory,
+    ):
+        mod = types.ModuleType(module_name)
+        sys.modules[module_name] = mod
+        if pack_name == "shell_path_safety":
+            exec(
+                "def build_command(path: str) -> str:\n"
+                "    return f'cp {path} /tmp'\n",
+                mod.__dict__,
+            )
+            contract_kwargs = {"path": "demo files/input.txt"}
+        elif pack_name == "protected_env_vars":
+            exec(
+                "def update_env(env_vars: dict[str, str]) -> dict[str, str]:\n"
+                "    updated = dict(env_vars)\n"
+                "    updated.pop('PATH', None)\n"
+                "    return updated\n",
+                mod.__dict__,
+            )
+            contract_kwargs = {"env_vars": {"PATH": "/bin", "HOME": "/home/test", "PWD": "/tmp"}}
+        elif pack_name == "cleanup_teardown":
+            exec(
+                "class Env:\n"
+                "    def __init__(self) -> None:\n"
+                "        self.events = []\n"
+                "\n"
+                "    def cleanup(self, marker: str) -> list[str]:\n"
+                "        try:\n"
+                "            self.cleanup_first(marker)\n"
+                "        except Exception:\n"
+                "            return list(self.events)\n"
+                "        self.cleanup_second(marker)\n"
+                "        return list(self.events)\n"
+                "\n"
+                "    def teardown(self, marker: str) -> list[str]:\n"
+                "        self.events.append(f'teardown:{marker}')\n"
+                "        return list(self.events)\n"
+                "\n"
+                "    def cleanup_first(self, marker: str) -> None:\n"
+                "        self.events.append(f'first:{marker}')\n"
+                "\n"
+                "    def cleanup_second(self, marker: str) -> None:\n"
+                "        self.events.append(f'second:{marker}')\n"
+                "\n"
+                "Env.cleanup_first.cleanup = True\n"
+                "Env.cleanup_second.cleanup = True\n",
+                mod.__dict__,
+            )
+            contract_kwargs = {"marker": "demo"}
+        elif pack_name == "cancellation_safety":
+            exec(
+                "class Env:\n"
+                "    def __init__(self) -> None:\n"
+                "        self.events = []\n"
+                "\n"
+                "    def rollout(self, marker: str) -> list[str]:\n"
+                "        try:\n"
+                "            self.rollout_step(marker)\n"
+                "        finally:\n"
+                "            self.cleanup(marker)\n"
+                "        return list(self.events)\n"
+                "\n"
+                "    def rollout_step(self, marker: str) -> None:\n"
+                "        self.events.append(f'rollout:{marker}')\n"
+                "\n"
+                "    def cleanup(self, marker: str) -> None:\n"
+                "        self.events.append(f'cleanup:{marker}')\n"
+                "\n"
+                "    def teardown(self, marker: str) -> None:\n"
+                "        self.events.append(f'teardown:{marker}')\n",
+                mod.__dict__,
+            )
+            contract_kwargs = {"marker": "demo"}
+        else:
+            exec(
+                "def normalize(payload: dict[str, object]) -> dict[str, object]:\n"
+                "    return payload\n",
+                mod.__dict__,
+            )
+            contract_kwargs = {
+                "payload": {
+                    "tool_call": {
+                        "args": {"alpha", "beta"},
+                    }
+                }
+            }
+        try:
+            resolved = auto_mod._resolve_contract_check_entries(
+                [{"pack": pack_name, "kwargs": contract_kwargs}],
+                probe_kwargs=contract_kwargs,
+            )
+            assert {check.name for check in resolved} & expected_contracts
+            if pack_name == "shell_path_safety":
+                assert not resolved[0].predicate("cp demo files/input.txt /tmp")
+            elif pack_name == "protected_env_vars":
+                assert not resolved[0].predicate(
+                    {"HOME": "/home/test", "PWD": "/tmp"}
+                )
+            elif pack_name == "json_tool_call_normalization":
+                assert not resolved[0].predicate(
+                    {"tool_call": {"args": {"alpha", "beta"}}}
+                )
+        finally:
+            del sys.modules[module_name]
 
     def test_package_root_discovery_includes_lazy_exported_callables(self):
         discovered = {name for name, _ in _get_public_functions(ordeal)}

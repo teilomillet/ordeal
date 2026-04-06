@@ -545,6 +545,7 @@ class ModuleAudit:
     mutation_gaps: list[dict[str, str]] = field(default_factory=list)
     weakest_tests: list[dict[str, int | str]] = field(default_factory=list)
     mutation_gap_stubs: list[dict[str, str]] = field(default_factory=list)
+    mutation_targets: list[dict[str, Any]] = field(default_factory=list)
     contract_findings: list[dict[str, Any]] = field(default_factory=list)
     blocking_reason: str | None = None
     harness_hints: list[dict[str, Any]] = field(default_factory=list)
@@ -591,17 +592,18 @@ class ModuleAudit:
             f"| {generated['lines']:>5} lines "
             f"| {generated['coverage']}"
         )
+        mutation = views["mutation_validation"]
+        if mutation["score"]:
+            lines.append(f"    mutation: {mutation['score']}")
+        if mutation["validation"]:
+            lines.append(f"    validation: {mutation['validation']}")
+        lines.append(f"    mutation view: {mutation['summary']}")
         combined = views["combined_view"]
         lines.append(f"    combined view: {combined['label']}: {combined['summary']}")
 
         if self.mined_properties:
             grouped = _group_mined_properties(self.mined_properties)
             lines.append(f"    mined:    {grouped}")
-
-        if generated["mutation"]:
-            lines.append(f"    mutation: {generated['mutation']}")
-        if generated["validation"]:
-            lines.append(f"    validation: {generated['validation']}")
         if self.mutation_gaps:
             lines.append("    surviving mutants:")
             for gap in self.mutation_gaps[:DISPLAY_CAP]:
@@ -667,6 +669,70 @@ class ModuleAudit:
 
         return "\n".join(lines)
 
+    def mutation_validation_view(self) -> dict[str, object]:
+        """Return a compact mutation-validation view for audit consumers."""
+        targets = [dict(item) for item in self.mutation_targets]
+        statuses = {str(item.get("status", "")) for item in targets}
+        promoted_boundary_count = sum(
+            int(item.get("promoted_boundary_count", 0) or 0) for item in targets
+        )
+        exploratory_survivors = sum(
+            int(item.get("exploratory_survivors", 0) or 0) for item in targets
+        )
+        promoted_boundaries: list[dict[str, Any]] = []
+        for item in targets:
+            for cluster in item.get("promoted_boundaries", []):
+                promoted_boundaries.append(dict(cluster))
+
+        score = self.mutation_score or ""
+        validation = (
+            self._format_validation_mode()
+            if score or targets or self.validation_mode == "deep"
+            else ""
+        )
+        if self.blocking_reason:
+            status = "blocked"
+            summary = "mutation validation was skipped because audit lacked runnable leverage"
+        elif not score and not targets:
+            status = "not_measured"
+            summary = "mutation validation not measured"
+        elif "promoted_gaps" in statuses:
+            status = "promoted_gaps"
+            summary = (
+                f"{score}; {promoted_boundary_count} promoted boundary cluster(s)"
+                if score
+                else f"{promoted_boundary_count} promoted boundary cluster(s)"
+            )
+        elif "exploratory_gaps" in statuses:
+            status = "exploratory_gaps"
+            summary = (
+                f"{score}; {exploratory_survivors} exploratory survivor(s)"
+                if score
+                else f"{exploratory_survivors} exploratory survivor(s)"
+            )
+        elif statuses == {"no_mutants"} and targets:
+            status = "no_mutants"
+            summary = "no mutants were available to validate generated checks"
+        else:
+            status = "fully_killed"
+            summary = (
+                f"{score}; observed mutants were killed by the current/generated suite"
+                if score
+                else "observed mutants were killed by the current/generated suite"
+            )
+        return {
+            "label": "contract-aware mutation",
+            "status": status,
+            "score": score or None,
+            "validation": validation,
+            "summary": summary,
+            "targets": targets,
+            "promoted_boundary_count": promoted_boundary_count,
+            "exploratory_survivors": exploratory_survivors,
+            "promoted_boundaries": promoted_boundaries[:DISPLAY_CAP],
+            "weakest_killers": list(self.weakest_tests),
+        }
+
     def evidence_views(self) -> dict[str, dict[str, object]]:
         """Return normalized current/generated/combined audit evidence views."""
         current = {
@@ -687,6 +753,7 @@ class ModuleAudit:
             if self.mutation_score or self.validation_mode == "deep"
             else "",
         }
+        mutation = self.mutation_validation_view()
         combined = {"label": "coverage delta", "summary": "not measured"}
         cur = self.current_coverage
         mig = self.migrated_coverage
@@ -704,10 +771,24 @@ class ModuleAudit:
                 self.migrated_lines,
                 coverage_delta=delta,
             )
-            combined = {"label": label, "summary": summary, "coverage_delta": delta}
+            combined = {
+                "label": label,
+                "summary": (
+                    f"{summary} | {mutation['label']}: {mutation['summary']}"
+                    if mutation["status"] != "not_measured"
+                    else summary
+                ),
+                "coverage_delta": delta,
+            }
+        elif mutation["status"] != "not_measured":
+            combined = {
+                "label": "mutation convergence",
+                "summary": f"{mutation['label']}: {mutation['summary']}",
+            }
         return {
             "current_suite": current,
             "generated_suite": generated,
+            "mutation_validation": mutation,
             "combined_view": combined,
         }
 
@@ -864,6 +945,7 @@ def _module_audit_to_dict(result: ModuleAudit) -> dict[str, object]:
         "mutation_gaps": result.mutation_gaps,
         "weakest_tests": result.weakest_tests,
         "mutation_gap_stubs": result.mutation_gap_stubs,
+        "mutation_targets": result.mutation_targets,
         "contract_findings": result.contract_findings,
         "blocking_reason": result.blocking_reason,
         "harness_hints": result.harness_hints,
@@ -897,6 +979,7 @@ def _module_audit_from_dict(data: dict[str, object]) -> ModuleAudit:
         mutation_gaps=list(data.get("mutation_gaps", [])),
         weakest_tests=list(data.get("weakest_tests", [])),
         mutation_gap_stubs=list(data.get("mutation_gap_stubs", [])),
+        mutation_targets=list(data.get("mutation_targets", [])),
         contract_findings=list(data.get("contract_findings", [])),
         blocking_reason=(
             str(data["blocking_reason"]) if data.get("blocking_reason") is not None else None
@@ -994,7 +1077,18 @@ def _pytest_collected_test_files(test_dir: Path) -> list[Path]:
 
     try:
         completed = subprocess.run(
-            [sys.executable, "-m", "pytest", "--collect-only", "-q", str(test_dir)],
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "--collect-only",
+                "-q",
+                "-o",
+                "addopts=",
+                "-p",
+                "no:ordeal",
+                str(test_dir),
+            ],
             capture_output=True,
             text=True,
             timeout=SUBPROCESS_TIMEOUT_SECONDS,
@@ -1061,11 +1155,12 @@ def _find_test_files(module_name: str, test_dir: Path) -> list[Path]:
     if not test_dir.is_dir():
         return results
 
-    candidates = sorted(
-        path.resolve()
-        for path in test_dir.rglob("*.py")
-        if path.is_file() and _looks_like_test_file(path)
+    python_files = sorted(
+        path.resolve() for path in test_dir.rglob("*.py") if path.is_file()
     )
+    if not python_files:
+        return []
+    candidates = [path for path in python_files if _looks_like_test_file(path)]
 
     for test_file in candidates:
         stem = test_file.stem
@@ -1131,11 +1226,12 @@ def _find_test_file_evidence(module_name: str, test_dir: Path) -> list[TestFileE
     if not test_dir.is_dir():
         return []
 
-    candidates = sorted(
-        path.resolve()
-        for path in test_dir.rglob("*.py")
-        if path.is_file() and _looks_like_test_file(path)
+    python_files = sorted(
+        path.resolve() for path in test_dir.rglob("*.py") if path.is_file()
     )
+    if not python_files:
+        return []
+    candidates = [path for path in python_files if _looks_like_test_file(path)]
 
     def _imports_target(path: Path) -> bool:
         try:
@@ -1222,6 +1318,10 @@ def _collect_pytest_nodeids(test_files: list[Path]) -> dict[Path, list[str]]:
                 "pytest",
                 "--collect-only",
                 "-q",
+                "-o",
+                "addopts=",
+                "-p",
+                "no:ordeal",
                 *[str(f) for f in test_files],
             ],
             capture_output=True,
@@ -2162,6 +2262,7 @@ def _audit_harness_hints(
                     "suggestion": hint.suggestion,
                     "evidence": hint.evidence,
                     "confidence": round(float(hint.confidence), 2),
+                    "config": dict(hint.config),
                 }
             )
     return hints
@@ -4042,6 +4143,7 @@ def _record_validation_result(
     kill_counts: dict[str, int],
 ) -> None:
     """Aggregate one mutation-validation result into the module audit."""
+    result.mutation_targets.append(dict(mutation_result.epistemic_view()))
     for mutant in mutation_result.survived:
         result.mutation_gaps.append(
             {
@@ -4053,8 +4155,9 @@ def _record_validation_result(
             }
         )
 
-    for test_name, mutants in mutation_result.kill_attribution().items():
-        kill_counts[test_name] = kill_counts.get(test_name, 0) + len(mutants)
+    for item in mutation_result.weakest_killers():
+        test_name = str(item["test"])
+        kill_counts[test_name] = kill_counts.get(test_name, 0) + int(item["kills"])
 
     stub = mutation_result.generate_test_stubs()
     if stub:

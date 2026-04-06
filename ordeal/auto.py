@@ -175,6 +175,7 @@ def _public_scan_mode(mode: str) -> str:
     normalized = _normalize_scan_mode(mode)
     return "candidate" if normalized == "real_bug" else "evidence"
 
+
 _PROMOTED_SCAN_VERDICTS = {
     "promoted_real_bug",
     "semantic_contract",

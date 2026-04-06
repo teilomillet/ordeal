@@ -279,8 +279,7 @@ def _bootstrap_review_scenarios_for_method(owner: type, method_name: str) -> lis
     if "system_prompt" in source_lower or "system prompt" in source_lower:
         names.add("no_system_prompt")
     if any(
-        token in source_lower
-        for token in ("log_file", "log_path", "missing_log", "transcript")
+        token in source_lower for token in ("log_file", "log_path", "missing_log", "transcript")
     ):
         names.add("missing_log_file")
     return sorted(names)
@@ -358,7 +357,8 @@ def _audit_bootstrap_targets(
         support_factory = f"{support_module}:make_{class_snake}"
         support_setup = (
             f"{support_module}:prime_{class_snake}"
-            if {"setup", "teardown"} & set(field_hints) or any(
+            if {"setup", "teardown"} & set(field_hints)
+            or any(
                 method.startswith(("post_", "setup_", "rollout", "cleanup", "teardown"))
                 for method in methods
             )
@@ -377,7 +377,8 @@ def _audit_bootstrap_targets(
             {
                 label
                 for label in scenario_labels
-                if label in {
+                if label
+                in {
                     "space_paths",
                     "quote_paths",
                     "empty_instruction",
@@ -1582,9 +1583,7 @@ def _audit_bootstrap_config_suggestions(
             if target.get("support_setup"):
                 lines.append(_toml_key_value("setup", target["support_setup"]))
             if target.get("support_state_factory"):
-                lines.append(
-                    _toml_key_value("state_factory", target["support_state_factory"])
-                )
+                lines.append(_toml_key_value("state_factory", target["support_state_factory"]))
             if target.get("support_teardown"):
                 lines.append(_toml_key_value("teardown", target["support_teardown"]))
             if target.get("support_scenarios"):
@@ -1769,9 +1768,7 @@ def _audit_bootstrap_support_suggestions(
                 "snippet": "\n".join(import_lines + body).rstrip() + "\n",
                 "target": ", ".join(str(target["target"]) for target in targets),
                 "evidence": [
-                    evidence
-                    for target in targets
-                    for evidence in list(target.get("evidence", ()))
+                    evidence for target in targets for evidence in list(target.get("evidence", ()))
                 ][:5],
                 "suggested_command": command,
                 "review_scenarios": scenario_labels,
@@ -1906,9 +1903,7 @@ def _build_target_listing_envelope(
         )
     runnable_count = sum(1 for row in flat_targets if row.get("runnable"))
     skip_count = len(flat_targets) - runnable_count
-    bootstrap_target_count = sum(
-        len(list(group.get("bootstrap_targets", ()))) for group in groups
-    )
+    bootstrap_target_count = sum(len(list(group.get("bootstrap_targets", ()))) for group in groups)
     status = "exploratory" if skip_count or bootstrap_target_count else "ok"
     summary = [
         f"Listed {len(flat_targets)} callable target(s) across {len(groups)} module(s)",
@@ -1938,9 +1933,7 @@ def _build_target_listing_envelope(
             "target_groups": [dict(group) for group in groups],
             "targets": flat_targets,
             "bootstrap_targets": [
-                dict(item)
-                for group in groups
-                for item in list(group.get("bootstrap_targets", ()))
+                dict(item) for group in groups for item in list(group.get("bootstrap_targets", ()))
             ],
             "warnings": list(warnings),
             "runnable_count": runnable_count,

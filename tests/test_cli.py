@@ -171,16 +171,25 @@ def _write_harness_hint_project(tmp_path: Path) -> str:
         "class Env:\n"
         "    def __init__(self, prefix: str):\n"
         "        self.prefix = prefix\n"
+        "        self.sandbox_client = None\n"
         "\n"
         "    def rollout(self, state: dict[str, str], prompt: str) -> str:\n"
+        "        if self.sandbox_client is not None:\n"
+        "            self.sandbox_client.execute_command(prompt)\n"
         "        return f'{self.prefix}:{state[\"seed\"]}:{prompt}'\n",
         encoding="utf-8",
     )
     (tests_dir / "support_factories.py").write_text(
         "from hintpkg.envs import Env\n"
         "\n"
+        "class FakeSandbox:\n"
+        "    def execute_command(self, prompt: str) -> None:\n"
+        "        return None\n"
+        "\n"
         "def make_env() -> Env:\n"
-        "    return Env('demo')\n"
+        "    env = Env('demo')\n"
+        "    env.sandbox_client = FakeSandbox()\n"
+        "    return env\n"
         "\n"
         "def make_env_state() -> dict[str, str]:\n"
         "    return {'seed': 'cached'}\n"
@@ -249,6 +258,19 @@ def _write_check_contract_project(tmp_path: Path) -> Path:
 class TestCLI:
     def test_no_command_returns_0(self):
         assert main([]) == 0
+
+    def test_resolve_symbol_path_supports_file_paths(self, tmp_path, monkeypatch):
+        helper = tmp_path / "support_factories.py"
+        helper.write_text(
+            "def make_env() -> str:\n"
+            "    return 'ready'\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        resolved = cli._resolve_symbol_path("support_factories.py:make_env")
+
+        assert resolved() == "ready"
 
     def test_top_level_help_points_to_live_help(self, capsys):
         with pytest.raises(SystemExit):
@@ -1355,7 +1377,7 @@ scan_max_examples = 12
         assert payload["raw_details"]["resolved_target"] == "Env.build_command"
         assert payload["raw_details"]["contracts"][0]["name"] == "command_arg_stability"
         assert payload["raw_details"]["target_listing"]["factory_configured"] is True
-        assert payload["raw_details"]["target_listing"]["harness"] == "fresh"
+        assert payload["raw_details"]["target_listing"]["harness"] == "stateful"
         assert any(
             "config" in hint and hint["config"].get("key")
             for hint in payload["raw_details"]["target_listing"]["harness_hints"]
@@ -1820,10 +1842,35 @@ scan_max_examples = 12
             item for item in payload["raw_details"]["targets"] if item["name"] == "Env.rollout"
         )
         hint_kinds = {hint["kind"] for hint in row["harness_hints"]}
-        assert {"factory", "state_factory", "teardown"} <= hint_kinds
+        assert {"factory", "state_factory", "teardown", "scenario_pack"} <= hint_kinds
         assert any(
             hint.get("config", {}).get("section") == "[[objects]]" for hint in row["harness_hints"]
         )
+
+    def test_scan_list_targets_json_marks_auto_mined_harness_sources(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        module_name = _write_harness_hint_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        rc = main(["scan", module_name, "--list-targets", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 0
+        row = next(
+            item for item in payload["raw_details"]["targets"] if item["name"] == "Env.rollout"
+        )
+        assert row["factory_configured"] is True
+        assert row["factory_source"] == "mined"
+        assert row["state_factory_configured"] is True
+        assert row["state_factory_source"] == "mined"
+        assert row["scenario_count"] >= 1
+        assert row["scenario_source"] == "mined"
+        assert row["auto_harness"] is True
 
     def test_scan_list_targets_text_shows_harness_config_hints(
         self,
@@ -1842,7 +1889,7 @@ scan_max_examples = 12
         assert "configs=" in out
         assert "[[objects]]" in out
 
-    def test_audit_json_surfaces_mined_harness_hints_for_blocked_methods(
+    def test_audit_json_uses_auto_mined_harness_for_methods(
         self,
         monkeypatch,
         tmp_path,
@@ -1856,9 +1903,10 @@ scan_max_examples = 12
         rc = main(["audit", module_name, "--json", "--test-dir", str(tests_dir)])
         payload = json.loads(capsys.readouterr().out)
 
-        assert rc == 1
-        assert payload["status"] == "blocked"
-        assert any(detail["kind"] == "harness_hint" for detail in payload["findings"])
+        assert rc == 0
+        assert payload["status"] != "blocked"
+        assert payload["raw_details"]["modules"][0]["blocking_reason"] is None
+        assert any(detail["kind"] == "function_gap" for detail in payload["findings"])
 
     def test_scan_json_blocks_when_methods_need_harness(self, monkeypatch, tmp_path, capsys):
         mod = _make_stateful_target_listing_module()

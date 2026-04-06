@@ -326,6 +326,36 @@ class TestScanModule:
         assert [candidate.origin for candidate in candidates[:2]] == ["test", "fixture"]
         assert candidates[-1].origin == "boundary"
 
+    def test_test_seeds_include_pytest_parametrize_examples(self, tmp_path, monkeypatch):
+        pkg = tmp_path / "seedpkg"
+        tests_dir = tmp_path / "tests"
+        pkg.mkdir()
+        tests_dir.mkdir()
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "mod.py").write_text(
+            "def compute(x: int, y: int) -> int:\n"
+            "    return x + y\n",
+            encoding="utf-8",
+        )
+        (tests_dir / "test_mod.py").write_text(
+            "import pytest\n"
+            "from seedpkg.mod import compute\n"
+            "\n"
+            "@pytest.mark.parametrize(('x', 'y'), [(1, 2), (3, 4)])\n"
+            "def test_compute(x, y):\n"
+            "    assert compute(x, y) >= x\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        seeds = auto_mod._test_seed_examples("seedpkg.mod", "compute")
+
+        assert {tuple(seed.kwargs.items()) for seed in seeds} == {
+            (("x", 1), ("y", 2)),
+            (("x", 3), ("y", 4)),
+        }
+
     def test_scans_typed_functions(self):
         result = scan_module("tests._auto_target", max_examples=10)
         names = [f.name for f in result.functions]
@@ -795,16 +825,25 @@ class TestScanModule:
             "class Env:\n"
             "    def __init__(self, prefix: str):\n"
             "        self.prefix = prefix\n"
+            "        self.sandbox_client = None\n"
             "\n"
             "    def render(self, state: dict[str, str], prompt: str) -> str:\n"
+            "        if self.sandbox_client is not None:\n"
+            "            self.sandbox_client.execute_command(prompt)\n"
             "        return f'{self.prefix}:{state[\"seed\"]}:{prompt}'\n",
             encoding="utf-8",
         )
         (tests_dir / "support_factories.py").write_text(
             "from hintpkg.envs import Env\n"
             "\n"
+            "class FakeSandbox:\n"
+            "    def execute_command(self, prompt: str) -> None:\n"
+            "        return None\n"
+            "\n"
             "def make_env() -> Env:\n"
-            "    return Env('demo')\n"
+            "    env = Env('demo')\n"
+            "    env.sandbox_client = FakeSandbox()\n"
+            "    return env\n"
             "\n"
             "def make_env_state() -> dict[str, str]:\n"
             "    return {'seed': 'cached'}\n"
@@ -826,6 +865,7 @@ class TestScanModule:
         factory_hint = next(hint for hint in hints if hint.kind == "factory")
         state_hint = next(hint for hint in hints if hint.kind == "state_factory")
         teardown_hint = next(hint for hint in hints if hint.kind == "teardown")
+        scenario_hint = next(hint for hint in hints if hint.kind == "scenario_pack")
 
         assert factory_hint.config["section"] == "[[objects]]"
         assert factory_hint.config["target"] == "hintpkg.envs:Env"
@@ -833,6 +873,166 @@ class TestScanModule:
         assert factory_hint.config["value"].endswith("make_env")
         assert state_hint.config["key"] == "state_factory"
         assert teardown_hint.config["key"] == "teardown"
+        assert scenario_hint.config["key"] == "scenarios"
+        assert "sandbox_client" in scenario_hint.config["value"]
+
+    def test_method_seed_examples_capture_fixture_backed_bound_calls(self, tmp_path, monkeypatch):
+        pkg = tmp_path / "hintpkg"
+        tests_dir = tmp_path / "tests"
+        pkg.mkdir()
+        tests_dir.mkdir()
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "envs.py").write_text(
+            "class Env:\n"
+            "    def __init__(self, prefix: str):\n"
+            "        self.prefix = prefix\n"
+            "\n"
+            "    def render(self, state: dict[str, str], prompt: str) -> str:\n"
+            "        return f'{self.prefix}:{state[\"seed\"]}:{prompt}'\n",
+            encoding="utf-8",
+        )
+        (tests_dir / "conftest.py").write_text(
+            "import pytest\n"
+            "from hintpkg.envs import Env\n"
+            "\n"
+            "@pytest.fixture\n"
+            "def env() -> Env:\n"
+            "    return Env('demo')\n"
+            "\n"
+            "@pytest.fixture\n"
+            "def cached_state() -> dict[str, str]:\n"
+            "    return {'seed': 'cached'}\n",
+            encoding="utf-8",
+        )
+        test_file = tests_dir / "test_envs.py"
+        test_file.write_text(
+            "def test_render(env, cached_state):\n"
+            "    prompt = 'hello'\n"
+            "    assert env.render(cached_state, prompt) == 'demo:cached:hello'\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        import importlib
+
+        auto_mod._mine_object_harness_hints.cache_clear()
+        module = importlib.import_module("hintpkg.envs")
+        funcs = dict(
+            _get_public_functions(
+                module,
+                object_factories={"hintpkg.envs:Env": lambda: module.Env("demo")},
+            )
+        )
+        examples = auto_mod._call_seed_examples_from_files(
+            funcs["Env.render"],
+            [test_file],
+            source="test",
+        )
+
+        assert any(example.kwargs == {"prompt": "hello"} for example in examples)
+
+    def test_harness_hints_detect_yield_fixtures_and_file_symbol_paths(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        pkg = tmp_path / "hintpkg"
+        tests_dir = tmp_path / "tests"
+        pkg.mkdir()
+        tests_dir.mkdir()
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "envs.py").write_text(
+            "class Env:\n"
+            "    def __init__(self, prefix: str):\n"
+            "        self.prefix = prefix\n"
+            "\n"
+            "    def close(self) -> None:\n"
+            "        self.prefix = 'closed'\n"
+            "\n"
+            "    def render(self, state: dict[str, str], prompt: str) -> str:\n"
+            "        return f'{self.prefix}:{state[\"seed\"]}:{prompt}'\n",
+            encoding="utf-8",
+        )
+        (tests_dir / "conftest.py").write_text(
+            "import pytest\n"
+            "from hintpkg.envs import Env\n"
+            "\n"
+            "@pytest.fixture\n"
+            "def env() -> Env:\n"
+            "    instance = Env('demo')\n"
+            "    yield instance\n"
+            "    instance.close()\n"
+            "\n"
+            "@pytest.fixture\n"
+            "def cached_state() -> dict[str, str]:\n"
+            "    return {'seed': 'cached'}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        auto_mod._mine_object_harness_hints.cache_clear()
+        hints = auto_mod._mine_object_harness_hints("hintpkg.envs", "Env", "render")
+
+        factory_hint = next(hint for hint in hints if hint.kind == "factory")
+        state_hint = next(hint for hint in hints if hint.kind == "state_factory")
+        teardown_hint = next(hint for hint in hints if hint.kind == "teardown")
+
+        assert factory_hint.config["value"].endswith("tests/conftest.py:env")
+        assert state_hint.config["value"].endswith("tests/conftest.py:cached_state")
+        assert teardown_hint.config["value"].endswith("tests/conftest.py:env")
+
+    def test_auto_mined_harness_makes_instance_method_runnable(self, tmp_path, monkeypatch):
+        pkg = tmp_path / "autoharnesspkg"
+        tests_dir = tmp_path / "tests"
+        pkg.mkdir()
+        tests_dir.mkdir()
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "envs.py").write_text(
+            "class Env:\n"
+            "    def __init__(self, prefix: str):\n"
+            "        self.prefix = prefix\n"
+            "\n"
+            "    def render(self, state: dict[str, str], prompt: str) -> str:\n"
+            "        return f'{self.prefix}:{state[\"seed\"]}:{prompt}'\n",
+            encoding="utf-8",
+        )
+        (tests_dir / "support_factories.py").write_text(
+            "from autoharnesspkg.envs import Env\n"
+            "\n"
+            "def make_env() -> Env:\n"
+            "    return Env('demo')\n"
+            "\n"
+            "def make_env_state(instance: Env) -> dict[str, str]:\n"
+            "    return {'seed': instance.prefix}\n",
+            encoding="utf-8",
+        )
+        (tests_dir / "test_envs.py").write_text(
+            "from autoharnesspkg.envs import Env\n"
+            "\n"
+            "def test_render_examples() -> None:\n"
+            "    env = Env('demo')\n"
+            "    assert env.render({'seed': 'demo'}, 'hello') == 'demo:demo:hello'\n",
+            encoding="utf-8",
+        )
+        auto_mod._mine_object_harness_hints.cache_clear()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        module = __import__("autoharnesspkg.envs", fromlist=["Env"])
+        callables = dict(_get_public_functions(module))
+        render = callables["Env.render"]
+
+        assert getattr(render, "__ordeal_factory_source__", None) == "mined"
+        assert getattr(render, "__ordeal_state_factory_source__", None) == "mined"
+        assert getattr(render, "__ordeal_auto_harness__", False) is True
+
+        result = scan_module("autoharnesspkg.envs", targets=["Env.render"], mode="real_bug")
+
+        assert result.skipped == []
+        assert [item.name for item in result.functions] == ["Env.render"]
+        assert result.functions[0].verdict == "clean"
 
     def test_builtin_object_scenario_library_aliases_resolve(self):
         assert auto_mod._builtin_object_scenario_hook("subprocess_runner") is not None

@@ -79,6 +79,7 @@ from ordeal.auto import (
     _lifecycle_fault_runtime,
     _mine_object_harness_hints,
     _prepare_bound_method_call,
+    _python_source_path_to_module_name,
     _resolve_module,
     _snapshot_instance_state,
     _state_param_name_for_callable,
@@ -3929,9 +3930,19 @@ def _generated_hook_import(
         module_name, sep, attr_path = hook.partition(":")
         if not sep:
             module_name, _, attr_path = hook.rpartition(".")
+        if module_name.endswith(".py"):
+            resolved_module = _python_source_path_to_module_name(module_name)
+            if resolved_module is not None:
+                module_name = resolved_module
     else:
         module_name = getattr(hook, "__module__", "")
         attr_path = getattr(hook, "__qualname__", getattr(hook, "__name__", ""))
+        if module_name.startswith("_ordeal_symbol_"):
+            source_file = inspect.getsourcefile(hook) or inspect.getfile(hook)
+            if source_file:
+                resolved_module = _python_source_path_to_module_name(source_file)
+                if resolved_module is not None:
+                    module_name = resolved_module
     if not module_name or not attr_path or "<locals>" in attr_path:
         return None
     return (f"import {module_name} as {alias}", f"{alias}.{attr_path}")

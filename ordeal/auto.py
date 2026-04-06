@@ -33,6 +33,7 @@ import os
 import re
 import shlex
 import sys
+import textwrap
 import traceback
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -416,6 +417,25 @@ class HarnessHint:
     config: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class AutoObjectRuntime:
+    """One conservative runtime assembled from mined harness hints."""
+
+    factory: Any | None = None
+    factory_source: str | None = None
+    setup: Any | None = None
+    setup_source: str | None = None
+    state_factory: Any | None = None
+    state_factory_source: str | None = None
+    teardown: Any | None = None
+    teardown_source: str | None = None
+    scenarios: tuple[Any, ...] = ()
+    scenario_source: str | None = None
+    harness: str | None = None
+    harness_source: str | None = None
+    hints: tuple[HarnessHint, ...] = ()
+
+
 _DEFAULT_AUTO_CONTRACTS = (
     "shell_safe",
     "quoted_paths",
@@ -499,6 +519,17 @@ def _literal_ast_value(node: ast.AST) -> Any:
     return _MISSING
 
 
+def _literal_ast_value_with_env(
+    node: ast.AST,
+    bindings: Mapping[str, Any] | None = None,
+) -> Any:
+    """Return a literal value, resolving simple local-name bindings when available."""
+    if isinstance(node, ast.Name) and bindings is not None:
+        if node.id in bindings:
+            return bindings[node.id]
+    return _literal_ast_value(node)
+
+
 _MISSING = object()
 
 
@@ -512,6 +543,276 @@ def _call_name(node: ast.AST) -> str | None:
             return None
         return f"{root}.{node.attr}"
     return None
+
+
+def _symbol_hint_value(path: Path, symbol_name: str) -> str:
+    """Return a TOML-ready file-path symbol reference for one local helper."""
+    try:
+        display = path.resolve().relative_to(Path.cwd().resolve())
+    except ValueError:
+        display = path.resolve()
+    return f"{display.as_posix()}:{symbol_name}"
+
+
+def _simple_assigned_names(target: ast.AST) -> list[str]:
+    """Return simple local names assigned by *target*."""
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, (ast.Tuple, ast.List)):
+        names: list[str] = []
+        for item in target.elts:
+            names.extend(_simple_assigned_names(item))
+        return names
+    return []
+
+
+def _iter_scope_statements(scope: ast.AST) -> Sequence[ast.stmt]:
+    """Return the direct statements for a module or function scope."""
+    if isinstance(scope, ast.Module):
+        return scope.body
+    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return scope.body
+    return ()
+
+
+def _yield_cleanup_mentions(node: ast.AST) -> bool:
+    """Return whether the post-yield body mentions teardown-like cleanup."""
+    return any(
+        isinstance(child, ast.Call)
+        and isinstance(child.func, ast.Attribute)
+        and child.func.attr.lower() in {"cleanup", "close", "stop", "teardown", "reset"}
+        for child in ast.walk(node)
+    )
+
+
+@functools.lru_cache(maxsize=64)
+def _pytest_fixture_catalog(path_keys: tuple[str, ...]) -> dict[str, dict[str, Any]]:
+    """Return simple metadata for pytest fixtures across the given files."""
+    catalog: dict[str, dict[str, Any]] = {}
+    for path_str in path_keys:
+        tree = _parse_python_source(path_str)
+        if tree is None:
+            continue
+        path = Path(path_str).resolve()
+        try:
+            display_path = path.relative_to(Path.cwd())
+        except ValueError:
+            display_path = path
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            is_fixture = any(
+                _call_name(decorator.func) == "pytest.fixture"
+                if isinstance(decorator, ast.Call)
+                else _call_name(decorator) == "pytest.fixture"
+                for decorator in node.decorator_list
+            )
+            if not is_fixture:
+                continue
+            info = catalog.setdefault(
+                node.name,
+                {
+                    "values": [],
+                    "return_names": set(),
+                    "yield_cleanup": False,
+                    "text": "",
+                    "evidence": f"{display_path}:{getattr(node, 'lineno', '?')}",
+                    "symbol": _symbol_hint_value(path, node.name),
+                },
+            )
+            annotation_text = ""
+            with contextlib.suppress(Exception):
+                if getattr(node, "returns", None) is not None:
+                    annotation_text = ast.unparse(node.returns)
+            body_text = ""
+            with contextlib.suppress(Exception):
+                body_text = " ".join(ast.unparse(stmt) for stmt in node.body[:8])
+            text_parts = [node.name, annotation_text, ast.get_docstring(node) or "", body_text]
+            info["text"] = " ".join(str(part).lower() for part in text_parts if part).strip()
+            if annotation_text:
+                lowered = annotation_text.lower()
+                info["return_names"].add(lowered)
+                info["return_names"].update(
+                    token.lower()
+                    for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", annotation_text)
+                )
+            saw_yield = False
+            yield_index: int | None = None
+            for index, stmt in enumerate(node.body):
+                value_node: ast.AST | None = None
+                if isinstance(stmt, ast.Return):
+                    value_node = stmt.value
+                elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Yield):
+                    value_node = stmt.value.value
+                    saw_yield = True
+                    yield_index = index
+                if value_node is None:
+                    if saw_yield and _yield_cleanup_mentions(stmt):
+                        info["yield_cleanup"] = True
+                    continue
+                value = _literal_ast_value(value_node)
+                if value is not _MISSING and value not in info["values"]:
+                    info["values"].append(value)
+                if isinstance(value_node, ast.Call):
+                    callee = _call_name(value_node.func)
+                    if callee:
+                        info["return_names"].add(callee.lower())
+                        info["return_names"].add(callee.rsplit(".", 1)[-1].lower())
+            if saw_yield and yield_index is not None:
+                trailing = node.body[yield_index + 1 :]
+                if any(_yield_cleanup_mentions(item) for item in trailing):
+                    info["yield_cleanup"] = True
+    return catalog
+
+
+def _scope_literal_bindings(
+    scope: ast.AST,
+    fixture_catalog: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Return simple literal bindings visible inside one module or function scope."""
+    bindings: dict[str, Any] = {}
+    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        for arg in [*scope.args.posonlyargs, *scope.args.args, *scope.args.kwonlyargs]:
+            values = list(fixture_catalog.get(arg.arg, {}).get("values", ()))
+            if values:
+                bindings[arg.arg] = values[0]
+    for stmt in _iter_scope_statements(scope):
+        if isinstance(stmt, ast.Assign):
+            value = _literal_ast_value_with_env(stmt.value, bindings)
+            if value is _MISSING:
+                continue
+            for target in stmt.targets:
+                for name in _simple_assigned_names(target):
+                    bindings[name] = value
+        elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+            value = _literal_ast_value_with_env(stmt.value, bindings)
+            if value is _MISSING:
+                continue
+            for name in _simple_assigned_names(stmt.target):
+                bindings[name] = value
+    return bindings
+
+
+def _class_import_aliases(
+    tree: ast.AST,
+    *,
+    module_name: str,
+    class_name: str | None = None,
+) -> tuple[set[str], set[str], set[str]]:
+    """Return imported module, callable, and class aliases for a target module."""
+    module_aliases: set[str] = set()
+    callable_aliases: set[str] = set()
+    class_aliases: set[str] = {class_name} if class_name else set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == module_name:
+                    module_aliases.add(alias.asname or alias.name.rsplit(".", 1)[-1])
+        elif isinstance(node, ast.ImportFrom):
+            imported_module = node.module or ""
+            for alias in node.names:
+                if imported_module == module_name:
+                    imported_name = alias.asname or alias.name
+                    callable_aliases.add(imported_name)
+                    if class_name and alias.name == class_name:
+                        class_aliases.add(imported_name)
+                elif f"{imported_module}.{alias.name}" == module_name:
+                    module_aliases.add(alias.asname or alias.name)
+    return module_aliases, callable_aliases, class_aliases
+
+
+def _factory_like_helper_names(
+    tree: ast.AST,
+    *,
+    class_tokens: set[str],
+    fixture_catalog: Mapping[str, Mapping[str, Any]],
+) -> set[str]:
+    """Return helper names that likely build the target object."""
+    helpers: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        info = fixture_catalog.get(node.name, {})
+        lowered = str(info.get("text", node.name)).lower()
+        return_names = {str(item).lower() for item in info.get("return_names", set())}
+        if (
+            node.name.startswith(("make_", "build_", "create_", "new_"))
+            or any(token in node.name.lower() for token in class_tokens)
+        ) and (return_names & class_tokens or any(token in lowered for token in class_tokens)):
+            helpers.add(node.name)
+    return helpers
+
+
+def _matches_target_fixture(
+    info: Mapping[str, Any] | None,
+    *,
+    class_tokens: set[str],
+) -> bool:
+    """Return whether one fixture metadata record looks like the target object."""
+    if not info:
+        return False
+    return_names = {str(item).lower() for item in info.get("return_names", set())}
+    lowered = str(info.get("text", "")).lower()
+    return bool(return_names & class_tokens) or any(token in lowered for token in class_tokens)
+
+
+def _scope_instance_names(
+    scope: ast.AST,
+    *,
+    class_tokens: set[str],
+    class_aliases: set[str],
+    factory_names: set[str],
+    fixture_catalog: Mapping[str, Mapping[str, Any]],
+) -> set[str]:
+    """Return local names in *scope* that likely hold the target instance."""
+    instance_names: set[str] = set()
+    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        for arg in [*scope.args.posonlyargs, *scope.args.args, *scope.args.kwonlyargs]:
+            info = fixture_catalog.get(arg.arg)
+            if _matches_target_fixture(info, class_tokens=class_tokens) or any(
+                token in arg.arg.lower() for token in class_tokens
+            ):
+                instance_names.add(arg.arg)
+    for stmt in _iter_scope_statements(scope):
+        if not isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+            continue
+        value = stmt.value
+        if not isinstance(value, ast.Call):
+            continue
+        callee = _call_name(value.func)
+        if callee is None:
+            continue
+        leaf = callee.rsplit(".", 1)[-1]
+        if leaf not in class_aliases and leaf not in factory_names:
+            continue
+        targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+        for target in targets:
+            for name in _simple_assigned_names(target):
+                instance_names.add(name)
+    return instance_names
+
+
+def _call_matches_bound_method(
+    call: ast.Call,
+    *,
+    method_name: str,
+    instance_names: set[str],
+    class_aliases: set[str],
+    factory_names: set[str],
+) -> bool:
+    """Return whether *call* looks like a target instance-method invocation."""
+    if not isinstance(call.func, ast.Attribute) or call.func.attr != method_name:
+        return False
+    receiver = call.func.value
+    if isinstance(receiver, ast.Name):
+        return receiver.id in instance_names
+    if isinstance(receiver, ast.Call):
+        callee = _call_name(receiver.func)
+        if callee is None:
+            return False
+        leaf = callee.rsplit(".", 1)[-1]
+        return leaf in class_aliases or leaf in factory_names
+    return False
 
 
 def _append_seed_example(
@@ -540,12 +841,16 @@ def _source_file_for_callable(func: Any) -> Path | None:
 
 
 @functools.lru_cache(maxsize=128)
-def _candidate_seed_files(module_name: str) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+def _candidate_seed_files_cached(
+    module_name: str,
+    workspace_root: str,
+) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
     """Return likely test files and project call-site files for *module_name*."""
+    root_path = Path(workspace_root)
     test_files: list[Path] = []
     project_files: list[Path] = []
 
-    tests_dir = Path.cwd() / "tests"
+    tests_dir = root_path / "tests"
     if tests_dir.is_dir():
         with contextlib.suppress(Exception):
             from ordeal.audit import _find_test_file_evidence
@@ -557,7 +862,7 @@ def _candidate_seed_files(module_name: str) -> tuple[tuple[Path, ...], tuple[Pat
             ]
 
     module_path_parts = module_name.split(".")
-    roots = [Path.cwd(), Path.cwd() / "src"]
+    roots = [root_path, root_path / "src"]
     module_path: Path | None = None
     for root in roots:
         candidate = root.joinpath(*module_path_parts)
@@ -585,35 +890,99 @@ def _candidate_seed_files(module_name: str) -> tuple[tuple[Path, ...], tuple[Pat
     return tuple(test_files), tuple(project_files)
 
 
+def _candidate_seed_files(module_name: str) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    """Return likely test files and project call-site files for *module_name*."""
+    return _candidate_seed_files_cached(module_name, str(Path.cwd().resolve()))
+
+
 def _fixture_literals_for_params(
     param_names: set[str],
     files: Sequence[Path],
 ) -> dict[str, list[Any]]:
     """Return literal pytest fixture values keyed by matching parameter name."""
-    fixtures: dict[str, list[Any]] = {name: [] for name in param_names}
-    for path in files:
-        tree = _parse_python_source(str(path))
-        if tree is None:
+    fixtures: dict[str, list[Any]] = {}
+    catalog = _pytest_fixture_catalog(
+        tuple(str(path.resolve()) for path in files if path.exists())
+    )
+    for name in sorted(param_names):
+        values = list(catalog.get(name, {}).get("values", ()))
+        if values:
+            fixtures[name] = values
+    return fixtures
+
+
+def _seed_value_from_node(
+    node: ast.AST,
+    *,
+    bindings: Mapping[str, Any] | None = None,
+) -> Any:
+    """Resolve a seed value from a literal node or a bound local name."""
+    if isinstance(node, ast.Name) and bindings and node.id in bindings:
+        return bindings[node.id]
+    return _literal_ast_value(node)
+
+
+def _parametrize_arg_names(node: ast.AST) -> list[str]:
+    """Return parameter names from a ``pytest.mark.parametrize`` decorator."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [item.strip() for item in node.value.split(",") if item.strip()]
+    if isinstance(node, (ast.Tuple, ast.List)):
+        names: list[str] = []
+        for item in node.elts:
+            if isinstance(item, ast.Constant) and isinstance(item.value, str):
+                text = item.value.strip()
+                if text:
+                    names.append(text)
+        return names
+    return []
+
+
+def _parametrize_bindings(values_node: ast.AST, names: Sequence[str]) -> list[dict[str, Any]]:
+    """Return literal binding rows from a ``pytest.mark.parametrize`` value node."""
+    if not names:
+        return []
+    rows_value = _literal_ast_value(values_node)
+    if rows_value is _MISSING:
+        return []
+    if len(names) == 1 and not isinstance(rows_value, (list, tuple)):
+        return [{names[0]: rows_value}]
+    rows = list(rows_value) if isinstance(rows_value, (list, tuple)) else [rows_value]
+    bindings: list[dict[str, Any]] = []
+    for row in rows:
+        if len(names) == 1:
+            bindings.append({names[0]: row})
             continue
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            name = node.name
-            if name not in param_names:
-                continue
-            if not any(
-                isinstance(decorator, ast.Call)
-                and _call_name(decorator.func) == "pytest.fixture"
-                or _call_name(decorator) == "pytest.fixture"
-                for decorator in node.decorator_list
-            ):
-                continue
-            for stmt in node.body:
-                if isinstance(stmt, ast.Return) and stmt.value is not None:
-                    value = _literal_ast_value(stmt.value)
-                    if value is not _MISSING and value not in fixtures[name]:
-                        fixtures[name].append(value)
-    return {name: values for name, values in fixtures.items() if values}
+        if not isinstance(row, (list, tuple)) or len(row) != len(names):
+            continue
+        bindings.append(dict(zip(names, row, strict=False)))
+    return bindings
+
+
+def _function_parametrize_bindings(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> list[dict[str, Any]]:
+    """Return merged literal binding rows for one parametrized test function."""
+    cases: list[dict[str, Any]] = [{}]
+    for decorator in node.decorator_list:
+        if not isinstance(decorator, ast.Call):
+            continue
+        if _call_name(decorator.func) not in {"pytest.mark.parametrize", "mark.parametrize"}:
+            continue
+        if len(decorator.args) < 2:
+            continue
+        names = _parametrize_arg_names(decorator.args[0])
+        rows = _parametrize_bindings(decorator.args[1], names) if names else []
+        if not names or not rows:
+            continue
+        expanded: list[dict[str, Any]] = []
+        for base in cases:
+            for row in rows:
+                merged = dict(base)
+                merged.update(row)
+                expanded.append(merged)
+        if expanded:
+            cases = expanded
+    return cases or [{}]
 
 
 def _call_seed_examples_from_files(
@@ -623,7 +992,8 @@ def _call_seed_examples_from_files(
     source: str,
 ) -> list[SeedExample]:
     """Extract literal call examples for *func* from Python files."""
-    target = _unwrap(func)
+    callable_obj = func
+    target = _unwrap(callable_obj)
     try:
         sig = inspect.signature(target)
     except Exception:
@@ -633,79 +1003,142 @@ def _call_seed_examples_from_files(
     leaf_name = getattr(target, "__name__", "")
     if not module_name or not leaf_name:
         return []
+    method_name = str(getattr(callable_obj, "__ordeal_method_name__", leaf_name) or leaf_name)
+    owner = getattr(callable_obj, "__ordeal_owner__", None)
+    callable_kind = getattr(callable_obj, "__ordeal_kind__", None)
+    class_tokens = {
+        token.lower()
+        for token in (
+            [getattr(owner, "__name__", "")] + _camel_case_tokens(getattr(owner, "__name__", ""))
+        )
+        if token
+    }
 
     param_names = [name for name in sig.parameters if name not in {"self", "cls"}]
     if not param_names:
         return []
+    hidden_state_param = None
+    if getattr(callable_obj, "__ordeal_state_factory__", None) is not None:
+        hidden_state_param = getattr(callable_obj, "__ordeal_state_param__", None)
 
     examples: list[SeedExample] = []
+    fixture_paths: set[Path] = {path.resolve() for path in files if path.exists()}
+    for path in list(fixture_paths):
+        for parent in [path.parent, *path.parents]:
+            candidate = parent / "conftest.py"
+            if candidate.exists():
+                fixture_paths.add(candidate.resolve())
+            if parent.resolve() == Path.cwd().resolve():
+                break
+    fixture_catalog = _pytest_fixture_catalog(tuple(str(path) for path in sorted(fixture_paths)))
     for path in files:
         tree = _parse_python_source(str(path))
         if tree is None:
             continue
 
-        module_aliases: set[str] = set()
-        imported_names: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.name == module_name:
-                        module_aliases.add(alias.asname or alias.name.split(".")[-1])
-            elif isinstance(node, ast.ImportFrom):
-                if node.module == module_name:
-                    for alias in node.names:
-                        imported_names.add(alias.asname or alias.name)
+        module_aliases, imported_names, class_aliases = _class_import_aliases(
+            tree,
+            module_name=module_name,
+            class_name=getattr(owner, "__name__", None),
+        )
+        factory_names = _factory_like_helper_names(
+            tree,
+            class_tokens=class_tokens,
+            fixture_catalog=fixture_catalog,
+        )
 
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func_name = _call_name(node.func)
-            if func_name is None:
-                continue
-            matched = func_name == leaf_name or func_name.split(".")[-1] == leaf_name
-            if not matched:
-                continue
-            if (
-                "." in func_name
-                and func_name.split(".", 1)[0] not in module_aliases
-                and func_name.split(".")[-1] != leaf_name
-            ):
-                continue
-            if "." not in func_name and imported_names and func_name not in imported_names:
-                continue
-
-            kwargs: dict[str, Any] = {}
-            positional_params = iter(param_names)
-            supported = True
-            for arg in node.args:
-                param_name = next(positional_params, None)
-                if param_name is None:
-                    supported = False
-                    break
-                value = _literal_ast_value(arg)
-                if value is _MISSING:
-                    supported = False
-                    break
-                kwargs[param_name] = value
-            if not supported:
-                continue
-            for kw in node.keywords:
-                if kw.arg is None:
-                    supported = False
-                    break
-                value = _literal_ast_value(kw.value)
-                if value is _MISSING:
-                    supported = False
-                    break
-                kwargs[kw.arg] = value
-            if not supported or not kwargs:
-                continue
-            _append_seed_example(
-                examples,
-                kwargs=kwargs,
-                source=source,
-                evidence=f"{path.name}:{getattr(node, 'lineno', 0)}",
+        scopes: list[tuple[ast.AST, list[dict[str, Any]]]] = [(tree, [{}])]
+        scopes.extend(
+            (node, _function_parametrize_bindings(node))
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        )
+        for scope, bindings_list in scopes:
+            base_bindings = _scope_literal_bindings(scope, fixture_catalog)
+            instance_names = _scope_instance_names(
+                scope,
+                class_tokens=class_tokens,
+                class_aliases=class_aliases,
+                factory_names=factory_names,
+                fixture_catalog=fixture_catalog,
             )
+            for stmt in _iter_scope_statements(scope):
+                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    continue
+                for node in ast.walk(stmt):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    if callable_kind == "instance":
+                        matched = _call_matches_bound_method(
+                            node,
+                            method_name=method_name,
+                            instance_names=instance_names,
+                            class_aliases=class_aliases,
+                            factory_names=factory_names,
+                        )
+                    else:
+                        func_name = _call_name(node.func)
+                        if func_name is None:
+                            continue
+                        matched = func_name == leaf_name or func_name.split(".")[-1] == leaf_name
+                        if not matched:
+                            continue
+                        if (
+                            "." in func_name
+                            and func_name.split(".", 1)[0] not in module_aliases
+                            and func_name.split(".")[-1] != leaf_name
+                        ):
+                            continue
+                        if (
+                            "." not in func_name
+                            and imported_names
+                            and func_name not in imported_names
+                        ):
+                            continue
+
+                    if not matched:
+                        continue
+
+                    for bindings in bindings_list or [{}]:
+                        merged_bindings = dict(base_bindings)
+                        merged_bindings.update(bindings)
+                        kwargs: dict[str, Any] = {}
+                        positional_params = iter(param_names)
+                        supported = True
+                        call_args = list(node.args)
+                        if hidden_state_param and len(call_args) == len(param_names) + 1:
+                            call_args = call_args[1:]
+                        for arg in call_args:
+                            param_name = next(positional_params, None)
+                            if param_name is None:
+                                supported = False
+                                break
+                            value = _seed_value_from_node(arg, bindings=merged_bindings)
+                            if value is _MISSING:
+                                supported = False
+                                break
+                            kwargs[param_name] = value
+                        if not supported:
+                            continue
+                        for kw in node.keywords:
+                            if kw.arg is None:
+                                supported = False
+                                break
+                            if hidden_state_param and kw.arg == hidden_state_param:
+                                continue
+                            value = _seed_value_from_node(kw.value, bindings=merged_bindings)
+                            if value is _MISSING:
+                                supported = False
+                                break
+                            kwargs[kw.arg] = value
+                        if not supported or not kwargs:
+                            continue
+                        _append_seed_example(
+                            examples,
+                            kwargs=kwargs,
+                            source=source,
+                            evidence=f"{path.name}:{getattr(node, 'lineno', 0)}",
+                        )
     return examples
 
 
@@ -1059,12 +1492,32 @@ def _infer_sink_categories(func: Any) -> list[str]:
         ),
         (
             "json_tool_call",
-            ("json", "tool_call", "tool_calls", "normalize"),
-            {"message", "messages", "response", "tool_call"},
+            (
+                "json.dumps",
+                "json.dump",
+                "json.loads",
+                "json.load",
+                "tool_call",
+                "tool_calls",
+                "response.json",
+                "request.json",
+                "model_dump",
+                "model_validate_json",
+            ),
+            {"payload", "tool_call", "tool_calls"},
         ),
         (
             "http",
-            ("headers", "request", "response", "body", "http"),
+            (
+                "http://",
+                "https://",
+                "httpx.",
+                "requests.",
+                "aiohttp",
+                "status_code",
+                ".headers",
+                "content-type",
+            ),
             {"headers", "body", "payload", "request"},
         ),
         (
@@ -2124,6 +2577,194 @@ def _call_with_optional_instance_arg(hook: Any, instance: Any) -> Any:
     return _call_sync(hook)
 
 
+def _python_source_path_to_module_name(path_str: str) -> str | None:
+    """Convert a project-relative Python path into an importable module name."""
+    path = Path(path_str)
+    if path.suffix != ".py":
+        return None
+    for root in (Path.cwd() / "src", Path.cwd()):
+        with contextlib.suppress(ValueError):
+            rel = path.resolve().relative_to(root.resolve())
+            rel_parts = rel.parts[:-1] if rel.name == "__init__.py" else rel.with_suffix("").parts
+            if rel_parts:
+                return ".".join(rel_parts)
+    return None
+
+
+def _resolve_symbol_path(path: str) -> Any:
+    """Resolve ``module:attr`` or dotted import paths into Python objects."""
+    import importlib.util
+
+    module_name, sep, attr_path = path.partition(":")
+    candidate_file = Path(module_name)
+    if sep and (
+        candidate_file.suffix == ".py"
+        or candidate_file.exists()
+        or module_name.startswith("./")
+        or module_name.startswith("../")
+    ):
+        file_path = candidate_file
+        if not file_path.is_absolute():
+            file_path = (Path.cwd() / file_path).resolve()
+        if not file_path.exists():
+            raise ValueError(f"invalid symbol path: {path!r}")
+        spec = importlib.util.spec_from_file_location(
+            f"_ordeal_symbol_{abs(hash((str(file_path), attr_path)))}",
+            file_path,
+        )
+        if spec is None or spec.loader is None:
+            raise ValueError(f"invalid symbol path: {path!r}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        obj: Any = module
+        for part in attr_path.split("."):
+            obj = getattr(obj, part)
+        return obj
+    if not sep:
+        module_name, _, attr_path = path.rpartition(".")
+    if not module_name or not attr_path:
+        raise ValueError(f"invalid symbol path: {path!r}")
+    obj = importlib.import_module(module_name)
+    for part in attr_path.split("."):
+        obj = getattr(obj, part)
+    return obj
+
+
+def _hint_symbol_path(value: object) -> str | None:
+    """Normalize one mined hint value into an importable symbol path when possible."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or text.lower().startswith("docs mention "):
+        return None
+    match = re.match(r"^(?P<path>.+?\.py):(?P<line>\d+):(?P<name>[A-Za-z_][\w]*)$", text)
+    if match is None:
+        return text if ":" in text or "." in text else None
+    module_name = _python_source_path_to_module_name(match.group("path"))
+    if module_name is None:
+        return None
+    return f"{module_name}:{match.group('name')}"
+
+
+def _scenario_pack_from_hint(hint: HarnessHint) -> str | None:
+    """Infer one built-in scenario pack from a mined collaborator hint."""
+    text = " ".join(
+        [
+            hint.kind,
+            hint.suggestion,
+            hint.evidence,
+            str(hint.config.get("value", "")) if isinstance(hint.config, Mapping) else "",
+        ]
+    ).lower()
+    if any(token in text for token in ("sandbox", "execute_command", "upload_content")):
+        return "sandbox_client"
+    if any(token in text for token in ("artifact", "storage", "download", "upload")):
+        return "upload_download"
+    if any(token in text for token in ("http", "request", "session", "transport")):
+        return "http_client"
+    if any(token in text for token in ("state_store", "session_state", "cache", "store")):
+        return "state_store"
+    if any(token in text for token in ("subprocess", "runner", "popen", "command_runner")):
+        return "subprocess"
+    return None
+
+
+def _single_resolved_hint(
+    hints: Sequence[HarnessHint],
+    *,
+    kind: str,
+    min_confidence: float,
+) -> tuple[Any | None, HarnessHint | None]:
+    """Resolve one high-confidence unique mined hook for *kind*."""
+    resolved: dict[str, tuple[Any, HarnessHint]] = {}
+    for hint in hints:
+        if hint.kind != kind or float(hint.confidence) < min_confidence:
+            continue
+        symbol_path = _hint_symbol_path(getattr(hint, "config", {}).get("value"))
+        if symbol_path is None:
+            continue
+        try:
+            obj = _resolve_symbol_path(symbol_path)
+        except Exception:
+            continue
+        resolved.setdefault(symbol_path, (obj, hint))
+    if len(resolved) != 1:
+        return None, None
+    return next(iter(resolved.values()))
+
+
+def _single_scenario_pack_hint(
+    hints: Sequence[HarnessHint],
+    *,
+    min_confidence: float,
+) -> tuple[tuple[Any, ...], HarnessHint | None]:
+    """Resolve one high-confidence built-in scenario pack from mined hints."""
+    packs: dict[str, HarnessHint] = {}
+    for hint in hints:
+        if float(hint.confidence) < min_confidence:
+            continue
+        if hint.kind == "scenario_pack":
+            raw_value = getattr(hint, "config", {}).get("value")
+            values = (
+                list(raw_value)
+                if isinstance(raw_value, Sequence)
+                and not isinstance(raw_value, (str, bytes, bytearray))
+                else [raw_value]
+            )
+            for value in values:
+                if not isinstance(value, str):
+                    continue
+                pack = value.strip()
+                if _builtin_object_scenario_hook(pack) is not None:
+                    packs.setdefault(pack, hint)
+        elif hint.kind == "client_fixture":
+            pack = _scenario_pack_from_hint(hint)
+            if pack:
+                packs.setdefault(pack, hint)
+    if len(packs) != 1:
+        return (), None
+    pack_name, hint = next(iter(packs.items()))
+    hook = _builtin_object_scenario_hook(pack_name)
+    if hook is None:
+        return (), None
+    return (hook,), hint
+
+
+def _mined_object_runtime(owner: type, method_name: str) -> AutoObjectRuntime:
+    """Resolve one conservative object runtime from mined harness hints."""
+    hints = tuple(_mine_object_harness_hints(owner.__module__, owner.__name__, method_name))
+    factory, factory_hint = _single_resolved_hint(hints, kind="factory", min_confidence=0.85)
+    setup, setup_hint = _single_resolved_hint(hints, kind="setup", min_confidence=0.8)
+    state_factory, state_hint = _single_resolved_hint(
+        hints,
+        kind="state_factory",
+        min_confidence=0.8,
+    )
+    teardown, teardown_hint = _single_resolved_hint(hints, kind="teardown", min_confidence=0.75)
+    scenarios, scenario_hint = _single_scenario_pack_hint(hints, min_confidence=0.75)
+    harness = (
+        "stateful"
+        if state_factory is not None or setup is not None or teardown is not None or scenarios
+        else None
+    )
+    harness_source = "mined" if harness is not None else None
+    return AutoObjectRuntime(
+        factory=factory,
+        factory_source="mined" if factory_hint is not None else None,
+        setup=setup,
+        setup_source="mined" if setup_hint is not None else None,
+        state_factory=state_factory,
+        state_factory_source="mined" if state_hint is not None else None,
+        teardown=teardown,
+        teardown_source="mined" if teardown_hint is not None else None,
+        scenarios=scenarios,
+        scenario_source="mined" if scenario_hint is not None else None,
+        harness=harness,
+        harness_source=harness_source,
+        hints=hints,
+    )
+
+
 def _build_state_value(
     state_factory: Any | None,
     *,
@@ -2338,6 +2979,31 @@ def _resolve_method_callable(
     state_factory = _resolve_object_hook(owner, object_state_factories)
     teardown = _resolve_object_hook(owner, object_teardowns)
     harness = _resolve_object_harness(owner, object_harnesses)
+    factory_source = "configured" if factory is not None else None
+    setup_source = "configured" if setup is not None else None
+    scenario_source = "configured" if scenarios else None
+    state_factory_source = "configured" if state_factory is not None else None
+    teardown_source = "configured" if teardown is not None else None
+    harness_source = "configured" if harness != "fresh" else None
+    mined_runtime = _mined_object_runtime(owner, method_name)
+    if factory is None and mined_runtime.factory is not None:
+        factory = mined_runtime.factory
+        factory_source = mined_runtime.factory_source
+    if setup is None and mined_runtime.setup is not None:
+        setup = mined_runtime.setup
+        setup_source = mined_runtime.setup_source
+    if not scenarios and mined_runtime.scenarios:
+        scenarios = mined_runtime.scenarios
+        scenario_source = mined_runtime.scenario_source
+    if state_factory is None and mined_runtime.state_factory is not None:
+        state_factory = mined_runtime.state_factory
+        state_factory_source = mined_runtime.state_factory_source
+    if teardown is None and mined_runtime.teardown is not None:
+        teardown = mined_runtime.teardown
+        teardown_source = mined_runtime.teardown_source
+    if harness == "fresh" and mined_runtime.harness is not None:
+        harness = mined_runtime.harness
+        harness_source = mined_runtime.harness_source
     state_param = _state_param_name_for_callable(raw_attr)
     if inspect.isfunction(raw_attr):
         if factory is None:
@@ -2349,6 +3015,8 @@ def _resolve_method_callable(
                     raw_attr,
                     state_param=state_param,
                     state_factory=state_factory,
+                    state_factory_source=state_factory_source,
+                    harness_hints=mined_runtime.hints,
                 ),
             )
         return (
@@ -2364,6 +3032,13 @@ def _resolve_method_callable(
                 state_param=state_param,
                 teardown=teardown,
                 harness=harness,
+                harness_hints=mined_runtime.hints,
+                factory_source=factory_source,
+                setup_source=setup_source,
+                scenario_source=scenario_source,
+                state_factory_source=state_factory_source,
+                teardown_source=teardown_source,
+                harness_source=harness_source,
             ),
         )
 
@@ -2382,6 +3057,13 @@ def _make_bound_method_callable(
     state_param: str | None = None,
     teardown: Any | None = None,
     harness: str = "fresh",
+    harness_hints: Sequence[HarnessHint] | None = None,
+    factory_source: str | None = None,
+    setup_source: str | None = None,
+    scenario_source: str | None = None,
+    state_factory_source: str | None = None,
+    teardown_source: str | None = None,
+    harness_source: str | None = None,
 ) -> Any:
     """Build a sync wrapper that creates a fresh object per invocation."""
     target = _unwrap(method)
@@ -2476,19 +3158,36 @@ def _make_bound_method_callable(
     wrapped.__ordeal_owner__ = owner
     wrapped.__ordeal_method_name__ = method_name
     wrapped.__ordeal_factory__ = factory
+    wrapped.__ordeal_factory_source__ = factory_source
     wrapped.__ordeal_setup__ = setup
+    wrapped.__ordeal_setup_source__ = setup_source
     wrapped.__ordeal_scenario__ = (scenarios or (None,))[0]
     wrapped.__ordeal_scenarios__ = tuple(scenarios or ())
+    wrapped.__ordeal_scenario_source__ = scenario_source
     wrapped.__ordeal_state_factory__ = state_factory
+    wrapped.__ordeal_state_factory_source__ = state_factory_source
     wrapped.__ordeal_state_param__ = state_param
     wrapped.__ordeal_teardown__ = teardown
+    wrapped.__ordeal_teardown_source__ = teardown_source
     wrapped.__ordeal_harness__ = harness
+    wrapped.__ordeal_harness_source__ = harness_source
     wrapped.__ordeal_kind__ = "instance"
     wrapped.__ordeal_lifecycle_phase__ = lifecycle_phase
     wrapped.__ordeal_keep_wrapped__ = True
     wrapped.__ordeal_instance_probe__ = None
+    wrapped.__ordeal_auto_harness__ = any(
+        source == "mined"
+        for source in (
+            factory_source,
+            setup_source,
+            scenario_source,
+            state_factory_source,
+            teardown_source,
+            harness_source,
+        )
+    )
     wrapped.__ordeal_harness_hints__ = tuple(
-        _mine_object_harness_hints(owner.__module__, owner.__name__, method_name)
+        harness_hints or _mine_object_harness_hints(owner.__module__, owner.__name__, method_name)
     )
     return wrapped
 
@@ -2500,6 +3199,8 @@ def _make_unbound_method_placeholder(
     *,
     state_param: str | None = None,
     state_factory: Any | None = None,
+    state_factory_source: str | None = None,
+    harness_hints: Sequence[HarnessHint] | None = None,
 ) -> Any:
     """Build a placeholder callable for a method that still needs a factory."""
     target = _unwrap(method)
@@ -2518,14 +3219,21 @@ def _make_unbound_method_placeholder(
     wrapped.__ordeal_method_name__ = method_name
     wrapped.__ordeal_kind__ = "instance"
     wrapped.__ordeal_harness__ = "fresh"
+    wrapped.__ordeal_harness_source__ = None
     wrapped.__ordeal_state_factory__ = state_factory
+    wrapped.__ordeal_state_factory_source__ = state_factory_source
     wrapped.__ordeal_state_param__ = state_param
     wrapped.__ordeal_lifecycle_phase__ = _lifecycle_phase(method_name, target)
     wrapped.__ordeal_skip_reason__ = "missing object factory"
     wrapped.__ordeal_keep_wrapped__ = True
     wrapped.__ordeal_instance_probe__ = None
+    wrapped.__ordeal_auto_harness__ = False
+    wrapped.__ordeal_factory_source__ = None
+    wrapped.__ordeal_setup_source__ = None
+    wrapped.__ordeal_scenario_source__ = None
+    wrapped.__ordeal_teardown_source__ = None
     wrapped.__ordeal_harness_hints__ = tuple(
-        _mine_object_harness_hints(owner.__module__, owner.__name__, method_name)
+        harness_hints or _mine_object_harness_hints(owner.__module__, owner.__name__, method_name)
     )
     wrapped.__ordeal_scenarios__ = ()
     return wrapped
@@ -3595,16 +4303,229 @@ def _harness_doc_files(module_name: str) -> list[Path]:
     return sorted(candidates)
 
 
-@functools.lru_cache(maxsize=128)
-def _mine_object_harness_hints(
+_SCENARIO_PACK_ATTR_ALIASES: dict[str, str] = {
+    "artifact_client": "upload_download",
+    "cache": "state_store",
+    "command_runner": "subprocess",
+    "downloader": "upload_download",
+    "executor": "subprocess",
+    "http_client": "http",
+    "process_runner": "subprocess",
+    "runner": "subprocess",
+    "sandbox": "sandbox_client",
+    "sandbox_client": "sandbox_client",
+    "session": "http",
+    "session_state": "state_store",
+    "state_store": "state_store",
+    "storage_client": "upload_download",
+    "store": "state_store",
+    "subprocess": "subprocess",
+    "transport": "http",
+    "upload_download": "upload_download",
+    "uploader": "upload_download",
+}
+
+
+def _constructor_aliases(
+    tree: ast.AST,
+    module_name: str,
+    class_name: str,
+) -> tuple[set[str], set[str]]:
+    """Return direct and module aliases that may construct *class_name*."""
+    direct = {class_name}
+    module_aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == module_name:
+                    module_aliases.add(alias.asname or alias.name.rsplit(".", 1)[-1])
+        elif isinstance(node, ast.ImportFrom):
+            imported_module = node.module or ""
+            for alias in node.names:
+                if imported_module == module_name and alias.name == class_name:
+                    direct.add(alias.asname or alias.name)
+                elif f"{imported_module}.{alias.name}" == module_name:
+                    module_aliases.add(alias.asname or alias.name)
+    return direct, module_aliases
+
+
+def _call_looks_like_target_constructor(
+    call: ast.Call,
+    *,
+    direct_aliases: set[str],
+    module_aliases: set[str],
+    class_name: str,
+) -> bool:
+    """Return whether *call* looks like ``ClassName(...)`` for the target."""
+    func_name = _call_name(call.func)
+    if func_name is None:
+        return False
+    if func_name in direct_aliases or func_name == class_name:
+        return True
+    if "." not in func_name:
+        return False
+    head, tail = func_name.rsplit(".", 1)
+    return tail == class_name and head in module_aliases
+
+
+def _names_returning_target_instance(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    *,
+    direct_aliases: set[str],
+    module_aliases: set[str],
+    class_name: str,
+) -> set[str]:
+    """Return local names within *node* that hold a target instance."""
+    names: set[str] = set()
+    for child in ast.walk(node):
+        value: ast.AST | None = None
+        targets: list[ast.expr] = []
+        if isinstance(child, ast.Assign):
+            value = child.value
+            targets = list(child.targets)
+        elif isinstance(child, ast.AnnAssign):
+            value = child.value
+            targets = [child.target]
+        if value is None or not isinstance(value, ast.Call):
+            continue
+        if not _call_looks_like_target_constructor(
+            value,
+            direct_aliases=direct_aliases,
+            module_aliases=module_aliases,
+            class_name=class_name,
+        ):
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                names.add(target.id)
+    return names
+
+
+def _function_returns_target_instance(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    *,
+    direct_aliases: set[str],
+    module_aliases: set[str],
+    class_name: str,
+) -> tuple[bool, set[str]]:
+    """Return whether *node* returns a target instance and the local instance names."""
+    instance_names = _names_returning_target_instance(
+        node,
+        direct_aliases=direct_aliases,
+        module_aliases=module_aliases,
+        class_name=class_name,
+    )
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Return) or child.value is None:
+            continue
+        if isinstance(child.value, ast.Name) and child.value.id in instance_names:
+            return True, instance_names
+        if isinstance(child.value, ast.Call) and _call_looks_like_target_constructor(
+            child.value,
+            direct_aliases=direct_aliases,
+            module_aliases=module_aliases,
+            class_name=class_name,
+        ):
+            return True, instance_names
+    return False, instance_names
+
+
+def _instance_attr_names(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    *,
+    instance_names: set[str],
+) -> set[str]:
+    """Return collaborator attr names assigned on local instance variables."""
+    attrs: set[str] = set()
+    if not instance_names:
+        return attrs
+    for child in ast.walk(node):
+        targets: list[ast.expr] = []
+        if isinstance(child, ast.Assign):
+            targets = list(child.targets)
+        elif isinstance(child, ast.AnnAssign):
+            targets = [child.target]
+        for target in targets:
+            if (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id in instance_names
+            ):
+                attrs.add(target.attr)
+    return attrs
+
+
+def _scenario_packs_for_attrs(attr_names: set[str]) -> list[str]:
+    """Return built-in scenario packs implied by observed collaborator attrs."""
+    packs: list[str] = []
+    for attr_name in sorted(attr_names):
+        pack = _SCENARIO_PACK_ATTR_ALIASES.get(attr_name)
+        if pack is not None and pack not in packs:
+            packs.append(pack)
+    return packs
+
+
+def _source_collaborator_attrs(
     module_name: str,
     class_name: str,
     method_name: str,
+) -> tuple[set[str], str | None]:
+    """Return ``self.<attr>`` names used in the target method source."""
+    try:
+        module = importlib.import_module(module_name)
+        owner = getattr(module, class_name)
+        method = getattr(owner, method_name)
+        source_file = _source_file_for_callable(method)
+        source_text = inspect.getsource(method)
+    except Exception:
+        return set(), None
+
+    try:
+        tree = ast.parse(textwrap.dedent(source_text))
+    except SyntaxError:
+        return set(), None
+
+    attrs = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id in {"self", "instance", "env", "obj"}
+    }
+    if source_file is None:
+        return attrs, None
+    try:
+        return attrs, str(source_file.relative_to(Path.cwd()))
+    except ValueError:
+        return attrs, str(source_file)
+
+
+@functools.lru_cache(maxsize=128)
+def _mine_object_harness_hints_cached(
+    module_name: str,
+    class_name: str,
+    method_name: str,
+    workspace_root: str,
 ) -> tuple[HarnessHint, ...]:
     """Mine likely factory/state/teardown/client hooks from tests and docs."""
     class_tokens = {class_name.lower(), *(_camel_case_tokens(class_name))}
     method_tokens = {method_name.lower(), *(_camel_case_tokens(method_name))}
     target_tokens = class_tokens | method_tokens
+    state_param_name: str | None = None
+    collaborator_packs: list[str] = []
+    collaborator_evidence: str | None = None
+    with contextlib.suppress(Exception):
+        module = importlib.import_module(module_name)
+        owner = getattr(module, class_name)
+        if inspect.getattr_static(owner, method_name, None) is not None:
+            state_param_name = _state_param_name_for_callable(getattr(owner, method_name))
+        source_attrs, source_path = _source_collaborator_attrs(
+            module_name,
+            class_name,
+            method_name,
+        )
+        collaborator_packs = _scenario_packs_for_attrs(source_attrs)
+        collaborator_evidence = source_path
     hints: list[HarnessHint] = []
     seen: set[tuple[str, str]] = set()
 
@@ -3639,10 +4560,15 @@ def _mine_object_harness_hints(
                 if resolved.is_file() and resolved not in support_files:
                     support_files.append(resolved)
 
+    fixture_catalog = _pytest_fixture_catalog(
+        tuple(str(path.resolve()) for path in support_files if path.exists())
+    )
+
     for path in sorted(dict.fromkeys(support_files)):
         tree = _parse_python_source(str(path))
         if tree is None:
             continue
+        direct_aliases, module_aliases = _constructor_aliases(tree, module_name, class_name)
         try:
             display_path = path.relative_to(Path.cwd())
         except ValueError:
@@ -3665,53 +4591,121 @@ def _mine_object_harness_hints(
                 for decorator in node.decorator_list
             )
             evidence = f"{display_path}:{getattr(node, 'lineno', '?')}"
+            fixture_info = fixture_catalog.get(node.name, {})
+            symbol_value = str(fixture_info.get("symbol") or _symbol_hint_value(path, node.name))
+            fixture_values = list(fixture_info.get("values", ()))
+            returns_mapping = any(isinstance(value, Mapping) for value in fixture_values) or (
+                "dict" in returns_lower or "mapping" in returns_lower
+            )
             mentions_target = any(token in text_lower for token in target_tokens)
-
-            if mentions_target and (
+            returns_target, instance_names = _function_returns_target_instance(
+                node,
+                direct_aliases=direct_aliases,
+                module_aliases=module_aliases,
+                class_name=class_name,
+            )
+            returns_target = returns_target or _matches_target_fixture(
+                fixture_info,
+                class_tokens=class_tokens,
+            )
+            attr_packs = _scenario_packs_for_attrs(
+                _instance_attr_names(node, instance_names=instance_names)
+            )
+            state_like_name = any(
+                token in name_lower for token in ("state", "context", "cache")
+            )
+            looks_like_factory = (
                 name_lower.startswith(("make_", "build_", "create_", "new_"))
                 or "factory" in name_lower
+            )
+
+            if returns_target or (
+                mentions_target
+                and looks_like_factory
+                and not state_like_name
+                and not returns_mapping
             ):
                 _add_hint(
                     "factory",
                     f"[[objects]] factory -> {evidence}:{node.name}",
+                    evidence,
+                    0.95 if returns_target else 0.9,
+                    config={
+                        "section": "[[objects]]",
+                        "target": f"{module_name}:{class_name}",
+                        "method": method_name,
+                        "key": "factory",
+                        "value": symbol_value,
+                    },
+                )
+            if (
+                "state" in text_lower
+                and (mentions_target or (state_param_name is not None and returns_target))
+            ) or (
+                state_param_name is not None
+                and (name_lower == state_param_name.lower() or "state" in name_lower)
+            ) or (
+                state_param_name is not None
+                and returns_mapping
+                and any(token in name_lower for token in ("state", "context", "cache"))
+            ):
+                _add_hint(
+                    "state_factory",
+                    f"[[objects]] state_factory -> {evidence}:{node.name}",
+                    evidence,
+                    0.9 if returns_target or returns_mapping else 0.85,
+                    config={
+                        "section": "[[objects]]",
+                        "target": f"{module_name}:{class_name}",
+                        "method": method_name,
+                        "key": "state_factory",
+                        "value": symbol_value,
+                    },
+                )
+            if mentions_target and any(
+                token in name_lower for token in ("setup", "prepare", "prime", "initialize")
+            ):
+                _add_hint(
+                    "setup",
+                    f"[[objects]] setup -> {evidence}:{node.name}",
+                    evidence,
+                    0.82,
+                    config={
+                        "section": "[[objects]]",
+                        "target": f"{module_name}:{class_name}",
+                        "method": method_name,
+                        "key": "setup",
+                        "value": symbol_value,
+                    },
+                )
+            if returns_target and attr_packs:
+                _add_hint(
+                    "scenario_pack",
+                    f"[[objects]] scenarios -> {attr_packs!r}",
                     evidence,
                     0.9,
                     config={
                         "section": "[[objects]]",
                         "target": f"{module_name}:{class_name}",
                         "method": method_name,
-                        "key": "factory",
-                        "value": f"{evidence}:{node.name}",
+                        "key": "scenarios",
+                        "value": attr_packs,
                     },
                 )
-            if mentions_target and "state" in text_lower:
-                _add_hint(
-                    "state_factory",
-                    f"[[objects]] state_factory -> {evidence}:{node.name}",
-                    evidence,
-                    0.85,
-                    config={
-                        "section": "[[objects]]",
-                        "target": f"{module_name}:{class_name}",
-                        "method": method_name,
-                        "key": "state_factory",
-                        "value": f"{evidence}:{node.name}",
-                    },
-                )
-            if mentions_target and any(
+            if (mentions_target and any(
                 token in text_lower for token in ("teardown", "cleanup", "close", "stop")
-            ):
+            )) or bool(fixture_info.get("yield_cleanup")):
                 _add_hint(
                     "teardown",
                     f"[[objects]] teardown -> {evidence}:{node.name}",
                     evidence,
-                    0.8,
+                    0.9 if fixture_info.get("yield_cleanup") else 0.8,
                     config={
                         "section": "[[objects]]",
                         "target": f"{module_name}:{class_name}",
                         "method": method_name,
                         "key": "teardown",
-                        "value": f"{evidence}:{node.name}",
+                        "value": symbol_value,
                     },
                 )
             if is_fixture and any(
@@ -3727,9 +4721,24 @@ def _mine_object_harness_hints(
                         "target": f"{module_name}:{class_name}",
                         "method": method_name,
                         "key": "scenarios",
-                        "value": [f"{evidence}:{node.name}"],
+                        "value": [symbol_value],
                     },
                 )
+
+    if collaborator_packs:
+        _add_hint(
+            "scenario_pack",
+            f"[[objects]] scenarios -> {collaborator_packs!r}",
+            collaborator_evidence or f"{module_name}.{class_name}.{method_name}",
+            0.7,
+            config={
+                "section": "[[objects]]",
+                "target": f"{module_name}:{class_name}",
+                "method": method_name,
+                "key": "scenarios",
+                "value": collaborator_packs,
+            },
+        )
 
     for path in _harness_doc_files(module_name):
         try:
@@ -3761,6 +4770,20 @@ def _mine_object_harness_hints(
                         "value": "docs mention state setup for this target",
                     },
                 )
+            if any(token in line for token in ("setup", "prepare", "initialize", "prime")):
+                _add_hint(
+                    "setup",
+                    "docs mention setup/prepare hooks for this target",
+                    evidence,
+                    0.55,
+                    config={
+                        "section": "[[objects]]",
+                        "target": f"{module_name}:{class_name}",
+                        "method": method_name,
+                        "key": "setup",
+                        "value": "docs mention setup/prepare hooks for this target",
+                    },
+                )
             if any(token in line for token in ("teardown", "cleanup", "close", "stop")):
                 _add_hint(
                     "teardown",
@@ -3789,6 +4812,27 @@ def _mine_object_harness_hints(
                         "value": ["docs mention a client/session collaborator"],
                     },
                 )
+            doc_packs = _scenario_packs_for_attrs(
+                {
+                    attr_name
+                    for attr_name in _SCENARIO_PACK_ATTR_ALIASES
+                    if attr_name in line
+                }
+            )
+            if doc_packs:
+                _add_hint(
+                    "scenario_pack",
+                    f"[[objects]] scenarios -> {doc_packs!r}",
+                    evidence,
+                    0.5,
+                    config={
+                        "section": "[[objects]]",
+                        "target": f"{module_name}:{class_name}",
+                        "method": method_name,
+                        "key": "scenarios",
+                        "value": doc_packs,
+                    },
+                )
 
     return tuple(
         sorted(
@@ -3796,6 +4840,23 @@ def _mine_object_harness_hints(
             key=lambda item: (-float(item.confidence), item.kind, item.suggestion),
         )
     )
+
+
+def _mine_object_harness_hints(
+    module_name: str,
+    class_name: str,
+    method_name: str,
+) -> tuple[HarnessHint, ...]:
+    """Mine likely factory/state/teardown/client hooks from tests and docs."""
+    return _mine_object_harness_hints_cached(
+        module_name,
+        class_name,
+        method_name,
+        str(Path.cwd().resolve()),
+    )
+
+
+_mine_object_harness_hints.cache_clear = _mine_object_harness_hints_cached.cache_clear  # type: ignore[attr-defined]
 
 
 def _import_alias_maps(
@@ -3841,6 +4902,7 @@ def _call_kwargs_from_ast(
     call: ast.Call,
     *,
     signature: inspect.Signature,
+    bindings: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Convert a literal call site into concrete kwargs."""
     params = [
@@ -3860,14 +4922,18 @@ def _call_kwargs_from_ast(
 
     kwargs: dict[str, Any] = {}
     for param, arg in zip(positional_params, call.args, strict=False):
-        if not _is_simple_literal_node(arg):
+        value = _seed_value_from_node(arg, bindings=bindings)
+        if value is _MISSING:
             return None
-        kwargs[param.name] = _literal_seed_value(arg)
+        kwargs[param.name] = value
 
     for keyword in call.keywords:
-        if keyword.arg is None or not _is_simple_literal_node(keyword.value):
+        if keyword.arg is None:
             return None
-        kwargs[keyword.arg] = _literal_seed_value(keyword.value)
+        value = _seed_value_from_node(keyword.value, bindings=bindings)
+        if value is _MISSING:
+            return None
+        kwargs[keyword.arg] = value
 
     for param in params:
         if param.kind in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}:
@@ -3880,7 +4946,11 @@ def _call_kwargs_from_ast(
 
 
 @functools.lru_cache(maxsize=128)
-def _test_seed_examples(module_name: str, leaf_name: str) -> tuple[SeedExample, ...]:
+def _test_seed_examples_cached(
+    module_name: str,
+    leaf_name: str,
+    workspace_root: str,
+) -> tuple[SeedExample, ...]:
     """Extract literal call-site seeds for a top-level callable from test files."""
     try:
         module = importlib.import_module(module_name)
@@ -3899,31 +4969,47 @@ def _test_seed_examples(module_name: str, leaf_name: str) -> tuple[SeedExample, 
         module_aliases, function_aliases = _import_alias_maps(tree, module_name, leaf_name)
         if not module_aliases and not function_aliases:
             continue
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            if not _call_matches_target(
-                node,
-                leaf_name=leaf_name,
-                module_aliases=module_aliases,
-                function_aliases=function_aliases,
-            ):
-                continue
-            kwargs = _call_kwargs_from_ast(node, signature=signature)
-            if not kwargs:
-                continue
-            dedupe = tuple(sorted((key, repr(value)) for key, value in kwargs.items()))
-            if dedupe in seen:
-                continue
-            seen.add(dedupe)
-            seeds.append(
-                SeedExample(
-                    kwargs=kwargs,
-                    source="pytest_seed",
-                    evidence=f"{path.name}:{getattr(node, 'lineno', '?')}",
-                )
+        scopes: list[tuple[ast.AST, list[dict[str, Any]]]] = [(tree, [{}])]
+        scopes.extend(
+            (node, _function_parametrize_bindings(node))
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        )
+        for scope, bindings_list in scopes:
+            for node in ast.walk(scope):
+                if not isinstance(node, ast.Call):
+                    continue
+                if not _call_matches_target(
+                    node,
+                    leaf_name=leaf_name,
+                    module_aliases=module_aliases,
+                    function_aliases=function_aliases,
+                ):
+                    continue
+                for bindings in bindings_list or [{}]:
+                    kwargs = _call_kwargs_from_ast(node, signature=signature, bindings=bindings)
+                    if not kwargs:
+                        continue
+                    dedupe = tuple(sorted((key, repr(value)) for key, value in kwargs.items()))
+                    if dedupe in seen:
+                        continue
+                    seen.add(dedupe)
+                    seeds.append(
+                        SeedExample(
+                            kwargs=kwargs,
+                            source="pytest_seed",
+                            evidence=f"{path.name}:{getattr(node, 'lineno', '?')}",
+                        )
             )
     return tuple(seeds)
+
+
+def _test_seed_examples(module_name: str, leaf_name: str) -> tuple[SeedExample, ...]:
+    """Extract literal call-site seeds for a top-level callable from test files."""
+    return _test_seed_examples_cached(module_name, leaf_name, str(Path.cwd().resolve()))
+
+
+_test_seed_examples.cache_clear = _test_seed_examples_cached.cache_clear  # type: ignore[attr-defined]
 
 
 def _source_boundary_candidates(func: Any) -> dict[str, list[Any]]:

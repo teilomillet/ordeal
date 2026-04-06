@@ -276,8 +276,33 @@ def _package_root_scan_sample(
 def _resolve_symbol_path(path: str) -> Any:
     """Resolve ``module:attr`` or dotted import paths into Python objects."""
     import importlib
+    import importlib.util
 
     module_name, sep, attr_path = path.partition(":")
+    candidate_file = Path(module_name)
+    if sep and (
+        candidate_file.suffix == ".py"
+        or candidate_file.exists()
+        or module_name.startswith("./")
+        or module_name.startswith("../")
+    ):
+        file_path = candidate_file
+        if not file_path.is_absolute():
+            file_path = (Path.cwd() / file_path).resolve()
+        if not file_path.exists():
+            raise ValueError(f"invalid symbol path: {path!r}")
+        spec = importlib.util.spec_from_file_location(
+            f"_ordeal_symbol_{abs(hash((str(file_path), attr_path)))}",
+            file_path,
+        )
+        if spec is None or spec.loader is None:
+            raise ValueError(f"invalid symbol path: {path!r}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        obj: Any = module
+        for part in attr_path.split("."):
+            obj = getattr(obj, part)
+        return obj
     if not sep:
         module_name, _, attr_path = path.rpartition(".")
     if not module_name or not attr_path:
@@ -412,18 +437,27 @@ def _callable_listing_rows(
         owner, descriptor = _callable_listing_owner(module_name, name)
         kind = _callable_listing_kind(func, owner, descriptor)
         factory_required = kind == "instance"
-        factory_configured = bool(
-            factory_required
-            and owner is not None
-            and _resolve_object_hook(owner, merged_factories)
-        )
-        setup_configured = bool(owner is not None and _resolve_object_hook(owner, merged_setups))
-        teardown_configured = bool(
-            owner is not None and _resolve_object_hook(owner, merged_teardowns)
-        )
+        factory_source = getattr(func, "__ordeal_factory_source__", None)
+        if factory_source is None and factory_required and owner is not None:
+            factory_source = (
+                "configured" if _resolve_object_hook(owner, merged_factories) else None
+            )
+        factory_configured = bool(factory_required and factory_source is not None)
+        setup_source = getattr(func, "__ordeal_setup_source__", None)
+        if setup_source is None and owner is not None:
+            setup_source = "configured" if _resolve_object_hook(owner, merged_setups) else None
+        setup_configured = bool(setup_source is not None)
+        teardown_source = getattr(func, "__ordeal_teardown_source__", None)
+        if teardown_source is None and owner is not None:
+            teardown_source = (
+                "configured" if _resolve_object_hook(owner, merged_teardowns) else None
+            )
+        teardown_configured = bool(teardown_source is not None)
         resolved_scenario = (
             _resolve_object_hook(owner, merged_scenarios) if owner is not None else None
         )
+        if getattr(func, "__ordeal_scenarios__", None):
+            resolved_scenario = getattr(func, "__ordeal_scenarios__")
         state_param = (
             str(
                 getattr(func, "__ordeal_state_param__", None)
@@ -432,14 +466,22 @@ def _callable_listing_rows(
             ).strip()
             or None
         )
-        state_factory_configured = bool(
-            state_param
-            and owner is not None
-            and _resolve_object_hook(owner, merged_state_factories)
+        state_factory_source = getattr(func, "__ordeal_state_factory_source__", None)
+        if state_factory_source is None and state_param and owner is not None:
+            state_factory_source = (
+                "configured" if _resolve_object_hook(owner, merged_state_factories) else None
+            )
+        state_factory_configured = bool(state_param and state_factory_source is not None)
+        harness_mode = str(
+            getattr(func, "__ordeal_harness__", None)
+            or (_resolve_object_harness(owner, merged_harnesses) if owner is not None else "fresh")
         )
-        harness_mode = (
-            _resolve_object_harness(owner, merged_harnesses) if owner is not None else "fresh"
-        )
+        harness_source = getattr(func, "__ordeal_harness_source__", None)
+        if harness_source is None and harness_mode != "fresh":
+            harness_source = "configured"
+        scenario_source = getattr(func, "__ordeal_scenario_source__", None)
+        if scenario_source is None and resolved_scenario is not None:
+            scenario_source = "configured"
         scenario_count = int(getattr(resolved_scenario, "__ordeal_scenario_count__", 0))
         if (
             scenario_count == 0
@@ -493,12 +535,19 @@ def _callable_listing_rows(
                 ),
                 "factory_required": factory_required,
                 "factory_configured": factory_configured,
+                "factory_source": factory_source,
                 "setup_configured": setup_configured,
+                "setup_source": setup_source,
                 "state_param": state_param,
                 "state_factory_configured": state_factory_configured,
+                "state_factory_source": state_factory_source,
                 "teardown_configured": teardown_configured,
+                "teardown_source": teardown_source,
                 "harness": harness_mode,
+                "harness_source": harness_source,
                 "scenario_count": scenario_count,
+                "scenario_source": scenario_source,
+                "auto_harness": bool(getattr(func, "__ordeal_auto_harness__", False)),
                 "contract_checks": [str(getattr(check, "name", check)) for check in checks],
                 "lifecycle_phase": getattr(func, "__ordeal_lifecycle_phase__", None),
                 "harness_hints": harness_hints,
@@ -778,27 +827,47 @@ def _config_suggestions_for_contract_checks(
 
 def _render_target_listing_parts(row: Mapping[str, Any]) -> list[str]:
     """Return the normalized text fragments for one callable discovery row."""
+    def _configured_text(enabled: object, source: object) -> str:
+        if not enabled:
+            return "no"
+        return f"yes[{source}]" if source else "yes"
+
+    state_text = (
+        "not-needed"
+        if not row.get("state_param")
+        else _configured_text(
+            row.get("state_factory_configured"),
+            row.get("state_factory_source"),
+        )
+    )
     factory_text = (
         "not-needed"
         if not row.get("factory_required")
-        else f"required, configured={'yes' if row.get('factory_configured') else 'no'}"
+        else "required, "
+        f"configured={_configured_text(row.get('factory_configured'), row.get('factory_source'))}"
     )
     parts = [
         f"kind={row.get('kind')}",
         f"async={row.get('async')}",
         f"selected={'yes' if row.get('selected', True) else 'no'}",
         f"factory={factory_text}",
-        f"harness={row.get('harness', 'fresh')}",
-        f"setup={'yes' if row.get('setup_configured') else 'no'}",
         (
-            "state=not-needed"
-            if not row.get("state_param")
-            else f"state={'yes' if row.get('state_factory_configured') else 'no'}"
+            f"harness={row.get('harness', 'fresh')}[{row.get('harness_source')}]"
+            if row.get("harness_source")
+            else f"harness={row.get('harness', 'fresh')}"
         ),
-        f"teardown={'yes' if row.get('teardown_configured') else 'no'}",
-        f"scenarios={row.get('scenario_count', 0)}",
+        f"setup={_configured_text(row.get('setup_configured'), row.get('setup_source'))}",
+        f"state={state_text}",
+        f"teardown={_configured_text(row.get('teardown_configured'), row.get('teardown_source'))}",
+        (
+            f"scenarios={row.get('scenario_count', 0)}[{row.get('scenario_source')}]"
+            if row.get("scenario_source")
+            else f"scenarios={row.get('scenario_count', 0)}"
+        ),
         f"runnable={'yes' if row.get('runnable') else 'no'}",
     ]
+    if row.get("auto_harness"):
+        parts.append("auto_harness=yes")
     contract_checks = list(row.get("contract_checks", []))
     if contract_checks:
         parts.append(f"contracts={','.join(contract_checks)}")

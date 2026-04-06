@@ -318,9 +318,16 @@ class TestCoverageBackendSelection:
         result = audit_mod._measure_coverage([Path(".ordeal/test_generated.py")], "ordeal.demo")
         assert result is sentinel
 
-    def test_audit_coverages_share_single_coverage_runner_when_available(self, monkeypatch):
+    def test_audit_coverages_share_single_coverage_runner_when_available(
+        self,
+        monkeypatch,
+        tmp_path: Path,
+    ):
         current = CoverageMeasurement(Status.VERIFIED)
         migrated = CoverageMeasurement(Status.FAILED, error="generated")
+        generated = tmp_path / ".ordeal" / "test_demo_migrated.py"
+        generated.parent.mkdir()
+        generated.write_text("def test_generated() -> None:\n    assert True\n", encoding="utf-8")
 
         def fake_find_spec(name: str):
             if name == "coverage":
@@ -341,14 +348,21 @@ class TestCoverageBackendSelection:
 
         result = audit_mod._measure_audit_coverages(
             [Path("tests/test_demo.py")],
-            [Path(".ordeal/test_demo_migrated.py")],
+            [generated],
             "ordeal.demo",
         )
 
         assert result == (current, migrated)
 
-    def test_audit_coverages_fall_back_to_individual_measurements(self, monkeypatch):
+    def test_audit_coverages_fall_back_to_individual_measurements(
+        self,
+        monkeypatch,
+        tmp_path: Path,
+    ):
         calls: list[tuple[list[Path], str]] = []
+        generated = tmp_path / ".ordeal" / "test_demo_migrated.py"
+        generated.parent.mkdir()
+        generated.write_text("def test_generated() -> None:\n    assert True\n", encoding="utf-8")
 
         monkeypatch.setattr(audit_mod.importlib.util, "find_spec", lambda _name: None)
 
@@ -360,13 +374,13 @@ class TestCoverageBackendSelection:
 
         current, migrated = audit_mod._measure_audit_coverages(
             [Path("tests/test_demo.py")],
-            [Path(".ordeal/test_demo_migrated.py")],
+            [generated],
             "ordeal.demo",
         )
 
         assert calls == [
             ([Path("tests/test_demo.py")], "ordeal.demo"),
-            ([Path(".ordeal/test_demo_migrated.py")], "ordeal.demo"),
+            ([generated], "ordeal.demo"),
         ]
         assert "test_demo.py" in (current.error or "")
         assert "test_demo_migrated.py" in (migrated.error or "")
@@ -393,6 +407,31 @@ class TestCoverageBackendSelection:
         assert calls == [([Path("tests/test_demo.py")], "ordeal.demo")]
         assert current.error == "current only"
         assert migrated.error == "no generated tests"
+
+    def test_audit_coverages_missing_generated_file_still_measures_paths(self, monkeypatch):
+        calls: list[tuple[list[Path], str]] = []
+
+        monkeypatch.setattr(audit_mod.importlib.util, "find_spec", lambda _name: None)
+
+        def fake_measure(test_files: list[Path], module: str) -> CoverageMeasurement:
+            calls.append((test_files, module))
+            return CoverageMeasurement(Status.FAILED, error=str(test_files[0]))
+
+        monkeypatch.setattr(audit_mod, "_measure_coverage", fake_measure)
+
+        missing_generated = Path(".ordeal/test_demo_migrated_missing.py")
+        current, migrated = audit_mod._measure_audit_coverages(
+            [Path("tests/test_demo.py")],
+            [missing_generated],
+            "ordeal.demo",
+        )
+
+        assert calls == [
+            ([Path("tests/test_demo.py")], "ordeal.demo"),
+            ([missing_generated], "ordeal.demo"),
+        ]
+        assert "test_demo.py" in (current.error or "")
+        assert "test_demo_migrated_missing.py" in (migrated.error or "")
 
 
 # ============================================================================

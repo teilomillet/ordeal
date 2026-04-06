@@ -2765,8 +2765,9 @@ def _measure_audit_coverages(
     module_name: str,
 ) -> tuple[CoverageMeasurement, CoverageMeasurement]:
     """Measure current and migrated audit coverage with shared fast paths."""
-    generated_test_count = sum(_count_tests_in_file(path)[0] for path in generated_test_files)
-    if generated_test_files and generated_test_count == 0:
+    existing_generated_files = [path for path in generated_test_files if path.exists()]
+    generated_test_count = sum(_count_tests_in_file(path)[0] for path in existing_generated_files)
+    if generated_test_files and existing_generated_files and generated_test_count == 0:
         current = (
             _measure_coverage(current_test_files, module_name)
             if current_test_files

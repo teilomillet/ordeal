@@ -226,19 +226,39 @@ def _normalize_module_target(target: str) -> str:
     """Resolve one dotted or file-backed target into an importable module target."""
     from ordeal.auto import _python_source_path_to_module_name
 
-    module_part, sep, remainder = str(target).partition(":")
+    raw_target = str(target)
+    module_part = raw_target
+    remainder = ""
+    if ":" in raw_target:
+        explicit_idx = raw_target.rfind(":")
+        candidate_prefix = raw_target[:explicit_idx]
+        candidate_path = Path(candidate_prefix)
+        if (
+            candidate_prefix.endswith(".py")
+            or candidate_prefix.startswith("./")
+            or candidate_prefix.startswith("../")
+            or candidate_prefix.startswith("/")
+            or bool(re.match(r"^[A-Za-z]:[\\\\/]", candidate_prefix))
+            or candidate_path.exists()
+        ):
+            module_part = candidate_prefix
+            remainder = raw_target[explicit_idx + 1 :]
+        else:
+            module_part, remainder = raw_target.split(":", 1)
     candidate = Path(module_part)
     normalized = module_part
     if (
         candidate.suffix == ".py"
         or module_part.startswith("./")
         or module_part.startswith("../")
+        or module_part.startswith("/")
+        or bool(re.match(r"^[A-Za-z]:[\\\\/]", module_part))
         or candidate.exists()
     ):
         module_name = _python_source_path_to_module_name(module_part)
         if module_name:
             normalized = module_name
-    return normalized if not sep else f"{normalized}:{remainder}"
+    return normalized if not remainder else f"{normalized}:{remainder}"
 
 
 def _scan_display_name(module_name: str, target: str) -> str:

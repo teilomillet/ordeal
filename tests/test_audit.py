@@ -371,6 +371,29 @@ class TestCoverageBackendSelection:
         assert "test_demo.py" in (current.error or "")
         assert "test_demo_migrated.py" in (migrated.error or "")
 
+    def test_audit_coverages_skip_empty_generated_suite(self, monkeypatch, tmp_path: Path):
+        generated = tmp_path / ".ordeal" / "test_demo_migrated.py"
+        generated.parent.mkdir()
+        generated.write_text("import ordeal.demo\n", encoding="utf-8")
+
+        calls: list[tuple[list[Path], str]] = []
+
+        def fake_measure(test_files: list[Path], module: str) -> CoverageMeasurement:
+            calls.append((test_files, module))
+            return CoverageMeasurement(Status.FAILED, error="current only")
+
+        monkeypatch.setattr(audit_mod, "_measure_coverage", fake_measure)
+
+        current, migrated = audit_mod._measure_audit_coverages(
+            [Path("tests/test_demo.py")],
+            [generated],
+            "ordeal.demo",
+        )
+
+        assert calls == [([Path("tests/test_demo.py")], "ordeal.demo")]
+        assert current.error == "current only"
+        assert migrated.error == "no generated tests"
+
 
 # ============================================================================
 # Self-verification

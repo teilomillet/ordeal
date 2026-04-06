@@ -210,15 +210,35 @@ def _load_fixture_registry_warnings(
 
 def _scan_base_module(target: str) -> str:
     """Return the module component for a scan target."""
-    return target.split(":", 1)[0]
+    return _normalize_module_target(target).split(":", 1)[0]
 
 
 def _target_module_name(target: str) -> str:
     """Return the importable module for dotted or explicit callable targets."""
-    if ":" in target:
-        return target.split(":", 1)[0]
-    module_name, _, _ = target.rpartition(".")
+    normalized = _normalize_module_target(target)
+    if ":" in normalized:
+        return normalized.split(":", 1)[0]
+    module_name, _, _ = normalized.rpartition(".")
     return module_name or target
+
+
+def _normalize_module_target(target: str) -> str:
+    """Resolve one dotted or file-backed target into an importable module target."""
+    from ordeal.auto import _python_source_path_to_module_name
+
+    module_part, sep, remainder = str(target).partition(":")
+    candidate = Path(module_part)
+    normalized = module_part
+    if (
+        candidate.suffix == ".py"
+        or module_part.startswith("./")
+        or module_part.startswith("../")
+        or candidate.exists()
+    ):
+        module_name = _python_source_path_to_module_name(module_part)
+        if module_name:
+            normalized = module_name
+    return normalized if not sep else f"{normalized}:{remainder}"
 
 
 def _scan_display_name(module_name: str, target: str) -> str:
@@ -4721,13 +4741,13 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         return 1
 
     audit_cfg = cfg.audit if cfg is not None else None
-    modules = list(args.modules or [])
+    modules = [_normalize_module_target(module) for module in list(args.modules or [])]
     if not modules and audit_cfg is not None:
-        modules = list(audit_cfg.modules)
+        modules = [_normalize_module_target(module) for module in audit_cfg.modules]
     target_specs_by_module: dict[str, dict[str, Any]] = {}
 
     def _merge_target_spec(spec: Any) -> None:
-        target = str(getattr(spec, "target"))
+        target = _normalize_module_target(str(getattr(spec, "target")))
         base_module = _scan_base_module(target)
         bucket = target_specs_by_module.setdefault(base_module, {})
         existing = bucket.get(target)

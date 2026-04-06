@@ -1719,6 +1719,11 @@ def _resolve_module(module: str | ModuleType) -> ModuleType:
     return module
 
 
+def _is_fatal_discovery_exception(exc: BaseException) -> bool:
+    """Return whether *exc* should abort discovery immediately."""
+    return isinstance(exc, (KeyboardInterrupt, SystemExit, GeneratorExit, MemoryError))
+
+
 def _unwrap(func: Any) -> Any:
     """Unwrap decorated functions to reach the original callable.
 
@@ -2678,6 +2683,34 @@ def _python_source_path_to_module_name(path_str: str) -> str | None:
     return None
 
 
+_DISCOVERY_IGNORED_PATH_PARTS = {
+    ".git",
+    ".hypothesis",
+    ".mypy_cache",
+    ".nox",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "dist-packages",
+    "node_modules",
+    "site-packages",
+    "venv",
+}
+
+
+def _is_project_discovery_path(path: Path, *, workspace_root: Path | None = None) -> bool:
+    """Return whether *path* should contribute to learned repo evidence."""
+    resolved = path.resolve()
+    root = (workspace_root or Path.cwd()).resolve()
+    try:
+        parts = resolved.relative_to(root).parts
+    except ValueError:
+        parts = resolved.parts
+    return not any(part in _DISCOVERY_IGNORED_PATH_PARTS for part in parts)
+
+
 def _resolve_symbol_path(path: str) -> Any:
     """Resolve ``module:attr`` or dotted import paths into Python objects."""
     import importlib.util
@@ -2772,7 +2805,9 @@ def _single_resolved_hint(
             continue
         try:
             obj = _resolve_symbol_path(symbol_path)
-        except Exception:
+        except BaseException as exc:
+            if _is_fatal_discovery_exception(exc):
+                raise
             continue
         resolved.setdefault(symbol_path, (obj, hint))
     if len(resolved) != 1:
@@ -4092,7 +4127,9 @@ def _get_public_functions(
                 continue
             try:
                 obj = getattr(mod, name)
-            except Exception:
+            except BaseException as exc:
+                if _is_fatal_discovery_exception(exc):
+                    raise
                 continue
             obj_mod = getattr(obj, "__module__", None)
             if obj_mod == mod.__name__ or (
@@ -4351,7 +4388,11 @@ def _callable_seed_files(module_name: str) -> list[Path]:
         for pattern in ("test_*.py", "*_test.py", "conftest.py"):
             for path in root.rglob(pattern):
                 resolved = path.resolve()
-                if resolved in seen or not resolved.is_file():
+                if (
+                    resolved in seen
+                    or not resolved.is_file()
+                    or not _is_project_discovery_path(resolved)
+                ):
                     continue
                 seen.add(resolved)
                 candidates.append(resolved)
@@ -4383,7 +4424,11 @@ def _harness_doc_files(module_name: str) -> list[Path]:
         for pattern in ("README*.md", "*.md", "docs/**/*.md"):
             for path in root.glob(pattern):
                 resolved = path.resolve()
-                if resolved in seen or not resolved.is_file():
+                if (
+                    resolved in seen
+                    or not resolved.is_file()
+                    or not _is_project_discovery_path(resolved)
+                ):
                     continue
                 seen.add(resolved)
                 candidates.append(resolved)
@@ -4644,7 +4689,11 @@ def _mine_object_harness_hints_cached(
         for pattern in extra_patterns:
             for path in root.rglob(pattern):
                 resolved = path.resolve()
-                if resolved.is_file() and resolved not in support_files:
+                if (
+                    resolved.is_file()
+                    and resolved not in support_files
+                    and _is_project_discovery_path(resolved)
+                ):
                     support_files.append(resolved)
 
     fixture_catalog = _pytest_fixture_catalog(

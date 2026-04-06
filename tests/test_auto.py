@@ -542,6 +542,56 @@ class TestScanModule:
         finally:
             del sys.modules[module_name]
 
+    def test_package_root_discovery_skips_nonfatal_lazy_exports(self, tmp_path, monkeypatch):
+        package_dir = tmp_path / "lazy_pkg"
+        package_dir.mkdir()
+        (package_dir / "__init__.py").write_text(
+            "import pytest\n"
+            "\n"
+            "def safe(value: int) -> int:\n"
+            "    return value + 1\n"
+            "\n"
+            "def __dir__():\n"
+            "    return ['safe', 'toxic']\n"
+            "\n"
+            "def __getattr__(name: str):\n"
+            "    if name == 'toxic':\n"
+            "        return pytest.importorskip('definitely_missing_optional_dep')\n"
+            "    raise AttributeError(name)\n",
+            encoding="utf-8",
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        import importlib
+
+        mod = importlib.import_module("lazy_pkg")
+        funcs = auto_mod._get_public_functions(mod)
+
+        assert [name for name, _func in funcs] == ["safe"]
+
+    def test_callable_seed_files_ignore_virtualenv_trees(self, tmp_path, monkeypatch):
+        package_dir = tmp_path / "demo_pkg"
+        package_dir.mkdir()
+        (package_dir / "__init__.py").write_text("", encoding="utf-8")
+        (package_dir / "feature.py").write_text(
+            "def ping() -> str:\n    return 'ok'\n",
+            encoding="utf-8",
+        )
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_feature.py").write_text("def test_ping(): pass\n", encoding="utf-8")
+        toxic = tmp_path / ".venv" / "lib" / "python3.13" / "site-packages" / "pyarrow" / "tests"
+        toxic.mkdir(parents=True)
+        (toxic / "test_jvm.py").write_text("def test_optional_dep(): pass\n", encoding="utf-8")
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        seed_files = auto_mod._callable_seed_files("demo_pkg.feature")
+
+        assert tests_dir / "test_feature.py" in seed_files
+        assert all(".venv" not in str(path) for path in seed_files)
+
     def test_method_scenarios_apply_after_setup_for_scan_fuzz_and_chaos(self):
         import sys
 

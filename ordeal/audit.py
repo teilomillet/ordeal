@@ -1506,6 +1506,11 @@ def _split_audit_target_spec(target: str) -> tuple[str, str | None, str | None]:
     return module_path, owner_path, method_name
 
 
+def _is_fatal_symbol_resolution_exception(exc: BaseException) -> bool:
+    """Return whether *exc* should abort audit symbol resolution."""
+    return isinstance(exc, (KeyboardInterrupt, SystemExit, GeneratorExit, MemoryError))
+
+
 def _resolve_audit_symbol(path: str) -> Any:
     """Resolve a dotted import path, including lazy-exported package members."""
     if ":" in path:
@@ -1517,20 +1522,26 @@ def _resolve_audit_symbol(path: str) -> Any:
 
     try:
         return importlib.import_module(path)
-    except ImportError:
+    except BaseException as exc:
+        if _is_fatal_symbol_resolution_exception(exc):
+            raise
         pass
 
     parts = path.split(".")
     for i in range(len(parts) - 1, 0, -1):
         try:
             obj: Any = importlib.import_module(".".join(parts[:i]))
-        except ImportError:
+        except BaseException as exc:
+            if _is_fatal_symbol_resolution_exception(exc):
+                raise
             continue
         try:
             for part in parts[i:]:
                 obj = getattr(obj, part)
             return obj
-        except AttributeError:
+        except BaseException as exc:
+            if _is_fatal_symbol_resolution_exception(exc):
+                raise
             continue
     raise ImportError(f"Cannot resolve target: {path!r}")
 
@@ -2752,6 +2763,15 @@ def _measure_audit_coverages(
     module_name: str,
 ) -> tuple[CoverageMeasurement, CoverageMeasurement]:
     """Measure current and migrated audit coverage with shared fast paths."""
+    generated_test_count = sum(_count_tests_in_file(path)[0] for path in generated_test_files)
+    if generated_test_files and generated_test_count == 0:
+        current = (
+            _measure_coverage(current_test_files, module_name)
+            if current_test_files
+            else CoverageMeasurement(Status.FAILED, error="no test files found")
+        )
+        return current, CoverageMeasurement(Status.FAILED, error="no generated tests")
+
     if (
         current_test_files
         and generated_test_files

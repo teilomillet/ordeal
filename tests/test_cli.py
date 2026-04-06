@@ -299,6 +299,34 @@ class TestCLI:
 
         assert resolved() == "ready"
 
+    def test_audit_accepts_module_file_paths(self, monkeypatch, tmp_path, capsys):
+        import ordeal.audit as audit_mod
+        from ordeal.audit import ModuleAudit
+
+        pkg = tmp_path / "demo_pkg"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        module_path = pkg / "feature.py"
+        module_path.write_text("def ping() -> str:\n    return 'ok'\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        calls: dict[str, object] = {}
+
+        def fake_audit(module, **kwargs):
+            calls["module"] = module
+            calls.update(kwargs)
+            return ModuleAudit(module=str(module))
+
+        monkeypatch.setattr(audit_mod, "audit", fake_audit)
+
+        rc = main(["audit", str(module_path), "--json"])
+
+        assert rc == 0
+        assert calls["module"] == "demo_pkg.feature"
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["target"] == "demo_pkg.feature"
+
     def test_top_level_help_points_to_live_help(self, capsys):
         with pytest.raises(SystemExit):
             main(["--help"])

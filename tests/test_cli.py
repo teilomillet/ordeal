@@ -202,6 +202,8 @@ def _write_harness_hint_project(tmp_path: Path) -> str:
 
 def _write_check_contract_project(tmp_path: Path) -> Path:
     """Write a tiny package with a harnessed class-method target and config."""
+    sys.modules.pop("pkg_mod", None)
+    sys.modules.pop("check_support", None)
     (tmp_path / "pkg_mod.py").write_text(
         "class Env:\n"
         "    def __init__(self, prefix: str):\n"

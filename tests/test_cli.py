@@ -327,6 +327,19 @@ class TestCLI:
         payload = json.loads(capsys.readouterr().out)
         assert payload["target"] == "demo_pkg.feature"
 
+    def test_normalize_module_target_accepts_windows_file_paths(self, monkeypatch):
+        target = r"C:\temp\demo_pkg\feature.py"
+
+        def fake_to_module(path_str: str) -> str | None:
+            if path_str == target:
+                return "demo_pkg.feature"
+            return None
+
+        monkeypatch.setattr(ordeal_auto, "_python_source_path_to_module_name", fake_to_module)
+
+        assert cli._normalize_module_target(target) == "demo_pkg.feature"
+        assert cli._normalize_module_target(f"{target}:Demo.run") == "demo_pkg.feature:Demo.run"
+
     def test_top_level_help_points_to_live_help(self, capsys):
         with pytest.raises(SystemExit):
             main(["--help"])

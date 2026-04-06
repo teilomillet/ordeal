@@ -229,7 +229,12 @@ def _normalize_module_target(target: str) -> str:
     raw_target = str(target)
     module_part = raw_target
     remainder = ""
-    if ":" in raw_target:
+    raw_target_lower = raw_target.lower()
+    if ".py:" in raw_target_lower:
+        py_idx = raw_target_lower.find(".py:")
+        module_part = raw_target[: py_idx + 3]
+        remainder = raw_target[py_idx + 4 :]
+    elif ":" in raw_target and not bool(re.match(r"^[A-Za-z]:[\\\\/]", raw_target)):
         explicit_idx = raw_target.rfind(":")
         candidate_prefix = raw_target[:explicit_idx]
         candidate_path = Path(candidate_prefix)

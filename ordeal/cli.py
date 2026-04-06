@@ -606,7 +606,7 @@ def _hint_evidence_groups(harness_hints: Sequence[Mapping[str, Any]]) -> dict[st
         if not evidence:
             continue
         path_part = evidence.split(":", 1)[0]
-        lowered = path_part.lower()
+        lowered = path_part.lower().replace("\\", "/")
         bucket = "other"
         if lowered.endswith(".md"):
             bucket = "docs"

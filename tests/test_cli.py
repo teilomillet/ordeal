@@ -1938,6 +1938,18 @@ scan_max_examples = 12
         assert "sinks=shell" in out
         assert "lifecycle=rollout" in out
 
+    def test_hint_evidence_groups_normalizes_windows_test_paths(self):
+        buckets = cli._hint_evidence_groups(
+            [
+                {
+                    "evidence": r"tests\support_factories.py:5:make_env",
+                }
+            ]
+        )
+
+        assert buckets["tests"] == [r"tests\support_factories.py:5:make_env"]
+        assert not buckets["other"]
+
     def test_audit_bootstrap_targets_falls_back_to_class_discovery(
         self,
         monkeypatch,

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.25
+
+**Features:**
+
+- expand scan review artifacts and scenario scaffolds
+
+
 ## 0.3.24
 
 **Features:**

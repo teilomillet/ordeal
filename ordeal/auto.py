@@ -4866,11 +4866,7 @@ def _mine_object_harness_hints_cached(
                     evidence,
                     0.95 if returns_target else 0.9,
                     signals=(
-                        *(
-                            ("returns_target_instance",)
-                            if returns_target
-                            else ()
-                        ),
+                        *(("returns_target_instance",) if returns_target else ()),
                         *(("constructor_like",) if looks_like_factory else ()),
                         *(("mentions_target_tokens",) if mentions_target else ()),
                         *(("pytest_fixture",) if is_fixture else ()),

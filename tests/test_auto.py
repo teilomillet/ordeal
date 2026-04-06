@@ -945,10 +945,7 @@ class TestScanModule:
             encoding="utf-8",
         )
         (tests_dir / "support_factories.py").write_text(
-            "from hintpkg.envs import Env\n"
-            "\n"
-            "def make_env() -> Env:\n"
-            "    return Env('factory')\n",
+            "from hintpkg.envs import Env\n\ndef make_env() -> Env:\n    return Env('factory')\n",
             encoding="utf-8",
         )
         (tests_dir / "conftest.py").write_text(

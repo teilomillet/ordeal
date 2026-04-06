@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.27
+
+**Features:**
+
+- rank harness hints by observed evidence
+
+**Fixes:**
+
+- normalize windows file audit targets
+- derive module names from package paths
+- harden audit file target handling
+- harden audit discovery against external test imports
+
+
 ## 0.3.26
 
 **Features:**

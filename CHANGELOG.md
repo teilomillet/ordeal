@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.26
+
+**Features:**
+
+- derive toml suggestions from surface maps
+
+**Fixes:**
+
+- normalize windows surface-map evidence paths
+
+**Other:**
+
+- test: relax audit target suggestion ordering
+
+
 ## 0.3.25
 
 **Features:**

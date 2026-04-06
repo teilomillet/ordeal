@@ -611,9 +611,7 @@ def _hint_evidence_groups(harness_hints: Sequence[Mapping[str, Any]]) -> dict[st
         if lowered.endswith(".md"):
             bucket = "docs"
         elif lowered.endswith(".py") and (
-            lowered.startswith("tests/")
-            or "/tests/" in lowered
-            or lowered.endswith("conftest.py")
+            lowered.startswith("tests/") or "/tests/" in lowered or lowered.endswith("conftest.py")
         ):
             bucket = "tests"
         if evidence not in buckets[bucket]:
@@ -748,9 +746,7 @@ def _build_surface_map(groups: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     for group in groups:
         module = str(group.get("module", ""))
         rows = list(group.get("targets", []))
-        bootstrap_targets = [
-            dict(item) for item in list(group.get("bootstrap_targets", ()))
-        ]
+        bootstrap_targets = [dict(item) for item in list(group.get("bootstrap_targets", ()))]
         group_entries = [
             dict(row.get("surface") or _surface_entry_from_listing_row(row)) for row in rows
         ]

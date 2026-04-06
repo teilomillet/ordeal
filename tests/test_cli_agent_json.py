@@ -718,9 +718,7 @@ class TestCLIAgentJson:
         assert entry["contracts"]["lifecycle_phase"] == "rollout"
         assert entry["evidence"]["tests"]["supporting_hints"]
         assert entry["evidence"]["docs"]["files"]
-        sections = {
-            item["section"] for item in payload["raw_details"]["config_suggestions"]
-        }
+        sections = {item["section"] for item in payload["raw_details"]["config_suggestions"]}
         assert {"[[scan]]", "[[objects]]", "[[audit.targets]]"} <= sections
 
     def test_scan_json_reports_surface_sampling_for_package_root(self, monkeypatch, capsys):
@@ -863,9 +861,7 @@ class TestCLIAgentJson:
         assert env_row["setup_configured"] is True
         assert env_row["scenario_count"] == 1
         assert env_row["runnable"] is True
-        sections = {
-            item["section"] for item in payload["raw_details"]["config_suggestions"]
-        }
+        sections = {item["section"] for item in payload["raw_details"]["config_suggestions"]}
         assert {"[audit]", "[[audit.targets]]"} <= sections
         assert any(
             row["name"] == "no_hints" and row["skip_reason"] == "missing inferable strategies"
@@ -904,9 +900,7 @@ class TestCLIAgentJson:
             "tests.ordeal_support:scenario_quote_paths",
             "tests.ordeal_support:scenario_space_paths",
         ]
-        sections = {
-            item["section"] for item in payload["raw_details"]["config_suggestions"]
-        }
+        sections = {item["section"] for item in payload["raw_details"]["config_suggestions"]}
         assert "[[audit.targets]]" in sections
         assert payload["raw_details"]["bootstrap_suggestions"][0]["filename"] == (
             "tests/ordeal_support.py"

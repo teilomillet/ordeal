@@ -436,6 +436,8 @@ class HarnessHint:
     suggestion: str
     evidence: str
     confidence: float = 0.5
+    score: float = 0.5
+    signals: tuple[str, ...] = ()
     config: dict[str, Any] = field(default_factory=dict)
 
 
@@ -469,6 +471,20 @@ _DEFAULT_AUTO_CONTRACTS = (
     "lifecycle_attempts_all",
     "lifecycle_followup",
 )
+
+_HARNESS_HINT_SIGNAL_WEIGHTS: dict[str, float] = {
+    "returns_target_instance": 0.28,
+    "constructor_like": 0.1,
+    "mentions_target_tokens": 0.08,
+    "pytest_fixture": 0.06,
+    "test_evidence": 0.05,
+    "support_file": 0.06,
+    "state_compatible": 0.14,
+    "returns_mapping": 0.08,
+    "lifecycle_cleanup": 0.08,
+    "collaborator_overlap": 0.08,
+    "doc_evidence": 0.03,
+}
 
 
 @functools.lru_cache(maxsize=512)
@@ -2711,6 +2727,48 @@ def _is_project_discovery_path(path: Path, *, workspace_root: Path | None = None
     return not any(part in _DISCOVERY_IGNORED_PATH_PARTS for part in parts)
 
 
+def _harness_hint_path_signals(evidence: str) -> tuple[str, ...]:
+    """Return generic discovery signals implied by one hint evidence path."""
+    path_text = str(evidence).split(":", 1)[0].replace("\\", "/").lower()
+    signals: list[str] = []
+    if "/tests/" in f"/{path_text}" or path_text.startswith("tests/"):
+        signals.append("test_evidence")
+    name = Path(path_text).name
+    if any(token in name for token in ("support", "fixture", "factory", "conftest")):
+        signals.append("support_file")
+    if path_text.endswith(".md"):
+        signals.append("doc_evidence")
+    return tuple(signals)
+
+
+def _harness_hint_signal_strength(signals: Sequence[str]) -> float:
+    """Return the weighted evidence strength for one hint signal set."""
+    unique = dict.fromkeys(str(item) for item in signals if str(item).strip())
+    return round(
+        sum(_HARNESS_HINT_SIGNAL_WEIGHTS.get(signal, 0.0) for signal in unique),
+        3,
+    )
+
+
+def _score_harness_hint(confidence: float, signals: Sequence[str]) -> float:
+    """Return one bounded compatibility score for a mined harness hint."""
+    strength = _harness_hint_signal_strength(signals)
+    score = float(confidence) + (strength * 0.04)
+    return round(min(score, 1.0), 4)
+
+
+def _hint_sort_key(hint: HarnessHint) -> tuple[float, float, int, str, str]:
+    """Return a stable descending sort key for mined harness hints."""
+    return (
+        -float(hint.score),
+        -float(hint.confidence),
+        -_harness_hint_signal_strength(hint.signals),
+        -len(hint.signals),
+        hint.kind,
+        hint.suggestion,
+    )
+
+
 def _resolve_symbol_path(path: str) -> Any:
     """Resolve ``module:attr`` or dotted import paths into Python objects."""
     import importlib.util
@@ -2795,10 +2853,10 @@ def _single_resolved_hint(
     kind: str,
     min_confidence: float,
 ) -> tuple[Any | None, HarnessHint | None]:
-    """Resolve one high-confidence unique mined hook for *kind*."""
+    """Resolve the strongest mined hook for *kind* when evidence is decisive."""
     resolved: dict[str, tuple[Any, HarnessHint]] = {}
     for hint in hints:
-        if hint.kind != kind or float(hint.confidence) < min_confidence:
+        if hint.kind != kind or float(hint.score) < min_confidence:
             continue
         symbol_path = _hint_symbol_path(getattr(hint, "config", {}).get("value"))
         if symbol_path is None:
@@ -2809,10 +2867,28 @@ def _single_resolved_hint(
             if _is_fatal_discovery_exception(exc):
                 raise
             continue
-        resolved.setdefault(symbol_path, (obj, hint))
-    if len(resolved) != 1:
+        current = resolved.get(symbol_path)
+        if current is None or _hint_sort_key(hint) < _hint_sort_key(current[1]):
+            resolved[symbol_path] = (obj, hint)
+    if not resolved:
         return None, None
-    return next(iter(resolved.values()))
+    ranked = sorted(resolved.values(), key=lambda item: _hint_sort_key(item[1]))
+    top_obj, top_hint = ranked[0]
+    if len(ranked) == 1:
+        return top_obj, top_hint
+    second_hint = ranked[1][1]
+    top_score = float(top_hint.score)
+    second_score = float(second_hint.score)
+    decisive_signals = {"returns_target_instance", "state_compatible", "lifecycle_cleanup"}
+    top_strength = _harness_hint_signal_strength(top_hint.signals)
+    second_strength = _harness_hint_signal_strength(second_hint.signals)
+    if (
+        top_score - second_score >= 0.01
+        or top_strength - second_strength >= 0.04
+        or decisive_signals & set(top_hint.signals)
+    ):
+        return top_obj, top_hint
+    return None, None
 
 
 def _single_scenario_pack_hint(
@@ -2823,7 +2899,7 @@ def _single_scenario_pack_hint(
     """Resolve one high-confidence built-in scenario pack from mined hints."""
     packs: dict[str, HarnessHint] = {}
     for hint in hints:
-        if float(hint.confidence) < min_confidence:
+        if float(hint.score) < min_confidence:
             continue
         if hint.kind == "scenario_pack":
             raw_value = getattr(hint, "config", {}).get("value")
@@ -2838,14 +2914,28 @@ def _single_scenario_pack_hint(
                     continue
                 pack = value.strip()
                 if _builtin_object_scenario_hook(pack) is not None:
-                    packs.setdefault(pack, hint)
+                    current = packs.get(pack)
+                    if current is None or _hint_sort_key(hint) < _hint_sort_key(current):
+                        packs[pack] = hint
         elif hint.kind == "client_fixture":
             pack = _scenario_pack_from_hint(hint)
             if pack:
-                packs.setdefault(pack, hint)
-    if len(packs) != 1:
+                current = packs.get(pack)
+                if current is None or _hint_sort_key(hint) < _hint_sort_key(current):
+                    packs[pack] = hint
+    if not packs:
         return (), None
-    pack_name, hint = next(iter(packs.items()))
+    ranked = sorted(packs.items(), key=lambda item: _hint_sort_key(item[1]))
+    pack_name, hint = ranked[0]
+    if len(ranked) > 1:
+        second_hint = ranked[1][1]
+        if (
+            float(hint.score) - float(second_hint.score) < 0.01
+            and _harness_hint_signal_strength(hint.signals)
+            - _harness_hint_signal_strength(second_hint.signals)
+            < 0.04
+        ):
+            return (), None
     hook = _builtin_object_scenario_hook(pack_name)
     if hook is None:
         return (), None
@@ -4667,18 +4757,29 @@ def _mine_object_harness_hints_cached(
         evidence: str,
         confidence: float,
         *,
+        signals: Sequence[str] = (),
         config: dict[str, Any] | None = None,
     ) -> None:
         key = (kind, suggestion)
         if key in seen:
             return
         seen.add(key)
+        normalized_signals = tuple(
+            dict.fromkeys(
+                [
+                    *(str(item) for item in signals if str(item).strip()),
+                    *_harness_hint_path_signals(evidence),
+                ]
+            )
+        )
         hints.append(
             HarnessHint(
                 kind=kind,
                 suggestion=suggestion,
                 evidence=evidence,
                 confidence=confidence,
+                score=_score_harness_hint(confidence, normalized_signals),
+                signals=normalized_signals,
                 config=dict(config or {}),
             )
         )
@@ -4764,6 +4865,16 @@ def _mine_object_harness_hints_cached(
                     f"[[objects]] factory -> {evidence}:{node.name}",
                     evidence,
                     0.95 if returns_target else 0.9,
+                    signals=(
+                        *(
+                            ("returns_target_instance",)
+                            if returns_target
+                            else ()
+                        ),
+                        *(("constructor_like",) if looks_like_factory else ()),
+                        *(("mentions_target_tokens",) if mentions_target else ()),
+                        *(("pytest_fixture",) if is_fixture else ()),
+                    ),
                     config={
                         "section": "[[objects]]",
                         "target": f"{module_name}:{class_name}",
@@ -4792,6 +4903,13 @@ def _mine_object_harness_hints_cached(
                     f"[[objects]] state_factory -> {evidence}:{node.name}",
                     evidence,
                     0.9 if returns_target or returns_mapping else 0.85,
+                    signals=(
+                        *(("state_compatible",) if state_param_name is not None else ()),
+                        *(("returns_target_instance",) if returns_target else ()),
+                        *(("returns_mapping",) if returns_mapping else ()),
+                        *(("pytest_fixture",) if is_fixture else ()),
+                        *(("mentions_target_tokens",) if mentions_target else ()),
+                    ),
                     config={
                         "section": "[[objects]]",
                         "target": f"{module_name}:{class_name}",
@@ -4808,6 +4926,11 @@ def _mine_object_harness_hints_cached(
                     f"[[objects]] setup -> {evidence}:{node.name}",
                     evidence,
                     0.82,
+                    signals=(
+                        *(("mentions_target_tokens",) if mentions_target else ()),
+                        *(("returns_target_instance",) if returns_target else ()),
+                        *(("pytest_fixture",) if is_fixture else ()),
+                    ),
                     config={
                         "section": "[[objects]]",
                         "target": f"{module_name}:{class_name}",
@@ -4822,6 +4945,11 @@ def _mine_object_harness_hints_cached(
                     f"[[objects]] scenarios -> {attr_packs!r}",
                     evidence,
                     0.9,
+                    signals=(
+                        "returns_target_instance",
+                        "collaborator_overlap",
+                        *(("mentions_target_tokens",) if mentions_target else ()),
+                    ),
                     config={
                         "section": "[[objects]]",
                         "target": f"{module_name}:{class_name}",
@@ -4839,6 +4967,11 @@ def _mine_object_harness_hints_cached(
                     f"[[objects]] teardown -> {evidence}:{node.name}",
                     evidence,
                     0.9 if fixture_info.get("yield_cleanup") else 0.8,
+                    signals=(
+                        *(("lifecycle_cleanup",) if fixture_info.get("yield_cleanup") else ()),
+                        *(("mentions_target_tokens",) if mentions_target else ()),
+                        *(("pytest_fixture",) if is_fixture else ()),
+                    ),
                     config={
                         "section": "[[objects]]",
                         "target": f"{module_name}:{class_name}",
@@ -4855,6 +4988,11 @@ def _mine_object_harness_hints_cached(
                     f"[[objects]] scenarios -> [{evidence}:{node.name}]",
                     evidence,
                     0.75,
+                    signals=(
+                        *(("pytest_fixture",) if is_fixture else ()),
+                        *(("mentions_target_tokens",) if mentions_target else ()),
+                        "collaborator_overlap",
+                    ),
                     config={
                         "section": "[[objects]]",
                         "target": f"{module_name}:{class_name}",
@@ -4870,6 +5008,7 @@ def _mine_object_harness_hints_cached(
             f"[[objects]] scenarios -> {collaborator_packs!r}",
             collaborator_evidence or f"{module_name}.{class_name}.{method_name}",
             0.7,
+            signals=("collaborator_overlap",),
             config={
                 "section": "[[objects]]",
                 "target": f"{module_name}:{class_name}",
@@ -4901,6 +5040,7 @@ def _mine_object_harness_hints_cached(
                     "docs mention state setup for this target",
                     evidence,
                     0.55,
+                    signals=("state_compatible", "doc_evidence"),
                     config={
                         "section": "[[objects]]",
                         "target": f"{module_name}:{class_name}",
@@ -4915,6 +5055,7 @@ def _mine_object_harness_hints_cached(
                     "docs mention setup/prepare hooks for this target",
                     evidence,
                     0.55,
+                    signals=("doc_evidence",),
                     config={
                         "section": "[[objects]]",
                         "target": f"{module_name}:{class_name}",
@@ -4929,6 +5070,7 @@ def _mine_object_harness_hints_cached(
                     "docs mention lifecycle teardown/cleanup",
                     evidence,
                     0.55,
+                    signals=("lifecycle_cleanup", "doc_evidence"),
                     config={
                         "section": "[[objects]]",
                         "target": f"{module_name}:{class_name}",
@@ -4943,6 +5085,7 @@ def _mine_object_harness_hints_cached(
                     "docs mention a client/session collaborator",
                     evidence,
                     0.5,
+                    signals=("collaborator_overlap", "doc_evidence"),
                     config={
                         "section": "[[objects]]",
                         "target": f"{module_name}:{class_name}",
@@ -4960,6 +5103,7 @@ def _mine_object_harness_hints_cached(
                     f"[[objects]] scenarios -> {doc_packs!r}",
                     evidence,
                     0.5,
+                    signals=("collaborator_overlap", "doc_evidence"),
                     config={
                         "section": "[[objects]]",
                         "target": f"{module_name}:{class_name}",
@@ -4972,7 +5116,7 @@ def _mine_object_harness_hints_cached(
     return tuple(
         sorted(
             hints,
-            key=lambda item: (-float(item.confidence), item.kind, item.suggestion),
+            key=_hint_sort_key,
         )
     )
 

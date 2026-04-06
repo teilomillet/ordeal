@@ -925,6 +925,55 @@ class TestScanModule:
         assert scenario_hint.config["key"] == "scenarios"
         assert "sandbox_client" in scenario_hint.config["value"]
 
+    def test_harness_hints_rank_structural_matches_above_generic_fixtures(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        pkg = tmp_path / "hintpkg"
+        tests_dir = tmp_path / "tests"
+        pkg.mkdir()
+        tests_dir.mkdir()
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "envs.py").write_text(
+            "class Env:\n"
+            "    def __init__(self, prefix: str):\n"
+            "        self.prefix = prefix\n"
+            "\n"
+            "    def render(self, prompt: str) -> str:\n"
+            "        return f'{self.prefix}:{prompt}'\n",
+            encoding="utf-8",
+        )
+        (tests_dir / "support_factories.py").write_text(
+            "from hintpkg.envs import Env\n"
+            "\n"
+            "def make_env() -> Env:\n"
+            "    return Env('factory')\n",
+            encoding="utf-8",
+        )
+        (tests_dir / "conftest.py").write_text(
+            "import pytest\n"
+            "from hintpkg.envs import Env\n"
+            "\n"
+            "@pytest.fixture\n"
+            "def env() -> Env:\n"
+            "    return Env('fixture')\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        auto_mod._mine_object_harness_hints.cache_clear()
+        hints = auto_mod._mine_object_harness_hints("hintpkg.envs", "Env", "render")
+        factory_hints = [hint for hint in hints if hint.kind == "factory"]
+
+        assert len(factory_hints) >= 2
+        assert factory_hints[0].score > factory_hints[1].score
+        assert factory_hints[0].config["value"].endswith("make_env")
+        assert "constructor_like" in factory_hints[0].signals
+        assert factory_hints[1].config["value"].endswith("env")
+        assert "pytest_fixture" in factory_hints[1].signals
+
     def test_method_seed_examples_capture_fixture_backed_bound_calls(self, tmp_path, monkeypatch):
         pkg = tmp_path / "hintpkg"
         tests_dir = tmp_path / "tests"

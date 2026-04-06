@@ -2270,6 +2270,8 @@ def _audit_harness_hints(
                     "suggestion": hint.suggestion,
                     "evidence": hint.evidence,
                     "confidence": round(float(hint.confidence), 2),
+                    "score": round(float(hint.score), 3),
+                    "signals": list(hint.signals),
                     "config": dict(hint.config),
                 }
             )

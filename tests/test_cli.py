@@ -1898,6 +1898,8 @@ scan_max_examples = 12
         )
         hint_kinds = {hint["kind"] for hint in row["harness_hints"]}
         assert {"factory", "state_factory", "teardown", "scenario_pack"} <= hint_kinds
+        assert any(isinstance(hint.get("score"), float) for hint in row["harness_hints"])
+        assert any(hint.get("signals") for hint in row["harness_hints"])
         assert any(
             hint.get("config", {}).get("section") == "[[objects]]" for hint in row["harness_hints"]
         )
@@ -2280,6 +2282,60 @@ scan_max_examples = 12
         assert any("[audit]" in snippet for snippet in snippets)
         assert any("[[objects]]" in snippet for snippet in snippets)
         assert any('target = "pkg.mod:Env"' in snippet for snippet in snippets)
+
+    def test_object_config_suggestions_prefer_highest_scored_factory_hint(self):
+        rows = [
+            {
+                "module": "pkg.mod",
+                "name": "Env.rollout",
+                "harness": "stateful",
+                "state_param": "state",
+                "harness_hints": [
+                    {
+                        "kind": "factory",
+                        "suggestion": "fixture env",
+                        "evidence": "tests/conftest.py:10",
+                        "confidence": 0.95,
+                        "score": 0.961,
+                        "signals": ["returns_target_instance", "pytest_fixture"],
+                        "config": {
+                            "section": "[[objects]]",
+                            "target": "pkg.mod:Env",
+                            "method": "rollout",
+                            "key": "factory",
+                            "value": "tests.conftest:env",
+                        },
+                    },
+                    {
+                        "kind": "factory",
+                        "suggestion": "make_env",
+                        "evidence": "tests/support_factories.py:5",
+                        "confidence": 0.95,
+                        "score": 0.985,
+                        "signals": ["returns_target_instance", "constructor_like"],
+                        "config": {
+                            "section": "[[objects]]",
+                            "target": "pkg.mod:Env",
+                            "method": "rollout",
+                            "key": "factory",
+                            "value": "tests.support_factories:make_env",
+                        },
+                    },
+                ],
+            }
+        ]
+
+        suggestions = cli._object_config_suggestions_from_rows(rows)
+
+        assert len(suggestions) == 1
+        assert 'factory = "tests.support_factories:make_env"' in suggestions[0]["snippet"]
+        factory_entry = next(
+            entry
+            for entry in suggestions[0]["entries"]
+            if entry["section"] == "[[objects]]" and entry["key"] == "factory"
+        )
+        assert factory_entry["value"] == "tests.support_factories:make_env"
+        assert factory_entry["score"] == pytest.approx(0.985)
 
     def test_mine_default_examples(self, capsys):
         """Default -n is 500 — just verify the flag is wired correctly."""

@@ -996,6 +996,8 @@ def _callable_listing_rows(
                         "suggestion": hint.suggestion,
                         "evidence": hint.evidence,
                         "confidence": round(float(hint.confidence), 2),
+                        "score": round(float(hint.score), 3),
+                        "signals": list(hint.signals),
                         "config": hint.config,
                     }
                 )
@@ -1093,17 +1095,41 @@ def _callable_listing_rows(
     return rows
 
 
+def _hint_mapping_sort_key(hint: Mapping[str, Any]) -> tuple[float, float, int, str, str]:
+    """Return a stable descending sort key for serialized harness hints."""
+    signals = hint.get("signals")
+    signal_count = (
+        len([item for item in signals if str(item).strip()])
+        if isinstance(signals, Sequence) and not isinstance(signals, (str, bytes, bytearray))
+        else 0
+    )
+    return (
+        -float(hint.get("score", 0.0) or 0.0),
+        -float(hint.get("confidence", 0.0) or 0.0),
+        -signal_count,
+        str(hint.get("kind", "")),
+        str(hint.get("suggestion", "")),
+    )
+
+
 def _harness_hint_summary(hints: Sequence[Mapping[str, Any]]) -> str | None:
     """Render a compact one-line summary of mined harness hints."""
-    by_kind: dict[str, str] = {}
+    best_by_kind: dict[str, Mapping[str, Any]] = {}
     for hint in hints:
         kind = str(hint.get("kind", "")).strip()
         suggestion = str(hint.get("suggestion", "")).strip()
-        if kind and suggestion and kind not in by_kind:
-            by_kind[kind] = suggestion
-    if not by_kind:
+        if not (kind and suggestion):
+            continue
+        current = best_by_kind.get(kind)
+        if current is None or _hint_mapping_sort_key(hint) < _hint_mapping_sort_key(current):
+            best_by_kind[kind] = hint
+    if not best_by_kind:
         return None
-    parts = [f"{kind}={value}" for kind, value in by_kind.items()]
+    parts = []
+    for kind, hint in best_by_kind.items():
+        score = hint.get("score")
+        suffix = f" [{float(score):.3f}]" if isinstance(score, (int, float)) else ""
+        parts.append(f"{kind}={str(hint.get('suggestion', '')).strip()}{suffix}")
     return "; ".join(parts[:3])
 
 
@@ -1510,7 +1536,10 @@ def _object_config_suggestions_from_rows(
         name = str(row.get("name", "")).strip()
         if allowed and name not in allowed:
             continue
-        hints = list(row.get("harness_hints", []))
+        hints = sorted(
+            list(row.get("harness_hints", [])),
+            key=_hint_mapping_sort_key,
+        )
         if not hints or "." not in name:
             continue
         object_target = f"{row.get('module')}:{name.rsplit('.', 1)[0]}"
@@ -1542,18 +1571,23 @@ def _object_config_suggestions_from_rows(
                     if item not in existing:
                         existing.append(item)
                 bucket["fields"]["scenarios"] = existing
-            else:
+            elif key not in bucket["fields"]:
                 bucket["fields"].setdefault(key, value)
+            else:
+                continue
             bucket["evidence"].append(str(hint.get("evidence", "")))
-            bucket["entries"].append(
-                {
-                    "section": "[[objects]]",
-                    "target": object_target,
-                    "method": method_name,
-                    "key": key,
-                    "value": value,
-                }
-            )
+            entry = {
+                "section": "[[objects]]",
+                "target": object_target,
+                "method": method_name,
+                "key": key,
+                "value": value,
+            }
+            if isinstance(hint.get("score"), (int, float)):
+                entry["score"] = round(float(hint["score"]), 3)
+            if hint.get("signals"):
+                entry["signals"] = list(hint["signals"])
+            bucket["entries"].append(entry)
 
     suggestions: list[dict[str, Any]] = []
     for object_target, bucket in grouped.items():
@@ -10064,7 +10098,10 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                 _arg(
                     "--list-targets",
                     action="store_true",
-                    help="List callable targets and metadata, then exit",
+                    help=(
+                        "List callable targets, surface metadata, and ranked config hints,"
+                        " then exit"
+                    ),
                 ),
             ),
         ),
@@ -10248,7 +10285,10 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                 _arg(
                     "--list-targets",
                     action="store_true",
-                    help="List callable targets and metadata, then exit",
+                    help=(
+                        "List callable targets, surface metadata, and ranked config hints,"
+                        " then exit"
+                    ),
                 ),
                 _arg("--json", action="store_true", help="Output agent-facing JSON"),
             ),

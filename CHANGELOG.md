@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.23
+
+**Features:**
+
+- mine harnesses from tests and add real bug evals
+
+
 ## 0.3.22
 
 **Features:**

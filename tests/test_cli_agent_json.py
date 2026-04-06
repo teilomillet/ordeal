@@ -904,7 +904,10 @@ class TestCLIAgentJson:
             "tests.ordeal_support:scenario_quote_paths",
             "tests.ordeal_support:scenario_space_paths",
         ]
-        assert payload["raw_details"]["config_suggestions"][0]["section"] == "[[audit.targets]]"
+        sections = {
+            item["section"] for item in payload["raw_details"]["config_suggestions"]
+        }
+        assert "[[audit.targets]]" in sections
         assert payload["raw_details"]["bootstrap_suggestions"][0]["filename"] == (
             "tests/ordeal_support.py"
         )

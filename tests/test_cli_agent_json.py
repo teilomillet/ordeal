@@ -72,6 +72,59 @@ def _write_bootstrap_target_project(tmp_path: Path) -> str:
     return "bootstrappkg.envs"
 
 
+def _write_harness_hint_project(tmp_path: Path) -> str:
+    """Write a tiny package whose tests/docs imply harness hooks."""
+    sys.modules.pop("hintpkg.envs", None)
+    sys.modules.pop("hintpkg", None)
+    pkg = tmp_path / "hintpkg"
+    tests_dir = tmp_path / "tests"
+    docs_dir = tmp_path / "docs"
+    pkg.mkdir()
+    tests_dir.mkdir()
+    docs_dir.mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "envs.py").write_text(
+        "class Env:\n"
+        "    def __init__(self, prefix: str):\n"
+        "        self.prefix = prefix\n"
+        "        self.sandbox_client = None\n"
+        "\n"
+        "    def rollout(self, state: dict[str, str], prompt: str) -> str:\n"
+        "        if self.sandbox_client is not None:\n"
+        "            self.sandbox_client.execute_command(prompt)\n"
+        "        return f'{self.prefix}:{state[\"seed\"]}:{prompt}'\n",
+        encoding="utf-8",
+    )
+    (tests_dir / "support_factories.py").write_text(
+        "from hintpkg.envs import Env\n"
+        "\n"
+        "class FakeSandbox:\n"
+        "    def execute_command(self, prompt: str) -> None:\n"
+        "        return None\n"
+        "\n"
+        "def make_env() -> Env:\n"
+        "    env = Env('demo')\n"
+        "    env.sandbox_client = FakeSandbox()\n"
+        "    return env\n"
+        "\n"
+        "def make_env_state() -> dict[str, str]:\n"
+        "    return {'seed': 'cached'}\n"
+        "\n"
+        "def teardown_env(env: Env) -> None:\n"
+        "    env.prefix = 'closed'\n"
+        "\n"
+        "def sandbox_client():\n"
+        "    return object()\n",
+        encoding="utf-8",
+    )
+    (docs_dir / "lifecycle.md").write_text(
+        "Cli lifecycle notes for Env.rollout.\n"
+        "This target needs state setup and a sandbox client before teardown.\n",
+        encoding="utf-8",
+    )
+    return "hintpkg.envs"
+
+
 class TestCLIAgentJson:
     def test_scan_json_outputs_agent_envelope(self, monkeypatch, capsys):
         state = SimpleNamespace(
@@ -639,6 +692,37 @@ class TestCLIAgentJson:
         assert by_name["audit_report"]["selected"] is True
         assert by_name["scan_module"]["selected"] is False
 
+    def test_scan_json_list_targets_includes_surface_map(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        module_name = _write_harness_hint_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        rc = main(["scan", module_name, "--json", "--list-targets"])
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        surface_map = payload["raw_details"]["surface_map"]
+        assert surface_map["summary"]["entry_count"] >= 1
+        entry = next(item for item in surface_map["entries"] if item["name"] == "Env.rollout")
+        assert entry["symbol"]["owner"] == "Env"
+        assert entry["symbol"]["member"] == "rollout"
+        assert entry["visibility"] == "public"
+        assert entry["execution"]["can_execute_now"] is True
+        assert entry["support"]["harness"]["auto"] is True
+        assert "shell" in entry["contracts"]["sink_categories"]
+        assert entry["contracts"]["lifecycle_phase"] == "rollout"
+        assert entry["evidence"]["tests"]["supporting_hints"]
+        assert entry["evidence"]["docs"]["files"]
+        sections = {
+            item["section"] for item in payload["raw_details"]["config_suggestions"]
+        }
+        assert {"[[scan]]", "[[objects]]", "[[audit.targets]]"} <= sections
+
     def test_scan_json_reports_surface_sampling_for_package_root(self, monkeypatch, capsys):
         rows = [
             {
@@ -779,6 +863,10 @@ class TestCLIAgentJson:
         assert env_row["setup_configured"] is True
         assert env_row["scenario_count"] == 1
         assert env_row["runnable"] is True
+        sections = {
+            item["section"] for item in payload["raw_details"]["config_suggestions"]
+        }
+        assert {"[audit]", "[[audit.targets]]"} <= sections
         assert any(
             row["name"] == "no_hints" and row["skip_reason"] == "missing inferable strategies"
             for row in rows

@@ -1914,7 +1914,29 @@ scan_max_examples = 12
 
         assert rc == 0
         assert "configs=" in out
+        assert "Suggested ordeal.toml:" in out
+        assert "[[scan]]" in out
         assert "[[objects]]" in out
+        assert "[[audit.targets]]" in out
+
+    def test_scan_list_targets_text_includes_surface_map_summary(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        module_name = _write_harness_hint_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        rc = main(["scan", module_name, "--list-targets"])
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        assert "surface map:" in out
+        assert "surface: public method" in out
+        assert "sinks=shell" in out
+        assert "lifecycle=rollout" in out
 
     def test_audit_bootstrap_targets_falls_back_to_class_discovery(
         self,
@@ -2953,6 +2975,7 @@ scan_max_examples = 12
         assert bundle["support_suggestions"][0]["filename"] == "tests/ordeal_support.py"
         assert bundle["scenario_libraries"][0]["inferred"][0]["name"] == "sandbox"
         assert "[[objects]]" in config_path.read_text()
+        assert "[[audit.targets]]" in config_path.read_text()
         assert "def make_env() -> Env:" in support_path.read_text()
         assert "tests/ordeal_support.py" in support_path.read_text()
         assert "shell command argument stability regression" in replay_path.read_text()

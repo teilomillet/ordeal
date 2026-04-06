@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import functools
 import hashlib
 import importlib
 import inspect
@@ -566,6 +567,265 @@ def _callable_listing_async_state(func: Any) -> str:
     return "sync"
 
 
+def _surface_symbol_parts(name: str, kind: str) -> dict[str, Any]:
+    """Return normalized symbol metadata for one callable listing name."""
+    parts = [part for part in str(name).split(".") if part]
+    if kind in {"instance", "class", "static"} and len(parts) >= 2:
+        owner = ".".join(parts[:-1])
+        member = parts[-1]
+        top_level = parts[0]
+        surface_kind = "method"
+    else:
+        owner = None
+        member = parts[-1] if parts else str(name)
+        top_level = member
+        surface_kind = "function"
+    return {
+        "qualname": str(name),
+        "kind": surface_kind,
+        "top_level": top_level,
+        "owner": owner,
+        "member": member,
+    }
+
+
+def _surface_visibility(name: str) -> str:
+    """Return the public/internal visibility label for one callable."""
+    return (
+        "internal"
+        if any(part.startswith("_") for part in str(name).split(".") if part)
+        else "public"
+    )
+
+
+def _hint_evidence_groups(harness_hints: Sequence[Mapping[str, Any]]) -> dict[str, list[str]]:
+    """Bucket harness-hint evidence into tests, docs, and other support files."""
+    buckets: dict[str, list[str]] = {"tests": [], "docs": [], "other": []}
+    for hint in harness_hints:
+        evidence = str(hint.get("evidence", "")).strip()
+        if not evidence:
+            continue
+        path_part = evidence.split(":", 1)[0]
+        lowered = path_part.lower()
+        bucket = "other"
+        if lowered.endswith(".md"):
+            bucket = "docs"
+        elif lowered.endswith(".py") and (
+            lowered.startswith("tests/")
+            or "/tests/" in lowered
+            or lowered.endswith("conftest.py")
+        ):
+            bucket = "tests"
+        if evidence not in buckets[bucket]:
+            buckets[bucket].append(evidence)
+    return buckets
+
+
+@functools.lru_cache(maxsize=128)
+def _module_surface_support_files(
+    module_name: str,
+    workspace_root: str,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return candidate adjacent test and doc files for one module."""
+    del workspace_root
+    from ordeal.auto import _candidate_seed_files, _harness_doc_files
+
+    test_files, _project_files = _candidate_seed_files(module_name)
+    doc_files = _harness_doc_files(module_name)
+    return (
+        tuple(_display_path(path) for path in test_files[:6]),
+        tuple(_display_path(path) for path in doc_files[:6]),
+    )
+
+
+def _surface_support_summary(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Build support/factory readiness details for one callable row."""
+    hints = list(row.get("harness_hints", []))
+    needs: list[str] = []
+    if row.get("factory_required") and not row.get("factory_configured"):
+        needs.append("object_factory")
+    if row.get("state_param") and not row.get("state_factory_configured"):
+        needs.append("state_factory")
+    return {
+        "needs": needs,
+        "factory": {
+            "required": bool(row.get("factory_required")),
+            "configured": bool(row.get("factory_configured")),
+            "source": row.get("factory_source"),
+        },
+        "setup": {
+            "configured": bool(row.get("setup_configured")),
+            "source": row.get("setup_source"),
+        },
+        "state": {
+            "param": row.get("state_param"),
+            "required": bool(row.get("state_param")),
+            "configured": bool(row.get("state_factory_configured")),
+            "source": row.get("state_factory_source"),
+        },
+        "teardown": {
+            "configured": bool(row.get("teardown_configured")),
+            "source": row.get("teardown_source"),
+        },
+        "scenarios": {
+            "count": int(row.get("scenario_count", 0) or 0),
+            "source": row.get("scenario_source"),
+        },
+        "harness": {
+            "mode": row.get("harness", "fresh"),
+            "source": row.get("harness_source"),
+            "auto": bool(row.get("auto_harness")),
+        },
+        "hints": [dict(item) for item in hints],
+    }
+
+
+def _surface_entry_from_listing_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Build one first-class surface entry from a callable listing row."""
+    hints = list(row.get("harness_hints", []))
+    hint_groups = _hint_evidence_groups(hints)
+    tests = list(row.get("adjacent_test_files", ()))
+    docs = list(row.get("adjacent_doc_files", ()))
+    if not tests:
+        tests = [item.split(":", 1)[0] for item in hint_groups["tests"]]
+    if not docs:
+        docs = [item.split(":", 1)[0] for item in hint_groups["docs"]]
+    symbol = dict(
+        row.get("surface_symbol")
+        or _surface_symbol_parts(str(row.get("name", "")), str(row.get("kind", "function")))
+    )
+    lifecycle_handlers = list(row.get("lifecycle_handlers", ()))
+    sink_categories = list(row.get("sink_categories", ()))
+    docstring_examples = int(row.get("docstring_examples", 0) or 0)
+    docstring_present = bool(row.get("docstring_present"))
+    return {
+        "name": row.get("name"),
+        "target": row.get("target"),
+        "module": row.get("module"),
+        "source_module": row.get("source_module"),
+        "source_path": row.get("source_path"),
+        "symbol": symbol,
+        "visibility": row.get("visibility") or _surface_visibility(str(row.get("name", ""))),
+        "async": row.get("async"),
+        "selected": bool(row.get("selected", True)),
+        "execution": {
+            "can_execute_now": bool(row.get("runnable")),
+            "blocking_reason": row.get("skip_reason"),
+        },
+        "support": _surface_support_summary(row),
+        "contracts": {
+            "checks": list(row.get("contract_checks", [])),
+            "sink_categories": sink_categories,
+            "lifecycle_phase": row.get("lifecycle_phase"),
+            "lifecycle_handlers": lifecycle_handlers,
+        },
+        "evidence": {
+            "tests": {
+                "files": tests,
+                "count": len(tests),
+                "supporting_hints": hint_groups["tests"],
+            },
+            "docs": {
+                "files": docs,
+                "count": len(docs) + (1 if docstring_present else 0),
+                "docstring_present": docstring_present,
+                "doctest_examples": docstring_examples,
+                "supporting_hints": hint_groups["docs"],
+            },
+            "support_files": {
+                "count": len(hint_groups["other"]),
+                "items": hint_groups["other"],
+            },
+        },
+    }
+
+
+def _build_surface_map(groups: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Build a reusable surface map from grouped callable listings."""
+    group_maps: list[dict[str, Any]] = []
+    entries: list[dict[str, Any]] = []
+    source_modules: set[str] = set()
+    for group in groups:
+        module = str(group.get("module", ""))
+        rows = list(group.get("targets", []))
+        bootstrap_targets = [
+            dict(item) for item in list(group.get("bootstrap_targets", ()))
+        ]
+        group_entries = [
+            dict(row.get("surface") or _surface_entry_from_listing_row(row)) for row in rows
+        ]
+        entries.extend(group_entries)
+        source_modules.update(
+            str(entry.get("source_module") or module)
+            for entry in group_entries
+            if entry.get("name")
+        )
+        group_maps.append(
+            {
+                "module": module,
+                "entry_count": len(group_entries),
+                "runnable_count": sum(
+                    1
+                    for entry in group_entries
+                    if entry.get("execution", {}).get("can_execute_now")
+                ),
+                "blocked_reason": _blocked_callable_listing_reason(rows),
+                "bootstrap_targets": bootstrap_targets,
+                "entries": group_entries,
+            }
+        )
+
+    return {
+        "summary": {
+            "group_count": len(group_maps),
+            "entry_count": len(entries),
+            "runnable_count": sum(
+                1 for entry in entries if entry.get("execution", {}).get("can_execute_now")
+            ),
+            "public_count": sum(1 for entry in entries if entry.get("visibility") == "public"),
+            "internal_count": sum(1 for entry in entries if entry.get("visibility") == "internal"),
+            "async_count": sum(1 for entry in entries if entry.get("async") == "async"),
+            "source_module_count": len(source_modules),
+            "bootstrap_class_count": sum(
+                len(group.get("bootstrap_targets", ())) for group in group_maps
+            ),
+        },
+        "groups": group_maps,
+        "entries": entries,
+    }
+
+
+def _render_surface_entry_summary(entry: Mapping[str, Any]) -> str:
+    """Return a compact human-readable summary for one surface entry."""
+    symbol = dict(entry.get("symbol", {}))
+    support = dict(entry.get("support", {}))
+    contracts = dict(entry.get("contracts", {}))
+    evidence = dict(entry.get("evidence", {}))
+    tests = dict(evidence.get("tests", {}))
+    docs = dict(evidence.get("docs", {}))
+    parts = [
+        f"{entry.get('visibility', 'public')} {symbol.get('kind', 'function')}",
+        (
+            "ready=yes"
+            if entry.get("execution", {}).get("can_execute_now")
+            else f"ready=no[{entry.get('execution', {}).get('blocking_reason')}]"
+        ),
+    ]
+    if support.get("needs"):
+        parts.append(f"needs={','.join(support['needs'])}")
+    if int(tests.get("count", 0) or 0) > 0:
+        parts.append(f"tests={tests.get('count')}")
+    if int(docs.get("count", 0) or 0) > 0:
+        parts.append(f"docs={docs.get('count')}")
+    sink_categories = list(contracts.get("sink_categories", ()))
+    if sink_categories:
+        parts.append(f"sinks={','.join(sink_categories)}")
+    lifecycle_phase = contracts.get("lifecycle_phase")
+    if lifecycle_phase:
+        parts.append(f"lifecycle={lifecycle_phase}")
+    return "  ".join(parts)
+
+
 def _callable_listing_rows(
     module_name: str,
     *,
@@ -589,17 +849,25 @@ def _callable_listing_rows(
         _REGISTERED_OBJECT_STATE_FACTORIES,
         _REGISTERED_OBJECT_TEARDOWNS,
         _callable_matches_target_selector,
+        _discover_lifecycle_handlers,
+        _doctest_seed_examples,
+        _infer_sink_categories,
         _infer_strategies,
         _mine_object_harness_hints,
         _resolve_module,
         _resolve_object_harness,
         _resolve_object_hook,
         _selected_public_functions,
+        _source_file_for_callable,
         _state_param_name_for_callable,
         _unwrap,
     )
 
     mod = _resolve_module(module_name)
+    candidate_test_files, candidate_doc_files = _module_surface_support_files(
+        module_name,
+        str(Path.cwd().resolve()),
+    )
     merged_factories = dict(_REGISTERED_OBJECT_FACTORIES)
     if object_factories:
         merged_factories.update(object_factories)
@@ -715,45 +983,82 @@ def _callable_listing_rows(
                         "config": hint.config,
                     }
                 )
+        try:
+            source_path = _source_file_for_callable(func)
+            display_source_path = _display_path(source_path) if source_path is not None else None
+        except Exception:
+            display_source_path = None
+        try:
+            docstring_present = bool(inspect.getdoc(_unwrap(func)) or "")
+        except Exception:
+            docstring_present = False
+        try:
+            docstring_examples = len(_doctest_seed_examples(func))
+        except Exception:
+            docstring_examples = 0
+        try:
+            sink_categories = _infer_sink_categories(func)
+        except Exception:
+            sink_categories = []
+        try:
+            lifecycle_handlers = (
+                _discover_lifecycle_handlers(
+                    owner,
+                    str(getattr(func, "__ordeal_lifecycle_phase__", "")),
+                )
+                if owner is not None and getattr(func, "__ordeal_lifecycle_phase__", None)
+                else []
+            )
+        except Exception:
+            lifecycle_handlers = []
 
-        rows.append(
-            {
-                "module": module_name,
-                "source_module": getattr(_unwrap(func), "__module__", module_name),
-                "name": name,
-                "target": f"{module_name}.{name}",
-                "kind": kind,
-                "async": _callable_listing_async_state(func),
-                "selected": (
-                    True
-                    if not selectors
-                    else any(
-                        _callable_matches_target_selector(module_name, name, selector)
-                        for selector in selectors
-                    )
-                ),
-                "factory_required": factory_required,
-                "factory_configured": factory_configured,
-                "factory_source": factory_source,
-                "setup_configured": setup_configured,
-                "setup_source": setup_source,
-                "state_param": state_param,
-                "state_factory_configured": state_factory_configured,
-                "state_factory_source": state_factory_source,
-                "teardown_configured": teardown_configured,
-                "teardown_source": teardown_source,
-                "harness": harness_mode,
-                "harness_source": harness_source,
-                "scenario_count": scenario_count,
-                "scenario_source": scenario_source,
-                "auto_harness": bool(getattr(func, "__ordeal_auto_harness__", False)),
-                "contract_checks": [str(getattr(check, "name", check)) for check in checks],
-                "lifecycle_phase": getattr(func, "__ordeal_lifecycle_phase__", None),
-                "harness_hints": harness_hints,
-                "runnable": skip_reason is None,
-                "skip_reason": skip_reason,
-            }
-        )
+        row = {
+            "module": module_name,
+            "source_module": getattr(_unwrap(func), "__module__", module_name),
+            "name": name,
+            "target": f"{module_name}.{name}",
+            "kind": kind,
+            "async": _callable_listing_async_state(func),
+            "selected": (
+                True
+                if not selectors
+                else any(
+                    _callable_matches_target_selector(module_name, name, selector)
+                    for selector in selectors
+                )
+            ),
+            "factory_required": factory_required,
+            "factory_configured": factory_configured,
+            "factory_source": factory_source,
+            "setup_configured": setup_configured,
+            "setup_source": setup_source,
+            "state_param": state_param,
+            "state_factory_configured": state_factory_configured,
+            "state_factory_source": state_factory_source,
+            "teardown_configured": teardown_configured,
+            "teardown_source": teardown_source,
+            "harness": harness_mode,
+            "harness_source": harness_source,
+            "scenario_count": scenario_count,
+            "scenario_source": scenario_source,
+            "auto_harness": bool(getattr(func, "__ordeal_auto_harness__", False)),
+            "contract_checks": [str(getattr(check, "name", check)) for check in checks],
+            "lifecycle_phase": getattr(func, "__ordeal_lifecycle_phase__", None),
+            "harness_hints": harness_hints,
+            "runnable": skip_reason is None,
+            "skip_reason": skip_reason,
+            "surface_symbol": _surface_symbol_parts(name, kind),
+            "visibility": _surface_visibility(name),
+            "source_path": display_source_path,
+            "adjacent_test_files": list(candidate_test_files),
+            "adjacent_doc_files": list(candidate_doc_files),
+            "docstring_present": docstring_present,
+            "docstring_examples": docstring_examples,
+            "sink_categories": sink_categories,
+            "lifecycle_handlers": lifecycle_handlers,
+        }
+        row["surface"] = _surface_entry_from_listing_row(row)
+        rows.append(row)
 
     unmatched_selectors = [
         selector
@@ -1263,6 +1568,124 @@ def _object_config_suggestions_from_rows(
     return suggestions
 
 
+def _audit_target_config_suggestions_from_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    only_names: Sequence[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Build `[[audit.targets]]` suggestions from discovered method surfaces."""
+    allowed = {str(name) for name in only_names or () if str(name).strip()}
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        name = str(row.get("name", "")).strip()
+        if not name or "." not in name:
+            continue
+        if allowed and name not in allowed:
+            continue
+        module_name = str(row.get("module", "")).strip()
+        if not module_name:
+            continue
+        owner_name, method_name = name.rsplit(".", 1)
+        object_target = f"{module_name}:{owner_name}"
+        bucket = grouped.setdefault(
+            object_target,
+            {
+                "target": object_target,
+                "module": module_name,
+                "methods": set(),
+                "fields": {},
+                "evidence": [],
+                "entries": [],
+            },
+        )
+        bucket["methods"].add(method_name)
+        if row.get("harness") == "stateful" or row.get("state_param"):
+            bucket["fields"].setdefault("harness", "stateful")
+        for hint in list(row.get("harness_hints", [])):
+            config = hint.get("config")
+            if not isinstance(config, Mapping):
+                continue
+            if str(config.get("section", "")).strip() != "[[objects]]":
+                continue
+            key = str(config.get("key", "")).strip()
+            if not key:
+                continue
+            value = _normalize_hint_config_value(config.get("value"))
+            if key == "scenarios":
+                existing = list(bucket["fields"].get("scenarios", []))
+                for item in list(value) if isinstance(value, list) else [value]:
+                    if item not in existing:
+                        existing.append(item)
+                bucket["fields"]["scenarios"] = existing
+            else:
+                bucket["fields"].setdefault(key, value)
+            evidence = str(hint.get("evidence", "")).strip()
+            if evidence:
+                bucket["evidence"].append(evidence)
+            bucket["entries"].append(
+                {
+                    "section": "[[audit.targets]]",
+                    "target": object_target,
+                    "method": method_name,
+                    "key": key,
+                    "value": value,
+                }
+            )
+        surface = row.get("surface")
+        if isinstance(surface, Mapping):
+            support = dict(surface.get("support", {}))
+            evidence = dict(surface.get("evidence", {}))
+            tests = dict(evidence.get("tests", {}))
+            docs = dict(evidence.get("docs", {}))
+            support_tests = list(tests.get("supporting_hints", ()))
+            for item in support_tests[:3]:
+                text = str(item).strip()
+                if text:
+                    bucket["evidence"].append(text)
+            for path in list(docs.get("files", ()))[:2]:
+                text = str(path).strip()
+                if text:
+                    bucket["evidence"].append(text)
+            if support.get("harness", {}).get("mode") == "stateful":
+                bucket["fields"].setdefault("harness", "stateful")
+
+    suggestions: list[dict[str, Any]] = []
+    for object_target, bucket in grouped.items():
+        methods = sorted(bucket["methods"])
+        if not methods:
+            continue
+        lines = ["[[audit.targets]]", _toml_key_value("target", object_target)]
+        fields = dict(bucket["fields"])
+        if fields.get("harness") == "stateful":
+            lines.append(_toml_key_value("harness", "stateful"))
+        for key in ("factory", "setup", "state_factory", "teardown", "scenarios"):
+            if key in fields:
+                lines.append(_toml_key_value(key, fields[key]))
+        lines.append(_toml_key_value("methods", methods))
+        suggestions.append(
+            _config_suggestion(
+                title=f"Pin audit targets for {object_target}",
+                reason=(
+                    "Carry the observed method surface into [audit] so follow-up reviews stay "
+                    "focused on the same class methods and harness hooks."
+                ),
+                snippet_lines=lines,
+                section="[[audit.targets]]",
+                target=object_target,
+                evidence=sorted(dict.fromkeys(bucket["evidence"]))[:5],
+                entries=[
+                    {
+                        "section": "[[audit.targets]]",
+                        "target": object_target,
+                        "methods": methods,
+                        **fields,
+                    }
+                ],
+            )
+        )
+    return suggestions
+
+
 def _contract_target_name(module_name: str, function_name: str) -> str:
     """Render one config target name for a function or bound method."""
     return (
@@ -1486,6 +1909,7 @@ def _scan_config_suggestions(
         )
     ]
     suggestions.extend(_object_config_suggestions_from_rows(rows))
+    suggestions.extend(_audit_target_config_suggestions_from_rows(rows))
     suggestions.extend(_contract_config_suggestions_from_scan_details(module_name, details))
     return _dedupe_config_suggestions(suggestions)
 
@@ -1842,8 +2266,17 @@ def _render_target_listing_text(
 ) -> str:
     """Render callable discovery rows for human-readable CLI output."""
     lines = [title]
+    surface_map = _build_surface_map(groups)
     for warning in warnings:
         lines.append(f"warning: {warning}")
+    summary = dict(surface_map.get("summary", {}))
+    if summary.get("entry_count"):
+        lines.append(
+            "surface map: "
+            f"{summary.get('entry_count', 0)} entries, "
+            f"{summary.get('runnable_count', 0)} runnable, "
+            f"{summary.get('source_module_count', 0)} source modules"
+        )
     for group in groups:
         module = str(group.get("module", ""))
         targets = list(group.get("targets", []))
@@ -1867,6 +2300,8 @@ def _render_target_listing_text(
         for row in targets:
             parts = _render_target_listing_parts(row)
             lines.append(f"  {row.get('name', ''):<38} " + "  ".join(parts))
+            surface = row.get("surface") or _surface_entry_from_listing_row(row)
+            lines.append(f"    surface: {_render_surface_entry_summary(surface)}")
     lines.extend(_render_config_suggestions_text(config_suggestions))
     lines.extend(_render_bootstrap_suggestions_text(bootstrap_suggestions))
     return "\n".join(lines)
@@ -1884,11 +2319,12 @@ def _build_target_listing_envelope(
     """Build the agent envelope for callable discovery output."""
     from ordeal.agent_schema import build_agent_envelope
 
+    surface_map = _build_surface_map(groups)
     flat_targets = [row for group in groups for row in list(group.get("targets", []))]
     if config_suggestions:
         normalized_config_suggestions = [dict(item) for item in config_suggestions]
     else:
-        normalized_config_suggestions = _config_suggestion_payload(
+        payload = _config_suggestion_payload(
             [
                 block
                 for group in groups
@@ -1901,6 +2337,21 @@ def _build_target_listing_envelope(
                 ).get("blocks", [])
             ]
         )
+        normalized_config_suggestions = []
+        if payload is not None:
+            normalized_config_suggestions = [
+                _config_suggestion(
+                    title=f"Persist callable surface for {target}",
+                    reason=(
+                        "Carry the observed callable surface into ordeal.toml for repeatable "
+                        "follow-up scans and audits."
+                    ),
+                    snippet_lines=str(payload.get("toml", "")).rstrip().splitlines(),
+                    section=str(payload.get("blocks", [{}])[0].get("section", "")),
+                    target=target,
+                    entries=list(payload.get("blocks", [])),
+                )
+            ]
     runnable_count = sum(1 for row in flat_targets if row.get("runnable"))
     skip_count = len(flat_targets) - runnable_count
     bootstrap_target_count = sum(len(list(group.get("bootstrap_targets", ()))) for group in groups)
@@ -1938,6 +2389,7 @@ def _build_target_listing_envelope(
             "warnings": list(warnings),
             "runnable_count": runnable_count,
             "skip_count": skip_count,
+            "surface_map": surface_map,
             "config_suggestions": normalized_config_suggestions,
             "bootstrap_suggestions": [dict(item) for item in bootstrap_suggestions],
         },
@@ -3737,6 +4189,23 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             f"{scan_max_examples} per target; pass -n or use --target for a deeper scan."
         )
     if getattr(args, "list_targets", False):
+        config_suggestions = _scan_config_suggestions(
+            module_name,
+            mode=scan_mode,
+            max_examples=scan_max_examples,
+            scan_targets=scan_targets,
+            include_private=inc_private,
+            seed_from_call_sites=runtime_defaults.seed_from_call_sites,
+            min_contract_fit=scan_min_contract_fit,
+            min_reachability=scan_min_reachability,
+            min_realism=scan_min_realism,
+            ignore_properties=scan_ignore_properties,
+            ignore_relations=scan_ignore_relations,
+            auto_contracts=runtime_defaults.auto_contracts,
+            sampling=None,
+            rows=selected_scan_rows,
+            details=(),
+        )
         groups = [{"module": module_name, "targets": scan_target_rows}]
         if args.json:
             print(
@@ -3745,6 +4214,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                     target=scan_target,
                     groups=groups,
                     warnings=runtime_defaults.registry_warnings,
+                    config_suggestions=config_suggestions,
                 ).to_json()
             )
         else:
@@ -3753,6 +4223,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                     f"Callable targets for {scan_target}",
                     groups,
                     warnings=runtime_defaults.registry_warnings,
+                    config_suggestions=config_suggestions,
                 )
             )
         return 0
@@ -4457,8 +4928,32 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             _stderr(f"{exc}\n")
             return 1
 
+        listing_rows = [
+            row
+            for group in target_groups
+            for row in list(group.get("targets", []))
+            if bool(row.get("selected", True))
+        ]
         config_suggestions = _dedupe_config_suggestions(
-            _audit_bootstrap_config_suggestions(target_groups)
+            [
+                *_audit_config_suggestions(
+                    modules=target_names,
+                    test_dir=test_dir,
+                    max_examples=max_examples,
+                    workers=workers,
+                    validation_mode=validation_mode,
+                    min_fixture_completeness=min_fixture_completeness,
+                    show_generated=show_generated,
+                    save_generated=save_generated,
+                    write_gaps=write_gaps,
+                    include_exploratory_function_gaps=include_exploratory_function_gaps,
+                    require_direct_tests=require_direct_tests,
+                    target_groups=target_groups,
+                    results=(),
+                ),
+                *_object_config_suggestions_from_rows(listing_rows),
+                *_audit_target_config_suggestions_from_rows(listing_rows),
+            ]
         )
         bootstrap_suggestions = _audit_bootstrap_support_suggestions(
             target_groups,

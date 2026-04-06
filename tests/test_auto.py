@@ -333,8 +333,7 @@ class TestScanModule:
         tests_dir.mkdir()
         (pkg / "__init__.py").write_text("", encoding="utf-8")
         (pkg / "mod.py").write_text(
-            "def compute(x: int, y: int) -> int:\n"
-            "    return x + y\n",
+            "def compute(x: int, y: int) -> int:\n    return x + y\n",
             encoding="utf-8",
         )
         (tests_dir / "test_mod.py").write_text(

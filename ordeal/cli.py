@@ -827,6 +827,7 @@ def _config_suggestions_for_contract_checks(
 
 def _render_target_listing_parts(row: Mapping[str, Any]) -> list[str]:
     """Return the normalized text fragments for one callable discovery row."""
+
     def _configured_text(enabled: object, source: object) -> str:
         if not enabled:
             return "no"

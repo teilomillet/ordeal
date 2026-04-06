@@ -28,13 +28,11 @@ def _write_real_bug_eval_project(tmp_path: Path) -> None:
     tests_dir.mkdir()
     (pkg / "__init__.py").write_text("", encoding="utf-8")
     (pkg / "numeric.py").write_text(
-        "def divide_total(total: int, count: int) -> float:\n"
-        "    return total / count\n",
+        "def divide_total(total: int, count: int) -> float:\n    return total / count\n",
         encoding="utf-8",
     )
     (pkg / "shellish.py").write_text(
-        "def build_copy_command(path: str) -> str:\n"
-        "    return f'cp {path} /tmp'\n",
+        "def build_copy_command(path: str) -> str:\n    return f'cp {path} /tmp'\n",
         encoding="utf-8",
     )
     (pkg / "robust.py").write_text(

@@ -4611,9 +4611,7 @@ def _mine_object_harness_hints_cached(
             attr_packs = _scenario_packs_for_attrs(
                 _instance_attr_names(node, instance_names=instance_names)
             )
-            state_like_name = any(
-                token in name_lower for token in ("state", "context", "cache")
-            )
+            state_like_name = any(token in name_lower for token in ("state", "context", "cache"))
             looks_like_factory = (
                 name_lower.startswith(("make_", "build_", "create_", "new_"))
                 or "factory" in name_lower
@@ -4639,15 +4637,19 @@ def _mine_object_harness_hints_cached(
                     },
                 )
             if (
-                "state" in text_lower
-                and (mentions_target or (state_param_name is not None and returns_target))
-            ) or (
-                state_param_name is not None
-                and (name_lower == state_param_name.lower() or "state" in name_lower)
-            ) or (
-                state_param_name is not None
-                and returns_mapping
-                and any(token in name_lower for token in ("state", "context", "cache"))
+                (
+                    "state" in text_lower
+                    and (mentions_target or (state_param_name is not None and returns_target))
+                )
+                or (
+                    state_param_name is not None
+                    and (name_lower == state_param_name.lower() or "state" in name_lower)
+                )
+                or (
+                    state_param_name is not None
+                    and returns_mapping
+                    and any(token in name_lower for token in ("state", "context", "cache"))
+                )
             ):
                 _add_hint(
                     "state_factory",
@@ -4692,9 +4694,10 @@ def _mine_object_harness_hints_cached(
                         "value": attr_packs,
                     },
                 )
-            if (mentions_target and any(
-                token in text_lower for token in ("teardown", "cleanup", "close", "stop")
-            )) or bool(fixture_info.get("yield_cleanup")):
+            if (
+                mentions_target
+                and any(token in text_lower for token in ("teardown", "cleanup", "close", "stop"))
+            ) or bool(fixture_info.get("yield_cleanup")):
                 _add_hint(
                     "teardown",
                     f"[[objects]] teardown -> {evidence}:{node.name}",
@@ -4813,11 +4816,7 @@ def _mine_object_harness_hints_cached(
                     },
                 )
             doc_packs = _scenario_packs_for_attrs(
-                {
-                    attr_name
-                    for attr_name in _SCENARIO_PACK_ATTR_ALIASES
-                    if attr_name in line
-                }
+                {attr_name for attr_name in _SCENARIO_PACK_ATTR_ALIASES if attr_name in line}
             )
             if doc_packs:
                 _add_hint(
@@ -5000,7 +4999,7 @@ def _test_seed_examples_cached(
                             source="pytest_seed",
                             evidence=f"{path.name}:{getattr(node, 'lineno', '?')}",
                         )
-            )
+                    )
     return tuple(seeds)
 
 

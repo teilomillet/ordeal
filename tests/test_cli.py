@@ -262,8 +262,7 @@ class TestCLI:
     def test_resolve_symbol_path_supports_file_paths(self, tmp_path, monkeypatch):
         helper = tmp_path / "support_factories.py"
         helper.write_text(
-            "def make_env() -> str:\n"
-            "    return 'ready'\n",
+            "def make_env() -> str:\n    return 'ready'\n",
             encoding="utf-8",
         )
         monkeypatch.chdir(tmp_path)

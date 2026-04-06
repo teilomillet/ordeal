@@ -46,6 +46,32 @@ def _make_target_listing_module(name: str = "tests._cli_targets") -> types.Modul
     return mod
 
 
+def _write_bootstrap_target_project(tmp_path: Path) -> str:
+    """Write a tiny package whose class target needs audit bootstrap scaffolding."""
+    sys.modules.pop("bootstrappkg.envs", None)
+    sys.modules.pop("bootstrappkg", None)
+    pkg = tmp_path / "bootstrappkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "envs.py").write_text(
+        "class ComposableEnv:\n"
+        "    def __init__(self, prefix: str = 'demo'):\n"
+        "        self.prefix = prefix\n"
+        "        self.upload_content = None\n"
+        "\n"
+        "    def build_env_vars(self, path: str, system_prompt: str | None = None) -> str:\n"
+        "        return f'{self.prefix}:{path}'\n"
+        "\n"
+        "    async def post_sandbox_setup(self) -> str:\n"
+        "        return 'ready'\n"
+        "\n"
+        "    def post_rollout(self, instruction: str, log_path: str | None = None) -> str:\n"
+        "        return instruction\n",
+        encoding="utf-8",
+    )
+    return "bootstrappkg.envs"
+
+
 class TestCLIAgentJson:
     def test_scan_json_outputs_agent_envelope(self, monkeypatch, capsys):
         state = SimpleNamespace(
@@ -229,14 +255,15 @@ class TestCLIAgentJson:
             functions={"divide": object()},
             supervisor_info={"seed": 42, "trajectory_steps": 4},
             tree=SimpleNamespace(size=2),
-            findings=["divide: crashes on realistic inputs"],
-            frontier={"divide": ["crash safety failed"]},
+            findings=["divide: strong candidate issue on contract-valid inputs"],
+            frontier={"divide": ["strong candidate issue on contract-valid inputs"]},
             finding_details=[
                 {
                     "kind": "crash",
                     "category": "likely_bug",
+                    "evidence_class": "candidate_issue",
                     "function": "divide",
-                    "summary": "divide: crash safety failed",
+                    "summary": "divide: strong candidate issue on contract-valid inputs",
                     "error": "ZeroDivisionError: division by zero",
                     "failing_args": {"a": 1.0, "b": 0.0},
                     "replayable": True,
@@ -250,6 +277,7 @@ class TestCLIAgentJson:
                         "witness": {"input": {"a": 1.0, "b": 0.0}, "source": "boundary"},
                         "contract_basis": {
                             "category": "likely_bug",
+                            "evidence_class": "candidate_issue",
                             "fit": 0.92,
                             "reachability": 0.8,
                             "realism": 1.0,
@@ -266,7 +294,7 @@ class TestCLIAgentJson:
                         "minimal_reproduction": {
                             "target": "pkg.mod:divide",
                             "command": (
-                                "uv run ordeal scan pkg.mod --mode real_bug "
+                                "uv run ordeal scan pkg.mod --mode candidate "
                                 "--targets pkg.mod:divide -n 1"
                             ),
                             "python_snippet": (
@@ -286,11 +314,12 @@ class TestCLIAgentJson:
                         },
                         "impact": {
                             "summary": "valid inputs reach an unchecked divide-by-zero boundary",
-                            "class": "likely_bug",
+                            "class": "candidate_issue",
                             "sink_categories": [],
                         },
                         "verdict": {
                             "category": "likely_bug",
+                            "evidence_class": "candidate_issue",
                             "promoted": True,
                             "demotion_reason": None,
                         },
@@ -307,6 +336,7 @@ class TestCLIAgentJson:
         proof = payload["findings"][0]["details"]["proof_bundle"]
         assert proof["version"] == 2
         assert proof["verdict"]["promoted"] is True
+        assert proof["verdict"]["evidence_class"] == "candidate_issue"
         assert proof["confidence_breakdown"]["contract_fit"] == 0.92
         assert proof["minimal_reproduction"]["target"] == "pkg.mod:divide"
 
@@ -632,6 +662,43 @@ class TestCLIAgentJson:
         assert any(
             row["name"] == "no_hints" and row["skip_reason"] == "missing inferable strategies"
             for row in rows
+        )
+
+    def test_audit_json_bootstrap_targets_include_review_scaffold_metadata(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        module_name = _write_bootstrap_target_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        monkeypatch.setattr(cli, "_callable_listing_rows", lambda *args, **kwargs: [])
+
+        rc = main(["audit", module_name, "--json", "--list-targets"])
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 0
+        assert payload["tool"] == "audit"
+        assert payload["status"] == "exploratory"
+        assert payload["raw_details"]["target_groups"][0]["module"] == module_name
+        row = payload["raw_details"]["bootstrap_targets"][0]
+        assert row["target"] == f"{module_name}:ComposableEnv"
+        assert row["support_module"] == "tests.ordeal_support"
+        assert row["support_path"] == "tests/ordeal_support.py"
+        assert row["support_factory"] == "tests.ordeal_support:make_composable_env"
+        assert row["support_setup"] == "tests.ordeal_support:prime_composable_env"
+        assert row["support_teardown"] == "tests.ordeal_support:cleanup_composable_env"
+        assert row["support_scenarios"] == [
+            "tests.ordeal_support:scenario_empty_instruction",
+            "tests.ordeal_support:scenario_missing_log_file",
+            "tests.ordeal_support:scenario_no_system_prompt",
+            "tests.ordeal_support:scenario_quote_paths",
+            "tests.ordeal_support:scenario_space_paths",
+        ]
+        assert payload["raw_details"]["config_suggestions"][0]["section"] == "[[audit.targets]]"
+        assert payload["raw_details"]["bootstrap_suggestions"][0]["filename"] == (
+            "tests/ordeal_support.py"
         )
 
     def test_audit_json_preserves_method_level_function_names(self, monkeypatch, capsys):

@@ -63,16 +63,24 @@ def _json_ready(value: Any) -> Any:
 def _crash_summary(name: str, category: str, replayable: bool | None) -> str:
     """Return the human-facing summary for one scan crash category."""
     if category == "likely_bug":
-        return f"{name}: crashes on realistic inputs"
+        return f"{name}: strong candidate issue on contract-valid inputs"
     if category == "coverage_gap":
-        return f"{name}: plausible crash but evidence still looks like a gap"
+        return f"{name}: crash evidence still looks like a coverage gap"
     if category == "beyond_declared_contract_robustness":
-        return f"{name}: crash sits just beyond the declared contract"
+        return f"{name}: robustness issue just beyond the declared contract"
     if category == "invalid_input_crash":
-        return f"{name}: crash currently looks driven by invalid input"
+        return f"{name}: robustness issue currently looks driven by invalid input"
     if replayable:
         return f"{name}: replayable crash on semi-valid inputs, still exploratory"
     return f"{name}: unreplayed crash on random inputs"
+
+
+def _evidence_class(category: str) -> str:
+    """Return the user-facing evidence class for one internal category."""
+    return {
+        "likely_bug": "candidate_issue",
+        "expected_precondition_failure": "expected_precondition",
+    }.get(category, category)
 
 
 @dataclass
@@ -241,7 +249,7 @@ class ExplorationState:
     exploration_time: float = 0.0
     supervisor_info: dict[str, Any] = field(default_factory=dict)
     tree: Any = field(default=None, repr=False)
-    scan_mode: str = "coverage_gap"
+    scan_mode: str = "evidence"
     active_dimensions: tuple[str, ...] = _ALL_EXPLORATION_DIMENSIONS
 
     def function(self, name: str) -> FunctionState:
@@ -320,7 +328,7 @@ class ExplorationState:
             ):
                 results.append(f"{name}: violates an explicit semantic contract")
             if fs.crash_free is False and fs.scan_crash_category == "likely_bug":
-                results.append(f"{name}: crashes on realistic inputs")
+                results.append(_crash_summary(name, fs.scan_crash_category, fs.scan_replayable))
         return results
 
     @property
@@ -335,16 +343,7 @@ class ExplorationState:
                 or category == "invalid_input_crash"
                 or category == "beyond_declared_contract_robustness"
             ):
-                if category == "coverage_gap":
-                    results.append(
-                        f"{name}: plausible crash but current evidence still looks like a gap"
-                    )
-                elif category == "beyond_declared_contract_robustness":
-                    results.append(f"{name}: crash sits just beyond the declared contract")
-                elif category == "invalid_input_crash":
-                    results.append(f"{name}: crash currently looks driven by invalid input")
-                else:
-                    results.append(_crash_summary(name, category, fs.scan_replayable))
+                results.append(_crash_summary(name, category, fs.scan_replayable))
             for v in fs.property_violations:
                 results.append(f"{name}: {v}")
             for note in fs.contract_violations:
@@ -362,6 +361,7 @@ class ExplorationState:
                     {
                         "kind": "crash",
                         "category": category,
+                        "evidence_class": _evidence_class(category),
                         "function": name,
                         "summary": (_crash_summary(name, category, fs.scan_replayable)),
                         "error": fs.scan_error,
@@ -389,6 +389,7 @@ class ExplorationState:
                 details.append(
                     {
                         "function": name,
+                        "evidence_class": _evidence_class(str(item.get("category", ""))),
                         "lifecycle_signal": (
                             1.0
                             if item.get("lifecycle_phase") is not None
@@ -403,6 +404,7 @@ class ExplorationState:
                     {
                         "kind": "property",
                         "category": "speculative_property",
+                        "evidence_class": "speculative_property",
                         "function": name,
                         **item,
                     }
@@ -412,6 +414,7 @@ class ExplorationState:
                     {
                         "kind": "mutation",
                         "category": "test_strength_gap",
+                        "evidence_class": "test_strength_gap",
                         "function": name,
                         "summary": f"{name}: mutation score {fs.mutation_score:.0%}",
                         "mutation_score": fs.mutation_score,
@@ -515,7 +518,7 @@ class ExplorationState:
         state = cls(module=raw["module"])
         state.edge_coverage = raw.get("edge_coverage")
         state.exploration_time = raw.get("exploration_time", 0.0)
-        state.scan_mode = raw.get("scan_mode", "coverage_gap")
+        state.scan_mode = raw.get("scan_mode", "evidence")
         state.active_dimensions = tuple(raw.get("active_dimensions", _ALL_EXPLORATION_DIMENSIONS))
         state.supervisor_info = raw.get("supervisor_info", {})
         for name, fdata in raw.get("functions", {}).items():
@@ -651,7 +654,7 @@ def explore_scan(
     property_overrides: dict[str, list[str]] | None = None,
     relation_overrides: dict[str, list[str]] | None = None,
     contract_checks: dict[str, list[Any]] | None = None,
-    mode: str = "coverage_gap",
+    mode: str = "evidence",
     seed_from_tests: bool = True,
     seed_from_fixtures: bool = True,
     seed_from_docstrings: bool = True,
@@ -902,7 +905,7 @@ def explore(
     scan_property_overrides: dict[str, list[str]] | None = None,
     scan_relation_overrides: dict[str, list[str]] | None = None,
     scan_contract_checks: dict[str, list[Any]] | None = None,
-    scan_mode: str = "coverage_gap",
+    scan_mode: str = "evidence",
     scan_seed_from_tests: bool = True,
     scan_seed_from_fixtures: bool = True,
     scan_seed_from_docstrings: bool = True,

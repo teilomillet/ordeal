@@ -125,7 +125,7 @@ property_overrides = { normalize = ["idempotent"] }
 relation_overrides = { normalize = ["equivalent"] }
 ```
 
-When you run `pytest --chaos`, ordeal auto-discovers these entries and smoke-tests every public function in each module. Functions without type hints are skipped unless fixtures are provided or a registry supplies them. Known preconditions stay separate from likely bugs so the output stays epistemic.
+When you run `pytest --chaos`, ordeal auto-discovers these entries and smoke-tests every public function in each module. Functions without type hints are skipped unless fixtures are provided or a registry supplies them. Known preconditions stay separate from candidate issue ranking so the output stays epistemic.
 
 `targets` now acts as a first-class selector list, not just an exact-callable allowlist. Exact names still work, and glob patterns let package-root scans focus on a subset of exported callables without rewriting the module target.
 

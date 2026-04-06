@@ -95,7 +95,7 @@ class ScanConfig:
 
     module: str
     max_examples: int = 50
-    mode: str = "coverage_gap"
+    mode: str = "evidence"
     min_contract_fit: float = 0.55
     min_reachability: float = 0.45
     min_realism: float = 0.55
@@ -299,7 +299,7 @@ class OrdealConfig:
 _VALID_CHECKPOINT_STRATEGIES = {"energy", "uniform", "recent"}
 _VALID_REPORT_FORMATS = {"json", "text", "both"}
 _VALID_AUDIT_VALIDATION_MODES = {"fast", "deep"}
-_VALID_SCAN_MODES = {"coverage_gap", "real_bug"}
+_VALID_SCAN_MODES = {"coverage_gap", "evidence", "real_bug", "candidate"}
 
 
 def _valid_presets() -> frozenset[str]:
@@ -469,7 +469,7 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
             ScanConfig(
                 module=s["module"],
                 max_examples=int(s.get("max_examples", 50)),
-                mode=str(s.get("mode", "coverage_gap")),
+                mode=str(s.get("mode", "evidence")),
                 min_contract_fit=float(s.get("min_contract_fit", 0.55)),
                 min_reachability=float(s.get("min_reachability", 0.45)),
                 min_realism=float(s.get("min_realism", 0.55)),

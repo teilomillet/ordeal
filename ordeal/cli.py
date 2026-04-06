@@ -44,6 +44,26 @@ def _stderr(msg: str) -> None:
     sys.stderr.flush()
 
 
+def _public_scan_mode(mode: str) -> str:
+    """Return the preferred public label for one scan mode."""
+    return {
+        "coverage_gap": "evidence",
+        "evidence": "evidence",
+        "real_bug": "candidate",
+        "candidate": "candidate",
+    }.get(str(mode).strip(), str(mode).strip())
+
+
+def _evidence_class_for_category(category: str | None) -> str | None:
+    """Return the user-facing evidence class for one internal category."""
+    if category is None:
+        return None
+    return {
+        "likely_bug": "candidate_issue",
+        "expected_precondition_failure": "expected_precondition",
+    }.get(category, category)
+
+
 def _install_skill(dry_run: bool = False) -> str | None:
     """Copy the bundled SKILL.md into .claude/skills/ordeal/SKILL.md.
 
@@ -122,7 +142,7 @@ class ScanRuntimeDefaults:
     """Resolved scan runtime config for one target module."""
 
     max_examples: int
-    mode: str = "coverage_gap"
+    mode: str = "evidence"
     seed_from_tests: bool = True
     seed_from_fixtures: bool = True
     seed_from_docstrings: bool = True
@@ -209,6 +229,184 @@ def _scan_display_name(module_name: str, target: str) -> str:
         return explicit_target
     dotted_prefix = f"{module_name}."
     return target[len(dotted_prefix) :] if target.startswith(dotted_prefix) else target
+
+
+def _camel_to_snake(name: str) -> str:
+    """Convert one CamelCase symbol into snake_case."""
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", str(name).strip()).lower()
+
+
+def _bootstrap_support_module_name(test_dir: str) -> str:
+    """Return the import path used for generated audit support scaffolds."""
+    path = Path(test_dir)
+    parts = [part for part in path.parts if part not in {"", ".", "/"}]
+    if parts and parts[-1] == "ordeal_support":
+        return ".".join(parts)
+    return ".".join([*(parts or ["tests"]), "ordeal_support"])
+
+
+def _bootstrap_support_file_path(test_dir: str) -> str:
+    """Return the filesystem path for generated audit support scaffolds."""
+    return _display_path(Path(test_dir) / "ordeal_support.py")
+
+
+def _bootstrap_review_scenarios_for_method(owner: type, method_name: str) -> list[str]:
+    """Infer a small review-oriented scenario set for one method."""
+    names: set[str] = set()
+    source_lower = ""
+    target = None
+    with contextlib.suppress(Exception):
+        target = getattr(owner, method_name)
+    if target is not None:
+        with contextlib.suppress(Exception):
+            params = inspect.signature(target).parameters.values()
+            for param in params:
+                lower = param.name.lower()
+                if lower in {"self", "cls", "state"}:
+                    continue
+                if any(token in lower for token in ("path", "file", "log")):
+                    names.update({"space_paths", "quote_paths"})
+                if "instruction" in lower:
+                    names.add("empty_instruction")
+                if "system_prompt" in lower or "prompt" == lower:
+                    names.add("no_system_prompt")
+        with contextlib.suppress(Exception):
+            source_lower = inspect.getsource(target).lower()
+    if any(token in source_lower for token in ("path", "paths", "file", "log_file", "log_path")):
+        names.update({"space_paths", "quote_paths"})
+    if "instruction" in source_lower:
+        names.add("empty_instruction")
+    if "system_prompt" in source_lower or "system prompt" in source_lower:
+        names.add("no_system_prompt")
+    if any(
+        token in source_lower
+        for token in ("log_file", "log_path", "missing_log", "transcript")
+    ):
+        names.add("missing_log_file")
+    return sorted(names)
+
+
+def _audit_bootstrap_targets(
+    module_name: str,
+    *,
+    include_private: bool = False,
+    test_dir: str = "tests",
+) -> list[dict[str, Any]]:
+    """Return class-level review scaffolds when callable discovery is empty."""
+    from ordeal.auto import (
+        _mine_object_harness_hints,
+        _resolve_module,
+        _state_param_name_for_callable,
+    )
+
+    mod = _resolve_module(module_name)
+    support_module = _bootstrap_support_module_name(test_dir)
+    targets: list[dict[str, Any]] = []
+    for class_name, obj in sorted(vars(mod).items()):
+        if not inspect.isclass(obj) or getattr(obj, "__module__", None) != mod.__name__:
+            continue
+        if class_name.startswith("_") and not include_private:
+            continue
+        methods: list[str] = []
+        scenario_labels: set[str] = set()
+        field_hints: dict[str, tuple[float, Any]] = {}
+        evidence: list[str] = []
+        requires_state = False
+        for meth_name, static_attr in sorted(vars(obj).items()):
+            if meth_name.startswith("__"):
+                continue
+            if meth_name.startswith("_") and not include_private:
+                continue
+            if isinstance(static_attr, property):
+                continue
+            if not (
+                isinstance(static_attr, (staticmethod, classmethod))
+                or inspect.isfunction(static_attr)
+            ):
+                continue
+            methods.append(meth_name)
+            scenario_labels.update(_bootstrap_review_scenarios_for_method(obj, meth_name))
+            with contextlib.suppress(Exception):
+                if _state_param_name_for_callable(getattr(obj, meth_name)):
+                    requires_state = True
+            for hint in _mine_object_harness_hints(module_name, class_name, meth_name):
+                config = getattr(hint, "config", {})
+                if (
+                    not isinstance(config, Mapping)
+                    or str(config.get("section", "")) != "[[objects]]"
+                ):
+                    continue
+                key = str(config.get("key", "")).strip()
+                if not key:
+                    continue
+                value = _normalize_hint_config_value(config.get("value"))
+                if key == "scenarios":
+                    for item in value if isinstance(value, list) else [value]:
+                        if isinstance(item, str) and item.strip():
+                            scenario_labels.add(str(item).strip())
+                else:
+                    current = field_hints.get(key)
+                    confidence = float(getattr(hint, "confidence", 0.0))
+                    if current is None or confidence > current[0]:
+                        field_hints[key] = (confidence, value)
+                evidence_text = str(getattr(hint, "evidence", "")).strip()
+                if evidence_text and evidence_text not in evidence:
+                    evidence.append(evidence_text)
+        if not methods:
+            continue
+        class_snake = _camel_to_snake(class_name)
+        support_factory = f"{support_module}:make_{class_snake}"
+        support_setup = (
+            f"{support_module}:prime_{class_snake}"
+            if {"setup", "teardown"} & set(field_hints) or any(
+                method.startswith(("post_", "setup_", "rollout", "cleanup", "teardown"))
+                for method in methods
+            )
+            else None
+        )
+        support_state_factory = (
+            f"{support_module}:make_{class_snake}_state" if requires_state else None
+        )
+        support_teardown = (
+            f"{support_module}:cleanup_{class_snake}"
+            if "teardown" in field_hints
+            or any(method.startswith(("cleanup", "teardown", "post_")) for method in methods)
+            else None
+        )
+        review_scenarios = sorted(
+            {
+                label
+                for label in scenario_labels
+                if label in {
+                    "space_paths",
+                    "quote_paths",
+                    "empty_instruction",
+                    "no_system_prompt",
+                    "missing_log_file",
+                }
+            }
+        )
+        support_scenarios = [f"{support_module}:scenario_{label}" for label in review_scenarios]
+        targets.append(
+            {
+                "module": module_name,
+                "class_name": class_name,
+                "target": f"{module_name}:{class_name}",
+                "methods": methods,
+                "method_count": len(methods),
+                "review_scenarios": review_scenarios,
+                "support_module": support_module,
+                "support_path": _bootstrap_support_file_path(test_dir),
+                "support_factory": support_factory,
+                "support_setup": support_setup,
+                "support_state_factory": support_state_factory,
+                "support_teardown": support_teardown,
+                "support_scenarios": support_scenarios,
+                "harness": "stateful" if requires_state else "fresh",
+                "evidence": evidence[:5],
+            }
+        )
+    return targets
 
 
 def _package_root_scan_sample(
@@ -1235,8 +1433,9 @@ def _scan_config_suggestions(
         lines.append(_toml_key_value("targets", list(sampling.get("targets", ()))))
     elif scan_targets:
         lines.append(_toml_key_value("targets", list(scan_targets)))
-    if mode != "coverage_gap":
-        lines.append(_toml_key_value("mode", mode))
+    public_mode = _public_scan_mode(mode)
+    if public_mode != "evidence":
+        lines.append(_toml_key_value("mode", public_mode))
     if max_examples != 50:
         lines.append(_toml_key_value("max_examples", max_examples))
     if include_private:
@@ -1279,7 +1478,7 @@ def _scan_config_suggestions(
                         if sampling is not None
                         else list(scan_targets)
                     ),
-                    "mode": mode,
+                    "mode": public_mode,
                     "max_examples": max_examples,
                 }
             ],
@@ -1366,7 +1565,219 @@ def _audit_config_suggestions(
     suggestions.extend(
         _object_config_suggestions_from_rows(rows, only_names=sorted(names_to_hint))
     )
+    suggestions.extend(_audit_bootstrap_config_suggestions(target_groups))
     return _dedupe_config_suggestions(suggestions)
+
+
+def _audit_bootstrap_config_suggestions(
+    target_groups: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build `[[audit.targets]]` suggestions from class-bootstrap fallback rows."""
+    suggestions: list[dict[str, Any]] = []
+    for group in target_groups:
+        for target in list(group.get("bootstrap_targets", [])):
+            lines = ["[[audit.targets]]", _toml_key_value("target", target["target"])]
+            if target.get("support_factory"):
+                lines.append(_toml_key_value("factory", target["support_factory"]))
+            if target.get("support_setup"):
+                lines.append(_toml_key_value("setup", target["support_setup"]))
+            if target.get("support_state_factory"):
+                lines.append(
+                    _toml_key_value("state_factory", target["support_state_factory"])
+                )
+            if target.get("support_teardown"):
+                lines.append(_toml_key_value("teardown", target["support_teardown"]))
+            if target.get("support_scenarios"):
+                lines.append(_toml_key_value("scenarios", target["support_scenarios"]))
+            if target.get("harness") == "stateful":
+                lines.append(_toml_key_value("harness", "stateful"))
+            lines.append(_toml_key_value("methods", list(target.get("methods", ()))))
+            suggestions.append(
+                _config_suggestion(
+                    title=f"Bootstrap audit target for {target['class_name']}",
+                    reason=(
+                        "Audit could not reach callable methods directly, so this review scaffold "
+                        "pins the class target, method subset, and support hooks explicitly."
+                    ),
+                    snippet_lines=lines,
+                    section="[[audit.targets]]",
+                    target=str(target["target"]),
+                    evidence=list(target.get("evidence", ())),
+                    entries=[
+                        {
+                            "section": "[[audit.targets]]",
+                            "target": target["target"],
+                            "factory": target.get("support_factory"),
+                            "setup": target.get("support_setup"),
+                            "state_factory": target.get("support_state_factory"),
+                            "teardown": target.get("support_teardown"),
+                            "scenarios": list(target.get("support_scenarios", ())),
+                            "harness": target.get("harness", "fresh"),
+                            "methods": list(target.get("methods", ())),
+                        }
+                    ],
+                )
+            )
+    return suggestions
+
+
+def _bootstrap_placeholder_expression(param_name: str) -> str:
+    """Return a conservative placeholder expression for one factory parameter."""
+    lower = param_name.lower()
+    if "state" in lower:
+        return "{}"
+    if "upload" in lower:
+        return "AsyncMock(return_value=None)"
+    if any(token in lower for token in ("client", "session", "transport", "sandbox")):
+        return (
+            "SimpleNamespace("
+            "execute_command=AsyncMock("
+            "return_value=SimpleNamespace(returncode=0, stdout='', stderr='')"
+            "), "
+            "upload_content=AsyncMock(return_value=None)"
+            ")"
+        )
+    return "SimpleNamespace()"
+
+
+def _bootstrap_constructor_lines(cls: type) -> tuple[list[str], list[str]]:
+    """Return setup lines and constructor arguments for one scaffolded factory."""
+    setup_lines: list[str] = []
+    arg_names: list[str] = []
+    with contextlib.suppress(Exception):
+        params = list(inspect.signature(cls).parameters.values())
+        for param in params:
+            if param.name == "self" or param.default is not inspect.Signature.empty:
+                continue
+            arg_names.append(param.name)
+            setup_lines.append(
+                f"    {param.name} = {_bootstrap_placeholder_expression(param.name)}"
+            )
+    return setup_lines, arg_names
+
+
+def _audit_bootstrap_support_suggestions(
+    target_groups: Sequence[Mapping[str, Any]],
+    *,
+    validation_mode: str,
+) -> list[dict[str, Any]]:
+    """Build review scaffolds for `tests/ordeal_support.py` from bootstrap rows."""
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for group in target_groups:
+        for target in list(group.get("bootstrap_targets", [])):
+            grouped.setdefault(str(target.get("support_path", "")), []).append(target)
+
+    suggestions: list[dict[str, Any]] = []
+    for support_path, targets in grouped.items():
+        if not support_path:
+            continue
+        imports = [
+            "from __future__ import annotations",
+            "",
+            "from types import SimpleNamespace",
+            "from unittest.mock import AsyncMock",
+        ]
+        class_imports: dict[str, list[str]] = {}
+        scenario_labels: list[str] = []
+        body: list[str] = []
+        seen_scenarios: set[str] = set()
+        for target in targets:
+            module_name = str(target["module"])
+            class_name = str(target["class_name"])
+            class_imports.setdefault(module_name, []).append(class_name)
+            try:
+                cls = getattr(importlib.import_module(module_name), class_name)
+            except Exception:
+                cls = None
+            class_snake = _camel_to_snake(class_name)
+            if cls is not None:
+                setup_lines, arg_names = _bootstrap_constructor_lines(cls)
+            else:
+                setup_lines, arg_names = [], []
+            body.extend(
+                [
+                    "",
+                    f"def make_{class_snake}() -> {class_name}:",
+                    f'    """Review scaffold for `{class_name}` audit/bootstrap."""',
+                    "    # TODO: replace placeholder collaborators with real project fixtures.",
+                ]
+            )
+            if setup_lines:
+                body.extend(setup_lines)
+                call_args = ", ".join(f"{name}={name}" for name in arg_names)
+                body.append(f"    return {class_name}({call_args})")
+            else:
+                body.append(f"    return {class_name}()")
+            if target.get("support_setup"):
+                body.extend(
+                    [
+                        "",
+                        f"def prime_{class_snake}(instance: {class_name}) -> {class_name}:",
+                        '    """Review scaffold for one post-construction setup hook."""',
+                        "    return instance",
+                    ]
+                )
+            if target.get("support_state_factory"):
+                body.extend(
+                    [
+                        "",
+                        f"def make_{class_snake}_state() -> dict[str, object]:",
+                        '    """Review scaffold for one method state payload."""',
+                        "    return {}",
+                    ]
+                )
+            if target.get("support_teardown"):
+                body.extend(
+                    [
+                        "",
+                        f"def cleanup_{class_snake}(instance: {class_name}) -> None:",
+                        '    """Review scaffold for cleanup after audit runs."""',
+                        "    return None",
+                    ]
+                )
+            for label in list(target.get("review_scenarios", ())):
+                if label in seen_scenarios:
+                    continue
+                seen_scenarios.add(label)
+                scenario_labels.append(label)
+                body.extend(
+                    [
+                        "",
+                        f"def scenario_{label}(instance: object) -> object:",
+                        f'    """Review scaffold for `{label}` on bound-method targets."""',
+                        "    return instance",
+                    ]
+                )
+
+        import_lines = imports + [
+            f"from {module_name} import {', '.join(sorted(dict.fromkeys(names)))}"
+            for module_name, names in sorted(class_imports.items())
+        ]
+        command_mode = "deep" if validation_mode == "fast" else validation_mode
+        command = (
+            f"ordeal audit {targets[0]['module']} --validation-mode {command_mode} "
+            "--write-gaps .ordeal/audit-gaps"
+        )
+        suggestions.append(
+            {
+                "title": f"Scaffold {support_path} for review-first audit hooks",
+                "reason": (
+                    "Bootstrap the object factory and scenario hooks automatically, then review "
+                    "the placeholders before trusting the audit results."
+                ),
+                "filename": support_path,
+                "snippet": "\n".join(import_lines + body).rstrip() + "\n",
+                "target": ", ".join(str(target["target"]) for target in targets),
+                "evidence": [
+                    evidence
+                    for target in targets
+                    for evidence in list(target.get("evidence", ()))
+                ][:5],
+                "suggested_command": command,
+                "review_scenarios": scenario_labels,
+            }
+        )
+    return suggestions
 
 
 def _config_suggestions_summary(suggestions: Sequence[Mapping[str, Any]]) -> str | None:
@@ -1398,11 +1809,39 @@ def _render_config_suggestions_text(
     return lines
 
 
+def _render_bootstrap_suggestions_text(
+    suggestions: Sequence[Mapping[str, Any]],
+    *,
+    indent: str = "  ",
+) -> list[str]:
+    """Render review-first support-file scaffolds for target discovery fallbacks."""
+    if not suggestions:
+        return []
+    lines = [f"{indent}Suggested review scaffolds:"]
+    for index, suggestion in enumerate(suggestions, start=1):
+        title = str(suggestion.get("title", "")).strip()
+        reason = str(suggestion.get("reason", "")).strip()
+        filename = str(suggestion.get("filename", "")).strip()
+        lines.append(f"{indent}  {index}. {title}")
+        if filename:
+            lines.append(f"{indent}     file: {filename}")
+        if reason:
+            lines.append(f"{indent}     {reason}")
+        command = str(suggestion.get("suggested_command", "")).strip()
+        if command:
+            lines.append(f"{indent}     command: {command}")
+        for snippet_line in str(suggestion.get("snippet", "")).rstrip().splitlines():
+            lines.append(f"{indent}     {snippet_line}")
+    return lines
+
+
 def _render_target_listing_text(
     title: str,
     groups: Sequence[Mapping[str, Any]],
     *,
     warnings: Sequence[str] = (),
+    config_suggestions: Sequence[Mapping[str, Any]] = (),
+    bootstrap_suggestions: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     """Render callable discovery rows for human-readable CLI output."""
     lines = [title]
@@ -1411,13 +1850,28 @@ def _render_target_listing_text(
     for group in groups:
         module = str(group.get("module", ""))
         targets = list(group.get("targets", []))
+        bootstrap_targets = list(group.get("bootstrap_targets", []))
         lines.append(f"\n{module}")
         if not targets:
             lines.append("  (no callable targets found)")
+            if bootstrap_targets:
+                lines.append("  review bootstrap targets:")
+                for target in bootstrap_targets:
+                    methods = ", ".join(list(target.get("methods", ()))[:5])
+                    scenarios = ", ".join(list(target.get("review_scenarios", ()))[:4]) or "none"
+                    lines.append(
+                        "    "
+                        f"{target.get('class_name', ''):<30} "
+                        f"methods={methods}  "
+                        f"factory={target.get('support_factory')}  "
+                        f"scenarios={scenarios}"
+                    )
             continue
         for row in targets:
             parts = _render_target_listing_parts(row)
             lines.append(f"  {row.get('name', ''):<38} " + "  ".join(parts))
+    lines.extend(_render_config_suggestions_text(config_suggestions))
+    lines.extend(_render_bootstrap_suggestions_text(bootstrap_suggestions))
     return "\n".join(lines)
 
 
@@ -1427,32 +1881,42 @@ def _build_target_listing_envelope(
     target: str,
     groups: Sequence[Mapping[str, Any]],
     warnings: Sequence[str] = (),
+    config_suggestions: Sequence[Mapping[str, Any]] = (),
+    bootstrap_suggestions: Sequence[Mapping[str, Any]] = (),
 ) -> Any:
     """Build the agent envelope for callable discovery output."""
     from ordeal.agent_schema import build_agent_envelope
 
     flat_targets = [row for group in groups for row in list(group.get("targets", []))]
-    config_suggestions = _config_suggestion_payload(
-        [
-            block
-            for group in groups
-            for block in (
-                _config_suggestions_from_rows(
-                    str(group.get("module", target)),
-                    list(group.get("targets", [])),
-                )
-                or {}
-            ).get("blocks", [])
-        ]
-    )
+    if config_suggestions:
+        normalized_config_suggestions = [dict(item) for item in config_suggestions]
+    else:
+        normalized_config_suggestions = _config_suggestion_payload(
+            [
+                block
+                for group in groups
+                for block in (
+                    _config_suggestions_from_rows(
+                        str(group.get("module", target)),
+                        list(group.get("targets", [])),
+                    )
+                    or {}
+                ).get("blocks", [])
+            ]
+        )
     runnable_count = sum(1 for row in flat_targets if row.get("runnable"))
     skip_count = len(flat_targets) - runnable_count
-    status = "exploratory" if skip_count else "ok"
+    bootstrap_target_count = sum(
+        len(list(group.get("bootstrap_targets", ()))) for group in groups
+    )
+    status = "exploratory" if skip_count or bootstrap_target_count else "ok"
     summary = [
         f"Listed {len(flat_targets)} callable target(s) across {len(groups)} module(s)",
         f"Runnable: {runnable_count}",
         f"Skipped: {skip_count}",
     ]
+    if bootstrap_target_count:
+        summary.append(f"Bootstrap classes: {bootstrap_target_count}")
     if warnings:
         summary.append(f"Warnings: {len(warnings)}")
     return build_agent_envelope(
@@ -1461,7 +1925,10 @@ def _build_target_listing_envelope(
         status=status,
         summary=" | ".join(summary),
         recommended_action=(
-            "Use these callable names and metadata directly in `scan`, `audit`, or `mutate`."
+            "Use these callable names directly, or review the bootstrap scaffolds before "
+            "rerunning `audit` when callable discovery is empty."
+            if bootstrap_target_count
+            else "Use these callable names and metadata directly in `scan`, `audit`, or `mutate`."
         ),
         confidence=None,
         confidence_basis=("target discovery only",),
@@ -1470,10 +1937,16 @@ def _build_target_listing_envelope(
         raw_details={
             "target_groups": [dict(group) for group in groups],
             "targets": flat_targets,
+            "bootstrap_targets": [
+                dict(item)
+                for group in groups
+                for item in list(group.get("bootstrap_targets", ()))
+            ],
             "warnings": list(warnings),
             "runnable_count": runnable_count,
             "skip_count": skip_count,
-            "config_suggestions": config_suggestions,
+            "config_suggestions": normalized_config_suggestions,
+            "bootstrap_suggestions": [dict(item) for item in bootstrap_suggestions],
         },
     )
 
@@ -2607,7 +3080,7 @@ def _resolve_scan_runtime_defaults(
 
     values: dict[str, Any] = {
         "max_examples": requested_examples,
-        "mode": "coverage_gap",
+        "mode": "evidence",
         "seed_from_tests": True,
         "seed_from_fixtures": True,
         "seed_from_docstrings": True,
@@ -3144,7 +3617,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         requested_examples=args.max_examples,
         allow_config_override=allow_config_override,
     )
-    scan_mode = str(getattr(args, "mode", None) or runtime_defaults.mode)
+    scan_mode = _public_scan_mode(str(getattr(args, "mode", None) or runtime_defaults.mode))
     scan_seed_from_tests = (
         runtime_defaults.seed_from_tests
         if getattr(args, "seed_from_tests", None) is None
@@ -3912,7 +4385,24 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                 )
             except Exception:
                 rows = []
-            target_groups.append({"module": module_name, "targets": rows})
+            if not rows:
+                try:
+                    bootstrap_targets = _audit_bootstrap_targets(
+                        module_name,
+                        include_private=module_include_private,
+                        test_dir=test_dir,
+                    )
+                except Exception:
+                    bootstrap_targets = []
+            else:
+                bootstrap_targets = []
+            target_groups.append(
+                {
+                    "module": module_name,
+                    "targets": rows,
+                    "bootstrap_targets": bootstrap_targets,
+                }
+            )
         return target_groups
 
     if getattr(args, "list_targets", False):
@@ -3936,12 +4426,22 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             _stderr(f"{exc}\n")
             return 1
 
+        config_suggestions = _dedupe_config_suggestions(
+            _audit_bootstrap_config_suggestions(target_groups)
+        )
+        bootstrap_suggestions = _audit_bootstrap_support_suggestions(
+            target_groups,
+            validation_mode=validation_mode,
+        )
+
         if args.json:
             print(
                 _build_target_listing_envelope(
                     tool="audit",
                     target=", ".join(target_names),
                     groups=target_groups,
+                    config_suggestions=config_suggestions,
+                    bootstrap_suggestions=bootstrap_suggestions,
                 ).to_json()
             )
         else:
@@ -3949,6 +4449,8 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                 _render_target_listing_text(
                     f"Callable targets for {', '.join(target_names)}",
                     target_groups,
+                    config_suggestions=config_suggestions,
+                    bootstrap_suggestions=bootstrap_suggestions,
                 )
             )
         return 0
@@ -4593,6 +5095,7 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
                     {
                         "kind": "crash",
                         "category": "likely_bug",
+                        "evidence_class": "candidate_issue",
                         "module": module,
                         "function": function.name,
                         "qualname": qualname,
@@ -4614,6 +5117,7 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
                     {
                         "kind": "crash",
                         "category": crash_category,
+                        "evidence_class": _evidence_class_for_category(crash_category),
                         "module": module,
                         "function": function.name,
                         "qualname": qualname,
@@ -4635,6 +5139,7 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
                     {
                         "kind": "property",
                         "category": "speculative_property",
+                        "evidence_class": "speculative_property",
                         "module": module,
                         "function": function.name,
                         "qualname": qualname,
@@ -4645,6 +5150,9 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
                 findings.append(
                     {
                         **note,
+                        "evidence_class": _evidence_class_for_category(
+                            str(note.get("category")) if note.get("category") is not None else None
+                        ),
                         "module": module,
                         "function": function.name,
                         "qualname": qualname,
@@ -5910,7 +6418,8 @@ def _render_finding_section(detail: dict[str, Any]) -> list[str]:
 
     lines = [f"### {detail['index']}. `{qualname}`", "", f"- Type: {kind}", f"- Finding: {title}"]
     if category:
-        lines.append(f"- Category: {category}")
+        lines.append(f"- Evidence class: {_evidence_class_for_category(str(category))}")
+        lines.append(f"- Internal category: {category}")
 
     if kind == "property":
         holds = detail.get("holds")
@@ -5996,7 +6505,7 @@ def _render_finding_section(detail: dict[str, Any]) -> list[str]:
                 "",
                 "Next steps:",
                 f"- Add direct tests or fixtures for `{qualname}`",
-                f"- Re-scan `{qualname}` in `--mode real_bug` once valid inputs are seeded",
+                f"- Re-scan `{qualname}` in `--mode candidate` once valid inputs are seeded",
             ]
         )
         return lines
@@ -6015,7 +6524,7 @@ def _render_finding_section(detail: dict[str, Any]) -> list[str]:
                     if category == "lifecycle_contract"
                     else f"- Add a direct regression for `{qualname}` around the semantic sink"
                 ),
-                f"- Re-run `ordeal scan {module} --mode real_bug`",
+                f"- Re-run `ordeal scan {module} --mode candidate`",
             ]
         )
         return lines
@@ -6624,13 +7133,13 @@ def _detail_confidence(detail: Mapping[str, Any]) -> float | None:
 def _scan_crash_summary(qualname: str, category: str, replayable: bool | None) -> str:
     """Return the CLI summary string for one scan crash."""
     if category == "likely_bug":
-        return f"{qualname}: crash safety failed"
+        return f"{qualname}: strong candidate issue on contract-valid inputs"
     if category == "coverage_gap":
-        return f"{qualname}: crash still looks like a coverage gap"
+        return f"{qualname}: crash evidence still looks like a coverage gap"
     if category == "beyond_declared_contract_robustness":
-        return f"{qualname}: crash sits just beyond the declared contract"
+        return f"{qualname}: robustness issue just beyond the declared contract"
     if category == "invalid_input_crash":
-        return f"{qualname}: crash currently looks driven by invalid input"
+        return f"{qualname}: robustness issue currently looks driven by invalid input"
     if replayable:
         return f"{qualname}: replayable crash on semi-valid inputs, still exploratory"
     return f"{qualname}: unreplayed crash on random inputs"
@@ -8121,6 +8630,8 @@ def _scan_command_description() -> str:
         f"{scan_desc}\n\n"
         "Scan is exploratory first: prioritize replayable, semantically plausible findings.\n"
         "For stronger signals on a mature codebase, prefer `ordeal audit` and `ordeal mutate`.\n"
+        "Use `--mode evidence` to surface a broad evidence set and `--mode candidate`\n"
+        " for stricter ranking; the older `coverage_gap` and `real_bug` names still work.\n"
         "Use `--list-targets` to inspect how ordeal sees functions, methods, async callables,\n"
         " and whether object factories are configured.\n"
         "Use `--target` to limit module scans to specific callable selectors or globs such as\n"
@@ -8272,9 +8783,9 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                 ),
                 _arg(
                     "--mode",
-                    choices=("coverage_gap", "real_bug"),
+                    choices=("evidence", "candidate", "coverage_gap", "real_bug"),
                     default=None,
-                    help="Promotion mode: gap-oriented or strict real-bug ranking",
+                    help="Surfacing mode: evidence-first or stricter candidate ranking",
                 ),
                 _arg(
                     "--seed-from-tests",

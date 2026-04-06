@@ -160,6 +160,8 @@ def _make_stateful_target_listing_module(
 
 def _write_harness_hint_project(tmp_path: Path) -> str:
     """Write a tiny package whose tests/docs imply harness hooks."""
+    sys.modules.pop("hintpkg.envs", None)
+    sys.modules.pop("hintpkg", None)
     pkg = tmp_path / "hintpkg"
     tests_dir = tmp_path / "tests"
     docs_dir = tmp_path / "docs"
@@ -207,6 +209,32 @@ def _write_harness_hint_project(tmp_path: Path) -> str:
         encoding="utf-8",
     )
     return "hintpkg.envs"
+
+
+def _write_bootstrap_target_project(tmp_path: Path) -> str:
+    """Write a tiny package whose class target needs audit bootstrap scaffolding."""
+    sys.modules.pop("bootstrappkg.envs", None)
+    sys.modules.pop("bootstrappkg", None)
+    pkg = tmp_path / "bootstrappkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "envs.py").write_text(
+        "class ComposableEnv:\n"
+        "    def __init__(self, prefix: str = 'demo'):\n"
+        "        self.prefix = prefix\n"
+        "        self.upload_content = None\n"
+        "\n"
+        "    def build_env_vars(self, path: str, system_prompt: str | None = None) -> str:\n"
+        "        return f'{self.prefix}:{path}'\n"
+        "\n"
+        "    async def post_sandbox_setup(self) -> str:\n"
+        "        return 'ready'\n"
+        "\n"
+        "    def post_rollout(self, instruction: str, log_path: str | None = None) -> str:\n"
+        "        return instruction\n",
+        encoding="utf-8",
+    )
+    return "bootstrappkg.envs"
 
 
 def _write_check_contract_project(tmp_path: Path) -> Path:
@@ -1888,6 +1916,31 @@ scan_max_examples = 12
         assert "configs=" in out
         assert "[[objects]]" in out
 
+    def test_audit_bootstrap_targets_falls_back_to_class_discovery(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        module_name = _write_bootstrap_target_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        monkeypatch.setattr(cli, "_callable_listing_rows", lambda *args, **kwargs: [])
+
+        rc = main(["audit", module_name, "--list-targets"])
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        assert "(no callable targets found)" in out
+        assert "review bootstrap targets:" in out
+        assert "ComposableEnv" in out
+        assert "tests.ordeal_support:make_composable_env" in out
+        assert "scenario_space_paths" in out
+        assert "Suggested ordeal.toml:" in out
+        assert "[[audit.targets]]" in out
+        assert "Suggested review scaffolds:" in out
+        assert "tests/ordeal_support.py" in out
+
     def test_audit_json_uses_auto_mined_harness_for_methods(
         self,
         monkeypatch,
@@ -2345,14 +2398,15 @@ scan_max_examples = 12
             functions={"divide": object()},
             supervisor_info={"seed": 42, "trajectory_steps": 4},
             tree=SimpleNamespace(size=2),
-            findings=["divide: crashes on realistic inputs"],
-            frontier={"divide": ["crash safety failed"]},
+            findings=["divide: strong candidate issue on contract-valid inputs"],
+            frontier={"divide": ["strong candidate issue on contract-valid inputs"]},
             finding_details=[
                 {
                     "kind": "crash",
                     "category": "likely_bug",
+                    "evidence_class": "candidate_issue",
                     "function": "divide",
-                    "summary": "divide: crash safety failed",
+                    "summary": "divide: strong candidate issue on contract-valid inputs",
                     "error": "ZeroDivisionError: division by zero",
                     "failing_args": {"a": 1.0, "b": 0.0},
                     "replayable": True,
@@ -2366,6 +2420,7 @@ scan_max_examples = 12
                         "witness": {"input": {"a": 1.0, "b": 0.0}, "source": "boundary"},
                         "contract_basis": {
                             "category": "likely_bug",
+                            "evidence_class": "candidate_issue",
                             "fit": 0.92,
                             "reachability": 0.8,
                             "realism": 1.0,
@@ -2384,7 +2439,7 @@ scan_max_examples = 12
                         "minimal_reproduction": {
                             "target": "pkg.mod:divide",
                             "command": (
-                                "uv run ordeal scan pkg.mod --mode real_bug "
+                                "uv run ordeal scan pkg.mod --mode candidate "
                                 "--targets pkg.mod:divide -n 1"
                             ),
                             "python_snippet": (
@@ -2404,11 +2459,12 @@ scan_max_examples = 12
                         },
                         "impact": {
                             "summary": "valid inputs reach an unchecked divide-by-zero boundary",
-                            "class": "likely_bug",
+                            "class": "candidate_issue",
                             "sink_categories": [],
                         },
                         "verdict": {
                             "category": "likely_bug",
+                            "evidence_class": "candidate_issue",
                             "promoted": True,
                             "demotion_reason": None,
                         },
@@ -2429,6 +2485,8 @@ scan_max_examples = 12
         assert "Minimal reproduction:" in report
         assert "Python snippet:" in report
         assert "Failure path:" in report
+        assert "Evidence class: candidate_issue" in report
+        assert "Internal category: likely_bug" in report
         assert "Likely impact: valid inputs reach an unchecked divide-by-zero boundary" in report
         assert "Scan report saved:" in captured.err
 
@@ -3161,7 +3219,7 @@ scan_max_examples = 12
         assert rc == 0
         assert "Initial scan: 2 finding(s) across 1 module(s)" in captured.err
         assert "pkg.normalize: idempotent (92%)" in captured.err
-        assert "pkg.score: crash safety failed" in captured.err
+        assert "pkg.score: strong candidate issue on contract-valid inputs" in captured.err
 
         report = json.loads(captured.out)
         assert report["initial_scan"]["status"] == "findings found"

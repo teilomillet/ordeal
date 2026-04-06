@@ -147,7 +147,7 @@ relation_overrides = { normalize = ["equivalent"] }
                 """
 [[scan]]
 module = "myapp.scoring"
-mode = "real_bug"
+mode = "candidate"
 min_contract_fit = 0.8
 min_reachability = 0.7
 min_realism = 0.9
@@ -164,13 +164,25 @@ auto_contracts = ["shell_safe", "json_roundtrip"]
             )
         )
         scan = cfg.scan[0]
-        assert scan.mode == "real_bug"
+        assert scan.mode == "candidate"
         assert scan.min_contract_fit == pytest.approx(0.8)
         assert scan.min_reachability == pytest.approx(0.7)
         assert scan.min_realism == pytest.approx(0.9)
         assert scan.seed_from_fixtures is False
         assert scan.seed_from_docstrings is False
         assert scan.auto_contracts == ["shell_safe", "json_roundtrip"]
+
+    def test_scan_config_defaults_to_evidence_mode(self, tmp_toml):
+        cfg = load_config(
+            tmp_toml(
+                """
+[[scan]]
+module = "myapp.scoring"
+"""
+            )
+        )
+
+        assert cfg.scan[0].mode == "evidence"
 
     def test_invalid_scan_precision_controls(self, tmp_toml):
         with pytest.raises(ConfigError, match="scan.0.mode"):

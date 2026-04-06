@@ -121,6 +121,7 @@ verbose = true
 # [[scan]]
 # module = "myapp.scoring"
 # max_examples = 50
+# mode = "evidence"   # or "candidate" for stricter ranking
 # include_private = false
 #
 # # Optional: focus scan on a subset of callables instead of the whole module

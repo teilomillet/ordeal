@@ -44,18 +44,18 @@ class TestExplorationStateSerialization:
         unreplayed.scan_replayable = False
         unreplayed.scan_crash_category = "speculative_crash"
 
-        assert state.findings == ["normalize: crashes on realistic inputs"]
+        assert state.findings == ["normalize: strong candidate issue on contract-valid inputs"]
         assert "flaky: unreplayed crash on random inputs" in state.exploratory_findings
 
-        categories = {
-            detail["function"]: detail["category"]
+        details = {
+            detail["function"]: detail
             for detail in state.finding_details
             if detail["kind"] == "crash"
         }
-        assert categories == {
-            "normalize": "likely_bug",
-            "flaky": "speculative_crash",
-        }
+        assert details["normalize"]["category"] == "likely_bug"
+        assert details["normalize"]["evidence_class"] == "candidate_issue"
+        assert details["flaky"]["category"] == "speculative_crash"
+        assert details["flaky"]["evidence_class"] == "speculative_crash"
 
         restored = ExplorationState.from_json(state.to_json())
         assert restored.functions["normalize"].scan_crash_category == "likely_bug"

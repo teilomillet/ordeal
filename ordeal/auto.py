@@ -152,7 +152,28 @@ class FunctionResult:
         return f"  WARN  {self.name}: {viols}"
 
 
-ScanMode = Literal["coverage_gap", "real_bug"]
+ScanMode = Literal["coverage_gap", "evidence", "real_bug", "candidate"]
+
+_SCAN_MODE_ALIASES: dict[str, Literal["coverage_gap", "real_bug"]] = {
+    "coverage_gap": "coverage_gap",
+    "evidence": "coverage_gap",
+    "real_bug": "real_bug",
+    "candidate": "real_bug",
+}
+
+
+def _normalize_scan_mode(mode: str) -> Literal["coverage_gap", "real_bug"]:
+    """Return the canonical internal scan mode for one public mode name."""
+    normalized = _SCAN_MODE_ALIASES.get(str(mode).strip())
+    if normalized is None:
+        raise ValueError(f"mode must be one of {set(_SCAN_MODE_ALIASES)}, got {mode!r}")
+    return normalized
+
+
+def _public_scan_mode(mode: str) -> str:
+    """Return the preferred public label for one scan mode."""
+    normalized = _normalize_scan_mode(mode)
+    return "candidate" if normalized == "real_bug" else "evidence"
 
 _PROMOTED_SCAN_VERDICTS = {
     "promoted_real_bug",
@@ -384,7 +405,7 @@ _BOUNDARY_SMOKE_VALUES: dict[object, tuple[object, ...]] = {
     str: ("", "a"),
     bytes: (b"", b"x"),
 }
-_VALID_SCAN_MODES: set[str] = {"coverage_gap", "real_bug"}
+_VALID_SCAN_MODES: set[str] = set(_SCAN_MODE_ALIASES)
 _WEAK_CONTRACT_FIT = 0.35
 
 
@@ -5203,7 +5224,7 @@ def _candidate_inputs(
     *,
     fixtures: dict[str, st.SearchStrategy[Any]] | None = None,
     mutate_observed_inputs: bool = True,
-    mode: ScanMode = "coverage_gap",
+    mode: ScanMode = "evidence",
     seed_examples: Sequence[SeedExample] | None = None,
     seed_from_tests: bool = True,
     seed_from_fixtures: bool = True,
@@ -5212,6 +5233,7 @@ def _candidate_inputs(
     seed_from_call_sites: bool = True,
 ) -> list[CandidateInput]:
     """Return deterministic candidate inputs with provenance metadata."""
+    mode = _normalize_scan_mode(mode)
     target = _unwrap(func)
     observed_examples = (
         list(seed_examples)
@@ -5819,7 +5841,7 @@ def _proof_demotion_reason(
     min_reachability: float,
     min_realism: float,
 ) -> str | None:
-    """Return the concrete reason a finding was not promoted as a real bug."""
+    """Return the concrete reason a finding was not promoted as a candidate issue."""
     if category in {"likely_bug", "semantic_contract", "lifecycle_contract"}:
         return None
     if category == "expected_precondition_failure":
@@ -5885,7 +5907,7 @@ def _proof_minimal_reproduction(
         command = f"uv run ordeal check {explicit_target} --contract {contract_check}"
     elif module_name:
         command = (
-            f"uv run ordeal scan {module_name} --mode real_bug --targets {explicit_target} -n 1"
+            f"uv run ordeal scan {module_name} --mode candidate --targets {explicit_target} -n 1"
         )
     else:
         command = None
@@ -5929,6 +5951,13 @@ def _build_proof_bundle(
     contract_check: str | None = None,
 ) -> dict[str, Any]:
     """Build the proof payload carried through reports and agent output."""
+    evidence_class = (
+        "candidate_issue"
+        if category == "likely_bug"
+        else "expected_precondition"
+        if category == "expected_precondition_failure"
+        else category
+    )
     full_qualname = _proof_target_qualname(qualname, profile)
     matched_sources = [
         {
@@ -5961,6 +5990,7 @@ def _build_proof_bundle(
     }
     contract_basis = {
         "category": category,
+        "evidence_class": evidence_class,
         "fit": round(contract_fit, 4),
         "reachability": round(reachability, 4),
         "realism": round(realism, 4),
@@ -6007,6 +6037,7 @@ def _build_proof_bundle(
         "contract_basis": contract_basis,
         "contract_validity": {
             "category": category,
+            "evidence_class": evidence_class,
             "likely_contract": _json_ready_proof(profile.get("params", {})),
             "rationale": list(rationale),
             "supporting_evidence": supporting_evidence,
@@ -6037,12 +6068,14 @@ def _build_proof_bundle(
                 if category == "lifecycle_contract"
                 else (list(sink_categories)[0] if sink_categories else category)
             ),
+            "evidence_class": evidence_class,
             "sink_categories": list(sink_categories),
         },
         "sink_categories": list(sink_categories),
         "likely_impact": impact_summary,
         "verdict": {
             "category": category,
+            "evidence_class": evidence_class,
             "promoted": category in {"likely_bug", "semantic_contract", "lifecycle_contract"},
             "demotion_reason": demotion_reason,
         },
@@ -6506,7 +6539,7 @@ def scan_module(
     contract_checks: dict[str, list[ContractCheck]] | None = None,
     ignore_contracts: list[str] | None = None,
     contract_overrides: dict[str, list[str]] | None = None,
-    mode: ScanMode = "coverage_gap",
+    mode: ScanMode = "evidence",
     seed_from_tests: bool = True,
     seed_from_fixtures: bool = True,
     seed_from_docstrings: bool = True,
@@ -6584,8 +6617,9 @@ def scan_module(
             reports a contract violation when its predicate fails.
         ignore_contracts: Auto-inferred contract probes to suppress globally.
         contract_overrides: Per-function auto-contract suppressions.
-        mode: ``"coverage_gap"`` promotes plausible crashes plus gaps;
-            ``"real_bug"`` promotes only high-fit bug candidates.
+        mode: ``"evidence"`` surfaces broad exploratory findings;
+            ``"candidate"`` keeps only stricter high-fit candidates.
+            ``"coverage_gap"`` and ``"real_bug"`` remain compatibility aliases.
         seed_from_tests: Learn valid input shapes from adjacent pytest files.
         seed_from_fixtures: Mine literal pytest fixture returns as seed inputs.
         seed_from_docstrings: Mine doctest-like examples from docstrings.
@@ -6601,6 +6635,7 @@ def scan_module(
     """
     if mode not in _VALID_SCAN_MODES:
         raise ValueError(f"mode must be one of {_VALID_SCAN_MODES}, got {mode!r}")
+    mode = _normalize_scan_mode(mode)
     mod = _resolve_module(module)
     mod_name = module if isinstance(module, str) else mod.__name__
     result = ScanResult(
@@ -6711,7 +6746,7 @@ def _test_one_function(
     contract_checks: list[ContractCheck] | None = None,
     expected_preconditions: list[str] | None = None,
     ignore_contracts: list[str] | None = None,
-    mode: ScanMode = "coverage_gap",
+    mode: ScanMode = "evidence",
     seed_from_tests: bool = True,
     seed_from_fixtures: bool = True,
     seed_from_docstrings: bool = True,
@@ -6726,6 +6761,7 @@ def _test_one_function(
     min_realism: float = 0.55,
 ) -> FunctionResult:
     """Run no-crash + return-type + mined-property checks on a single function."""
+    mode = _normalize_scan_mode(mode)
 
     def _replay_failure(exc: Exception) -> tuple[bool, int, int]:
         if not last_kwargs:

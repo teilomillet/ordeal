@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -91,10 +92,16 @@ class TestPytestConfigure:
     def setup_method(self):
         self._prev_active = assertions.tracker.active
         self._prev_buggify = _buggify_is_active()
+        self._prev_seed_replay = os.environ.get("ORDEAL_DISABLE_SEED_REPLAY")
+        os.environ["ORDEAL_DISABLE_SEED_REPLAY"] = "1"
         assertions.tracker.active = False
 
     def teardown_method(self):
         assertions.tracker.active = self._prev_active
+        if self._prev_seed_replay is None:
+            os.environ.pop("ORDEAL_DISABLE_SEED_REPLAY", None)
+        else:
+            os.environ["ORDEAL_DISABLE_SEED_REPLAY"] = self._prev_seed_replay
         if self._prev_buggify:
             _buggify_activate()
         else:

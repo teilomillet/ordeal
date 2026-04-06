@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.22
+
+**Features:**
+
+- deepen real-bug seeding and audit guidance
+
+**Other:**
+
+- test: reset cli helper modules between mutate fixtures
+
+
 ## 0.3.21
 
 **Fixes:**

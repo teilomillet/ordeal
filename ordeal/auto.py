@@ -1458,6 +1458,7 @@ def _http_response_stub(*args: Any, **kwargs: Any) -> SimpleNamespace:
         json=lambda: {},
     )
 
+
 def _apply_state_store_pack(instance: Any) -> Any:
     """Attach a shared in-memory state store to matching instance collaborators."""
     store: dict[str, Any] = {}
@@ -1645,8 +1646,8 @@ def _scenario_hook_from_spec(spec: Mapping[str, Any]) -> Callable[[Any], Any]:
                 error=_scenario_exception_from_spec(
                     spec.get("error", spec.get("exception", spec.get("value")))
                 ),
-                ),
-            )
+            ),
+        )
         return instance
 
     def _pack_hook(instance: Any) -> Any:
@@ -5176,9 +5177,7 @@ def _resolve_contract_check_entries(
         env_value = probe_kwargs.get(resolved_env_param)
         if isinstance(env_value, Mapping):
             resolved_protected_keys = [
-                key
-                for key in ("PATH", "HOME", "PWD", "TMPDIR")
-                if key in env_value
+                key for key in ("PATH", "HOME", "PWD", "TMPDIR") if key in env_value
             ]
     for raw in checks or ():
         if isinstance(raw, ContractCheck):
@@ -5186,11 +5185,7 @@ def _resolve_contract_check_entries(
             continue
         if isinstance(raw, Mapping):
             raw_name = str(
-                raw.get("name")
-                or raw.get("pack")
-                or raw.get("contract")
-                or raw.get("check")
-                or ""
+                raw.get("name") or raw.get("pack") or raw.get("contract") or raw.get("check") or ""
             ).strip()
             if not raw_name:
                 raise ValueError("contract check spec needs a name or pack")

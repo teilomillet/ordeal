@@ -1124,8 +1124,7 @@ class MutationResult:
         else:
             status = "exploratory_gaps"
             summary = (
-                f"{len(self.survived)} exploratory survivor(s) "
-                "without a promoted boundary cluster"
+                f"{len(self.survived)} exploratory survivor(s) without a promoted boundary cluster"
             )
 
         return {

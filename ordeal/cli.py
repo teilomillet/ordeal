@@ -588,9 +588,7 @@ def _toml_value(value: Any) -> str:
     if isinstance(value, str):
         return json.dumps(value)
     if isinstance(value, Mapping):
-        items = ", ".join(
-            f"{key} = {_toml_value(item)}" for key, item in value.items()
-        )
+        items = ", ".join(f"{key} = {_toml_value(item)}" for key, item in value.items())
         return "{ " + items + " }"
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return "[" + ", ".join(_toml_value(item) for item in value) + "]"
@@ -624,11 +622,7 @@ def _merge_config_suggestion_blocks(
             if field_value in (None, "", [], {}):
                 continue
             if field_name == "methods":
-                items = [
-                    str(item)
-                    for item in field_value
-                    if str(item).strip()
-                ]
+                items = [str(item) for item in field_value if str(item).strip()]
                 existing = list(block.get("methods", []))
                 for item in items:
                     if item not in existing:
@@ -637,11 +631,7 @@ def _merge_config_suggestion_blocks(
                     block["methods"] = existing
                 continue
             if field_name in {"checks", "scenarios", "tracked_params", "protected_keys"}:
-                items = [
-                    item
-                    for item in field_value
-                    if str(item).strip()
-                ]
+                items = [item for item in field_value if str(item).strip()]
                 existing = list(block.get(field_name, []))
                 for item in items:
                     if item not in existing:
@@ -688,9 +678,9 @@ def _render_config_suggestion_blocks(blocks: Sequence[Mapping[str, Any]]) -> str
             lines.append("")
         lines.append(section)
         remaining = [key for key in block.keys() if key != "section"]
-        ordered_keys = [
-            key for key in key_order if key in remaining
-        ] + [key for key in remaining if key not in key_order]
+        ordered_keys = [key for key in key_order if key in remaining] + [
+            key for key in remaining if key not in key_order
+        ]
         for key in ordered_keys:
             lines.append(f"{key} = {_toml_value(block[key])}")
     return "\n".join(lines)
@@ -737,9 +727,7 @@ def _config_suggestions_from_rows(
             if isinstance(config, Mapping):
                 blocks.append(dict(config))
         contract_checks = [
-            str(item).strip()
-            for item in row.get("contract_checks", [])
-            if str(item).strip()
+            str(item).strip() for item in row.get("contract_checks", []) if str(item).strip()
         ]
         if contract_checks:
             blocks.append(
@@ -867,10 +855,7 @@ def _toml_key_value(key: str, value: Any) -> str:
     elif isinstance(value, str):
         rendered = json.dumps(value)
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        rendered_items = [
-            _toml_key_value("", item).split(" = ", 1)[-1]
-            for item in value
-        ]
+        rendered_items = [_toml_key_value("", item).split(" = ", 1)[-1] for item in value]
         rendered = "[" + ", ".join(rendered_items) + "]"
     elif isinstance(value, Mapping):
         rendered_items = [
@@ -1034,12 +1019,16 @@ def _contract_suggestion_entries_from_checks(
         }
         if kwargs:
             entry["kwargs"] = kwargs
-        if entry["checks"][0] in {
-            "shell_safe",
-            "quoted_paths",
-            "command_arg_stability",
-            "subprocess_argv",
-        } and kwargs:
+        if (
+            entry["checks"][0]
+            in {
+                "shell_safe",
+                "quoted_paths",
+                "command_arg_stability",
+                "subprocess_argv",
+            }
+            and kwargs
+        ):
             entry["tracked_params"] = list(kwargs)
         if entry["checks"][0] == "protected_env_keys":
             env_param = next(
@@ -1275,11 +1264,7 @@ def _audit_config_suggestions(
         for item in getattr(result, "function_audits", [])
         if str(getattr(item, "status", "")) != "exercised"
     }
-    rows = [
-        row
-        for group in target_groups
-        for row in list(group.get("targets", []))
-    ]
+    rows = [row for group in target_groups for row in list(group.get("targets", []))]
     suggestions = [
         _config_suggestion(
             title="Persist audit defaults for this verification pass",
@@ -5367,9 +5352,7 @@ def _format_scan_summary(state: Any) -> str:
     """Render a concise, action-oriented summary for ``ordeal scan``."""
     lines = [f"ordeal scan: {state.module}"]
     details = _scan_report_details(state)
-    config_suggestions = list(
-        getattr(state, "supervisor_info", {}).get("config_suggestions", ())
-    )
+    config_suggestions = list(getattr(state, "supervisor_info", {}).get("config_suggestions", ()))
     coverage_gaps = [detail for detail in details if detail.get("category") == "coverage_gap"]
     invalid_inputs = [
         detail for detail in details if detail.get("category") == "invalid_input_crash"
@@ -7278,10 +7261,7 @@ def _build_audit_agent_envelope(
         (
             "Mutation Alignment",
             [
-                (
-                    f"{result.module}: "
-                    f"{result.mutation_validation_view()['summary']}"
-                )
+                (f"{result.module}: {result.mutation_validation_view()['summary']}")
                 for result in results
             ],
         ),
@@ -8169,8 +8149,7 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     action="append",
                     default=[],
                     help=(
-                        "Repeat to check one or more built-in contracts or pack aliases "
-                        "directly."
+                        "Repeat to check one or more built-in contracts or pack aliases directly."
                     ),
                 ),
                 _arg(

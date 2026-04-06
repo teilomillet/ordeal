@@ -1264,7 +1264,7 @@ scan_max_examples = 12
         assert "factory=required, configured=yes" in out
         assert "configs=" in out
         assert "Suggested ordeal.toml:" in captured.out
-        assert '[[contracts]]' in captured.out
+        assert "[[contracts]]" in captured.out
         assert 'target = "pkg_mod:Env.build_command"' in captured.out
 
     def test_check_expands_builtin_contract_packs_and_scenario_libraries(
@@ -1360,11 +1360,9 @@ scan_max_examples = 12
         )
         assert payload["raw_details"]["violations"] == []
         assert payload["raw_details"]["report"]["config_suggestions"]
-        snippets = [
-            item["snippet"] for item in payload["raw_details"]["config_suggestions"]
-        ]
-        assert any('[[contracts]]' in snippet for snippet in snippets)
-        assert any('[[objects]]' in snippet for snippet in snippets)
+        snippets = [item["snippet"] for item in payload["raw_details"]["config_suggestions"]]
+        assert any("[[contracts]]" in snippet for snippet in snippets)
+        assert any("[[objects]]" in snippet for snippet in snippets)
 
     def test_check_supports_direct_builtin_contracts_without_toml(
         self,
@@ -1408,7 +1406,7 @@ scan_max_examples = 12
         assert calls["kwargs"] == [{"path": "demo files/input.txt"}]
         assert "Checking pkg_mod.build_command explicit contract(s)" in out
         assert "Suggested ordeal.toml:" in captured.out
-        assert '[[contracts]]' in captured.out
+        assert "[[contracts]]" in captured.out
 
     def test_check_property_mode_still_uses_mine(self, monkeypatch, tmp_path, capsys):
         monkeypatch.chdir(tmp_path)
@@ -1446,7 +1444,7 @@ scan_max_examples = 12
         assert calls["max_examples"] == 5
         assert "ALWAYS" in out or "PASS" in out
         assert "Suggested ordeal.toml:" in out
-        assert '[[scan]]' in out
+        assert "[[scan]]" in out
         assert 'targets = ["normalize"]' in out
 
     def test_scan_list_targets_shows_unselected_rows_when_toml_limits_targets(

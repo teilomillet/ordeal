@@ -1506,8 +1506,7 @@ class TestAuditCache:
         assert payload["evidence_views"]["current_suite"]["label"] == "current suite"
         assert payload["evidence_views"]["generated_suite"]["label"] == "generated incremental"
         assert (
-            payload["evidence_views"]["mutation_validation"]["label"]
-            == "contract-aware mutation"
+            payload["evidence_views"]["mutation_validation"]["label"] == "contract-aware mutation"
         )
         assert payload["evidence_views"]["mutation_validation"]["status"] == "fully_killed"
         assert payload["evidence_views"]["combined_view"]["label"] in {

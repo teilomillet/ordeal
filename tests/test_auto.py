@@ -731,9 +731,7 @@ class TestScanModule:
             if pack_name == "subprocess":
                 assert asyncio.run(instance.render("echo hi")) == ""
             elif pack_name == "sandbox_client":
-                assert asyncio.run(
-                    instance.render("echo hi", "/tmp/file", b"payload")
-                ) == ""
+                assert asyncio.run(instance.render("echo hi", "/tmp/file", b"payload")) == ""
             elif pack_name == "upload_download":
                 assert instance.render(b"payload") == 0
             elif pack_name == "http":
@@ -961,8 +959,7 @@ class TestScanModule:
         sys.modules[module_name] = mod
         if pack_name == "shell_path_safety":
             exec(
-                "def build_command(path: str) -> str:\n"
-                "    return f'cp {path} /tmp'\n",
+                "def build_command(path: str) -> str:\n    return f'cp {path} /tmp'\n",
                 mod.__dict__,
             )
             contract_kwargs = {"path": "demo files/input.txt"}
@@ -1050,13 +1047,9 @@ class TestScanModule:
             if pack_name == "shell_path_safety":
                 assert not resolved[0].predicate("cp demo files/input.txt /tmp")
             elif pack_name == "protected_env_vars":
-                assert not resolved[0].predicate(
-                    {"HOME": "/home/test", "PWD": "/tmp"}
-                )
+                assert not resolved[0].predicate({"HOME": "/home/test", "PWD": "/tmp"})
             elif pack_name == "json_tool_call_normalization":
-                assert not resolved[0].predicate(
-                    {"tool_call": {"args": {"alpha", "beta"}}}
-                )
+                assert not resolved[0].predicate({"tool_call": {"args": {"alpha", "beta"}}})
         finally:
             del sys.modules[module_name]
 

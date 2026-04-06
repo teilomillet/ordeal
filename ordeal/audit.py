@@ -1155,9 +1155,7 @@ def _find_test_files(module_name: str, test_dir: Path) -> list[Path]:
     if not test_dir.is_dir():
         return results
 
-    python_files = sorted(
-        path.resolve() for path in test_dir.rglob("*.py") if path.is_file()
-    )
+    python_files = sorted(path.resolve() for path in test_dir.rglob("*.py") if path.is_file())
     if not python_files:
         return []
     candidates = [path for path in python_files if _looks_like_test_file(path)]
@@ -1226,9 +1224,7 @@ def _find_test_file_evidence(module_name: str, test_dir: Path) -> list[TestFileE
     if not test_dir.is_dir():
         return []
 
-    python_files = sorted(
-        path.resolve() for path in test_dir.rglob("*.py") if path.is_file()
-    )
+    python_files = sorted(path.resolve() for path in test_dir.rglob("*.py") if path.is_file())
     if not python_files:
         return []
     candidates = [path for path in python_files if _looks_like_test_file(path)]

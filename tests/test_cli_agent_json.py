@@ -170,7 +170,7 @@ class TestCLIAgentJson:
                     "filename": "ordeal.toml",
                     "section": "[audit]",
                     "target": "pkg.mod",
-                    "snippet": "[audit]\nmodules = [\"pkg.mod\"]\n",
+                    "snippet": '[audit]\nmodules = ["pkg.mod"]\n',
                     "entries": [{"section": "[audit]", "modules": ["pkg.mod"]}],
                 }
             ],
@@ -420,9 +420,10 @@ class TestCLIAgentJson:
         assert "hidden by default" in payload["summary"]
         assert payload["raw_details"]["function_audits"][0]["module"] == "ordeal.demo"
         assert payload["raw_details"]["config_suggestions"][0]["section"] == "[audit]"
-        assert 'modules = ["ordeal.demo"]' in payload["raw_details"]["config_suggestions"][0][
-            "snippet"
-        ]
+        assert (
+            'modules = ["ordeal.demo"]'
+            in payload["raw_details"]["config_suggestions"][0]["snippet"]
+        )
         assert {item["status"] for item in payload["raw_details"]["function_audits"]} == {
             "uncovered",
             "exploratory",
@@ -539,9 +540,10 @@ class TestCLIAgentJson:
             == "Surface sampling: 2/12 runnable exports checked"
         )
         assert payload["raw_details"]["config_suggestions"][0]["section"] == "[[scan]]"
-        assert 'targets = ["target_1", "target_9"]' in payload["raw_details"][
-            "config_suggestions"
-        ][0]["snippet"]
+        assert (
+            'targets = ["target_1", "target_9"]'
+            in payload["raw_details"]["config_suggestions"][0]["snippet"]
+        )
         assert payload["raw_details"]["state"]["supervisor_info"]["scan_sampling"] == {
             "kind": "package_root_sample",
             "module": "ordeal",

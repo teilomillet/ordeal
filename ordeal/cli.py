@@ -701,6 +701,160 @@ def _module_surface_support_files(
     )
 
 
+def _add_surface_provenance_item(
+    bucket: list[dict[str, str]],
+    seen: set[tuple[str, str]],
+    *,
+    kind: str,
+    detail: Any,
+) -> None:
+    """Append one normalized provenance item when it adds new information."""
+    rendered = str(detail or "").strip()
+    key = (str(kind), rendered)
+    if not rendered or key in seen:
+        return
+    seen.add(key)
+    bucket.append({"kind": str(kind), "detail": rendered})
+
+
+def _surface_provenance_from_row(
+    row: Mapping[str, Any],
+    hint_groups: Mapping[str, Sequence[str]],
+) -> dict[str, Any]:
+    """Build lean provenance buckets for one surface entry."""
+    observed: list[dict[str, str]] = []
+    declared: list[dict[str, str]] = []
+    inferred: list[dict[str, str]] = []
+    observed_seen: set[tuple[str, str]] = set()
+    declared_seen: set[tuple[str, str]] = set()
+    inferred_seen: set[tuple[str, str]] = set()
+
+    if source_path := row.get("source_path"):
+        _add_surface_provenance_item(
+            observed,
+            observed_seen,
+            kind="source_file",
+            detail=source_path,
+        )
+    for path in list(row.get("adjacent_test_files", ())):
+        _add_surface_provenance_item(
+            observed,
+            observed_seen,
+            kind="test_file",
+            detail=path,
+        )
+    for path in list(row.get("adjacent_doc_files", ())):
+        _add_surface_provenance_item(
+            observed,
+            observed_seen,
+            kind="doc_file",
+            detail=path,
+        )
+    for evidence in hint_groups.get("tests", ()):
+        _add_surface_provenance_item(
+            observed,
+            observed_seen,
+            kind="test_support",
+            detail=evidence,
+        )
+    for evidence in hint_groups.get("docs", ()):
+        _add_surface_provenance_item(
+            observed,
+            observed_seen,
+            kind="doc_support",
+            detail=evidence,
+        )
+    for evidence in hint_groups.get("other", ()):
+        _add_surface_provenance_item(
+            observed,
+            observed_seen,
+            kind="support_file",
+            detail=evidence,
+        )
+
+    for kind, source in (
+        ("factory", row.get("factory_source")),
+        ("setup", row.get("setup_source")),
+        ("state_factory", row.get("state_factory_source")),
+        ("teardown", row.get("teardown_source")),
+        ("harness", row.get("harness_source")),
+        ("scenario", row.get("scenario_source")),
+    ):
+        source_text = str(source or "").strip()
+        if not source_text:
+            continue
+        bucket = declared if source_text == "configured" else observed
+        seen = declared_seen if source_text == "configured" else observed_seen
+        _add_surface_provenance_item(
+            bucket,
+            seen,
+            kind=kind,
+            detail=source_text,
+        )
+
+    for check_name in list(row.get("contract_checks", ())):
+        _add_surface_provenance_item(
+            declared,
+            declared_seen,
+            kind="contract_check",
+            detail=check_name,
+        )
+
+    if bool(row.get("docstring_present")):
+        _add_surface_provenance_item(
+            inferred,
+            inferred_seen,
+            kind="docstring",
+            detail="present",
+        )
+    docstring_examples = int(row.get("docstring_examples", 0) or 0)
+    if docstring_examples > 0:
+        _add_surface_provenance_item(
+            inferred,
+            inferred_seen,
+            kind="doctest_examples",
+            detail=str(docstring_examples),
+        )
+    for sink in list(row.get("sink_categories", ())):
+        _add_surface_provenance_item(
+            inferred,
+            inferred_seen,
+            kind="sink_category",
+            detail=sink,
+        )
+    if lifecycle_phase := row.get("lifecycle_phase"):
+        _add_surface_provenance_item(
+            inferred,
+            inferred_seen,
+            kind="lifecycle_phase",
+            detail=lifecycle_phase,
+        )
+    for handler in list(row.get("lifecycle_handlers", ())):
+        _add_surface_provenance_item(
+            inferred,
+            inferred_seen,
+            kind="lifecycle_handler",
+            detail=handler,
+        )
+
+    primary = (
+        "observed"
+        if observed
+        else ("declared" if declared else ("inferred" if inferred else "none"))
+    )
+    return {
+        "primary_basis": primary,
+        "observed": observed,
+        "declared": declared,
+        "inferred": inferred,
+        "summary": {
+            "observed_count": len(observed),
+            "declared_count": len(declared),
+            "inferred_count": len(inferred),
+        },
+    }
+
+
 def _surface_support_summary(row: Mapping[str, Any]) -> dict[str, Any]:
     """Build support/factory readiness details for one callable row."""
     hints = list(row.get("harness_hints", []))
@@ -761,6 +915,7 @@ def _surface_entry_from_listing_row(row: Mapping[str, Any]) -> dict[str, Any]:
     sink_categories = list(row.get("sink_categories", ()))
     docstring_examples = int(row.get("docstring_examples", 0) or 0)
     docstring_present = bool(row.get("docstring_present"))
+    provenance = _surface_provenance_from_row(row, hint_groups)
     return {
         "name": row.get("name"),
         "target": row.get("target"),
@@ -782,6 +937,7 @@ def _surface_entry_from_listing_row(row: Mapping[str, Any]) -> dict[str, Any]:
             "lifecycle_phase": row.get("lifecycle_phase"),
             "lifecycle_handlers": lifecycle_handlers,
         },
+        "provenance": provenance,
         "evidence": {
             "tests": {
                 "files": tests,
@@ -821,6 +977,20 @@ def _build_surface_map(groups: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             for entry in group_entries
             if entry.get("name")
         )
+        group_provenance = {
+            "observed_count": sum(
+                int(entry.get("provenance", {}).get("summary", {}).get("observed_count", 0) or 0)
+                for entry in group_entries
+            ),
+            "declared_count": sum(
+                int(entry.get("provenance", {}).get("summary", {}).get("declared_count", 0) or 0)
+                for entry in group_entries
+            ),
+            "inferred_count": sum(
+                int(entry.get("provenance", {}).get("summary", {}).get("inferred_count", 0) or 0)
+                for entry in group_entries
+            ),
+        }
         group_maps.append(
             {
                 "module": module,
@@ -832,10 +1002,25 @@ def _build_surface_map(groups: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                 ),
                 "blocked_reason": _blocked_callable_listing_reason(rows),
                 "bootstrap_targets": bootstrap_targets,
+                "provenance": group_provenance,
                 "entries": group_entries,
             }
         )
 
+    provenance_summary = {
+        "observed_count": sum(
+            int(entry.get("provenance", {}).get("summary", {}).get("observed_count", 0) or 0)
+            for entry in entries
+        ),
+        "declared_count": sum(
+            int(entry.get("provenance", {}).get("summary", {}).get("declared_count", 0) or 0)
+            for entry in entries
+        ),
+        "inferred_count": sum(
+            int(entry.get("provenance", {}).get("summary", {}).get("inferred_count", 0) or 0)
+            for entry in entries
+        ),
+    }
     return {
         "summary": {
             "group_count": len(group_maps),
@@ -850,6 +1035,7 @@ def _build_surface_map(groups: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "bootstrap_class_count": sum(
                 len(group.get("bootstrap_targets", ())) for group in group_maps
             ),
+            "provenance": provenance_summary,
         },
         "groups": group_maps,
         "entries": entries,
@@ -862,6 +1048,8 @@ def _render_surface_entry_summary(entry: Mapping[str, Any]) -> str:
     support = dict(entry.get("support", {}))
     contracts = dict(entry.get("contracts", {}))
     evidence = dict(entry.get("evidence", {}))
+    provenance = dict(entry.get("provenance", {}))
+    provenance_summary = dict(provenance.get("summary", {}))
     tests = dict(evidence.get("tests", {}))
     docs = dict(evidence.get("docs", {}))
     parts = [
@@ -884,6 +1072,11 @@ def _render_surface_entry_summary(entry: Mapping[str, Any]) -> str:
     lifecycle_phase = contracts.get("lifecycle_phase")
     if lifecycle_phase:
         parts.append(f"lifecycle={lifecycle_phase}")
+    observed_count = int(provenance_summary.get("observed_count", 0) or 0)
+    declared_count = int(provenance_summary.get("declared_count", 0) or 0)
+    inferred_count = int(provenance_summary.get("inferred_count", 0) or 0)
+    if observed_count or declared_count or inferred_count:
+        parts.append(f"prov=o{observed_count}/d{declared_count}/i{inferred_count}")
     return "  ".join(parts)
 
 
@@ -1138,6 +1331,89 @@ def _callable_listing_rows(
         )
 
     return rows
+
+
+def _canonical_surface_groups_for_targets(
+    targets: Sequence[str],
+    *,
+    cfg: OrdealConfig | None = None,
+    object_specs: Sequence[Any] = (),
+    include_private_by_module: Mapping[str, bool] | None = None,
+    bootstrap_test_dir: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return grouped callable rows for explicit target inputs using one shared path."""
+    (
+        object_factories,
+        object_setups,
+        object_scenarios,
+        object_state_factories,
+        object_teardowns,
+        object_harnesses,
+    ) = _object_runtime_maps(object_specs)
+    module_requests: dict[str, dict[str, Any]] = {}
+    for target in targets:
+        normalized_target = _normalize_module_target(str(target))
+        module_name = _scan_base_module(normalized_target)
+        if ":" not in normalized_target:
+            imported_module = False
+            with contextlib.suppress(Exception):
+                importlib.import_module(module_name)
+                imported_module = True
+            if not imported_module:
+                module_name = _target_module_name(normalized_target)
+        request = module_requests.setdefault(
+            module_name,
+            {"select_all": False, "selectors": []},
+        )
+        if normalized_target == module_name:
+            request["select_all"] = True
+            continue
+        request["selectors"].append(normalized_target)
+
+    groups: list[dict[str, Any]] = []
+    for module_name, request in module_requests.items():
+        include_private = bool((include_private_by_module or {}).get(module_name, False))
+        try:
+            module_contract_checks = (
+                _config_contract_checks_for_module(cfg, module_name) if cfg is not None else {}
+            )
+        except Exception:
+            module_contract_checks = {}
+        try:
+            rows = _callable_listing_rows(
+                module_name,
+                targets=(
+                    None
+                    if bool(request.get("select_all"))
+                    else list(request.get("selectors", ())) or None
+                ),
+                include_private=include_private,
+                object_factories=object_factories,
+                object_setups=object_setups,
+                object_scenarios=object_scenarios,
+                object_state_factories=object_state_factories,
+                object_teardowns=object_teardowns,
+                object_harnesses=object_harnesses,
+                contract_checks=module_contract_checks,
+            )
+        except Exception:
+            rows = []
+        bootstrap_targets: list[dict[str, Any]] = []
+        if not rows and bootstrap_test_dir is not None:
+            with contextlib.suppress(Exception):
+                bootstrap_targets = _audit_bootstrap_targets(
+                    module_name,
+                    include_private=include_private,
+                    test_dir=bootstrap_test_dir,
+                )
+        groups.append(
+            {
+                "module": module_name,
+                "targets": rows,
+                "bootstrap_targets": bootstrap_targets,
+            }
+        )
+    return groups
 
 
 def _hint_mapping_sort_key(hint: Mapping[str, Any]) -> tuple[float, float, int, str, str]:
@@ -2366,11 +2642,16 @@ def _render_target_listing_text(
         lines.append(f"warning: {warning}")
     summary = dict(surface_map.get("summary", {}))
     if summary.get("entry_count"):
+        provenance = dict(summary.get("provenance", {}))
         lines.append(
             "surface map: "
             f"{summary.get('entry_count', 0)} entries, "
             f"{summary.get('runnable_count', 0)} runnable, "
-            f"{summary.get('source_module_count', 0)} source modules"
+            f"{summary.get('source_module_count', 0)} source modules, "
+            "provenance="
+            f"o{int(provenance.get('observed_count', 0) or 0)}/"
+            f"d{int(provenance.get('declared_count', 0) or 0)}/"
+            f"i{int(provenance.get('inferred_count', 0) or 0)}"
         )
     for group in groups:
         module = str(group.get("module", ""))
@@ -4952,64 +5233,28 @@ def _cmd_audit(args: argparse.Namespace) -> int:
 
     def _audit_target_groups() -> list[dict[str, Any]]:
         try:
-            (
-                object_factories,
-                object_setups,
-                object_scenarios,
-                object_state_factories,
-                object_teardowns,
-                object_harnesses,
-            ) = _object_runtime_maps(object_specs)
+            include_private_by_module = {
+                _scan_base_module(target): bool(
+                    getattr(args, "include_private", False)
+                    or any(
+                        bool(getattr(spec, "include_private", False))
+                        for spec in normalized_target_specs_by_module.get(
+                            _scan_base_module(target),
+                            [],
+                        )
+                    )
+                )
+                for target in target_names
+            }
+            return _canonical_surface_groups_for_targets(
+                target_names,
+                cfg=cfg,
+                object_specs=object_specs,
+                include_private_by_module=include_private_by_module,
+                bootstrap_test_dir=test_dir,
+            )
         except Exception as exc:  # pragma: no cover - shared with list-targets/json block
             raise RuntimeError(f"target metadata resolution failed: {exc}") from exc
-
-        target_groups: list[dict[str, Any]] = []
-        for target in target_names:
-            module_name = _scan_base_module(target)
-            module_specs = normalized_target_specs_by_module.get(module_name, [])
-            module_include_private = bool(
-                getattr(args, "include_private", False)
-                or any(bool(getattr(spec, "include_private", False)) for spec in module_specs)
-            )
-            try:
-                module_contract_checks = (
-                    _config_contract_checks_for_module(cfg, module_name) if cfg else {}
-                )
-            except Exception:
-                module_contract_checks = {}
-            try:
-                rows = _callable_listing_rows(
-                    module_name,
-                    include_private=module_include_private,
-                    object_factories=object_factories,
-                    object_setups=object_setups,
-                    object_scenarios=object_scenarios,
-                    object_state_factories=object_state_factories,
-                    object_teardowns=object_teardowns,
-                    object_harnesses=object_harnesses,
-                    contract_checks=module_contract_checks,
-                )
-            except Exception:
-                rows = []
-            if not rows:
-                try:
-                    bootstrap_targets = _audit_bootstrap_targets(
-                        module_name,
-                        include_private=module_include_private,
-                        test_dir=test_dir,
-                    )
-                except Exception:
-                    bootstrap_targets = []
-            else:
-                bootstrap_targets = []
-            target_groups.append(
-                {
-                    "module": module_name,
-                    "targets": rows,
-                    "bootstrap_targets": bootstrap_targets,
-                }
-            )
-        return target_groups
 
     if getattr(args, "list_targets", False):
         try:
@@ -5152,6 +5397,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                 include_exploratory_function_gaps=include_exploratory_function_gaps,
                 require_direct_tests=require_direct_tests,
                 config_suggestions=config_suggestions,
+                surface_groups=audit_target_groups,
             ).to_json()
         )
         if blocked_results:
@@ -5195,6 +5441,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                 results,
                 include_exploratory_function_gaps=include_exploratory_function_gaps,
                 config_suggestions=config_suggestions,
+                surface_groups=audit_target_groups,
             )
         )
 
@@ -6518,6 +6765,15 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
             status = "PASS" if overall >= threshold else "FAIL"
             print(f"Threshold: {threshold:.0%} — {status}")
 
+    surface_groups: list[dict[str, Any]] = []
+    if targets:
+        with contextlib.suppress(Exception):
+            surface_groups = _canonical_surface_groups_for_targets(
+                targets,
+                cfg=cfg,
+                object_specs=list(cfg.objects) if cfg is not None else [],
+            )
+
     if getattr(args, "json", False):
         print(
             _build_mutate_agent_envelope(
@@ -6526,6 +6782,7 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
                 blockers=blockers,
                 threshold=threshold,
                 stubs_path=stubs_path,
+                surface_groups=surface_groups,
             ).to_json()
         )
 
@@ -8869,6 +9126,7 @@ def _render_audit_report_text(
     *,
     include_exploratory_function_gaps: bool,
     config_suggestions: Sequence[Mapping[str, Any]] = (),
+    surface_groups: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     """Render a human-readable audit report from precomputed results."""
     lines = ["ordeal audit"]
@@ -8915,6 +9173,19 @@ def _render_audit_report_text(
     if rendered_suggestions:
         lines.append("")
         lines.extend(rendered_suggestions)
+    if surface_groups:
+        surface_summary = dict(_build_surface_map(surface_groups).get("summary", {}))
+        provenance = dict(surface_summary.get("provenance", {}))
+        lines.append("")
+        lines.append(
+            "  surface map: "
+            f"{surface_summary.get('entry_count', 0)} entries | "
+            f"{surface_summary.get('runnable_count', 0)} runnable | "
+            "provenance="
+            f"o{int(provenance.get('observed_count', 0) or 0)}/"
+            f"d{int(provenance.get('declared_count', 0) or 0)}/"
+            f"i{int(provenance.get('inferred_count', 0) or 0)}"
+        )
 
     return "\n".join(lines)
 
@@ -8927,6 +9198,7 @@ def _build_audit_agent_envelope(
     include_exploratory_function_gaps: bool = False,
     require_direct_tests: bool = False,
     config_suggestions: Sequence[Mapping[str, Any]] = (),
+    surface_groups: Sequence[Mapping[str, Any]] = (),
 ) -> Any:
     """Build the agent-facing JSON envelope for `ordeal audit`."""
     from ordeal.audit import _generated_test_path, _module_audit_to_dict
@@ -8952,6 +9224,13 @@ def _build_audit_agent_envelope(
     seen: set[str] = set()
     deduped_commands = [cmd for cmd in suggested_commands if not (cmd in seen or seen.add(cmd))]
     blocked_count = sum(1 for result in results if getattr(result, "blocking_reason", None))
+    surface_map = (
+        _build_surface_map(surface_groups)
+        if surface_groups
+        else {"summary": {}, "groups": [], "entries": []}
+    )
+    surface_summary = dict(surface_map.get("summary", {}))
+    surface_provenance = dict(surface_summary.get("provenance", {}))
     report = {
         "target": ", ".join(modules),
         "tool": "audit",
@@ -9022,6 +9301,16 @@ def _build_audit_agent_envelope(
     )
     if direct_test_gate is not None:
         report["summary"].append(_direct_test_gate_summary(direct_test_gate))
+    if surface_summary.get("entry_count"):
+        report["summary"].append(
+            "Surface map: "
+            f"{surface_summary.get('entry_count', 0)} entries, "
+            f"{surface_summary.get('runnable_count', 0)} runnable, "
+            "provenance="
+            f"o{int(surface_provenance.get('observed_count', 0) or 0)}/"
+            f"d{int(surface_provenance.get('declared_count', 0) or 0)}/"
+            f"i{int(surface_provenance.get('inferred_count', 0) or 0)}"
+        )
     if exploratory_count and not include_exploratory_function_gaps:
         report["summary"].append(
             "Exploratory function gaps hidden by default: "
@@ -9071,6 +9360,23 @@ def _build_audit_agent_envelope(
             ],
         ),
     ]
+    if surface_summary.get("entry_count"):
+        report["extra_sections"].append(
+            (
+                "Surface Map",
+                [
+                    (
+                        f"{surface_summary.get('entry_count', 0)} entries, "
+                        f"{surface_summary.get('runnable_count', 0)} runnable, "
+                        f"{surface_summary.get('source_module_count', 0)} source modules, "
+                        "provenance="
+                        f"o{int(surface_provenance.get('observed_count', 0) or 0)}/"
+                        f"d{int(surface_provenance.get('declared_count', 0) or 0)}/"
+                        f"i{int(surface_provenance.get('inferred_count', 0) or 0)}"
+                    )
+                ],
+            )
+        )
     if written_gap_files:
         report["extra_sections"].append(
             (
@@ -9147,6 +9453,13 @@ def _build_audit_agent_envelope(
         raw_details={
             "report": report,
             "modules": [_module_audit_to_dict(result) for result in results],
+            "target_groups": [dict(group) for group in surface_groups],
+            "targets": [
+                row
+                for group in surface_groups
+                for row in list(group.get("targets", ()))
+            ],
+            "surface_map": surface_map,
             "mutation_views": [
                 {
                     "module": result.module,
@@ -9201,6 +9514,7 @@ def _build_mutate_agent_envelope(
     blockers: Sequence[Mapping[str, Any]],
     threshold: float,
     stubs_path: Path | None = None,
+    surface_groups: Sequence[Mapping[str, Any]] = (),
 ) -> Any:
     """Build the agent-facing JSON envelope for `ordeal mutate`."""
     details = []
@@ -9236,6 +9550,13 @@ def _build_mutate_agent_envelope(
         status = "blocked"
     elif details:
         status = "findings"
+    surface_map = (
+        _build_surface_map(surface_groups)
+        if surface_groups
+        else {"summary": {}, "groups": [], "entries": []}
+    )
+    surface_summary = dict(surface_map.get("summary", {}))
+    surface_provenance = dict(surface_summary.get("provenance", {}))
     report = {
         "target": ", ".join(targets),
         "tool": "mutate",
@@ -9248,6 +9569,16 @@ def _build_mutate_agent_envelope(
         "details": details,
         "suggested_commands": deduped_commands,
     }
+    if surface_summary.get("entry_count"):
+        report["summary"].append(
+            "Surface map: "
+            f"{surface_summary.get('entry_count', 0)} entries, "
+            f"{surface_summary.get('runnable_count', 0)} runnable, "
+            "provenance="
+            f"o{int(surface_provenance.get('observed_count', 0) or 0)}/"
+            f"d{int(surface_provenance.get('declared_count', 0) or 0)}/"
+            f"i{int(surface_provenance.get('inferred_count', 0) or 0)}"
+        )
     blocking_reason = str(blockers[0]["summary"]) if blockers and not results else None
     artifacts = (
         [_agent_artifact("regression", stubs_path, "generated mutation test stubs")]
@@ -9286,6 +9617,13 @@ def _build_mutate_agent_envelope(
             "blockers": list(blockers),
             "overall_score": overall,
             "threshold": threshold,
+            "surface_groups": [dict(group) for group in surface_groups],
+            "surface_targets": [
+                row
+                for group in surface_groups
+                for row in list(group.get("targets", ()))
+            ],
+            "surface_map": surface_map,
         },
         suggested_test_file=(
             str(stubs_path)
@@ -10584,8 +10922,8 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     default=None,
                     metavar="NAME",
                     help=(
-                        "Workflow filename (default: ordeal → .github/workflows/ordeal.yml,"
-                        " or [init].ci_name)"
+                        "Workflow filename stem or basename under .github/workflows "
+                        "(default: ordeal → .github/workflows/ordeal.yml, or [init].ci_name)"
                     ),
                 ),
                 _arg(

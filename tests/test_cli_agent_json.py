@@ -318,6 +318,17 @@ class TestCLIAgentJson:
         assert payload["findings"][0]["details"]["replayable"] is False
 
     def test_audit_agent_envelope_surfaces_mutation_views_and_config_suggestions(self):
+        mod = _make_target_listing_module("tests._cli_audit_surface_targets")
+        sys.modules[mod.__name__] = mod
+        ordeal_auto._REGISTERED_OBJECT_FACTORIES["tests._cli_audit_surface_targets:Env"] = (
+            lambda: mod.Env()
+        )
+        ordeal_auto._REGISTERED_OBJECT_SETUPS["tests._cli_audit_surface_targets:Env"] = (
+            lambda instance: instance
+        )
+        ordeal_auto._REGISTERED_OBJECT_SCENARIOS["tests._cli_audit_surface_targets:Env"] = (
+            lambda instance: instance
+        )
         result = ModuleAudit(
             module="pkg.mod",
             mutation_score="3/4 (75%)",
@@ -360,29 +371,61 @@ class TestCLIAgentJson:
             Status.VERIFIED,
             CoverageResult(92.0, 10, 0, frozenset(), "coverage.py API"),
         )
-        envelope = cli._build_audit_agent_envelope(
-            [result],
-            config_suggestions=[
+        try:
+            surface_groups = [
                 {
-                    "title": "Persist audit defaults",
-                    "reason": "Keep audit settings versioned.",
-                    "filename": "ordeal.toml",
-                    "section": "[audit]",
-                    "target": "pkg.mod",
-                    "snippet": '[audit]\nmodules = ["pkg.mod"]\n',
-                    "entries": [{"section": "[audit]", "modules": ["pkg.mod"]}],
+                    "module": mod.__name__,
+                    "targets": cli._callable_listing_rows(mod.__name__),
+                    "bootstrap_targets": [],
                 }
-            ],
-        )
-        payload = json.loads(envelope.to_json())
+            ]
+            envelope = cli._build_audit_agent_envelope(
+                [result],
+                config_suggestions=[
+                    {
+                        "title": "Persist audit defaults",
+                        "reason": "Keep audit settings versioned.",
+                        "filename": "ordeal.toml",
+                        "section": "[audit]",
+                        "target": "pkg.mod",
+                        "snippet": '[audit]\nmodules = ["pkg.mod"]\n',
+                        "entries": [{"section": "[audit]", "modules": ["pkg.mod"]}],
+                    }
+                ],
+                surface_groups=surface_groups,
+            )
+            payload = json.loads(envelope.to_json())
 
-        assert payload["raw_details"]["mutation_views"][0]["module"] == "pkg.mod"
-        assert "status" in payload["raw_details"]["mutation_views"][0]
-        assert payload["raw_details"]["report"]["config_suggestions"][0]["section"] == "[audit]"
-        assert any(
-            section[0] == "Mutation Alignment"
-            for section in payload["raw_details"]["report"]["extra_sections"]
-        )
+            assert payload["raw_details"]["mutation_views"][0]["module"] == "pkg.mod"
+            assert "status" in payload["raw_details"]["mutation_views"][0]
+            assert (
+                payload["raw_details"]["report"]["config_suggestions"][0]["section"]
+                == "[audit]"
+            )
+            assert any(
+                section[0] == "Mutation Alignment"
+                for section in payload["raw_details"]["report"]["extra_sections"]
+            )
+            assert payload["raw_details"]["surface_map"]["summary"]["entry_count"] >= 1
+            entry = next(
+                item
+                for item in payload["raw_details"]["surface_map"]["entries"]
+                if item["name"] == "Env.build_env_vars"
+            )
+            assert entry["provenance"]["summary"]["declared_count"] >= 1
+        finally:
+            ordeal_auto._REGISTERED_OBJECT_FACTORIES.pop(
+                "tests._cli_audit_surface_targets:Env",
+                None,
+            )
+            ordeal_auto._REGISTERED_OBJECT_SETUPS.pop(
+                "tests._cli_audit_surface_targets:Env",
+                None,
+            )
+            ordeal_auto._REGISTERED_OBJECT_SCENARIOS.pop(
+                "tests._cli_audit_surface_targets:Env", None
+            )
+            sys.modules.pop(mod.__name__, None)
 
     def test_scan_json_replayable_speculative_crash_has_exploratory_summary(
         self, monkeypatch, capsys
@@ -718,6 +761,9 @@ class TestCLIAgentJson:
         assert entry["contracts"]["lifecycle_phase"] == "rollout"
         assert entry["evidence"]["tests"]["supporting_hints"]
         assert entry["evidence"]["docs"]["files"]
+        assert entry["provenance"]["primary_basis"] == "observed"
+        assert entry["provenance"]["summary"]["observed_count"] >= 2
+        assert entry["provenance"]["summary"]["inferred_count"] >= 1
         sections = {item["section"] for item in payload["raw_details"]["config_suggestions"]}
         assert {"[[scan]]", "[[objects]]", "[[audit.targets]]"} <= sections
 
@@ -1377,6 +1423,13 @@ write_gaps_dir = "{gap_dir.as_posix()}"
         assert payload["suggested_test_file"] == "tests/test_ordeal_regressions.py"
         assert payload["findings"][0]["location"] == "L12:4"
         assert payload["raw_details"]["overall_score"] == 0.0
+        assert payload["raw_details"]["surface_map"]["summary"]["entry_count"] >= 1
+        entry = next(
+            item
+            for item in payload["raw_details"]["surface_map"]["entries"]
+            if item["name"] == "normalize"
+        )
+        assert "inferred_count" in entry["provenance"]["summary"]
 
     def test_mutate_json_reports_blocking_reason_when_no_tests_found(self, monkeypatch, capsys):
         def fake_mutate(*args, **kwargs):

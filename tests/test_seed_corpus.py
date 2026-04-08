@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from hypothesis.stateful import rule
 
 from ordeal.chaos import ChaosTest
@@ -207,3 +208,24 @@ class TestExplorationResultSummary:
         assert "Seed corpus" in s
         assert "1 reproduced" in s
         assert "1 fixed" in s
+
+
+class TestExplorerStateResumeSecurity:
+    def test_load_state_requires_explicit_unsafe_opt_in(self, tmp_path: Path):
+        from ordeal.explore import Explorer
+
+        state_path = tmp_path / "state.pkl"
+        Explorer(_NeverFails).save_state(state_path)
+
+        with pytest.raises(ValueError, match="allow_unsafe=True"):
+            Explorer(_NeverFails).load_state(state_path)
+
+    def test_load_state_allows_trusted_pickle_when_requested(self, tmp_path: Path):
+        from ordeal.explore import Explorer
+
+        state_path = tmp_path / "state.pkl"
+        Explorer(_NeverFails).save_state(state_path)
+
+        restored = Explorer(_NeverFails).load_state(state_path, allow_unsafe=True)
+        assert restored["total_edges"] == 0
+        assert restored["checkpoints"] == 0

@@ -45,6 +45,26 @@ def _stderr(msg: str) -> None:
     sys.stderr.flush()
 
 
+def _workflow_path_from_ci_name(ci_name: str) -> Path:
+    """Return a workflow path rooted under ``.github/workflows``."""
+    cleaned = str(ci_name).strip()
+    if not cleaned:
+        raise ValueError("workflow name cannot be empty")
+    if "/" in cleaned or "\\" in cleaned:
+        raise ValueError("workflow name must not contain path separators")
+    if cleaned in {".", ".."}:
+        raise ValueError("workflow name must not be '.' or '..'")
+
+    candidate = Path(cleaned)
+    if candidate.is_absolute() or len(candidate.parts) != 1:
+        raise ValueError("workflow name must be a single filename")
+
+    filename = candidate.name
+    if candidate.suffix.lower() not in {".yml", ".yaml"}:
+        filename = f"{filename}.yml"
+    return Path(".github") / "workflows" / filename
+
+
 def _public_scan_mode(mode: str) -> str:
     """Return the preferred public label for one scan mode."""
     return {
@@ -4532,6 +4552,14 @@ def _cmd_explore(args: argparse.Namespace) -> int:
     if args.workers is not None:
         cfg.explorer.workers = args.workers
     verbose = args.verbose or cfg.report.verbose
+    allow_unsafe_resume = bool(getattr(args, "allow_unsafe_resume", False))
+
+    if args.resume and not allow_unsafe_resume:
+        _stderr(
+            "Refusing to load --resume without --allow-unsafe-resume. "
+            "Explorer state files use pickle and may execute arbitrary code.\n"
+        )
+        return 2
 
     if not cfg.tests:
         if cfg.scan:
@@ -4584,6 +4612,7 @@ def _cmd_explore(args: argparse.Namespace) -> int:
             progress=_ProgressPrinter() if verbose else None,
             resume_from=args.resume,
             save_state_to=args.save_state,
+            allow_unsafe_resume=allow_unsafe_resume,
         )
 
         if verbose:
@@ -5834,6 +5863,13 @@ def _cmd_init(args: argparse.Namespace) -> int:
     close_gap_include_exploratory = bool(
         audit_cfg.include_exploratory_function_gaps if audit_cfg is not None else False
     )
+    ci_workflow_path: Path | None = None
+    if ci:
+        try:
+            ci_workflow_path = _workflow_path_from_ci_name(ci_name)
+        except ValueError as exc:
+            _stderr(f"Invalid CI workflow name: {exc}\n")
+            return 2
 
     results = init_project(target=target, output_dir=output_dir, dry_run=dry_run)
 
@@ -5854,8 +5890,8 @@ def _cmd_init(args: argparse.Namespace) -> int:
     # --- CI workflow ---
     ci_path: str | None = None
     ci_content: str | None = None
-    if ci:
-        ci_path = f".github/workflows/{ci_name}.yml"
+    if ci and ci_workflow_path is not None:
+        ci_path = _display_path(ci_workflow_path)
         ci_content = _generate_ci_workflow(pkg)
 
     # --- Install AI skill ---
@@ -5878,8 +5914,8 @@ def _cmd_init(args: argparse.Namespace) -> int:
         return 0
 
     # --- Write CI workflow ---
-    if ci_path and ci_content:
-        ci_p = Path(ci_path)
+    if ci_workflow_path is not None and ci_content:
+        ci_p = ci_workflow_path
         ci_p.parent.mkdir(parents=True, exist_ok=True)
         ci_p.write_text(ci_content, encoding="utf-8")
 
@@ -10188,14 +10224,25 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     type=str,
                     default=None,
                     metavar="PATH",
-                    help="Resume from a saved state file (e.g. .ordeal/state.pkl)",
+                    help=(
+                        "Resume from a trusted saved state file "
+                        "(pickle; requires --allow-unsafe-resume)"
+                    ),
+                ),
+                _arg(
+                    "--allow-unsafe-resume",
+                    action="store_true",
+                    help="Allow loading the trusted pickle file passed to --resume",
                 ),
                 _arg(
                     "--save-state",
                     type=str,
                     default=None,
                     metavar="PATH",
-                    help="Save exploration state on completion (e.g. .ordeal/state.pkl)",
+                    help=(
+                        "Save exploration state on completion "
+                        "(trusted-only pickle, e.g. .ordeal/state.pkl)"
+                    ),
                 ),
             ),
         ),

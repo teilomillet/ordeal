@@ -90,6 +90,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         choices=["essential", "standard", "thorough"],
         help="Mutation operator preset (default: standard).",
     )
+    group.addoption(
+        "--ordeal-seed-replay",
+        action="store_true",
+        default=False,
+        help="Replay saved ordeal seeds during pytest startup (trusted seeds only).",
+    )
 
 
 def _register_array_strategies() -> None:
@@ -157,10 +163,24 @@ def _register_array_strategies() -> None:
 _seed_replay_results: list[dict[str, Any]] = []
 
 
+def _truthy_env(name: str) -> bool:
+    """Return whether environment variable *name* is set to a truthy value."""
+    value = os.environ.get(name, "")
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
 def _seed_replay_disabled() -> bool:
     """Return ``True`` when pytest seed replay should be skipped."""
-    value = os.environ.get("ORDEAL_DISABLE_SEED_REPLAY", "")
-    return value.lower() in {"1", "true", "yes", "on"}
+    return _truthy_env("ORDEAL_DISABLE_SEED_REPLAY")
+
+
+def _seed_replay_enabled(config: pytest.Config) -> bool:
+    """Return ``True`` when pytest seed replay is explicitly enabled."""
+    if _seed_replay_disabled():
+        return False
+    if config.getoption("ordeal_seed_replay", default=False):
+        return True
+    return _truthy_env("ORDEAL_ENABLE_SEED_REPLAY")
 
 
 def _replay_seed_corpus() -> list[dict[str, Any]]:
@@ -219,11 +239,11 @@ def pytest_configure(config: pytest.Config) -> None:
 
     _register_array_strategies()
 
-    # Replay seed corpus for regression detection — runs on EVERY pytest
-    # invocation, not just --chaos.  This is the Go fuzzing model: saved
-    # crashers are permanent regression tests that run automatically.
+    # Replay seed corpus only when explicitly enabled. Seed traces can import
+    # arbitrary local classes during replay, so plain pytest runs must stay
+    # side-effect free by default.
     _seed_replay_results.clear()
-    if not _seed_replay_disabled():
+    if _seed_replay_enabled(config):
         try:
             _seed_replay_results.extend(_replay_seed_corpus())
         except Exception:

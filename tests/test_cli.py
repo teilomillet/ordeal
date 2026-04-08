@@ -3267,6 +3267,27 @@ scan_max_examples = 12
         assert report["initial_scan"]["available_commands"] == ["ordeal scan pkg --save-artifacts"]
         assert ".claude/skills/ordeal/SKILL.md" not in report["files"]
 
+    def test_init_rejects_path_traversal_ci_name(self, monkeypatch, tmp_path, capsys):
+        import ordeal.mutations as mutations
+
+        monkeypatch.chdir(tmp_path)
+        called = False
+
+        def fake_init_project(*, target=None, output_dir="tests", dry_run=False):
+            nonlocal called
+            called = True
+            return []
+
+        monkeypatch.setattr(mutations, "init_project", fake_init_project)
+
+        rc = main(["init", "pkg", "--ci", "--ci-name", "../../escaped/owned"])
+        captured = capsys.readouterr()
+
+        assert rc == 2
+        assert called is False
+        assert "Invalid CI workflow name" in captured.err
+        assert not (tmp_path / ".github").exists()
+
     def test_init_opt_in_installs_skill_and_writes_audit_gap_stubs(
         self, monkeypatch, tmp_path, capsys
     ):
@@ -3801,6 +3822,88 @@ verbose = false
         err = capsys.readouterr().err
         assert "fixed       seed-fixed" in err
         assert "REGRESSION  seed-bad" in err
+
+    def test_explore_refuses_resume_without_explicit_unsafe_opt_in(
+        self, monkeypatch, capsys
+    ):
+        cfg = SimpleNamespace(
+            tests=[],
+            scan=[],
+            explorer=SimpleNamespace(),
+            report=SimpleNamespace(verbose=False),
+        )
+
+        monkeypatch.setattr(cli, "load_config", lambda path: cfg)
+
+        assert main(["explore", "--config", "ordeal.toml", "--resume", ".ordeal/state.pkl"]) == 2
+        err = capsys.readouterr().err
+        assert "--allow-unsafe-resume" in err
+        assert "pickle" in err
+
+    def test_explore_passes_allow_unsafe_resume_to_explorer(self, monkeypatch, capsys):
+        class _FakeTestCfg:
+            class_path = "tests.fake:Chaos"
+            steps_per_run = None
+
+            def resolve(self):
+                return object
+
+        cfg = SimpleNamespace(
+            tests=[_FakeTestCfg()],
+            explorer=SimpleNamespace(
+                target_modules=[],
+                seed=42,
+                max_checkpoints=32,
+                checkpoint_prob=0.4,
+                checkpoint_strategy="energy",
+                fault_toggle_prob=0.3,
+                ngram=2,
+                steps_per_run=10,
+                max_time=1.0,
+                max_runs=1,
+                workers=1,
+                rule_swarm=False,
+                seed_mutation_respect_strategies=False,
+            ),
+            report=SimpleNamespace(
+                format="text",
+                output="ordeal-report.json",
+                verbose=False,
+                traces=False,
+                traces_dir=".ordeal/traces",
+                corpus_dir=".ordeal/seeds",
+            ),
+        )
+        run_calls: dict[str, object] = {}
+
+        class _FakeExplorer:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def run(self, **kwargs):
+                run_calls.update(kwargs)
+                return SimpleNamespace(seed_replays=[], failures=[], traces=[])
+
+        monkeypatch.setattr(cli, "load_config", lambda path: cfg)
+        monkeypatch.setattr(cli, "Explorer", _FakeExplorer)
+        monkeypatch.setattr(cli, "_print_report", lambda all_results, cfg: None)
+
+        assert (
+            main(
+                [
+                    "explore",
+                    "--config",
+                    "ordeal.toml",
+                    "--resume",
+                    ".ordeal/state.pkl",
+                    "--allow-unsafe-resume",
+                ]
+            )
+            == 0
+        )
+        capsys.readouterr()
+        assert run_calls["resume_from"] == ".ordeal/state.pkl"
+        assert run_calls["allow_unsafe_resume"] is True
 
     def test_explore_can_prune_fixed_seeds(self, monkeypatch, tmp_path, capsys):
         fixed_seed = tmp_path / "seed-fixed.json"

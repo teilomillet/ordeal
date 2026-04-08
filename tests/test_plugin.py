@@ -30,10 +30,20 @@ from ordeal.plugin import (
 # ============================================================================
 
 
-def _make_config(chaos: bool = False, seed: int | None = None, prob: float = 0.1):
+def _make_config(
+    chaos: bool = False,
+    seed: int | None = None,
+    prob: float = 0.1,
+    ordeal_seed_replay: bool = False,
+):
     """Create a mock pytest.Config with ordeal options."""
     cfg = MagicMock()
-    values = {"chaos": chaos, "chaos_seed": seed, "buggify_prob": prob}
+    values = {
+        "chaos": chaos,
+        "chaos_seed": seed,
+        "buggify_prob": prob,
+        "ordeal_seed_replay": ordeal_seed_replay,
+    }
     cfg.getoption = lambda key, default=None: values.get(key, default)
     cfg.addinivalue_line = MagicMock()
     return cfg
@@ -79,8 +89,9 @@ class TestPytestAddoption:
     def test_registers_all_options(self):
         parser, group = _make_parser()
         pytest_addoption(parser)
-        # chaos, chaos-seed, buggify-prob, rule-timeout, mutate, mutate-preset
-        assert group.addoption.call_count == 6
+        # chaos, chaos-seed, buggify-prob, rule-timeout, mutate,
+        # mutate-preset, ordeal-seed-replay
+        assert group.addoption.call_count == 7
 
 
 # ============================================================================
@@ -92,16 +103,22 @@ class TestPytestConfigure:
     def setup_method(self):
         self._prev_active = assertions.tracker.active
         self._prev_buggify = _buggify_is_active()
-        self._prev_seed_replay = os.environ.get("ORDEAL_DISABLE_SEED_REPLAY")
-        os.environ["ORDEAL_DISABLE_SEED_REPLAY"] = "1"
+        self._prev_disable_seed_replay = os.environ.get("ORDEAL_DISABLE_SEED_REPLAY")
+        self._prev_enable_seed_replay = os.environ.get("ORDEAL_ENABLE_SEED_REPLAY")
+        os.environ.pop("ORDEAL_DISABLE_SEED_REPLAY", None)
+        os.environ.pop("ORDEAL_ENABLE_SEED_REPLAY", None)
         assertions.tracker.active = False
 
     def teardown_method(self):
         assertions.tracker.active = self._prev_active
-        if self._prev_seed_replay is None:
+        if self._prev_disable_seed_replay is None:
             os.environ.pop("ORDEAL_DISABLE_SEED_REPLAY", None)
         else:
-            os.environ["ORDEAL_DISABLE_SEED_REPLAY"] = self._prev_seed_replay
+            os.environ["ORDEAL_DISABLE_SEED_REPLAY"] = self._prev_disable_seed_replay
+        if self._prev_enable_seed_replay is None:
+            os.environ.pop("ORDEAL_ENABLE_SEED_REPLAY", None)
+        else:
+            os.environ["ORDEAL_ENABLE_SEED_REPLAY"] = self._prev_enable_seed_replay
         if self._prev_buggify:
             _buggify_activate()
         else:
@@ -137,6 +154,18 @@ class TestPytestConfigure:
         cfg = _make_config(chaos=False)
         pytest_configure(cfg)
         assert assertions.tracker.active is False
+
+    def test_seed_replay_is_disabled_by_default(self):
+        cfg = _make_config(chaos=False)
+        with patch("ordeal.plugin._replay_seed_corpus") as replay_corpus:
+            pytest_configure(cfg)
+        replay_corpus.assert_not_called()
+
+    def test_seed_replay_runs_when_opted_in_via_flag(self):
+        cfg = _make_config(chaos=False, ordeal_seed_replay=True)
+        with patch("ordeal.plugin._replay_seed_corpus", return_value=[]) as replay_corpus:
+            pytest_configure(cfg)
+        replay_corpus.assert_called_once()
 
 
 # ============================================================================

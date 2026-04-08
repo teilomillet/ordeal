@@ -1322,12 +1322,22 @@ class Explorer:
             pickle.dump(payload, f)
         tmp.rename(p)  # atomic on POSIX
 
-    def load_state(self, path: str | Path) -> dict[str, Any]:
+    def load_state(
+        self,
+        path: str | Path,
+        *,
+        allow_unsafe: bool = False,
+    ) -> dict[str, Any]:
         """Load saved exploration state, restoring checkpoints and edges.
 
         Returns a dict of counters (``total_runs``, ``total_steps``, etc.)
         that the caller should seed into the ``ExplorationResult``.
         """
+        if not allow_unsafe:
+            raise ValueError(
+                "Explorer state files use pickle and may execute arbitrary code. "
+                "Pass allow_unsafe=True only for trusted files."
+            )
         with open(path, "rb") as f:
             payload = pickle.load(f)
 
@@ -2202,6 +2212,7 @@ class Explorer:
         progress: Callable[[ProgressSnapshot], None] | None = None,
         resume_from: str | Path | None = None,
         save_state_to: str | Path | None = None,
+        allow_unsafe_resume: bool = False,
     ) -> ExplorationResult:
         """Run the coverage-guided exploration loop.
 
@@ -2219,6 +2230,9 @@ class Explorer:
             save_state_to: Path to save exploration state on completion
                 (and on interrupt).  Use with ``resume_from`` on the next
                 run to continue exploration across sessions.
+            allow_unsafe_resume: Permit loading trusted pickle state files
+                passed via ``resume_from``. Disabled by default because
+                pickle deserialization can execute arbitrary code.
         """
         if self.workers > 1:
             return self._run_parallel(
@@ -2268,7 +2282,10 @@ class Explorer:
 
             # Resume from saved state if provided
             if resume_from is not None:
-                restored = self.load_state(resume_from)
+                restored = self.load_state(
+                    resume_from,
+                    allow_unsafe=allow_unsafe_resume,
+                )
                 result.unique_edges = restored["total_edges"]
                 result.checkpoints_saved = restored["checkpoints"]
 

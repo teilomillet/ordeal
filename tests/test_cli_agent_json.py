@@ -320,8 +320,8 @@ class TestCLIAgentJson:
     def test_audit_agent_envelope_surfaces_mutation_views_and_config_suggestions(self):
         mod = _make_target_listing_module("tests._cli_audit_surface_targets")
         sys.modules[mod.__name__] = mod
-        ordeal_auto._REGISTERED_OBJECT_FACTORIES["tests._cli_audit_surface_targets:Env"] = (
-            lambda: mod.Env()
+        ordeal_auto._REGISTERED_OBJECT_FACTORIES["tests._cli_audit_surface_targets:Env"] = lambda: (
+            mod.Env()
         )
         ordeal_auto._REGISTERED_OBJECT_SETUPS["tests._cli_audit_surface_targets:Env"] = (
             lambda instance: instance
@@ -399,8 +399,7 @@ class TestCLIAgentJson:
             assert payload["raw_details"]["mutation_views"][0]["module"] == "pkg.mod"
             assert "status" in payload["raw_details"]["mutation_views"][0]
             assert (
-                payload["raw_details"]["report"]["config_suggestions"][0]["section"]
-                == "[audit]"
+                payload["raw_details"]["report"]["config_suggestions"][0]["section"] == "[audit]"
             )
             assert any(
                 section[0] == "Mutation Alignment"

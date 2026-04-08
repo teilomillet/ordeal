@@ -9454,11 +9454,7 @@ def _build_audit_agent_envelope(
             "report": report,
             "modules": [_module_audit_to_dict(result) for result in results],
             "target_groups": [dict(group) for group in surface_groups],
-            "targets": [
-                row
-                for group in surface_groups
-                for row in list(group.get("targets", ()))
-            ],
+            "targets": [row for group in surface_groups for row in list(group.get("targets", ()))],
             "surface_map": surface_map,
             "mutation_views": [
                 {
@@ -9619,9 +9615,7 @@ def _build_mutate_agent_envelope(
             "threshold": threshold,
             "surface_groups": [dict(group) for group in surface_groups],
             "surface_targets": [
-                row
-                for group in surface_groups
-                for row in list(group.get("targets", ()))
+                row for group in surface_groups for row in list(group.get("targets", ()))
             ],
             "surface_map": surface_map,
         },

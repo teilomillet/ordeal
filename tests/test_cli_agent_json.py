@@ -320,15 +320,10 @@ class TestCLIAgentJson:
     def test_audit_agent_envelope_surfaces_mutation_views_and_config_suggestions(self):
         mod = _make_target_listing_module("tests._cli_audit_surface_targets")
         sys.modules[mod.__name__] = mod
-        ordeal_auto._REGISTERED_OBJECT_FACTORIES["tests._cli_audit_surface_targets:Env"] = lambda: (
-            mod.Env()
-        )
-        ordeal_auto._REGISTERED_OBJECT_SETUPS["tests._cli_audit_surface_targets:Env"] = (
-            lambda instance: instance
-        )
-        ordeal_auto._REGISTERED_OBJECT_SCENARIOS["tests._cli_audit_surface_targets:Env"] = (
-            lambda instance: instance
-        )
+        env_key = "tests._cli_audit_surface_targets:Env"
+        ordeal_auto._REGISTERED_OBJECT_FACTORIES[env_key] = lambda: mod.Env()
+        ordeal_auto._REGISTERED_OBJECT_SETUPS[env_key] = lambda instance: instance
+        ordeal_auto._REGISTERED_OBJECT_SCENARIOS[env_key] = lambda instance: instance
         result = ModuleAudit(
             module="pkg.mod",
             mutation_score="3/4 (75%)",

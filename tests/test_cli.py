@@ -3823,9 +3823,7 @@ verbose = false
         assert "fixed       seed-fixed" in err
         assert "REGRESSION  seed-bad" in err
 
-    def test_explore_refuses_resume_without_explicit_unsafe_opt_in(
-        self, monkeypatch, capsys
-    ):
+    def test_explore_refuses_resume_without_explicit_unsafe_opt_in(self, monkeypatch, capsys):
         cfg = SimpleNamespace(
             tests=[],
             scan=[],

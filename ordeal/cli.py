@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from pprint import pformat
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 from ordeal.config import ConfigError, OrdealConfig, load_config
@@ -39,10 +40,41 @@ if TYPE_CHECKING:
 # the import cost on every short CLI command.
 Explorer = None
 
+_SAFE_LISTING_CONFIG_WARNING = (
+    "config-backed fixture registries, object hooks, and custom contracts "
+    "were not imported during target listing; run a real scan/audit/check "
+    "to validate them"
+)
+
 
 def _stderr(msg: str) -> None:
     sys.stderr.write(msg)
     sys.stderr.flush()
+
+
+def _metadata_only_hook(kind: str, label: str) -> Callable[..., Any]:
+    """Return a placeholder hook used for read-only discovery paths."""
+
+    def _placeholder(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError(
+            f"metadata-only {kind} placeholder for {label!r} should not be executed"
+        )
+
+    _placeholder.__name__ = f"_ordeal_metadata_only_{kind}"
+    _placeholder.__qualname__ = _placeholder.__name__
+    return _placeholder
+
+
+def _safe_listing_config_warning(
+    *,
+    has_fixture_registries: bool = False,
+    has_object_hooks: bool = False,
+    has_contracts: bool = False,
+) -> list[str]:
+    """Return a discovery warning when config-backed imports were skipped."""
+    if has_fixture_registries or has_object_hooks or has_contracts:
+        return [_SAFE_LISTING_CONFIG_WARNING]
+    return []
 
 
 def _workflow_path_from_ci_name(ci_name: str) -> Path:
@@ -1340,6 +1372,7 @@ def _canonical_surface_groups_for_targets(
     object_specs: Sequence[Any] = (),
     include_private_by_module: Mapping[str, bool] | None = None,
     bootstrap_test_dir: str | None = None,
+    resolve_config_imports: bool = True,
 ) -> list[dict[str, Any]]:
     """Return grouped callable rows for explicit target inputs using one shared path."""
     (
@@ -1349,7 +1382,7 @@ def _canonical_surface_groups_for_targets(
         object_state_factories,
         object_teardowns,
         object_harnesses,
-    ) = _object_runtime_maps(object_specs)
+    ) = _object_runtime_maps(object_specs, resolve_imports=resolve_config_imports)
     module_requests: dict[str, dict[str, Any]] = {}
     for target in targets:
         normalized_target = _normalize_module_target(str(target))
@@ -1375,7 +1408,13 @@ def _canonical_surface_groups_for_targets(
         include_private = bool((include_private_by_module or {}).get(module_name, False))
         try:
             module_contract_checks = (
-                _config_contract_checks_for_module(cfg, module_name) if cfg is not None else {}
+                _config_contract_checks_for_module(
+                    cfg,
+                    module_name,
+                    resolve_imports=resolve_config_imports,
+                )
+                if cfg is not None
+                else {}
             )
         except Exception:
             module_contract_checks = {}
@@ -3764,6 +3803,8 @@ def _config_object_specs_for_module(cfg: OrdealConfig, module_name: str) -> list
 
 def _object_runtime_maps(
     object_specs: Sequence[Any],
+    *,
+    resolve_imports: bool = True,
 ) -> tuple[
     dict[str, Any],
     dict[str, Any],
@@ -3784,13 +3825,17 @@ def _object_runtime_maps(
         if isinstance(item, Mapping):
             return dict(item)
         if isinstance(item, (str, bytes)):
+            text = item.decode() if isinstance(item, bytes) else item
+            if not resolve_imports:
+                return _metadata_only_hook("scenario", text)
             from ordeal.auto import _builtin_object_scenario_hook
 
-            text = item.decode() if isinstance(item, bytes) else item
             builtin = _builtin_object_scenario_hook(text)
             if builtin is not None:
                 return builtin
             return _resolve_symbol_path(text)
+        if not resolve_imports:
+            return _metadata_only_hook("scenario", str(item))
         return _resolve_symbol_path(str(item))
 
     for spec in object_specs:
@@ -3802,13 +3847,29 @@ def _object_runtime_maps(
         harness = str(getattr(spec, "harness", "fresh") or "fresh").strip().lower()
         scenario_paths = list(getattr(spec, "scenarios", []) or [])
         if factory_path:
-            factories[target] = _resolve_symbol_path(str(factory_path))
+            factories[target] = (
+                _resolve_symbol_path(str(factory_path))
+                if resolve_imports
+                else _metadata_only_hook("factory", str(factory_path))
+            )
         if setup_path:
-            setups[target] = _resolve_symbol_path(str(setup_path))
+            setups[target] = (
+                _resolve_symbol_path(str(setup_path))
+                if resolve_imports
+                else _metadata_only_hook("setup", str(setup_path))
+            )
         if state_factory_path:
-            state_factories[target] = _resolve_symbol_path(str(state_factory_path))
+            state_factories[target] = (
+                _resolve_symbol_path(str(state_factory_path))
+                if resolve_imports
+                else _metadata_only_hook("state_factory", str(state_factory_path))
+            )
         if teardown_path:
-            teardowns[target] = _resolve_symbol_path(str(teardown_path))
+            teardowns[target] = (
+                _resolve_symbol_path(str(teardown_path))
+                if resolve_imports
+                else _metadata_only_hook("teardown", str(teardown_path))
+            )
         harnesses[target] = harness if harness in {"fresh", "stateful"} else "fresh"
         if scenario_paths:
             resolved_hooks = tuple(_resolve_scenario_item(path) for path in scenario_paths)
@@ -3822,6 +3883,8 @@ def _object_runtime_maps(
 def _config_contract_checks_for_module(
     cfg: OrdealConfig,
     module_name: str,
+    *,
+    resolve_imports: bool = True,
 ) -> dict[str, list[Any]]:
     """Resolve configured semantic contract probes for *module_name*."""
     from ordeal.auto import (
@@ -3839,6 +3902,13 @@ def _config_contract_checks_for_module(
         bucket = checks.setdefault(display_name, [])
         for check_name in _expand_contract_names_ordered(spec.checks):
             resolved_name = str(check_name)
+            if not resolve_imports:
+                bucket.append(
+                    SimpleNamespace(
+                        name=resolved_name.rsplit(":", 1)[-1].rsplit(".", 1)[-1],
+                    )
+                )
+                continue
             try:
                 builtin_kwargs = dict(spec.kwargs)
                 lifecycle_phase = (
@@ -3894,6 +3964,7 @@ def _resolve_scan_runtime_defaults(
     *,
     requested_examples: int,
     allow_config_override: bool = False,
+    resolve_config_imports: bool = True,
 ) -> ScanRuntimeDefaults:
     """Load fixture registries and optional ``[[scan]]`` defaults for *target*."""
     module_name = _scan_base_module(target)
@@ -4002,10 +4073,12 @@ def _resolve_scan_runtime_defaults(
     try:
         cfg = load_config(config_path)
     except (FileNotFoundError, ConfigError):
-        warnings.extend(_load_fixture_registry_warnings())
+        if resolve_config_imports:
+            warnings.extend(_load_fixture_registry_warnings())
         return _build_defaults()
 
-    warnings.extend(_load_fixture_registry_warnings(shared_modules=cfg.fixtures.registries))
+    if resolve_config_imports:
+        warnings.extend(_load_fixture_registry_warnings(shared_modules=cfg.fixtures.registries))
     shared_object_specs = _config_object_specs_for_module(cfg, module_name)
     try:
         (
@@ -4015,7 +4088,10 @@ def _resolve_scan_runtime_defaults(
             values["object_state_factories"],
             values["object_teardowns"],
             values["object_harnesses"],
-        ) = _object_runtime_maps(shared_object_specs)
+        ) = _object_runtime_maps(
+            shared_object_specs,
+            resolve_imports=resolve_config_imports,
+        )
     except Exception as exc:
         warnings.append(f"object factory config failed for {module_name}: {exc}")
         (
@@ -4033,13 +4109,25 @@ def _resolve_scan_runtime_defaults(
             {},
         )
     try:
-        values["contract_checks"] = _config_contract_checks_for_module(cfg, module_name)
+        values["contract_checks"] = _config_contract_checks_for_module(
+            cfg,
+            module_name,
+            resolve_imports=resolve_config_imports,
+        )
     except Exception as exc:
         warnings.append(f"contract config failed for {module_name}: {exc}")
         values["contract_checks"] = {}
 
     match = next((entry for entry in cfg.scan if entry.module == module_name), None)
     if match is None:
+        if not resolve_config_imports:
+            warnings.extend(
+                _safe_listing_config_warning(
+                    has_fixture_registries=bool(cfg.fixtures.registries),
+                    has_object_hooks=bool(shared_object_specs),
+                    has_contracts=bool(cfg.contracts),
+                )
+            )
         return _build_defaults()
 
     if allow_config_override:
@@ -4065,7 +4153,8 @@ def _resolve_scan_runtime_defaults(
     values["expected_preconditions"] = {
         str(name): list(items) for name, items in match.expected_preconditions.items()
     }
-    warnings.extend(_load_fixture_registry_warnings(extra_modules=match.fixture_registries))
+    if resolve_config_imports:
+        warnings.extend(_load_fixture_registry_warnings(extra_modules=match.fixture_registries))
     values["ignore_contracts"] = list(match.ignore_contracts)
     values["ignore_properties"] = list(match.ignore_properties)
     values["ignore_relations"] = list(match.ignore_relations)
@@ -4084,6 +4173,14 @@ def _resolve_scan_runtime_defaults(
     values["relation_overrides"] = {
         str(name): list(items) for name, items in match.relation_overrides.items()
     }
+    if not resolve_config_imports:
+        warnings.extend(
+            _safe_listing_config_warning(
+                has_fixture_registries=bool(cfg.fixtures.registries or match.fixture_registries),
+                has_object_hooks=bool(shared_object_specs),
+                has_contracts=bool(cfg.contracts),
+            )
+        )
     return _build_defaults()
 
 
@@ -4437,6 +4534,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         scan_target,
         requested_examples=args.max_examples,
         allow_config_override=allow_config_override,
+        resolve_config_imports=not bool(getattr(args, "list_targets", False)),
     )
     scan_mode = _public_scan_mode(str(getattr(args, "mode", None) or runtime_defaults.mode))
     scan_seed_from_tests = (
@@ -5252,6 +5350,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                 object_specs=object_specs,
                 include_private_by_module=include_private_by_module,
                 bootstrap_test_dir=test_dir,
+                resolve_config_imports=not bool(getattr(args, "list_targets", False)),
             )
         except Exception as exc:  # pragma: no cover - shared with list-targets/json block
             raise RuntimeError(f"target metadata resolution failed: {exc}") from exc
@@ -5315,6 +5414,10 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                     tool="audit",
                     target=", ".join(target_names),
                     groups=target_groups,
+                    warnings=_safe_listing_config_warning(
+                        has_object_hooks=bool(object_specs),
+                        has_contracts=bool(cfg is not None and cfg.contracts),
+                    ),
                     config_suggestions=config_suggestions,
                     bootstrap_suggestions=bootstrap_suggestions,
                 ).to_json()
@@ -5324,6 +5427,10 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                 _render_target_listing_text(
                     f"Callable targets for {', '.join(target_names)}",
                     target_groups,
+                    warnings=_safe_listing_config_warning(
+                        has_object_hooks=bool(object_specs),
+                        has_contracts=bool(cfg is not None and cfg.contracts),
+                    ),
                     config_suggestions=config_suggestions,
                     bootstrap_suggestions=bootstrap_suggestions,
                 )
@@ -5905,6 +6012,7 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
                 module,
                 requested_examples=max_examples,
                 allow_config_override=False,
+                resolve_config_imports=False,
             )
             scan_kwargs: dict[str, Any] = {
                 "max_examples": runtime_defaults.max_examples,
@@ -9918,7 +10026,14 @@ def _print_scan_artifact_workflow(
     print(f"  index: {_display_path(index_path)}")
     print("available:")
     if len(finding_ids) == 1 and regression_path is not None:
-        verify_cmd = _shell_command("uv", "run", "ordeal", "verify", finding_ids[0])
+        verify_cmd = _shell_command(
+            "uv",
+            "run",
+            "ordeal",
+            "verify",
+            finding_ids[0],
+            "--allow-unsafe-artifacts",
+        )
         print(f"  verify: {verify_cmd}")
     if regression_path is not None:
         run_cmd = _shell_command("uv", "run", "pytest", _display_path(regression_path), "-q")
@@ -10006,6 +10121,14 @@ def _verification_command(
 def _cmd_verify(args: argparse.Namespace) -> int:
     """Re-run the saved regression for one finding ID."""
     import subprocess
+
+    if not bool(getattr(args, "allow_unsafe_artifacts", False)):
+        _stderr(
+            "Refusing to load artifact indexes or bundles without "
+            "--allow-unsafe-artifacts. Saved findings may point verify at "
+            "attacker-controlled repo tests.\n"
+        )
+        return 2
 
     index_path = Path(args.index)
     try:
@@ -10234,7 +10357,7 @@ def _scan_command_description() -> str:
         f" {_default_scan_support_bundle_path('mymod')}) +"
         f" {_DEFAULT_REGRESSION_PATH}, then update {_default_artifact_index_path()}.\n"
         "When one finding is saved, the workflow prints an exact"
-        " `ordeal verify <finding-id>` follow-up command.\n"
+        " `ordeal verify <finding-id> --allow-unsafe-artifacts` follow-up command.\n"
         "Use --report-file report.md to save a shareable Markdown bug report.\n"
         f"Use --write-regression or --write-regression PATH to save runnable pytest"
         f" regressions (default: {_DEFAULT_REGRESSION_PATH})."
@@ -10246,6 +10369,8 @@ def _verify_command_description() -> str:
     return (
         "Re-run a saved regression from `.ordeal/findings/index.json`.\n\n"
         "Use the stable `finding_id` from a JSON bug bundle or index entry.\n"
+        "For safety, verification requires `--allow-unsafe-artifacts` because "
+        "artifact bundles can point pytest at repo-controlled code.\n"
         "Verification updates the bundle status and appends a verification event"
         " to the artifact index."
     )
@@ -10511,6 +10636,14 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     default=_default_artifact_index_path(),
                     metavar="PATH",
                     help=f"Artifact index path (default: {_default_artifact_index_path()})",
+                ),
+                _arg(
+                    "--allow-unsafe-artifacts",
+                    action="store_true",
+                    help=(
+                        "Trust the artifact index and bundle enough to run the recorded "
+                        "pytest regression"
+                    ),
                 ),
             ),
         ),

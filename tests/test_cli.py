@@ -2398,7 +2398,7 @@ scan_max_examples = 12
         out = capsys.readouterr().out
         assert "shareable Markdown bug report" in out
         assert "runnable pytest regressions" in out
-        assert "ordeal verify <finding-id>" in out
+        assert "ordeal verify <finding-id> --allow-unsafe-artifacts" in out
         assert "--save-artifacts" in out
         assert ".ordeal/findings/mymod.md" in out
         assert ".ordeal/findings/mymod.json" in out
@@ -2412,6 +2412,7 @@ scan_max_examples = 12
         out = capsys.readouterr().out
         assert "stable `finding_id`" in out
         assert "--index PATH" in out
+        assert "--allow-unsafe-artifacts" in out
         assert ".ordeal/findings/index.json" in out
 
     def test_init_help_mentions_opt_in_flags(self, capsys):
@@ -2756,7 +2757,9 @@ scan_max_examples = 12
         assert "index: .ordeal/findings/index.json" in captured.out
         assert "available:" in captured.out
         fid = bundle["findings"][0]["finding_id"]
-        assert f"verify: uv run ordeal verify {fid}" in captured.out
+        assert (
+            f"verify: uv run ordeal verify {fid} --allow-unsafe-artifacts" in captured.out
+        )
         assert "pytest: uv run pytest tests/test_ordeal_regressions.py -q" in captured.out
         assert "rescan: uv run ordeal scan pkg.mod --save-artifacts" in captured.out
         assert "Scan report saved:" in captured.err
@@ -3106,7 +3109,15 @@ scan_max_examples = 12
 
         monkeypatch.setattr(subprocess, "run", fake_run)
 
-        rc = main(["verify", finding_id, "--index", str(index_path)])
+        rc = main(
+            [
+                "verify",
+                finding_id,
+                "--index",
+                str(index_path),
+                "--allow-unsafe-artifacts",
+            ]
+        )
         captured = capsys.readouterr()
 
         assert rc == 0
@@ -3141,7 +3152,15 @@ scan_max_examples = 12
 
         monkeypatch.setattr(subprocess, "run", fake_run)
 
-        rc = main(["verify", finding_id, "--index", str(index_path)])
+        rc = main(
+            [
+                "verify",
+                finding_id,
+                "--index",
+                str(index_path),
+                "--allow-unsafe-artifacts",
+            ]
+        )
         captured = capsys.readouterr()
 
         assert rc == 1
@@ -3170,7 +3189,15 @@ scan_max_examples = 12
 
         monkeypatch.setattr(subprocess, "run", fake_run)
 
-        rc = main(["verify", finding_id, "--index", str(index_path)])
+        rc = main(
+            [
+                "verify",
+                finding_id,
+                "--index",
+                str(index_path),
+                "--allow-unsafe-artifacts",
+            ]
+        )
         captured = capsys.readouterr()
 
         assert rc == 2
@@ -3180,6 +3207,87 @@ scan_max_examples = 12
         artifact_index = json.loads(index_path.read_text())
         assert len(artifact_index["entries"]) == 1
         assert "No runnable regression is recorded" in captured.err
+
+    def test_verify_refuses_without_explicit_unsafe_opt_in(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        index_path, bundle_path, finding_id = _write_verify_fixture(tmp_path)
+
+        called = False
+
+        def fake_run(cmd, cwd=None, text=None, capture_output=None, check=None):
+            nonlocal called
+            called = True
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        rc = main(["verify", finding_id, "--index", str(index_path)])
+        captured = capsys.readouterr()
+
+        assert rc == 2
+        assert called is False
+        bundle = json.loads(bundle_path.read_text())
+        assert "verification" not in bundle
+        assert "--allow-unsafe-artifacts" in captured.err
+
+    def test_scan_list_targets_skips_config_hook_imports(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.chdir(tmp_path)
+        marker = tmp_path / "scan-hook-marker.txt"
+        hook_path = tmp_path / "scan_hook.py"
+        hook_path.write_text(
+            "from pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text('imported', encoding='utf-8')\n"
+            "\n"
+            "def make_env():\n"
+            "    return object()\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "ordeal.toml").write_text(
+            "[[scan]]\n"
+            'module = "ordeal.cli"\n'
+            "\n"
+            "[[objects]]\n"
+            'target = "ordeal.cli:Fake"\n'
+            f'factory = "{hook_path.as_posix()}:make_env"\n',
+            encoding="utf-8",
+        )
+
+        rc = main(["scan", "ordeal.cli", "--list-targets"])
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert not marker.exists()
+        assert "were not imported during target listing" in captured.out
+
+    def test_audit_list_targets_skips_config_hook_imports(self, tmp_path, capsys):
+        marker = tmp_path / "audit-hook-marker.txt"
+        hook_path = tmp_path / "audit_hook.py"
+        hook_path.write_text(
+            "from pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text('imported', encoding='utf-8')\n"
+            "\n"
+            "def make_env():\n"
+            "    return object()\n",
+            encoding="utf-8",
+        )
+        config_path = tmp_path / "ordeal.toml"
+        config_path.write_text(
+            "[[objects]]\n"
+            'target = "ordeal.cli:Fake"\n'
+            f'factory = "{hook_path.as_posix()}:make_env"\n'
+            "\n"
+            "[audit]\n"
+            'modules = ["ordeal.cli"]\n',
+            encoding="utf-8",
+        )
+
+        rc = main(["audit", "ordeal.cli", "--list-targets", "--config", str(config_path)])
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert not marker.exists()
+        assert "were not imported during target listing" in captured.out
 
     def test_init_default_is_minimal(self, monkeypatch, tmp_path, capsys):
         import ordeal.mutations as mutations

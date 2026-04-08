@@ -19,6 +19,7 @@ from ordeal.explore import (
     _POOL_RING_SIZE,
     _POOL_SLOT_DATA_MAX,
     Explorer,
+    _pool_encode_payload,
     _ring_read,
     _ring_update_energy,
     _ring_write,
@@ -339,13 +340,20 @@ class TestRingBufferPrimitives:
 class TestCheckpointRingExchange:
     """Verify the Explorer's publish/subscribe via the ring buffer."""
 
-    def _make_explorer_pair(self, *, num_workers=2, slots_per_worker=128):
+    def _make_explorer_pair(
+        self,
+        *,
+        num_workers=2,
+        slots_per_worker=128,
+        auth_key: bytes | None = None,
+    ):
         """Create two Explorers sharing a ring buffer."""
         buf = bytearray(_POOL_RING_SIZE)
         mv = memoryview(buf)
 
         def setup(explorer, worker_id):
             explorer._pool_ring = mv
+            explorer._pool_auth_key = auth_key
             explorer._worker_id = worker_id
             explorer._pool_num_workers = num_workers
             explorer._pool_slots_per_worker = slots_per_worker
@@ -446,6 +454,45 @@ class TestCheckpointRingExchange:
         sub._pool_subscribe()
         # Checkpoint is either present (if service state pickled) or absent
         # (if everything was unpicklable) — no crash either way
+
+    def test_subscribe_rejects_unauthenticated_payloads(self):
+        """Workers skip ring entries that fail checkpoint payload authentication."""
+        auth_key = b"shared-secret-for-tests"
+        _, sub, buf = self._make_explorer_pair(auth_key=auth_key)
+
+        forged = pickle.dumps({"state_dict": {"service": "bad"}, "fault_active": {}})
+        _ring_write(
+            memoryview(buf),
+            slot=0,
+            seq=1,
+            writer_id=0,
+            energy=1.0,
+            data=forged,
+            new_edges=1,
+            step=0,
+        )
+
+        sub._pool_subscribe()
+        assert sub._checkpoints == []
+
+        signed = _pool_encode_payload(
+            {"state_dict": {"service": "good"}, "fault_active": {}},
+            auth_key,
+        )
+        _ring_write(
+            memoryview(buf),
+            slot=0,
+            seq=2,
+            writer_id=0,
+            energy=1.0,
+            data=signed,
+            new_edges=1,
+            step=1,
+        )
+
+        sub._pool_last_sync = 0
+        sub._pool_subscribe()
+        assert len(sub._checkpoints) == 1
 
     def test_energy_propagation_across_workers(self):
         """Energy updates from one worker are visible to others."""

@@ -55,11 +55,13 @@ Example::
 from __future__ import annotations
 
 import copy
+import hmac
 import importlib
 import multiprocessing as mp
 import os
 import pickle
 import random
+import secrets
 import struct
 import sys
 import threading
@@ -551,6 +553,7 @@ _POOL_RING_SIZE = _POOL_HEADER_SIZE + _POOL_NUM_SLOTS * _POOL_SLOT_SIZE
 #   [32:]   data       pickled _MachineSnapshot payload
 _POOL_SLOT_HDR_SIZE = 32
 _POOL_SLOT_DATA_MAX = _POOL_SLOT_SIZE - _POOL_SLOT_HDR_SIZE
+_POOL_AUTH_TAG_SIZE = 32
 
 
 def _ring_write(
@@ -588,6 +591,31 @@ def _ring_write(
     # 3. Sequence LAST — signals "slot is ready"
     struct.pack_into("<I", buf, base, seq)
     return True
+
+
+def _pool_encode_payload(payload: dict[str, Any], auth_key: bytes | None) -> bytes:
+    """Serialize one checkpoint payload with an authentication tag."""
+    encoded = pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
+    if auth_key is None:
+        return encoded
+    return hmac.digest(auth_key, encoded, "sha256") + encoded
+
+
+def _pool_decode_payload(data: bytes, auth_key: bytes | None) -> dict[str, Any]:
+    """Verify and deserialize one checkpoint payload."""
+    encoded = data
+    if auth_key is not None:
+        if len(data) <= _POOL_AUTH_TAG_SIZE:
+            raise ValueError("checkpoint payload missing authentication tag")
+        tag = data[:_POOL_AUTH_TAG_SIZE]
+        encoded = data[_POOL_AUTH_TAG_SIZE:]
+        expected = hmac.digest(auth_key, encoded, "sha256")
+        if not hmac.compare_digest(tag, expected):
+            raise ValueError("checkpoint payload authentication failed")
+    payload = pickle.loads(encoded)
+    if not isinstance(payload, dict):
+        raise TypeError("checkpoint payload must deserialize to a dict")
+    return payload
 
 
 def _ring_read(buf: memoryview, slot: int) -> dict[str, Any] | None:
@@ -1199,6 +1227,7 @@ class Explorer:
         self._pool_seen_seq: dict[int, int] = {}  # slot → last seen sequence
         self._pool_last_sync: float = 0.0
         self._pool_sync_interval: float = 0.5  # 500ms (was 2s for file-based)
+        self._pool_auth_key: bytes | None = None
 
         # Internal state
         self._total_edges: set[int] = set()
@@ -1652,7 +1681,7 @@ class Explorer:
                 except Exception:
                     pass
             payload = {"state_dict": picklable_state, "fault_active": snap.fault_active}
-            data = pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
+            data = _pool_encode_payload(payload, self._pool_auth_key)
             if len(data) > _POOL_SLOT_DATA_MAX:
                 return  # checkpoint too large for a slot — skip
 
@@ -1704,7 +1733,7 @@ class Explorer:
                     continue  # already imported
                 self._pool_seen_seq[slot] = seq
                 try:
-                    payload = pickle.loads(entry["data"])
+                    payload = _pool_decode_payload(entry["data"], self._pool_auth_key)
                     snap = _MachineSnapshot(
                         state_dict=payload.get("state_dict", payload),
                         fault_active=payload.get("fault_active", {}),
@@ -2714,10 +2743,12 @@ class Explorer:
         # Shared ring buffer for checkpoint exchange + energy propagation
         ring_shm: SharedMemory | None = None
         ring_shm_name: str | None = None
+        pool_auth_key: bytes | None = None
         if self.share_checkpoints:
             ring_shm = SharedMemory(create=True, size=_POOL_RING_SIZE)
             # SharedMemory is zeroed on creation (POSIX shm_open + ftruncate)
             ring_shm_name = ring_shm.name
+            pool_auth_key = secrets.token_bytes(_POOL_AUTH_TAG_SIZE)
 
         slots_per_worker = max(1, _POOL_NUM_SLOTS // max(worker_count, 1))
 
@@ -2757,6 +2788,9 @@ class Explorer:
                         "shared_edges_name": shm_name,
                         "shared_state_name": state_shm_name,
                         "ring_shm_name": ring_shm_name,
+                        "pool_auth_key": (
+                            pool_auth_key.hex() if pool_auth_key is not None else None
+                        ),
                         "worker_id": i,
                         "num_workers": worker_count,
                         "slots_per_worker": slots_per_worker,
@@ -2882,6 +2916,10 @@ def _worker_fn(args: dict[str, Any]) -> dict[str, Any]:
         if ring_name:
             ring_shm = SharedMemory(name=ring_name, create=False)
             explorer._pool_ring = ring_shm.buf
+            auth_key_hex = args.get("pool_auth_key")
+            explorer._pool_auth_key = (
+                bytes.fromhex(str(auth_key_hex)) if auth_key_hex is not None else None
+            )
             explorer._worker_id = worker_id
             explorer._pool_num_workers = args.get("num_workers", 1)
             explorer._pool_slots_per_worker = args.get("slots_per_worker", _POOL_NUM_SLOTS)

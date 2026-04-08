@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.29
+
+**Features:**
+
+- expose surface provenance in agent envelopes
+
+
 ## 0.3.27
 
 **Features:**

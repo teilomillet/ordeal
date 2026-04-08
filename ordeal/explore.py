@@ -62,6 +62,7 @@ import os
 import pickle
 import random
 import secrets
+import signal
 import struct
 import sys
 import threading
@@ -71,6 +72,7 @@ import warnings
 import zlib
 from collections import Counter, deque
 from dataclasses import dataclass, field
+from itertools import combinations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -508,6 +510,9 @@ class SwarmConfig:
     energy: float = 1.0
     times_used: int = 0
     edges_found: int = 0
+    runs_with_new_edges: int = 0
+    failure_count: int = 0
+    property_hits: int = 0
 
     @property
     def key(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -752,6 +757,7 @@ class Failure:
     trace: Trace | None = None
     necessary_faults: dict[str, bool] | None = None
     error_traceback: str | None = None
+    native_boundary: dict[str, Any] | None = None
 
     def __str__(self) -> str:
         faults = ", ".join(self.active_faults) or "none"
@@ -766,10 +772,13 @@ class Failure:
                 ablation = f"\n  Necessary faults: {', '.join(needed)}"
             else:
                 ablation = "\n  Necessary faults: none (fails without any faults)"
+        boundary = ""
+        if self.native_boundary:
+            boundary = f"\n  Native boundary: {_format_native_boundary(self.native_boundary)}"
         return (
             f"Run {self.run_id}, step {self.step}: "
             f"{_error_display_name(self.error)}: {self.error}{shrunk}\n"
-            f"  Active faults: {faults}{ablation}\n"
+            f"  Active faults: {faults}{ablation}{boundary}\n"
             f"  Sequence: {last_rules}"
         )
 
@@ -802,6 +811,13 @@ class ExplorationResult:
     ngram: int = 1
     seed_replays: list[dict[str, Any]] = field(default_factory=list)
     rule_swarm_runs: int = 0
+    swarm_stats: list[dict[str, Any]] = field(default_factory=list)
+    fault_pair_coverage: list[dict[str, Any]] = field(default_factory=list)
+    uncovered_fault_pairs: list[list[str]] = field(default_factory=list)
+    rule_fault_coverage: dict[str, dict[str, int]] = field(default_factory=dict)
+    behavior_coverage: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    property_stress: dict[str, dict[str, int]] = field(default_factory=dict)
+    native_boundary_findings: list[dict[str, Any]] = field(default_factory=list)
     coverage_gaps: list[dict[str, Any]] = field(default_factory=list)
     lines_covered: int = 0
     lines_total: int = 0
@@ -834,6 +850,58 @@ class ExplorationResult:
             lines.append(
                 f"Swarm: {self.rule_swarm_runs}/{self.total_runs} runs"
                 f" used joint rule+fault configs"
+            )
+            if self.swarm_stats:
+                lines.append(
+                    "  Swarm leaders: "
+                    + "; ".join(
+                        _format_swarm_config_summary(row) for row in self.swarm_stats[:3]
+                    )
+                )
+            if self.uncovered_fault_pairs:
+                missing = ["/".join(pair) for pair in self.uncovered_fault_pairs[:4]]
+                suffix = (
+                    f" (+{len(self.uncovered_fault_pairs) - 4} more)"
+                    if len(self.uncovered_fault_pairs) > 4
+                    else ""
+                )
+                lines.append(f"  Missing fault pairs: {', '.join(missing)}{suffix}")
+        rule_fault_combos = sum(len(faults) for faults in self.rule_fault_coverage.values())
+        property_combos = sum(
+            len(props)
+            for fault_map in self.behavior_coverage.values()
+            for props in fault_map.values()
+        )
+        if rule_fault_combos > 0:
+            lines.append(
+                f"Behavior: {rule_fault_combos} rule/fault combos, "
+                f"{property_combos} rule/fault/property observations"
+            )
+            hotspots = _top_property_stress(self.property_stress)
+            if hotspots:
+                lines.append(
+                    "  Property stress: "
+                    + "; ".join(
+                        f"{item['property']} under {item['faults']} x{item['hits']}"
+                        for item in hotspots[:3]
+                    )
+                )
+        if self.native_boundary_findings:
+            labels = Counter(
+                "timeout"
+                if item.get("mode") == "timeout"
+                else (
+                    "signal death"
+                    if item.get("mode") == "signal"
+                    else "nonzero exit"
+                    if item.get("mode") == "exit_code"
+                    else str(item.get("mode", "subprocess failure"))
+                )
+                for item in self.native_boundary_findings
+            )
+            lines.append(
+                "Native boundary: "
+                f"{len(self.native_boundary_findings)} findings ({_format_counter_summary(labels)})"
             )
         if self.seed_mutations_used > 0:
             lines.append(
@@ -920,6 +988,9 @@ class ExplorationResult:
             "mutations": self.mutations_total > 0,
             "checkpoints": self.checkpoints_saved > 0,
             "sometimes_properties": self.properties_satisfied > 0,
+            "behavior_coverage": bool(self.rule_fault_coverage),
+            "rule_swarm": self.rule_swarm_runs > 0,
+            "native_boundary": bool(self.native_boundary_findings),
         }
 
     def reachability_suggestions(self) -> list[dict[str, Any]]:
@@ -958,6 +1029,177 @@ class ExplorationResult:
         return suggestions
 
 
+def _fault_signature(active_faults: list[str]) -> str:
+    """Stable label for one active-fault set."""
+    if not active_faults:
+        return "none"
+    return ",".join(sorted(dict.fromkeys(active_faults)))
+
+
+def _property_counter_snapshot(tracker: Any) -> dict[str, tuple[str, int, int, int]]:
+    """Capture the current property counters keyed by property name."""
+    return {
+        p.name: (p.type, int(p.hits), int(p.passes), int(p.failures))
+        for p in tracker.results
+        if isinstance(getattr(p, "name", None), str)
+    }
+
+
+def _property_events_since(
+    before: dict[str, tuple[str, int, int, int]],
+    after: dict[str, tuple[str, int, int, int]],
+) -> list[dict[str, Any]]:
+    """Return property deltas observed between two tracker snapshots."""
+    events: list[dict[str, Any]] = []
+    for name, (prop_type, hits, passes, failures) in after.items():
+        _, before_hits, before_passes, before_failures = before.get(name, (prop_type, 0, 0, 0))
+        delta_hits = hits - before_hits
+        delta_passes = passes - before_passes
+        delta_failures = failures - before_failures
+        if delta_hits <= 0 and delta_passes <= 0 and delta_failures <= 0:
+            continue
+        events.append(
+            {
+                "name": name,
+                "type": prop_type,
+                "delta_hits": delta_hits,
+                "delta_passes": delta_passes,
+                "delta_failures": delta_failures,
+            }
+        )
+    return events
+
+
+def _signal_name(signum: int) -> str:
+    """Best-effort symbolic signal name."""
+    try:
+        return signal.Signals(signum).name
+    except Exception:
+        return f"SIG{signum}"
+
+
+def _normalize_command(cmd: Any) -> str:
+    """Compact command formatting for subprocess-oriented findings."""
+    if isinstance(cmd, (list, tuple)):
+        return " ".join(str(part) for part in cmd)
+    return str(cmd)
+
+
+def _excerpt_stream(value: Any, limit: int = 160) -> str | None:
+    """Return a short human-readable stdout/stderr excerpt."""
+    if value in (None, b"", ""):
+        return None
+    if isinstance(value, bytes):
+        try:
+            text = value.decode("utf-8", "replace")
+        except Exception:
+            text = repr(value)
+    else:
+        text = str(value)
+    text = text.strip()
+    if not text:
+        return None
+    if len(text) > limit:
+        return text[:limit] + "..."
+    return text
+
+
+def _extract_native_boundary(error: BaseException) -> dict[str, Any] | None:
+    """Classify subprocess/native-boundary failures into structured metadata."""
+    try:
+        import subprocess as _sp
+    except Exception:
+        return None
+
+    if isinstance(error, _sp.TimeoutExpired):
+        return {
+            "boundary": "subprocess",
+            "mode": "timeout",
+            "command": _normalize_command(getattr(error, "cmd", "")),
+            "timeout": getattr(error, "timeout", None),
+            "stdout": _excerpt_stream(getattr(error, "output", None)),
+            "stderr": _excerpt_stream(getattr(error, "stderr", None)),
+        }
+
+    if isinstance(error, _sp.CalledProcessError):
+        returncode = int(getattr(error, "returncode", 0))
+        if returncode < 0:
+            signum = abs(returncode)
+            return {
+                "boundary": "subprocess",
+                "mode": "signal",
+                "command": _normalize_command(getattr(error, "cmd", "")),
+                "signal": signum,
+                "signal_name": _signal_name(signum),
+                "returncode": returncode,
+                "stdout": _excerpt_stream(getattr(error, "output", None)),
+                "stderr": _excerpt_stream(getattr(error, "stderr", None)),
+            }
+        return {
+            "boundary": "subprocess",
+            "mode": "exit_code",
+            "command": _normalize_command(getattr(error, "cmd", "")),
+            "returncode": returncode,
+            "stdout": _excerpt_stream(getattr(error, "output", None)),
+            "stderr": _excerpt_stream(getattr(error, "stderr", None)),
+        }
+
+    return None
+
+
+def _format_native_boundary(boundary: dict[str, Any]) -> str:
+    """Human-readable native-boundary summary."""
+    mode = str(boundary.get("mode", "unknown"))
+    command = boundary.get("command")
+    if mode == "timeout":
+        timeout = boundary.get("timeout")
+        base = f"subprocess timeout ({timeout}s)" if timeout is not None else "subprocess timeout"
+    elif mode == "signal":
+        signame = boundary.get("signal_name") or _signal_name(int(boundary.get("signal", 0) or 0))
+        base = f"subprocess died by {signame}"
+    elif mode == "exit_code":
+        base = f"subprocess exited with code {boundary.get('returncode')}"
+    else:
+        base = f"subprocess failure ({mode})"
+    if command:
+        base += f" [{command}]"
+    stderr = boundary.get("stderr")
+    if stderr:
+        base += f": {stderr}"
+    return base
+
+
+def _format_swarm_config_summary(row: dict[str, Any]) -> str:
+    """Compact one-line summary for one swarm configuration."""
+    rule_count = len(row.get("active_rules", []))
+    fault_count = len(row.get("active_faults", []))
+    uses = int(row.get("times_used", 0))
+    edges = int(row.get("edges_found", 0))
+    failures = int(row.get("failure_count", 0))
+    energy = float(row.get("energy", 0.0))
+    return (
+        f"rules={rule_count}, faults={fault_count}, uses={uses}, "
+        f"edges={edges}, failures={failures}, energy={energy:.2f}"
+    )
+
+
+def _format_counter_summary(counter: Counter[str]) -> str:
+    """Render a compact ``label xN`` summary."""
+    if not counter:
+        return ""
+    return ", ".join(f"{label} x{count}" for label, count in counter.most_common(3))
+
+
+def _top_property_stress(property_stress: dict[str, dict[str, int]]) -> list[dict[str, Any]]:
+    """Return the highest-signal property/fault stress hotspots."""
+    rows: list[dict[str, Any]] = []
+    for prop, fault_hits in property_stress.items():
+        for fault_sig, hits in fault_hits.items():
+            rows.append({"property": prop, "faults": fault_sig, "hits": int(hits)})
+    rows.sort(key=lambda row: (-row["hits"], row["property"], row["faults"]))
+    return rows
+
+
 def _resolve_worker_count(workers: int) -> int:
     """Resolve requested workers to a safe concrete process count."""
     if workers > 0:
@@ -983,6 +1225,7 @@ def _serialize_failure_payload(
     error_traceback: str | None = None,
 ) -> dict[str, Any]:
     """Convert a worker-side failure into a transport-safe payload."""
+    native_boundary = _extract_native_boundary(error)
     payload = {
         "worker_id": worker_id,
         "run_id": run_id,
@@ -995,6 +1238,8 @@ def _serialize_failure_payload(
         "error_message": str(error)[:1000],
         "error_traceback": (error_traceback or _format_exception_traceback(error))[:12000],
     }
+    if native_boundary is not None:
+        payload["native_boundary"] = native_boundary
     if trace is not None:
         payload["trace"] = trace.to_dict()
         payload["trace_hash"] = trace.content_hash()
@@ -1050,6 +1295,7 @@ def _deserialize_failure_payload(payload: dict[str, Any]) -> Failure:
         rule_log=list(payload.get("rule_log", [])),
         trace=trace,
         error_traceback=payload.get("error_traceback"),
+        native_boundary=payload.get("native_boundary"),
     )
 
 
@@ -1245,6 +1491,8 @@ class Explorer:
         self._swarm_configs: dict[
             tuple[tuple[str, ...], tuple[str, ...]], SwarmConfig
         ] = {}  # energy-tracked configs
+        self._fault_pair_hits: Counter[tuple[str, str]] = Counter()
+        self._current_run_properties: set[str] = set()
         self._rule_file_coverage: dict[str, set[str]] = {}  # rule_name -> {filenames}
         self._gap_files: set[str] = set()  # files with uncovered branches
         self._strategy_failures: dict[str, int] = {}
@@ -1755,6 +2003,93 @@ class Explorer:
 
     # -- Swarm configuration selection ----------------------------------------
 
+    def _register_swarm_run(self, active_faults: list[str]) -> None:
+        """Track which fault pairs were exercised by one swarm configuration."""
+        uniq = sorted(dict.fromkeys(active_faults))
+        for pair in combinations(uniq, 2):
+            self._fault_pair_hits[pair] += 1
+
+    def _uncovered_fault_pairs(self, all_fault_names: list[str]) -> list[tuple[str, str]]:
+        """Return fault pairs never exercised by the current run history."""
+        uniq = sorted(dict.fromkeys(all_fault_names))
+        missing = [
+            pair for pair in combinations(uniq, 2) if self._fault_pair_hits.get(pair, 0) <= 0
+        ]
+        return missing
+
+    def _pairwise_fault_config(
+        self, n_rules: int, all_fault_names: list[str]
+    ) -> SwarmConfig | None:
+        """Bias one config toward an uncovered or under-covered fault pair."""
+        missing_pairs = self._uncovered_fault_pairs(all_fault_names)
+        candidate_pairs = missing_pairs
+        if not candidate_pairs and len(all_fault_names) >= 2:
+            all_pairs = list(combinations(sorted(dict.fromkeys(all_fault_names)), 2))
+            if not all_pairs:
+                return None
+            min_hits = min(self._fault_pair_hits.get(pair, 0) for pair in all_pairs)
+            candidate_pairs = [pair for pair in all_pairs if self._fault_pair_hits.get(pair, 0) == min_hits]
+        if not candidate_pairs:
+            return None
+
+        pair = self.rng.choice(candidate_pairs)
+        if n_rules > 1:
+            rule_mask = self.rng.randint(1, (1 << n_rules) - 1)
+            active_rules = [self._rules[i].name for i in range(n_rules) if rule_mask & (1 << i)]
+        else:
+            active_rules = [self._rules[0].name]
+
+        active_faults = list(pair)
+        for fname in all_fault_names:
+            if fname in pair:
+                continue
+            if self.rng.random() < 0.35:
+                active_faults.append(fname)
+
+        cfg = SwarmConfig(active_rules=active_rules, active_faults=sorted(active_faults))
+        key = cfg.key
+        if key not in self._swarm_configs:
+            self._swarm_configs[key] = cfg
+        self._swarm_configs[key].times_used += 1
+        return self._swarm_configs[key]
+
+    def _swarm_stats(self) -> list[dict[str, Any]]:
+        """Structured summary rows for the tracked swarm configurations."""
+        rows = [
+            {
+                "active_rules": list(cfg.active_rules),
+                "active_faults": list(cfg.active_faults),
+                "energy": float(cfg.energy),
+                "times_used": int(cfg.times_used),
+                "edges_found": int(cfg.edges_found),
+                "runs_with_new_edges": int(cfg.runs_with_new_edges),
+                "failure_count": int(cfg.failure_count),
+                "property_hits": int(cfg.property_hits),
+            }
+            for cfg in self._swarm_configs.values()
+            if cfg.times_used > 0
+        ]
+        rows.sort(
+            key=lambda row: (
+                -row["failure_count"],
+                -row["edges_found"],
+                -row["property_hits"],
+                -row["energy"],
+                -row["times_used"],
+                tuple(row["active_rules"]),
+                tuple(row["active_faults"]),
+            )
+        )
+        return rows
+
+    def _fault_pair_rows(self, all_fault_names: list[str]) -> list[dict[str, Any]]:
+        """Structured coverage rows for every possible fault pair."""
+        rows = []
+        for pair in combinations(sorted(dict.fromkeys(all_fault_names)), 2):
+            rows.append({"pair": list(pair), "hits": int(self._fault_pair_hits.get(pair, 0))})
+        rows.sort(key=lambda row: (row["hits"], row["pair"]))
+        return rows
+
     def _select_swarm_config(self, machine: ChaosTest, total_runs: int) -> SwarmConfig | None:
         """Select a joint rule+fault configuration for this run.
 
@@ -1774,13 +2109,17 @@ class Explorer:
 
         # Phase 1: pure coin-flip (warmup or no history)
         if total_runs < _SWARM_WARMUP_RUNS or not self._swarm_configs:
+            pairwise = self._pairwise_fault_config(n_rules, all_fault_names)
+            if pairwise is not None and self.rng.random() < 0.5:
+                return pairwise
             return self._coin_flip_config(n_rules, all_fault_names)
 
         # Phase 2: mixed strategy (paper §2.2: "include C_D in every swarm set").
         #   10% full config C_D (all rules + all faults — catches sequence bugs)
         #   15% pure coin-flip (explore — catches accumulation bugs)
         #   10% coverage-directed (steer — reaches uncovered branches)
-        #   65% energy-weighted from history (exploit — repeats what works)
+        #   15% pairwise-directed (close fault-pair gaps early)
+        #   50% energy-weighted from history (exploit — repeats what works)
         roll = self.rng.random()
         if roll < 0.1:
             # C_D: the default all-inclusive config. Guarantees sequence
@@ -1801,6 +2140,11 @@ class Explorer:
             if directed is not None:
                 return directed
             return self._coin_flip_config(n_rules, all_fault_names)
+        if roll < 0.5:
+            pairwise = self._pairwise_fault_config(n_rules, all_fault_names)
+            if pairwise is not None:
+                return pairwise
+            return self._coin_flip_config(n_rules, all_fault_names)
 
         # Select from existing configs weighted by energy
         configs = list(self._swarm_configs.values())
@@ -1817,6 +2161,7 @@ class Explorer:
                 cfg.times_used += 1
                 return cfg
 
+        configs[-1].times_used += 1
         return configs[-1]  # fallback
 
     def _coin_flip_config(self, n_rules: int, all_fault_names: list[str]) -> SwarmConfig:
@@ -1843,6 +2188,7 @@ class Explorer:
         key = cfg.key
         if key not in self._swarm_configs:
             self._swarm_configs[key] = cfg
+        self._swarm_configs[key].times_used += 1
         return self._swarm_configs[key]
 
     def _coverage_directed_config(
@@ -1886,6 +2232,7 @@ class Explorer:
         key = cfg.key
         if key not in self._swarm_configs:
             self._swarm_configs[key] = cfg
+        self._swarm_configs[key].times_used += 1
         return self._swarm_configs[key]
 
     def _update_swarm_energy(self, new_edges: int) -> None:
@@ -1902,12 +2249,50 @@ class Explorer:
         if new_edges > 0:
             cfg.energy = min(cfg.energy * _SWARM_ENERGY_REWARD, 10.0)
             cfg.edges_found += new_edges
+            cfg.runs_with_new_edges += 1
         elif cfg.edges_found > 0:
             # Previously productive — slow decay (keep exploring this config)
             cfg.energy = max(cfg.energy * 0.98, _SWARM_ENERGY_MIN)
         else:
             # Never productive — fast decay
             cfg.energy = max(cfg.energy * _SWARM_ENERGY_DECAY, _SWARM_ENERGY_MIN)
+
+    def _record_behavior_observations(
+        self,
+        result: ExplorationResult,
+        machine: ChaosTest,
+        property_events: list[dict[str, Any]],
+        trace_steps: list[TraceStep],
+    ) -> None:
+        """Record rule/fault/property coverage for the most recent executed step."""
+        property_names = sorted({event["name"] for event in property_events})
+        if trace_steps:
+            trace_steps[-1].properties_observed = property_names
+
+        if self._last_step_rule is None:
+            return
+
+        rule_name = self._last_step_rule[0]
+        fault_sig = _fault_signature([f.name for f in machine.active_faults])
+
+        rule_fault = result.rule_fault_coverage.setdefault(rule_name, {})
+        rule_fault[fault_sig] = rule_fault.get(fault_sig, 0) + 1
+
+        if not property_names:
+            return
+
+        if self._current_swarm_config is not None:
+            self._current_swarm_config.property_hits += len(property_names)
+        self._current_run_properties.update(property_names)
+
+        behavior = result.behavior_coverage.setdefault(rule_name, {})
+        existing = set(behavior.get(fault_sig, []))
+        existing.update(property_names)
+        behavior[fault_sig] = sorted(existing)
+
+        for prop in property_names:
+            fault_hits = result.property_stress.setdefault(prop, {})
+            fault_hits[fault_sig] = fault_hits.get(fault_sig, 0) + 1
 
     # -- Step execution helpers (extracted from run() for readability) -----
 
@@ -2095,6 +2480,9 @@ class Explorer:
         _mutation_pairs: list[tuple],
     ) -> Trace:
         """Record a failure into the result and return the trace."""
+        native_boundary = _extract_native_boundary(e)
+        if native_boundary is not None and trace_steps:
+            trace_steps[-1].native_boundary = native_boundary
         trace = Trace(
             run_id=run_id,
             seed=self.seed,
@@ -2105,6 +2493,7 @@ class Explorer:
                 error_type=type(e).__name__,
                 error_message=str(e)[:500],
                 step=step,
+                native_boundary=native_boundary,
             ),
             edges_discovered=new_edges_this_run,
             duration=_time.monotonic() - run_start,
@@ -2126,6 +2515,7 @@ class Explorer:
                 rule_log=rule_log,
                 trace=trace,
                 error_traceback=_format_exception_traceback(e),
+                native_boundary=native_boundary,
             )
         )
         return trace
@@ -2390,6 +2780,7 @@ class Explorer:
                 # Unified swarm: joint rule+fault configuration per run.
                 self._active_fault_names = None  # reset — means "all faults"
                 self._current_swarm_config = None
+                self._current_run_properties = set()
                 if self.rule_swarm:
                     swarm_cfg = self._select_swarm_config(machine, result.total_runs)
                     if swarm_cfg is not None:
@@ -2412,6 +2803,7 @@ class Explorer:
                                 },
                             )
                         )
+                        self._register_swarm_run(swarm_cfg.active_faults)
                     else:
                         self._active_rules = self._rules
                 else:
@@ -2432,6 +2824,7 @@ class Explorer:
                     for step in range(n_steps):
                         result.total_steps += 1
                         ts_offset = _time.monotonic() - run_start
+                        tracker_before = _property_counter_snapshot(_assertions.tracker)
 
                         executed = self._execute_step(
                             machine,
@@ -2447,6 +2840,16 @@ class Explorer:
                         if self._last_step_used_mutation:
                             result.seed_mutations_used += 1
                         self._check_invariants(machine)
+                        property_events = _property_events_since(
+                            tracker_before,
+                            _property_counter_snapshot(_assertions.tracker),
+                        )
+                        self._record_behavior_observations(
+                            result,
+                            machine,
+                            property_events,
+                            trace_steps,
+                        )
                         new_edges_this_run = self._process_coverage(
                             machine,
                             collector,
@@ -2474,6 +2877,8 @@ class Explorer:
                         result,
                         _mutation_pairs,
                     )
+                    if self._current_swarm_config is not None:
+                        self._current_swarm_config.failure_count += 1
                     if self.record_traces:
                         result.traces.append(trace)
 
@@ -2572,9 +2977,21 @@ class Explorer:
             for failure in result.failures:
                 if failure.trace:
                     self._save_seed(failure.trace)
+            result.native_boundary_findings = [
+                dict(failure.native_boundary)
+                for failure in result.failures
+                if failure.native_boundary is not None
+            ]
 
             result.unique_edges = len(self._total_edges)
             result.duration_seconds = _time.monotonic() - start
+            if self.rule_swarm:
+                all_fault_names = [f.name for f in getattr(_original_test_class, "faults", [])]
+                result.swarm_stats = self._swarm_stats()
+                result.fault_pair_coverage = self._fault_pair_rows(all_fault_names)
+                result.uncovered_fault_pairs = [
+                    list(pair) for pair in self._uncovered_fault_pairs(all_fault_names)
+                ]
 
             # -- Post-exploration: coverage gap analysis --
             if use_coverage and _lines_hit_all and self.target_modules:
@@ -2807,17 +3224,78 @@ class Explorer:
             result.ngram = self.ngram
             all_edges: set[int] = set()
             seen_failures: set[tuple[Any, ...]] = set()
+            merged_swarm: dict[tuple[tuple[str, ...], tuple[str, ...]], dict[str, Any]] = {}
+            merged_rule_fault: dict[str, dict[str, int]] = {}
+            merged_behavior: dict[str, dict[str, set[str]]] = {}
+            merged_property_stress: dict[str, dict[str, int]] = {}
+            merged_pair_hits: Counter[tuple[str, str]] = Counter()
 
             for wr in worker_results:
                 result.total_runs += wr["total_runs"]
                 result.total_steps += wr["total_steps"]
+                result.skipped_steps += wr.get("skipped_steps", 0)
                 result.checkpoints_saved += wr["checkpoints_saved"]
                 result.edge_log.extend(wr["edge_log"])
                 all_edges.update(wr["edges"])
+                result.unique_states += wr.get("unique_states", 0)
+                result.properties_satisfied += wr.get("properties_satisfied", 0)
+                result.seed_mutations_used += wr.get("seed_mutations_used", 0)
+                result.seed_mutations_productive += wr.get("seed_mutations_productive", 0)
+                result.rule_swarm_runs += wr.get("rule_swarm_runs", 0)
+                result.lines_covered += wr.get("lines_covered", 0)
+                result.lines_total += wr.get("lines_total", 0)
+                result.coverage_gaps.extend(wr.get("coverage_gaps", []))
+                if not result.seed_replays:
+                    result.seed_replays = list(wr.get("seed_replays", []))
+                for name, count in wr.get("strategy_failures", {}).items():
+                    result.strategy_failures[name] = result.strategy_failures.get(name, 0) + int(
+                        count
+                    )
                 if self.record_traces:
                     result.traces.extend(
                         Trace.from_dict(trace_payload) for trace_payload in wr.get("traces", [])
                     )
+                for row in wr.get("swarm_stats", []):
+                    key = (
+                        tuple(row.get("active_rules", [])),
+                        tuple(row.get("active_faults", [])),
+                    )
+                    existing = merged_swarm.setdefault(
+                        key,
+                        {
+                            "active_rules": list(row.get("active_rules", [])),
+                            "active_faults": list(row.get("active_faults", [])),
+                            "energy": 0.0,
+                            "times_used": 0,
+                            "edges_found": 0,
+                            "runs_with_new_edges": 0,
+                            "failure_count": 0,
+                            "property_hits": 0,
+                        },
+                    )
+                    existing["energy"] = max(existing["energy"], float(row.get("energy", 0.0)))
+                    existing["times_used"] += int(row.get("times_used", 0))
+                    existing["edges_found"] += int(row.get("edges_found", 0))
+                    existing["runs_with_new_edges"] += int(row.get("runs_with_new_edges", 0))
+                    existing["failure_count"] += int(row.get("failure_count", 0))
+                    existing["property_hits"] += int(row.get("property_hits", 0))
+                for row in wr.get("fault_pair_coverage", []):
+                    pair = tuple(row.get("pair", []))
+                    if len(pair) == 2:
+                        merged_pair_hits[(str(pair[0]), str(pair[1]))] += int(row.get("hits", 0))
+                for rule_name, fault_map in wr.get("rule_fault_coverage", {}).items():
+                    merged_faults = merged_rule_fault.setdefault(rule_name, {})
+                    for fault_sig, hits in fault_map.items():
+                        merged_faults[fault_sig] = merged_faults.get(fault_sig, 0) + int(hits)
+                for rule_name, fault_map in wr.get("behavior_coverage", {}).items():
+                    merged_faults = merged_behavior.setdefault(rule_name, {})
+                    for fault_sig, props in fault_map.items():
+                        merged_props = merged_faults.setdefault(fault_sig, set())
+                        merged_props.update(str(prop) for prop in props)
+                for prop, fault_hits in wr.get("property_stress", {}).items():
+                    merged_hits = merged_property_stress.setdefault(prop, {})
+                    for fault_sig, hits in fault_hits.items():
+                        merged_hits[fault_sig] = merged_hits.get(fault_sig, 0) + int(hits)
                 payloads: list[dict[str, Any]] = []
                 if wr.get("worker_error") is not None:
                     payloads.append(wr["worker_error"])
@@ -2831,6 +3309,39 @@ class Explorer:
 
             result.unique_edges = len(all_edges)
             self._total_edges = all_edges
+            result.swarm_stats = sorted(
+                merged_swarm.values(),
+                key=lambda row: (
+                    -row["failure_count"],
+                    -row["edges_found"],
+                    -row["property_hits"],
+                    -row["energy"],
+                    -row["times_used"],
+                    tuple(row["active_rules"]),
+                    tuple(row["active_faults"]),
+                ),
+            )
+            result.rule_fault_coverage = merged_rule_fault
+            result.behavior_coverage = {
+                rule_name: {
+                    fault_sig: sorted(props) for fault_sig, props in fault_map.items()
+                }
+                for rule_name, fault_map in merged_behavior.items()
+            }
+            result.property_stress = merged_property_stress
+            result.native_boundary_findings = [
+                dict(f.native_boundary) for f in result.failures if f.native_boundary is not None
+            ]
+            all_fault_names = [f.name for f in getattr(self.test_class, "faults", [])]
+            result.fault_pair_coverage = [
+                {"pair": list(pair), "hits": hits}
+                for pair, hits in sorted(merged_pair_hits.items(), key=lambda item: (item[1], item[0]))
+            ]
+            result.uncovered_fault_pairs = [
+                list(pair)
+                for pair in combinations(sorted(dict.fromkeys(all_fault_names)), 2)
+                if merged_pair_hits.get(pair, 0) <= 0
+            ]
             result.duration_seconds = _time.monotonic() - start
             reason = self._parallel_retry_reason(worker_results, result)
             if reason is not None:
@@ -2952,9 +3463,25 @@ def _worker_fn(args: dict[str, Any]) -> dict[str, Any]:
             "worker_id": worker_id,
             "total_runs": result.total_runs,
             "total_steps": result.total_steps,
+            "skipped_steps": result.skipped_steps,
             "unique_edges": result.unique_edges,
+            "unique_states": result.unique_states,
             "checkpoints_saved": result.checkpoints_saved,
             "duration_seconds": result.duration_seconds,
+            "properties_satisfied": result.properties_satisfied,
+            "seed_mutations_used": result.seed_mutations_used,
+            "seed_mutations_productive": result.seed_mutations_productive,
+            "rule_swarm_runs": result.rule_swarm_runs,
+            "strategy_failures": dict(result.strategy_failures),
+            "seed_replays": list(result.seed_replays),
+            "swarm_stats": list(result.swarm_stats),
+            "fault_pair_coverage": list(result.fault_pair_coverage),
+            "rule_fault_coverage": result.rule_fault_coverage,
+            "behavior_coverage": result.behavior_coverage,
+            "property_stress": result.property_stress,
+            "coverage_gaps": list(result.coverage_gaps),
+            "lines_covered": result.lines_covered,
+            "lines_total": result.lines_total,
             "failures": serialized_failures,
             "worker_error": None,
             "edge_log": result.edge_log,
@@ -2970,9 +3497,25 @@ def _worker_fn(args: dict[str, Any]) -> dict[str, Any]:
             "worker_id": worker_id,
             "total_runs": 0,
             "total_steps": 0,
+            "skipped_steps": 0,
             "unique_edges": 0,
+            "unique_states": 0,
             "checkpoints_saved": 0,
             "duration_seconds": 0.0,
+            "properties_satisfied": 0,
+            "seed_mutations_used": 0,
+            "seed_mutations_productive": 0,
+            "rule_swarm_runs": 0,
+            "strategy_failures": {},
+            "seed_replays": [],
+            "swarm_stats": [],
+            "fault_pair_coverage": [],
+            "rule_fault_coverage": {},
+            "behavior_coverage": {},
+            "property_stress": {},
+            "coverage_gaps": [],
+            "lines_covered": 0,
+            "lines_total": 0,
             "failures": [],
             "worker_error": _serialize_failure_payload(
                 exc,

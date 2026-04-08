@@ -90,6 +90,10 @@ You list the faults. ordeal's nemesis -- an automatically injected rule -- toggl
 | `nan_injection(target)` | Replaces numeric values in the target's output with `NaN` |
 | `inf_injection(target)` | Replaces numeric values in the target's output with `Inf` |
 | `wrong_shape(target, expected, actual)` | Makes the target return an array with a different shape |
+| `dtype_drift(target, kind="str")` | Coerces numeric outputs into string/int/bool/object leaves |
+| `partial_batch(target, fraction=0.5, min_items=1)` | Returns only part of a batch-like output |
+| `feature_order_drift(target, shift=1)` | Rotates feature order while keeping the same outer shape |
+| `missing_feature(target, key=None, fill=...)` | Drops one feature key, or replaces it with a fill value |
 | `corrupted_floats(corrupt_type="nan")` | Provides corrupt float values via `fault.value()` (no patching) |
 
 **Timing faults** (`ordeal.faults.timing`):

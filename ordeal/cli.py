@@ -24,6 +24,7 @@ import re
 import shlex
 import sys
 import time as _time
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -6902,6 +6903,476 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
 # ============================================================================
 
 
+def _telemetry_root(result: Any) -> Any | None:
+    """Return the nested telemetry container if one exists."""
+    return _result_value(result, "telemetry", "telemetry_info", "exploration_telemetry")
+
+
+def _result_value(source: Any, *names: str) -> Any | None:
+    """Return the first non-None value found under one of *names*."""
+    if source is None:
+        return None
+    if isinstance(source, Mapping):
+        for name in names:
+            if name in source and source[name] is not None:
+                return source[name]
+        return None
+    for name in names:
+        if hasattr(source, name):
+            value = getattr(source, name)
+            if value is not None:
+                return value
+    return None
+
+
+def _lookup_telemetry_value(result: Any, *names: str) -> Any | None:
+    """Return telemetry data from the nested telemetry object or the result itself."""
+    root = _telemetry_root(result)
+    value = _result_value(root, *names)
+    if value is not None:
+        return value
+    return _result_value(result, *names)
+
+
+def _count_entries(value: Any) -> int | None:
+    """Return a size-like count for mappings or sequences."""
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        if value and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value.values()):
+            return sum(int(v) for v in value.values())
+        return len(value)
+    if isinstance(value, (str, bytes, bytearray)):
+        return None
+    try:
+        return len(value)
+    except TypeError:
+        return None
+
+
+def _normalize_telemetry_label(value: Any) -> str | None:
+    """Return a compact human-readable label for one telemetry item."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text.replace("_", " ")
+
+
+def _telemetry_item_label(item: Any) -> str | None:
+    """Return a best-effort label for one telemetry item."""
+    for name in ("kind", "category", "type", "status", "error_type"):
+        value = _result_value(item, name)
+        label = _normalize_telemetry_label(value)
+        if label:
+            return label
+
+    exit_code = _result_value(item, "exit_code", "returncode")
+    signal_value = _result_value(item, "signal", "terminated_by_signal")
+    if isinstance(exit_code, int):
+        if exit_code < 0 or signal_value is not None:
+            return "signal death"
+        if exit_code != 0:
+            return "nonzero exit"
+    if signal_value is not None:
+        return "signal death"
+    return None
+
+
+def _summarize_telemetry_items(value: Any) -> tuple[int | None, Counter[str]]:
+    """Return a count and label histogram for a telemetry collection."""
+    if value is None:
+        return None, Counter()
+    if isinstance(value, Mapping):
+        if value and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value.values()):
+            histogram = Counter()
+            total = 0
+            for key, count in value.items():
+                label = _normalize_telemetry_label(key)
+                if label is None:
+                    continue
+                histogram[label] += int(count)
+                total += int(count)
+            return total, histogram
+        items: list[Any] = list(value.values())
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        items = list(value)
+    else:
+        items = [value]
+
+    histogram: Counter[str] = Counter()
+    for item in items:
+        label = _telemetry_item_label(item)
+        if label is not None:
+            histogram[label] += 1
+    return len(items), histogram
+
+
+def _format_counter(counter: Counter[str]) -> str | None:
+    """Render a compact count histogram."""
+    if not counter:
+        return None
+    parts = [f"{label} x{count}" for label, count in counter.most_common(3)]
+    return ", ".join(parts) if parts else None
+
+
+def _format_mapping_counts(
+    value: Any,
+    *,
+    preferred_keys: Sequence[str] = (),
+    max_items: int = 3,
+) -> str | None:
+    """Render a compact summary for one telemetry mapping."""
+    if not isinstance(value, Mapping):
+        return None
+    for key in ("summary", "description", "text"):
+        summary = value.get(key)
+        if isinstance(summary, str) and summary.strip():
+            return summary.strip()
+
+    items: list[str] = []
+    for key in preferred_keys:
+        entry = value.get(key)
+        if entry is None:
+            continue
+        if isinstance(entry, bool):
+            if entry:
+                items.append(str(key))
+        elif isinstance(entry, (int, float, str)):
+            items.append(f"{key}={entry}")
+        elif isinstance(entry, Mapping):
+            count = _count_entries(entry)
+            if count is not None:
+                items.append(f"{key}={count}")
+        elif isinstance(entry, Sequence) and not isinstance(entry, (str, bytes, bytearray)):
+            items.append(f"{key}={len(entry)}")
+        if len(items) >= max_items:
+            return ", ".join(items)
+
+    if not items:
+        for key, entry in value.items():
+            if key in {"summary", "description", "text"}:
+                continue
+            if isinstance(entry, bool):
+                if entry:
+                    items.append(str(key))
+            elif isinstance(entry, (int, float, str)):
+                items.append(f"{key}={entry}")
+            elif isinstance(entry, Mapping):
+                count = _count_entries(entry)
+                if count is not None:
+                    items.append(f"{key}={count}")
+            elif isinstance(entry, Sequence) and not isinstance(entry, (str, bytes, bytearray)):
+                items.append(f"{key}={len(entry)}")
+            if len(items) >= max_items:
+                break
+
+    return ", ".join(items) if items else None
+
+
+def _resolve_telemetry_section(result: Any, *names: str) -> Any | None:
+    """Return the first available telemetry section by name."""
+    for source in (_telemetry_root(result), result):
+        value = _result_value(source, *names)
+        if value is not None:
+            return value
+    return None
+
+
+def _format_swarm_telemetry(result: Any) -> str | None:
+    """Render joint rule+fault swarm telemetry."""
+    section = _resolve_telemetry_section(
+        result,
+        "swarm",
+        "rule_swarm",
+        "swarm_stats",
+        "swarm_summary",
+    )
+    if isinstance(section, str):
+        return section.strip() or None
+    if isinstance(section, Mapping):
+        summary = _result_value(section, "summary", "description", "text")
+        if isinstance(summary, str) and summary.strip():
+            return summary.strip()
+
+    parts: list[str] = []
+    runs = _lookup_telemetry_value(result, "rule_swarm_runs", "swarm_runs")
+    total_runs = _result_value(result, "total_runs")
+    if isinstance(runs, int):
+        if isinstance(total_runs, int) and total_runs > 0:
+            parts.append(f"{runs}/{total_runs} runs used joint rule+fault configs")
+        else:
+            parts.append(f"{runs} swarm run(s)")
+    elif runs is not None:
+        parts.append(f"{runs} swarm run(s)")
+
+    config_value = None
+    if isinstance(section, Mapping):
+        config_value = _result_value(section, "configs", "swarm_configs", "configurations")
+    if config_value is None:
+        config_value = _lookup_telemetry_value(
+            result,
+            "swarm_configs",
+            "rule_swarm_configs",
+            "configurations",
+        )
+    config_count = _count_entries(config_value)
+    if config_count:
+        parts.append(f"{config_count} configs")
+
+    if isinstance(section, Mapping) and any(
+        key in section for key in ("top_config", "best_config", "dead_configs", "edge_gain", "failure_count")
+    ):
+        extra = _format_mapping_counts(
+            section,
+            preferred_keys=(
+                "top_config",
+                "best_config",
+                "dead_configs",
+                "edge_gain",
+                "failure_count",
+            ),
+            max_items=2,
+        )
+        if extra:
+            parts.append(extra)
+
+    return "; ".join(parts) if parts else None
+
+
+def _format_behavior_telemetry(result: Any) -> str | None:
+    """Render behavior-coverage telemetry."""
+    section = _resolve_telemetry_section(
+        result,
+        "behavior",
+        "behavior_coverage",
+        "coverage",
+        "coverage_summary",
+    )
+    if isinstance(section, str):
+        return section.strip() or None
+    if isinstance(section, Mapping):
+        summary = _result_value(section, "summary", "description", "text")
+        if isinstance(summary, str) and summary.strip():
+            return summary.strip()
+
+    parts: list[str] = []
+    if isinstance(section, Mapping):
+        properties = _result_value(
+            section,
+            "properties_satisfied",
+            "sometimes_properties",
+            "properties",
+        )
+        if properties is not None:
+            if isinstance(properties, int):
+                if properties > 0:
+                    parts.append(f"{properties} sometimes-properties satisfied")
+            else:
+                count = _count_entries(properties)
+                if count:
+                    parts.append(f"{count} sometimes-properties satisfied")
+
+        gaps = _result_value(section, "coverage_gaps", "gaps", "branch_gaps")
+        if gaps is None:
+            gaps = _lookup_telemetry_value(result, "coverage_gaps")
+        gap_count = _count_entries(gaps)
+        if gap_count is not None:
+            parts.append(f"{gap_count} coverage gaps")
+
+        lines_covered = _result_value(section, "lines_covered")
+        if lines_covered is None:
+            lines_covered = _lookup_telemetry_value(result, "lines_covered")
+        lines_total = _result_value(section, "lines_total")
+        if lines_total is None:
+            lines_total = _lookup_telemetry_value(result, "lines_total")
+        if isinstance(lines_covered, int) and isinstance(lines_total, int) and lines_total > 0:
+            parts.append(f"{lines_covered}/{lines_total} lines covered")
+
+        if any(key in section for key in ("retry_paths", "fallback_paths", "recovery_paths")):
+            extra = _format_mapping_counts(
+                section,
+                preferred_keys=("retry_paths", "fallback_paths", "recovery_paths"),
+                max_items=2,
+            )
+            if extra:
+                parts.append(extra)
+    else:
+        properties = _lookup_telemetry_value(
+            result,
+            "properties_satisfied",
+            "sometimes_properties",
+        )
+        if isinstance(properties, int):
+            if properties > 0:
+                parts.append(f"{properties} sometimes-properties satisfied")
+        elif properties is not None:
+            count = _count_entries(properties)
+            if count:
+                parts.append(f"{count} sometimes-properties satisfied")
+
+        gaps = _lookup_telemetry_value(result, "coverage_gaps")
+        gap_count = _count_entries(gaps)
+        if gap_count is not None:
+            parts.append(f"{gap_count} coverage gaps")
+
+        lines_covered = _lookup_telemetry_value(result, "lines_covered")
+        lines_total = _lookup_telemetry_value(result, "lines_total")
+        if isinstance(lines_covered, int) and isinstance(lines_total, int) and lines_total > 0:
+            parts.append(f"{lines_covered}/{lines_total} lines covered")
+
+    return ", ".join(parts) if parts else None
+
+
+def _format_boundary_telemetry(result: Any) -> str | None:
+    """Render native-boundary telemetry."""
+    section = _resolve_telemetry_section(
+        result,
+        "native_boundary",
+        "boundary",
+        "boundary_findings",
+        "native_boundary_findings",
+        "subprocess_failures",
+    )
+    if isinstance(section, str):
+        return section.strip() or None
+
+    findings = section
+    if isinstance(section, Mapping):
+        summary = _result_value(section, "summary", "description", "text")
+        if isinstance(summary, str) and summary.strip():
+            return summary.strip()
+        findings = _result_value(section, "findings", "events", "crashes", "items")
+        if findings is None:
+            findings = section
+
+    count, labels = _summarize_telemetry_items(findings)
+    if count is None and not labels:
+        return None
+
+    parts: list[str] = []
+    if count is not None:
+        noun = "finding" if count == 1 else "findings"
+        parts.append(f"{count} {noun}")
+    label_text = _format_counter(labels)
+    if label_text:
+        parts.append(f"({label_text})")
+    return " ".join(parts) if parts else None
+
+
+def _exploration_telemetry_payload(result: Any) -> dict[str, Any]:
+    """Return a compact JSON-safe telemetry payload for one exploration result."""
+    payload: dict[str, Any] = {}
+
+    swarm = _resolve_telemetry_section(
+        result,
+        "swarm",
+        "rule_swarm",
+        "swarm_stats",
+        "swarm_summary",
+    )
+    swarm_summary = _format_swarm_telemetry(result)
+    if swarm is not None or swarm_summary is not None:
+        swarm_configs = None
+        if isinstance(swarm, Mapping):
+            swarm_configs = _result_value(swarm, "configs", "swarm_configs", "configurations")
+        if swarm_configs is None:
+            swarm_configs = _lookup_telemetry_value(
+                result,
+                "swarm_configs",
+                "rule_swarm_configs",
+                "configurations",
+            )
+        payload["swarm"] = {
+            "summary": swarm_summary,
+            "rule_swarm_runs": _lookup_telemetry_value(result, "rule_swarm_runs", "swarm_runs"),
+            "total_runs": _result_value(result, "total_runs"),
+            "config_count": _count_entries(swarm_configs),
+        }
+
+    behavior = _resolve_telemetry_section(
+        result,
+        "behavior",
+        "behavior_coverage",
+        "coverage",
+        "coverage_summary",
+    )
+    behavior_summary = _format_behavior_telemetry(result)
+    if behavior is not None or behavior_summary is not None:
+        behavior_gaps = None
+        behavior_properties = None
+        behavior_lines_covered = None
+        behavior_lines_total = None
+        if isinstance(behavior, Mapping):
+            behavior_gaps = _result_value(behavior, "coverage_gaps", "gaps", "branch_gaps")
+            behavior_properties = _result_value(
+                behavior,
+                "properties_satisfied",
+                "sometimes_properties",
+                "properties",
+            )
+            behavior_lines_covered = _result_value(behavior, "lines_covered")
+            behavior_lines_total = _result_value(behavior, "lines_total")
+        if behavior_gaps is None:
+            behavior_gaps = _lookup_telemetry_value(result, "coverage_gaps")
+        if behavior_properties is None:
+            behavior_properties = _lookup_telemetry_value(
+                result,
+                "properties_satisfied",
+                "sometimes_properties",
+            )
+        if behavior_lines_covered is None:
+            behavior_lines_covered = _lookup_telemetry_value(result, "lines_covered")
+        if behavior_lines_total is None:
+            behavior_lines_total = _lookup_telemetry_value(result, "lines_total")
+        payload["behavior"] = {
+            "summary": behavior_summary,
+            "properties_satisfied": behavior_properties,
+            "coverage_gaps": _count_entries(behavior_gaps),
+            "lines_covered": behavior_lines_covered,
+            "lines_total": behavior_lines_total,
+        }
+
+    boundary = _resolve_telemetry_section(
+        result,
+        "native_boundary",
+        "boundary",
+        "boundary_findings",
+        "native_boundary_findings",
+        "subprocess_failures",
+    )
+    boundary_summary = _format_boundary_telemetry(result)
+    if boundary is not None or boundary_summary is not None:
+        count, labels = _summarize_telemetry_items(
+            _result_value(boundary, "findings", "events", "crashes", "items")
+            if isinstance(boundary, Mapping)
+            else boundary
+        )
+        payload["native_boundary"] = {
+            "summary": boundary_summary,
+            "finding_count": count,
+            "categories": dict(labels),
+        }
+
+    return payload
+
+
+def _result_telemetry_lines(result: Any) -> list[str]:
+    """Return compact human-readable telemetry lines for one result."""
+    lines: list[str] = []
+    swarm = _format_swarm_telemetry(result)
+    if swarm:
+        lines.append(f"    Swarm: {swarm}")
+    behavior = _format_behavior_telemetry(result)
+    if behavior:
+        lines.append(f"    Behavior: {behavior}")
+    boundary = _format_boundary_telemetry(result)
+    if boundary:
+        lines.append(f"    Native boundary: {boundary}")
+    return lines
+
+
 def _print_report(
     results: list[tuple[str, ExplorationResult]],
     cfg: OrdealConfig,
@@ -6918,6 +7389,8 @@ def _print_report(
             f"{result.duration_seconds:.1f}s"
         )
         print(f"    {result.unique_edges} edges, {result.checkpoints_saved} checkpoints")
+        for line in _result_telemetry_lines(result):
+            print(line)
         if result.failures:
             print(f"    {len(result.failures)} FAILURES:")
             for f in result.failures[:10]:
@@ -10304,6 +10777,7 @@ def _write_json_report(
                 "unique_edges": r.unique_edges,
                 "checkpoints_saved": r.checkpoints_saved,
                 "duration_seconds": r.duration_seconds,
+                "telemetry": _exploration_telemetry_payload(r),
                 "failures": [
                     {
                         "error_type": type(f.error).__name__,

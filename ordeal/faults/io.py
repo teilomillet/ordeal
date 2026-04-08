@@ -1,10 +1,15 @@
-"""I/O fault injections — 6 faults.
+"""I/O fault injections — 10 faults.
 
 Targeted (patch a specific function):
 - error_on_call(target) — raise IOError on every call
 - return_empty(target) — return None on every call
 - corrupt_output(target) — replace output with random bytes
 - truncate_output(target, fraction) — cut output to fraction of length
+- subprocess_timeout(target) — make matching subprocess calls time out
+- subprocess_exit(target) — make matching subprocesses exit nonzero
+- subprocess_signal(target) — make matching subprocesses die by signal
+- subprocess_truncate_stdout(target, fraction) — truncate subprocess stdout
+- subprocess_truncate_stderr(target, fraction) — truncate subprocess stderr
 
 Environment (system-wide, use with caution):
 - disk_full() — fail all write-mode open() and os.write()
@@ -21,6 +26,9 @@ from __future__ import annotations
 import errno
 import functools
 import os
+import signal
+import subprocess as _sp
+from dataclasses import dataclass
 from typing import Any
 
 from . import Fault, PatchFault
@@ -187,6 +195,137 @@ def permission_denied() -> Fault:
 # ---------------------------------------------------------------------------
 
 
+def _subprocess_cmd_string(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
+    """Return the command string passed to ``subprocess``."""
+    cmd = args[0] if args else kwargs.get("args", "")
+    return " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+
+
+def _subprocess_text_mode(kwargs: dict[str, Any]) -> bool:
+    """Return whether subprocess output should be text rather than bytes."""
+    return bool(
+        kwargs.get("text")
+        or kwargs.get("universal_newlines")
+        or kwargs.get("encoding") is not None
+        or kwargs.get("errors") is not None
+    )
+
+
+def _truncate_stream(value: bytes | str | None, fraction: float) -> bytes | str | None:
+    """Truncate a subprocess stream while preserving its type."""
+    if value is None:
+        return None
+    cut = max(0, int(len(value) * fraction))
+    return value[:cut]
+
+
+@dataclass
+class _SyntheticSubprocess:
+    """Minimal subprocess object used for synthetic child-process failures."""
+
+    args: Any
+    returncode: int
+    stdout: bytes | str | None
+    stderr: bytes | str | None
+    _stdout_pipe: bool
+    _stderr_pipe: bool
+
+    def __enter__(self) -> "_SyntheticSubprocess":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def poll(self) -> int:
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        return self.returncode
+
+    def communicate(
+        self,
+        input: object = None,
+        timeout: float | None = None,
+    ) -> tuple[bytes | str | None, bytes | str | None]:
+        del input, timeout
+        return (
+            self.stdout if self._stdout_pipe else None,
+            self.stderr if self._stderr_pipe else None,
+        )
+
+    def kill(self) -> None:
+        self.returncode = -signal.SIGKILL
+
+    def terminate(self) -> None:
+        self.returncode = -signal.SIGTERM
+
+    def send_signal(self, sig: int) -> None:
+        self.returncode = -abs(sig)
+
+
+def _subprocess_failure_factory(
+    target: str,
+    *,
+    returncode: int,
+    stdout: bytes | str | None = None,
+    stderr: bytes | str | None = None,
+) -> Any:
+    """Build a ``PatchFault`` factory that returns a synthetic child process."""
+
+    def _factory(original: object) -> object:
+        def _patched_popen(*args: object, **kwargs: object) -> object:
+            cmd_str = _subprocess_cmd_string(args, kwargs)
+            if target not in cmd_str:
+                return original(*args, **kwargs)  # type: ignore[operator]
+
+            text_mode = _subprocess_text_mode(kwargs)
+            stdout_pipe = kwargs.get("stdout") is _sp.PIPE
+            stderr_pipe = kwargs.get("stderr") is _sp.PIPE
+            empty_stdout: bytes | str = "" if text_mode else b""
+            empty_stderr: bytes | str = "" if text_mode else b""
+            result_stdout = stdout if stdout is not None else empty_stdout
+            result_stderr = stderr if stderr is not None else empty_stderr
+            return _SyntheticSubprocess(
+                args=args[0] if args else kwargs.get("args", ""),
+                returncode=returncode,
+                stdout=result_stdout,
+                stderr=result_stderr,
+                _stdout_pipe=stdout_pipe,
+                _stderr_pipe=stderr_pipe,
+            )
+
+        return _patched_popen
+
+    return _factory
+
+
+def _subprocess_output_truncation_factory(
+    target: str,
+    *,
+    stream: str,
+    fraction: float,
+) -> Any:
+    """Build a ``PatchFault`` factory that truncates subprocess output."""
+
+    def _factory(original: object) -> object:
+        def _patched_run(*args: object, **kwargs: object) -> object:
+            cmd_str = _subprocess_cmd_string(args, kwargs)
+            result = original(*args, **kwargs)  # type: ignore[operator]
+            if target not in cmd_str:
+                return result
+
+            if stream == "stdout" and hasattr(result, "stdout"):
+                result.stdout = _truncate_stream(result.stdout, fraction)
+            elif stream == "stderr" and hasattr(result, "stderr"):
+                result.stderr = _truncate_stream(result.stderr, fraction)
+            return result
+
+        return _patched_run
+
+    return _factory
+
+
 def subprocess_timeout(target: str, *, timeout_sec: float = 0.001) -> PatchFault:
     """Make ``subprocess.run``/``subprocess.check_output`` calls matching *target* time out.
 
@@ -226,6 +365,95 @@ def subprocess_timeout(target: str, *, timeout_sec: float = 0.001) -> PatchFault
         return _timeout_run
 
     return PatchFault("subprocess.run", _factory, name=f"subprocess_timeout({target!r})")
+
+
+def subprocess_exit(
+    target: str,
+    *,
+    returncode: int = 1,
+    stdout: bytes | str | None = None,
+    stderr: bytes | str | None = None,
+) -> PatchFault:
+    """Make matching subprocesses exit with *returncode*.
+
+    Patches ``subprocess.Popen`` so the child never starts.  This makes
+    ``subprocess.run()``, ``subprocess.check_output()``, and direct
+    ``Popen`` callers observe a nonzero exit as if the child had failed.
+
+    Args:
+        target: Substring to match in the command string.
+        returncode: Exit status to report.  Use a negative value only if
+            you want to model signal-style death directly.
+        stdout: Optional synthetic stdout for the completed process.
+        stderr: Optional synthetic stderr for the completed process.
+    """
+    return PatchFault(
+        "subprocess.Popen",
+        _subprocess_failure_factory(
+            target,
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+        ),
+        name=f"subprocess_exit({target!r}, returncode={returncode})",
+    )
+
+
+def subprocess_signal(
+    target: str,
+    *,
+    signum: int = signal.SIGTERM,
+    stdout: bytes | str | None = None,
+    stderr: bytes | str | None = None,
+) -> PatchFault:
+    """Make matching subprocesses die from *signum*.
+
+    The synthetic process reports ``returncode == -signum``, matching
+    Python's standard subprocess convention for signal death.
+
+    Args:
+        target: Substring to match in the command string.
+        signum: Signal number to report as the death cause.
+        stdout: Optional synthetic stdout for the completed process.
+        stderr: Optional synthetic stderr for the completed process.
+    """
+    return PatchFault(
+        "subprocess.Popen",
+        _subprocess_failure_factory(
+            target,
+            returncode=-abs(signum),
+            stdout=stdout,
+            stderr=stderr,
+        ),
+        name=f"subprocess_signal({target!r}, signum={signum})",
+    )
+
+
+def subprocess_truncate_stdout(target: str, fraction: float = 0.5) -> PatchFault:
+    """Truncate matching subprocess stdout to *fraction* of its length.
+
+    Patches ``subprocess.run`` so the child process still executes, but
+    the captured stdout is shortened after the fact.  Useful for testing
+    parsers that assume the child always returns a full payload.
+    """
+    return PatchFault(
+        "subprocess.run",
+        _subprocess_output_truncation_factory(target, stream="stdout", fraction=fraction),
+        name=f"subprocess_truncate_stdout({target!r}, {fraction})",
+    )
+
+
+def subprocess_truncate_stderr(target: str, fraction: float = 0.5) -> PatchFault:
+    """Truncate matching subprocess stderr to *fraction* of its length.
+
+    Patches ``subprocess.run`` so the child process still executes, but
+    the captured stderr is shortened after the fact.
+    """
+    return PatchFault(
+        "subprocess.run",
+        _subprocess_output_truncation_factory(target, stream="stderr", fraction=fraction),
+        name=f"subprocess_truncate_stderr({target!r}, {fraction})",
+    )
 
 
 def corrupt_stdout(target: str) -> PatchFault:

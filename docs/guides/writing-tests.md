@@ -151,7 +151,7 @@ faults = [
 |---|---|---|
 | `faults.timing` | `timeout`, `slow`, `intermittent_crash`, `jitter` | External calls, latency-sensitive code |
 | `faults.io` | `error_on_call`, `return_empty`, `corrupt_output`, `truncate_output`, `disk_full`, `permission_denied` | File I/O, database calls, API calls |
-| `faults.numerical` | `nan_injection`, `inf_injection`, `wrong_shape`, `corrupted_floats` | Math, ML models, data pipelines |
+| `faults.numerical` | `nan_injection`, `inf_injection`, `wrong_shape`, `dtype_drift`, `partial_batch`, `feature_order_drift`, `missing_feature`, `corrupted_floats` | Math, ML models, data pipelines |
 
 Each fault takes a `target` -- a dotted path to the function to patch (e.g., `"myapp.api.call"`). When the nemesis activates the fault, that function gets replaced with the faulty version. When the nemesis deactivates it, the original is restored.
 

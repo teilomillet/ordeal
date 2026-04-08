@@ -41,6 +41,21 @@ def _returns_tuple():
     return (1, 2, 3, 4, 5, 6)
 
 
+def returns_feature_dict() -> dict[str, float]:
+    return {"a": 1.0, "b": 2.0, "c": 3.0}
+
+
+def returns_feature_rows() -> list[dict[str, float]]:
+    return [
+        {"a": 1.0, "b": 2.0},
+        {"a": 3.0, "b": 4.0},
+    ]
+
+
+def returns_vectors() -> list[list[float]]:
+    return [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+
+
 # ============================================================================
 # _resolve_target
 # ============================================================================
@@ -431,6 +446,100 @@ class TestCorruptedFloats:
         from ordeal.faults.numerical import corrupted_floats
 
         assert corrupted_floats("nan").value() == 0.0
+
+
+class TestDtypeDrift:
+    def test_coerces_scalar_to_string(self):
+        from ordeal.faults.numerical import dtype_drift
+
+        fault = dtype_drift(f"{__name__}.returns_float", kind="str")
+        fault.activate()
+        assert returns_float() == "42.0"
+        fault.deactivate()
+
+    def test_coerces_nested_values(self):
+        from ordeal.faults.numerical import dtype_drift
+
+        fault = dtype_drift(f"{__name__}.returns_feature_dict", kind="bool")
+        fault.activate()
+        assert returns_feature_dict() == {"a": True, "b": True, "c": True}
+        fault.deactivate()
+
+    def test_name_mentions_kind(self):
+        from ordeal.faults.numerical import dtype_drift
+
+        fault = dtype_drift("mod.fn", kind="int")
+        assert "int" in fault.name
+
+
+class TestPartialBatch:
+    def test_truncates_list_output(self):
+        from ordeal.faults.numerical import partial_batch
+
+        fault = partial_batch(f"{__name__}.returns_list", fraction=0.5)
+        fault.activate()
+        assert returns_list() == [1, 2, 3, 4]
+        fault.deactivate()
+
+    def test_honors_min_items(self):
+        from ordeal.faults.numerical import partial_batch
+
+        fault = partial_batch(f"{__name__}._returns_tuple", fraction=0.0, min_items=2)
+        fault.activate()
+        assert _returns_tuple() == (1, 2)
+        fault.deactivate()
+
+
+class TestFeatureOrderDrift:
+    def test_rotates_single_feature_vector(self):
+        from ordeal.faults.numerical import feature_order_drift
+
+        fault = feature_order_drift(f"{__name__}.returns_list", shift=2)
+        fault.activate()
+        assert returns_list() == [3, 4, 5, 6, 7, 8, 1, 2]
+        fault.deactivate()
+
+    def test_rotates_each_row_in_batch(self):
+        from ordeal.faults.numerical import feature_order_drift
+
+        fault = feature_order_drift(f"{__name__}.returns_vectors", shift=1)
+        fault.activate()
+        assert returns_vectors() == [[2.0, 3.0, 1.0], [5.0, 6.0, 4.0]]
+        fault.deactivate()
+
+    def test_reorders_mapping_insertion_order(self):
+        from ordeal.faults.numerical import feature_order_drift
+
+        fault = feature_order_drift(f"{__name__}.returns_feature_dict", shift=1)
+        fault.activate()
+        assert list(returns_feature_dict().keys()) == ["b", "c", "a"]
+        fault.deactivate()
+
+
+class TestMissingFeature:
+    def test_drops_first_key_by_default(self):
+        from ordeal.faults.numerical import missing_feature
+
+        fault = missing_feature(f"{__name__}.returns_feature_dict")
+        fault.activate()
+        assert returns_feature_dict() == {"b": 2.0, "c": 3.0}
+        fault.deactivate()
+
+    def test_fills_specific_key(self):
+        from ordeal.faults.numerical import missing_feature
+
+        fault = missing_feature(f"{__name__}.returns_feature_dict", "b", fill=None)
+        fault.activate()
+        assert returns_feature_dict() == {"a": 1.0, "b": None, "c": 3.0}
+        fault.deactivate()
+
+    def test_applies_rowwise_to_batches(self):
+        from ordeal.faults.numerical import missing_feature
+
+        fault = missing_feature(f"{__name__}.returns_feature_rows", "a")
+        fault.activate()
+        assert returns_feature_rows() == [{"b": 2.0}, {"b": 4.0}]
+        fault.deactivate()
 
 
 # ============================================================================

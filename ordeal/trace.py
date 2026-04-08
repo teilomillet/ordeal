@@ -47,12 +47,14 @@ class TraceStep:
     ``fault_toggle`` steps in the trace.
     """
 
-    kind: str  # "rule" | "fault_toggle" | "api_call"
+    kind: str  # "rule" | "fault_toggle" | "api_call" | "rule_swarm"
     name: str  # rule name, "+fault_name"/"-fault_name", or "GET /items"
     params: dict[str, Any] = field(default_factory=dict)
     active_faults: list[str] = field(default_factory=list)
     edge_count: int = 0
     timestamp_offset: float = 0.0
+    properties_observed: list[str] = field(default_factory=list)
+    native_boundary: dict[str, Any] | None = None
     # Populated only for kind="api_call":
     status_code: int | None = None
     endpoint: str | None = None
@@ -65,6 +67,7 @@ class TraceFailure:
     error_type: str
     error_message: str
     step: int
+    native_boundary: dict[str, Any] | None = None
 
 
 @dataclass

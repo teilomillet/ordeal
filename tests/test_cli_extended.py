@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from ordeal.cli import (
@@ -166,6 +167,34 @@ class TestPrintReport:
             traces=[],
         )
 
+    def _telemetry_result(self):
+        return SimpleNamespace(
+            total_runs=20,
+            total_steps=500,
+            unique_edges=42,
+            checkpoints_saved=5,
+            duration_seconds=10.0,
+            failures=[],
+            traces=[],
+            rule_swarm_runs=12,
+            telemetry={
+                "swarm": {"configs": [{"name": "all"}, {"name": "subset"}]},
+                "behavior": {
+                    "coverage_gaps": [{"line": 10}, {"line": 20}],
+                    "properties_satisfied": 3,
+                    "lines_covered": 18,
+                    "lines_total": 20,
+                },
+                "native_boundary": {
+                    "findings": [
+                        {"kind": "timeout"},
+                        {"exit_code": -11},
+                        {"error_type": "TimeoutExpired"},
+                    ]
+                },
+            },
+        )
+
     def _cfg(self, fmt="text"):
         cfg = MagicMock()
         cfg.report.format = fmt
@@ -185,6 +214,20 @@ class TestPrintReport:
         _print_report([("test:Class", self._result([failure]))], self._cfg("text"))
         out = capsys.readouterr().out
         assert "FAILURES" in out
+
+    def test_text_report_includes_telemetry(self, capsys):
+        _print_report([("test:Class", self._telemetry_result())], self._cfg("text"))
+        out = capsys.readouterr().out
+        assert "Swarm:" in out
+        assert "12/20 runs used joint rule+fault configs" in out
+        assert "2 configs" in out
+        assert "Behavior:" in out
+        assert "3 sometimes-properties satisfied" in out
+        assert "2 coverage gaps" in out
+        assert "18/20 lines covered" in out
+        assert "Native boundary:" in out
+        assert "3 findings" in out
+        assert "signal death x1" in out
 
     def test_json_format_skips_text(self, capsys):
         _print_report([("test:Class", self._result())], self._cfg("json"))
@@ -215,6 +258,46 @@ class TestWriteJsonReport:
         with open(tmp_path / "report.json") as f:
             data = json.load(f)
         assert data["results"][0]["total_runs"] == 50
+
+    def test_writes_telemetry(self, tmp_path):
+        cfg = MagicMock()
+        cfg.report.output = str(tmp_path / "report.json")
+        telemetry_result = SimpleNamespace(
+            total_runs=20,
+            total_steps=500,
+            unique_edges=42,
+            checkpoints_saved=5,
+            duration_seconds=10.0,
+            failures=[],
+            traces=[],
+            rule_swarm_runs=12,
+            telemetry={
+                "swarm": {"configs": [{"name": "all"}, {"name": "subset"}]},
+                "behavior": {
+                    "coverage_gaps": [{"line": 10}, {"line": 20}],
+                    "properties_satisfied": 3,
+                    "lines_covered": 18,
+                    "lines_total": 20,
+                },
+                "native_boundary": {
+                    "findings": [
+                        {"kind": "timeout"},
+                        {"exit_code": -11},
+                        {"error_type": "TimeoutExpired"},
+                    ]
+                },
+            },
+        )
+        _write_json_report([("mod:Cls", telemetry_result)], cfg)
+        with open(tmp_path / "report.json") as f:
+            data = json.load(f)
+        telemetry = data["results"][0]["telemetry"]
+        assert telemetry["swarm"]["rule_swarm_runs"] == 12
+        assert telemetry["swarm"]["config_count"] == 2
+        assert telemetry["behavior"]["coverage_gaps"] == 2
+        assert telemetry["behavior"]["lines_covered"] == 18
+        assert telemetry["native_boundary"]["finding_count"] == 3
+        assert telemetry["native_boundary"]["categories"]["signal death"] == 1
 
     def test_writes_failures(self, tmp_path):
         failure = MagicMock()

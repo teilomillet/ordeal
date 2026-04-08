@@ -368,11 +368,17 @@ from ordeal.faults import numerical
 | `nan_injection` | `(target: str) -> PatchFault` | Numeric output becomes NaN |
 | `inf_injection` | `(target: str) -> PatchFault` | Numeric output becomes Inf |
 | `wrong_shape` | `(target: str, expected: tuple, actual: tuple) -> PatchFault` | Returns array with wrong shape |
+| `dtype_drift` | `(target: str, kind: str = "str") -> PatchFault` | Coerces numeric output into string/int/bool/object leaves |
+| `partial_batch` | `(target: str, fraction: float = 0.5, min_items: int = 1) -> PatchFault` | Truncates batch-like output on the first axis |
+| `feature_order_drift` | `(target: str, shift: int = 1) -> PatchFault` | Rotates feature order without changing outer shape |
+| `missing_feature` | `(target: str, key: str \| None = None, *, fill: object = ...) -> PatchFault` | Drops one feature key or replaces it with a fill value |
 | `corrupted_floats` | `(corrupt_type: str = "nan") -> Fault` | Standalone corrupt float source; use `fault.value()` |
 
 ```python
 faults = [
     numerical.nan_injection("myapp.model.predict"),
+    numerical.partial_batch("myapp.model.predict", fraction=0.5),
+    numerical.missing_feature("myapp.features.fetch", "country"),
     numerical.wrong_shape("myapp.embed", (1, 512), (1, 256)),
 ]
 ```

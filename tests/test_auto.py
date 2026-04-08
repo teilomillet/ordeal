@@ -284,6 +284,46 @@ def _install_state_store_pack_target_module(module_name: str):
     return mod
 
 
+def _install_model_inference_pack_target_module(module_name: str):
+    mod = types.ModuleType(module_name)
+    sys.modules[module_name] = mod
+    exec(
+        "class Predictor:\n"
+        "    def predict(self, rows: list[str]):\n"
+        "        raise RuntimeError('needs model_inference scenario')\n"
+        "\n"
+        "class Env:\n"
+        "    def __init__(self) -> None:\n"
+        "        self.model = Predictor()\n"
+        "\n"
+        "    def render(self, rows: list[str]) -> float:\n"
+        "        scores = self.model.predict(rows)\n"
+        "        return scores[0]\n",
+        mod.__dict__,
+    )
+    return mod
+
+
+def _install_feature_store_pack_target_module(module_name: str):
+    mod = types.ModuleType(module_name)
+    sys.modules[module_name] = mod
+    exec(
+        "class FeatureStore:\n"
+        "    def get(self, key: str):\n"
+        "        raise RuntimeError('needs feature_store scenario')\n"
+        "\n"
+        "class Env:\n"
+        "    def __init__(self) -> None:\n"
+        "        self.feature_store = FeatureStore()\n"
+        "\n"
+        "    def render(self, key: str) -> float:\n"
+        "        row = self.feature_store.get(key)\n"
+        "        return row['feature_0']\n",
+        mod.__dict__,
+    )
+    return mod
+
+
 def _install_stateful_target_module(module_name: str):
     mod = types.ModuleType(module_name)
     sys.modules[module_name] = mod
@@ -801,6 +841,8 @@ class TestScanModule:
             (_install_subprocess_pack_target_module, "subprocess"),
             (_install_sandbox_client_pack_target_module, "sandbox_client"),
             (_install_upload_download_pack_target_module, "upload_download"),
+            (_install_model_inference_pack_target_module, "model_inference"),
+            (_install_feature_store_pack_target_module, "feature_store"),
             (_install_http_pack_target_module, "http"),
             (_install_state_store_pack_target_module, "state_store"),
         ],
@@ -823,6 +865,10 @@ class TestScanModule:
                 assert asyncio.run(instance.render("echo hi", "/tmp/file", b"payload")) == ""
             elif pack_name == "upload_download":
                 assert instance.render(b"payload") == 0
+            elif pack_name == "model_inference":
+                assert instance.render(["prompt"]) == 0.5
+            elif pack_name == "feature_store":
+                assert instance.render("user-1") == 0.5
             elif pack_name == "http":
                 assert asyncio.run(instance.render("https://example.test")) == 200
             else:
@@ -982,7 +1028,8 @@ class TestScanModule:
         assert "pytest_fixture" in factory_hints[1].signals
 
     def test_method_seed_examples_capture_fixture_backed_bound_calls(self, tmp_path, monkeypatch):
-        pkg = tmp_path / "hintpkg"
+        package_name = "hintpkg_seed_examples"
+        pkg = tmp_path / package_name
         tests_dir = tmp_path / "tests"
         pkg.mkdir()
         tests_dir.mkdir()
@@ -998,7 +1045,7 @@ class TestScanModule:
         )
         (tests_dir / "conftest.py").write_text(
             "import pytest\n"
-            "from hintpkg.envs import Env\n"
+            f"from {package_name}.envs import Env\n"
             "\n"
             "@pytest.fixture\n"
             "def env() -> Env:\n"
@@ -1022,11 +1069,11 @@ class TestScanModule:
         import importlib
 
         auto_mod._mine_object_harness_hints.cache_clear()
-        module = importlib.import_module("hintpkg.envs")
+        module = importlib.import_module(f"{package_name}.envs")
         funcs = dict(
             _get_public_functions(
                 module,
-                object_factories={"hintpkg.envs:Env": lambda: module.Env("demo")},
+                object_factories={f"{package_name}.envs:Env": lambda: module.Env("demo")},
             )
         )
         examples = auto_mod._call_seed_examples_from_files(
@@ -1143,6 +1190,25 @@ class TestScanModule:
         assert auto_mod._builtin_object_scenario_hook("subprocess_runner") is not None
         assert auto_mod._builtin_object_scenario_hook("upload_download_client") is not None
         assert auto_mod._builtin_object_scenario_hook("http_client") is not None
+        assert auto_mod._builtin_object_scenario_hook("predictor") is not None
+        assert auto_mod._builtin_object_scenario_hook("vector_store") is not None
+
+    def test_scenario_pack_from_hint_detects_ml_terms(self):
+        model_hint = auto_mod.HarnessHint(
+            kind="client_fixture",
+            suggestion="predictor collaborator",
+            evidence="predictor.predict",
+            score=0.8,
+        )
+        feature_hint = auto_mod.HarnessHint(
+            kind="client_fixture",
+            suggestion="feature store collaborator",
+            evidence="feature_store.get",
+            score=0.8,
+        )
+
+        assert auto_mod._scenario_pack_from_hint(model_hint) == "model_inference"
+        assert auto_mod._scenario_pack_from_hint(feature_hint) == "feature_store"
 
     def test_documented_precondition_is_not_reported_as_crash(self):
         mod = types.ModuleType("_test_preconditions")
@@ -1639,6 +1705,46 @@ class TestChaosFor:
             stateful_step_count=5,
         )
         assert TestCase is not None
+
+    def test_auto_infers_ml_data_faults_from_collaborator_calls(self, tmp_path, monkeypatch):
+        module_name = "_test_ml_data_fault_inference"
+        module_file = tmp_path / f"{module_name}.py"
+        module_file.write_text(
+            "class Predictor:\n"
+            "    def predict(self, rows: list[list[float]]) -> list[float]:\n"
+            "        return [sum(row) for row in rows]\n"
+            "\n"
+            "class FeatureStore:\n"
+            "    def get(self, key: str) -> dict[str, float]:\n"
+            "        return {'feature_0': 1.0, 'feature_1': 2.0}\n"
+            "\n"
+            "def score(rows: list[list[float]], key: str) -> tuple[list[float], dict[str, float]]:\n"
+            "    model = Predictor()\n"
+            "    feature_store = FeatureStore()\n"
+            "    return model.predict(rows), feature_store.get(key)\n",
+            encoding="utf-8",
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        import importlib
+
+        mod = importlib.import_module(module_name)
+        try:
+            TestCase = chaos_for(
+                mod,
+                invariants=[],
+                max_examples=1,
+                stateful_step_count=1,
+            )
+            machine_cls = TestCase.runTest.__closure__[0].cell_contents
+            fault_names = {fault.name for fault in machine_cls.faults}
+
+            assert any(name.startswith("nan_injection(") for name in fault_names)
+            assert any(name.startswith("partial_batch(") for name in fault_names)
+            assert any(name.startswith("dtype_drift(") for name in fault_names)
+            assert any(name.startswith("missing_feature(") for name in fault_names)
+        finally:
+            del sys.modules[module_name]
 
     def test_method_targets_work_in_stateful_chaos(self):
         import sys

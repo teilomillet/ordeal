@@ -116,6 +116,7 @@ Every goal maps to a starting point — a command to run, a module to import, an
 | Test API endpoints for faults | `from ordeal.integrations.openapi import chaos_api_test` | [Integrations](guides/integrations.md) |
 | Extend ordeal with a new fault | Follow the pattern in `ordeal/faults/*.py` | [Fault Injection](concepts/fault-injection.md) |
 | Configure reproducible runs | Create `ordeal.toml` | [Configuration](guides/configuration.md) |
+| See the next functionality-coverage priorities | Read the roadmap | [Roadmap](roadmap.md) |
 | Inspect every capability before choosing a tool | `ordeal catalog --detail` | [API Reference](reference/api.md) |
 | Discover all available faults, assertions, strategies | `from ordeal import catalog; catalog()` | [API Reference](reference/api.md) |
 

@@ -1955,6 +1955,53 @@ def _http_response_stub(*args: Any, **kwargs: Any) -> SimpleNamespace:
     )
 
 
+def _sequence_arg(values: Sequence[Any]) -> Sequence[Any] | None:
+    """Return the first batch-like argument from *values*."""
+    for value in values:
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            return value
+    return None
+
+
+def _model_vector(width: int = 4) -> list[float]:
+    """Return one stable embedding-like vector."""
+    return [0.0 for _ in range(width)]
+
+
+def _model_prediction_stub(*args: Any, **kwargs: Any) -> Any:
+    """Return one stable prediction payload shaped like the input batch."""
+    batch = _sequence_arg([*args, *kwargs.values()])
+    if batch is None:
+        return 0.5
+    return [0.5 for _ in range(max(1, len(batch)))]
+
+
+def _model_probability_stub(*args: Any, **kwargs: Any) -> Any:
+    """Return one stable probability payload shaped like the input batch."""
+    batch = _sequence_arg([*args, *kwargs.values()])
+    row = [0.5, 0.5]
+    if batch is None:
+        return row
+    return [list(row) for _ in range(max(1, len(batch)))]
+
+
+def _embedding_stub(*args: Any, **kwargs: Any) -> Any:
+    """Return one stable embedding or batch of embeddings."""
+    batch = _sequence_arg([*args, *kwargs.values()])
+    if batch is None:
+        return _model_vector()
+    return [_model_vector() for _ in range(max(1, len(batch)))]
+
+
+def _feature_payload_stub(*args: Any, **kwargs: Any) -> Any:
+    """Return one stable feature row or batch of feature rows."""
+    batch = _sequence_arg([*args, *kwargs.values()])
+    row = {"feature_0": 0.5, "feature_1": 1.0}
+    if batch is None:
+        return dict(row)
+    return [dict(row) for _ in range(max(1, len(batch)))]
+
+
 def _apply_state_store_pack(instance: Any) -> Any:
     """Attach a shared in-memory state store to matching instance collaborators."""
     store: dict[str, Any] = {}
@@ -2088,6 +2135,58 @@ def _apply_http_pack(instance: Any) -> Any:
     )
 
 
+def _apply_model_inference_pack(instance: Any) -> Any:
+    """Attach a stable model-inference collaborator pack to *instance*."""
+    return _apply_collaborator_pack(
+        instance,
+        attr_names=(
+            "model",
+            "predictor",
+            "scorer",
+            "embedder",
+            "encoder",
+            "classifier",
+            "reranker",
+            "model_client",
+        ),
+        method_behaviors={
+            "predict": _model_prediction_stub,
+            "predict_proba": _model_probability_stub,
+            "transform": _embedding_stub,
+            "embed": _embedding_stub,
+            "encode": _embedding_stub,
+            "score": lambda *args, **kwargs: 0.5,
+            "classify": lambda *args, **kwargs: {"label": "ok", "score": 0.5},
+            "infer": _model_prediction_stub,
+            "run": _model_prediction_stub,
+        },
+    )
+
+
+def _apply_feature_store_pack(instance: Any) -> Any:
+    """Attach a stable feature-store collaborator pack to *instance*."""
+    return _apply_collaborator_pack(
+        instance,
+        attr_names=(
+            "feature_store",
+            "vector_store",
+            "embedding_store",
+            "retriever",
+            "feature_client",
+        ),
+        method_behaviors={
+            "get": _feature_payload_stub,
+            "fetch": _feature_payload_stub,
+            "lookup": _feature_payload_stub,
+            "get_features": _feature_payload_stub,
+            "fetch_features": _feature_payload_stub,
+            "lookup_features": _feature_payload_stub,
+            "put": lambda *args, **kwargs: True,
+            "upsert": lambda *args, **kwargs: True,
+        },
+    )
+
+
 _BUILTIN_OBJECT_SCENARIO_LIBRARY_SPECS: dict[str, dict[str, Any]] = {
     "subprocess": {
         "aliases": ("subprocess_runner",),
@@ -2115,6 +2214,31 @@ _BUILTIN_OBJECT_SCENARIO_LIBRARY_SPECS: dict[str, dict[str, Any]] = {
             "Stub storage, upload, and download collaborators with safe in-memory responses."
         ),
         "hook": _apply_upload_download_pack,
+    },
+    "model_inference": {
+        "aliases": (
+            "model_client",
+            "predictor",
+            "embedder",
+            "encoder",
+            "classifier",
+        ),
+        "description": (
+            "Stub model-style collaborators with stable prediction, embedding, and scoring outputs."
+        ),
+        "hook": _apply_model_inference_pack,
+    },
+    "feature_store": {
+        "aliases": (
+            "vector_store",
+            "embedding_store",
+            "feature_client",
+            "retriever",
+        ),
+        "description": (
+            "Stub feature-store collaborators with stable row-shaped feature payloads."
+        ),
+        "hook": _apply_feature_store_pack,
     },
     "http": {
         "aliases": ("http_client",),
@@ -2844,6 +2968,31 @@ def _scenario_pack_from_hint(hint: HarnessHint) -> str | None:
     ).lower()
     if any(token in text for token in ("sandbox", "execute_command", "upload_content")):
         return "sandbox_client"
+    if any(
+        token in text
+        for token in (
+            "feature_store",
+            "vector_store",
+            "embedding_store",
+            "feature_client",
+            "fetch_features",
+            "lookup_features",
+        )
+    ):
+        return "feature_store"
+    if any(
+        token in text
+        for token in (
+            "model.predict",
+            "predictor",
+            "embedder",
+            "encoder",
+            "classifier",
+            "predict_proba",
+            "embedding client",
+        )
+    ):
+        return "model_inference"
     if any(token in text for token in ("artifact", "storage", "download", "upload")):
         return "upload_download"
     if any(token in text for token in ("http", "request", "session", "transport")):
@@ -4536,14 +4685,27 @@ def _harness_doc_files(module_name: str) -> list[Path]:
 _SCENARIO_PACK_ATTR_ALIASES: dict[str, str] = {
     "artifact_client": "upload_download",
     "cache": "state_store",
+    "classifier": "model_inference",
     "command_runner": "subprocess",
     "downloader": "upload_download",
+    "embedder": "model_inference",
+    "embedding_store": "feature_store",
+    "encoder": "model_inference",
     "executor": "subprocess",
+    "feature_client": "feature_store",
+    "feature_store": "feature_store",
     "http_client": "http",
+    "model": "model_inference",
+    "model_client": "model_inference",
+    "model_registry": "upload_download",
+    "model_store": "upload_download",
+    "predictor": "model_inference",
     "process_runner": "subprocess",
+    "reranker": "model_inference",
     "runner": "subprocess",
     "sandbox": "sandbox_client",
     "sandbox_client": "sandbox_client",
+    "scorer": "model_inference",
     "session": "http",
     "session_state": "state_store",
     "state_store": "state_store",
@@ -4553,6 +4715,8 @@ _SCENARIO_PACK_ATTR_ALIASES: dict[str, str] = {
     "transport": "http",
     "upload_download": "upload_download",
     "uploader": "upload_download",
+    "vector_store": "feature_store",
+    "weights_store": "upload_download",
 }
 
 
@@ -7413,6 +7577,62 @@ _FAULT_PATTERNS: dict[str, list[tuple[str, str, dict[str, Any]]]] = {
 }
 
 
+def _ml_data_fault_specs(call_str: str) -> list[tuple[str, str, dict[str, Any]]]:
+    """Infer ML/data seam faults from one dotted call target string."""
+    parts = [part.lower() for part in call_str.split(".") if part]
+    if not parts:
+        return []
+    leaf = parts[-1]
+    has_model_token = bool(
+        {
+            "model",
+            "model_client",
+            "predictor",
+            "scorer",
+            "embedder",
+            "encoder",
+            "classifier",
+            "reranker",
+        }
+        & set(parts)
+    )
+    has_feature_token = bool(
+        {
+            "feature_store",
+            "vector_store",
+            "embedding_store",
+            "retriever",
+            "feature_client",
+        }
+        & set(parts)
+    )
+    if has_model_token and leaf in {"predict", "infer", "run"}:
+        return [
+            ("numerical", "nan_injection", {}),
+            ("numerical", "partial_batch", {}),
+            ("numerical", "dtype_drift", {}),
+        ]
+    if has_model_token and leaf in {"predict_proba", "transform", "embed", "encode"}:
+        return [
+            ("numerical", "partial_batch", {}),
+            ("numerical", "feature_order_drift", {}),
+            ("numerical", "dtype_drift", {}),
+        ]
+    if has_feature_token and leaf in {
+        "get",
+        "fetch",
+        "lookup",
+        "get_features",
+        "fetch_features",
+        "lookup_features",
+    }:
+        return [
+            ("numerical", "missing_feature", {}),
+            ("numerical", "dtype_drift", {}),
+        ]
+    return []
+
+
 def _infer_faults(
     mod: ModuleType,
     mod_name: str,
@@ -7433,7 +7653,7 @@ def _infer_faults(
     import textwrap
 
     faults: list[Fault] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str, str, tuple[tuple[str, Any], ...]]] = set()
 
     for name, func in _get_public_functions(
         mod,
@@ -7464,7 +7684,12 @@ def _infer_faults(
                 if pattern not in call_str:
                     continue
                 for fault_mod, fault_fn, kwargs in fault_specs:
-                    key = f"{fault_mod}.{fault_fn}"
+                    key = (
+                        name,
+                        fault_mod,
+                        fault_fn,
+                        tuple(sorted(kwargs.items())),
+                    )
                     if key in seen:
                         continue
                     seen.add(key)
@@ -7477,9 +7702,32 @@ def _infer_faults(
                     else:
                         faults.append(factory(**kwargs))
 
+            for fault_mod, fault_fn, kwargs in _ml_data_fault_specs(call_str):
+                key = (
+                    name,
+                    fault_mod,
+                    fault_fn,
+                    tuple(sorted(kwargs.items())),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                fault_module = importlib.import_module(f"ordeal.faults.{fault_mod}")
+                factory = getattr(fault_module, fault_fn)
+                params = inspect.signature(factory).parameters
+                if "target" in params:
+                    faults.append(factory(f"{mod_name}.{name}", **kwargs))
+                else:
+                    faults.append(factory(**kwargs))
+
             # Cross-function calls → error_on_call
-            if call_str.startswith(mod_name + ".") and call_str not in seen:
-                seen.add(call_str)
+            if call_str.startswith(mod_name + ".") and (
+                name,
+                "io",
+                call_str,
+                (),
+            ) not in seen:
+                seen.add((name, "io", call_str, ()))
                 from ordeal.faults.io import error_on_call
 
                 faults.append(error_on_call(call_str))

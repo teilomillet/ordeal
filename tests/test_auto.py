@@ -1925,7 +1925,7 @@ class TestScanModule:
 
         monkeypatch.setattr(ordeal, "_get_version", missing_version)
 
-        assert ordeal._resolve_version() == "0.3.32"
+        assert ordeal._resolve_version() == ordeal._source_tree_version()
 
     def test_marks_unreplayed_crashes_as_speculative(self):
         calls = iter(range(10_000))

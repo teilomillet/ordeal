@@ -7722,12 +7722,16 @@ def _infer_faults(
                     faults.append(factory(**kwargs))
 
             # Cross-function calls → error_on_call
-            if call_str.startswith(mod_name + ".") and (
-                name,
-                "io",
-                call_str,
-                (),
-            ) not in seen:
+            if (
+                call_str.startswith(mod_name + ".")
+                and (
+                    name,
+                    "io",
+                    call_str,
+                    (),
+                )
+                not in seen
+            ):
                 seen.add((name, "io", call_str, ()))
                 from ordeal.faults.io import error_on_call
 

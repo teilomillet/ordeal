@@ -6940,8 +6940,7 @@ def _count_entries(value: Any) -> int | None:
         return None
     if isinstance(value, Mapping):
         if value and all(
-            isinstance(v, (int, float)) and not isinstance(v, bool)
-            for v in value.values()
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in value.values()
         ):
             return sum(int(v) for v in value.values())
         return len(value)
@@ -6989,8 +6988,7 @@ def _summarize_telemetry_items(value: Any) -> tuple[int | None, Counter[str]]:
         return None, Counter()
     if isinstance(value, Mapping):
         if value and all(
-            isinstance(v, (int, float)) and not isinstance(v, bool)
-            for v in value.values()
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in value.values()
         ):
             histogram = Counter()
             total = 0

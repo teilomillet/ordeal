@@ -2757,9 +2757,7 @@ scan_max_examples = 12
         assert "index: .ordeal/findings/index.json" in captured.out
         assert "available:" in captured.out
         fid = bundle["findings"][0]["finding_id"]
-        assert (
-            f"verify: uv run ordeal verify {fid} --allow-unsafe-artifacts" in captured.out
-        )
+        assert f"verify: uv run ordeal verify {fid} --allow-unsafe-artifacts" in captured.out
         assert "pytest: uv run pytest tests/test_ordeal_regressions.py -q" in captured.out
         assert "rescan: uv run ordeal scan pkg.mod --save-artifacts" in captured.out
         assert "Scan report saved:" in captured.err
@@ -3208,9 +3206,7 @@ scan_max_examples = 12
         assert len(artifact_index["entries"]) == 1
         assert "No runnable regression is recorded" in captured.err
 
-    def test_verify_refuses_without_explicit_unsafe_opt_in(
-        self, monkeypatch, tmp_path, capsys
-    ):
+    def test_verify_refuses_without_explicit_unsafe_opt_in(self, monkeypatch, tmp_path, capsys):
         index_path, bundle_path, finding_id = _write_verify_fixture(tmp_path)
 
         called = False

@@ -854,9 +854,7 @@ class ExplorationResult:
             if self.swarm_stats:
                 lines.append(
                     "  Swarm leaders: "
-                    + "; ".join(
-                        _format_swarm_config_summary(row) for row in self.swarm_stats[:3]
-                    )
+                    + "; ".join(_format_swarm_config_summary(row) for row in self.swarm_stats[:3])
                 )
             if self.uncovered_fault_pairs:
                 missing = ["/".join(pair) for pair in self.uncovered_fault_pairs[:4]]
@@ -2030,9 +2028,7 @@ class Explorer:
                 return None
             min_hits = min(self._fault_pair_hits.get(pair, 0) for pair in all_pairs)
             candidate_pairs = [
-                pair
-                for pair in all_pairs
-                if self._fault_pair_hits.get(pair, 0) == min_hits
+                pair for pair in all_pairs if self._fault_pair_hits.get(pair, 0) == min_hits
             ]
         if not candidate_pairs:
             return None
@@ -3328,9 +3324,7 @@ class Explorer:
             )
             result.rule_fault_coverage = merged_rule_fault
             result.behavior_coverage = {
-                rule_name: {
-                    fault_sig: sorted(props) for fault_sig, props in fault_map.items()
-                }
+                rule_name: {fault_sig: sorted(props) for fault_sig, props in fault_map.items()}
                 for rule_name, fault_map in merged_behavior.items()
             }
             result.property_stress = merged_property_stress

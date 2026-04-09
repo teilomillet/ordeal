@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.34
+
+**Fixes:**
+
+- unwrap pytest fixtures in auto harness dry-runs
+
+**Other:**
+
+- test: follow source-tree version after rebase
+
+
 ## 0.3.31
 
 **Features:**

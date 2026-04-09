@@ -901,7 +901,8 @@ class ExplorationResult:
             )
             lines.append(
                 "Native boundary: "
-                f"{len(self.native_boundary_findings)} findings ({_format_counter_summary(labels)})"
+                f"{len(self.native_boundary_findings)} findings "
+                f"({_format_counter_summary(labels)})"
             )
         if self.seed_mutations_used > 0:
             lines.append(
@@ -2028,7 +2029,11 @@ class Explorer:
             if not all_pairs:
                 return None
             min_hits = min(self._fault_pair_hits.get(pair, 0) for pair in all_pairs)
-            candidate_pairs = [pair for pair in all_pairs if self._fault_pair_hits.get(pair, 0) == min_hits]
+            candidate_pairs = [
+                pair
+                for pair in all_pairs
+                if self._fault_pair_hits.get(pair, 0) == min_hits
+            ]
         if not candidate_pairs:
             return None
 
@@ -3335,7 +3340,10 @@ class Explorer:
             all_fault_names = [f.name for f in getattr(self.test_class, "faults", [])]
             result.fault_pair_coverage = [
                 {"pair": list(pair), "hits": hits}
-                for pair, hits in sorted(merged_pair_hits.items(), key=lambda item: (item[1], item[0]))
+                for pair, hits in sorted(
+                    merged_pair_hits.items(),
+                    key=lambda item: (item[1], item[0]),
+                )
             ]
             result.uncovered_fault_pairs = [
                 list(pair)

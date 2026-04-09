@@ -1723,7 +1723,10 @@ class TestChaosFor:
             "    def get(self, key: str) -> dict[str, float]:\n"
             "        return {'feature_0': 1.0, 'feature_1': 2.0}\n"
             "\n"
-            "def score(rows: list[list[float]], key: str) -> tuple[list[float], dict[str, float]]:\n"
+            "def score(\n"
+            "    rows: list[list[float]],\n"
+            "    key: str,\n"
+            ") -> tuple[list[float], dict[str, float]]:\n"
             "    model = Predictor()\n"
             "    feature_store = FeatureStore()\n"
             "    return model.predict(rows), feature_store.get(key)\n",

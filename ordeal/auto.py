@@ -2224,7 +2224,8 @@ _BUILTIN_OBJECT_SCENARIO_LIBRARY_SPECS: dict[str, dict[str, Any]] = {
             "classifier",
         ),
         "description": (
-            "Stub model-style collaborators with stable prediction, embedding, and scoring outputs."
+            "Stub model-style collaborators with stable prediction, "
+            "embedding, and scoring outputs."
         ),
         "hook": _apply_model_inference_pack,
     },

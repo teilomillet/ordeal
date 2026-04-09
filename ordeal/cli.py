@@ -6939,7 +6939,10 @@ def _count_entries(value: Any) -> int | None:
     if value is None:
         return None
     if isinstance(value, Mapping):
-        if value and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value.values()):
+        if value and all(
+            isinstance(v, (int, float)) and not isinstance(v, bool)
+            for v in value.values()
+        ):
             return sum(int(v) for v in value.values())
         return len(value)
     if isinstance(value, (str, bytes, bytearray)):
@@ -6985,7 +6988,10 @@ def _summarize_telemetry_items(value: Any) -> tuple[int | None, Counter[str]]:
     if value is None:
         return None, Counter()
     if isinstance(value, Mapping):
-        if value and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value.values()):
+        if value and all(
+            isinstance(v, (int, float)) and not isinstance(v, bool)
+            for v in value.values()
+        ):
             histogram = Counter()
             total = 0
             for key, count in value.items():
@@ -7122,7 +7128,14 @@ def _format_swarm_telemetry(result: Any) -> str | None:
         parts.append(f"{config_count} configs")
 
     if isinstance(section, Mapping) and any(
-        key in section for key in ("top_config", "best_config", "dead_configs", "edge_gain", "failure_count")
+        key in section
+        for key in (
+            "top_config",
+            "best_config",
+            "dead_configs",
+            "edge_gain",
+            "failure_count",
+        )
     ):
         extra = _format_mapping_counts(
             section,

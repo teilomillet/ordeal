@@ -122,7 +122,8 @@ verbose = true
 # module = "myapp.scoring"
 # max_examples = 50
 # mode = "evidence"   # or "candidate" for stricter ranking
-# security_focus = true   # opt in to trust-boundary-biased sink detection/probes
+# security_focus = true   # opt in to trust-boundary-biased sink detection, path probes,
+#                        # and small artifact/config mutations for deserialize/IPC inputs
 # include_private = false
 #
 # # Optional: focus scan on a subset of callables instead of the whole module
@@ -244,8 +245,8 @@ verbose = true
 #
 # # Optional outputs / gates.
 # show_generated = false
-# # save_generated = "tests/test_migrated.py"
-# # write_gaps_dir = "tests/gaps"
+# # save_generated = "tests/test_migrated.py"  # must stay under the current workspace root
+# # write_gaps_dir = "tests/gaps"              # must stay under the current workspace root
 # # min_fixture_completeness = 0.5
 # include_exploratory_function_gaps = false
 # require_direct_tests = false
@@ -255,14 +256,14 @@ verbose = true
 #
 # [init]
 # target = "myapp"
-# output_dir = "tests"
+# output_dir = "tests"   # must stay under the current workspace root
 # ci = false
 # ci_name = "ordeal"
 # install_skill = false
 # close_gaps = false
 #
 # # Optional deeper defaults for the bootstrap loop.
-# # gap_output_dir = "tests/gaps"
+# # gap_output_dir = "tests/gaps"   # must stay under the current workspace root
 # mutation_preset = "essential"
 # scan_max_examples = 10
 

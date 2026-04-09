@@ -98,6 +98,22 @@ def _workflow_path_from_ci_name(ci_name: str) -> Path:
     return Path(".github") / "workflows" / filename
 
 
+def _workspace_output_path(path_value: str | os.PathLike[str], *, label: str) -> Path:
+    """Return *path_value* when it stays inside the current workspace root."""
+    cleaned = os.fspath(path_value).strip()
+    if not cleaned:
+        raise ValueError(f"{label} cannot be empty")
+    raw_path = Path(cleaned)
+    workspace_root = Path.cwd().resolve()
+    candidate = raw_path if raw_path.is_absolute() else workspace_root / raw_path
+    resolved = candidate.resolve(strict=False)
+    try:
+        resolved.relative_to(workspace_root)
+    except ValueError as exc:
+        raise ValueError(f"{label} must stay within the current workspace") from exc
+    return raw_path if not raw_path.is_absolute() else resolved
+
+
 def _public_scan_mode(mode: str) -> str:
     """Return the preferred public label for one scan mode."""
     return {
@@ -5457,6 +5473,25 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             )
         return 0
 
+    try:
+        save_generated_path = (
+            _workspace_output_path(str(save_generated), label="audit.save_generated")
+            if save_generated
+            else None
+        )
+        write_gaps_dir = (
+            _workspace_output_path(str(write_gaps), label="audit.write_gaps_dir")
+            if write_gaps
+            else None
+        )
+    except ValueError as exc:
+        _stderr(f"Invalid audit output path: {exc}\n")
+        return 2
+    if save_generated_path is not None:
+        save_generated = str(save_generated_path)
+    if write_gaps_dir is not None:
+        write_gaps = str(write_gaps_dir)
+
     def _collect_results() -> list[Any]:
         collected: list[Any] = []
         for target in target_names:
@@ -6245,6 +6280,15 @@ def _cmd_init(args: argparse.Namespace) -> int:
         except ValueError as exc:
             _stderr(f"Invalid CI workflow name: {exc}\n")
             return 2
+    try:
+        output_dir = str(_workspace_output_path(output_dir, label="init.output_dir"))
+        if close_gaps:
+            gap_output_dir = str(
+                _workspace_output_path(gap_output_dir, label="init.gap_output_dir")
+            )
+    except ValueError as exc:
+        _stderr(f"Invalid init output path: {exc}\n")
+        return 2
 
     results = init_project(target=target, output_dir=output_dir, dry_run=dry_run)
 

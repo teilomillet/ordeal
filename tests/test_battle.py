@@ -21,11 +21,16 @@ from hypothesis import strategies as st
 from hypothesis.stateful import invariant, precondition, rule
 
 from ordeal.assertions import PropertyTracker
+from ordeal.auto import _test_one_function
 from ordeal.buggify import activate, buggify, buggify_value, deactivate, set_seed
 from ordeal.chaos import ChaosTest
 from ordeal.faults import LambdaFault, PatchFault
 from ordeal.invariants import bounded, finite, monotonic, no_inf, no_nan, unique
-from ordeal.mutations import generate_mutants, mutate_function_and_test, validate_mined_properties
+from ordeal.mutations import (
+    generate_mutants,
+    mutate_function_and_test,
+    validate_mined_properties,
+)
 from ordeal.strategies import corrupted_bytes, nan_floats
 
 # ============================================================================
@@ -776,3 +781,56 @@ class TestEquivalenceFiltering:
         source = "def compute(a, b):\n    return a * b + a\n"
         mutants = generate_mutants(source, operators=["arithmetic"])
         assert len(mutants) >= 2, f"Real mutants should not be filtered: {len(mutants)}"
+
+
+class TestAutoSecurityFocusBattle:
+    def test_security_focus_promotes_data_sink_artifact_candidates(self):
+        import pickle
+        from multiprocessing import shared_memory
+
+        cases = [
+            ("deserialization", {"blob": st.just(b"trusted")}, bytes),
+            ("ipc", {"channel": st.just("trusted")}, str),
+        ]
+
+        for critical_sink, strategies, return_type in cases:
+            if critical_sink == "deserialization":
+                def target(blob: bytes) -> bytes:
+                    if False:
+                        pickle.loads(blob)
+                    if blob.startswith(b'{"artifact"'):
+                        raise RuntimeError("checkpoint probe rejected")
+                    return blob
+            else:
+                def target(channel: str) -> str:
+                    if False:
+                        shared_memory.SharedMemory(name=channel)
+                    if channel.startswith("ordeal-security-probe"):
+                        raise RuntimeError("ipc descriptor rejected")
+                    return channel
+
+            baseline = _test_one_function(
+                "target",
+                target,
+                strategies,
+                return_type,
+                max_examples=1,
+                check_return_type=True,
+                mode="candidate",
+            )
+            focused = _test_one_function(
+                "target",
+                target,
+                strategies,
+                return_type,
+                max_examples=1,
+                check_return_type=True,
+                mode="candidate",
+                security_focus=True,
+            )
+
+            assert baseline.execution_ok is True
+            assert focused.verdict == "promoted_real_bug"
+            assert focused.input_source == "artifact_mutation"
+            assert focused.proof_bundle is not None
+            assert focused.proof_bundle["impact"]["critical_sinks"] == [critical_sink]

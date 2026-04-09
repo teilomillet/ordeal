@@ -227,13 +227,47 @@ _SECURITY_PROBE_VALUES: dict[str, tuple[Any, ...]] = {
     "path": ("../security_probe.txt", "nested/../../security_probe.txt"),
     "symlink": ("link/../security_probe.txt",),
 }
+_SECURITY_ARTIFACT_MUTATION_VALUES: dict[str, tuple[Any, ...]] = {
+    "serialized_bytes": (
+        b'{"artifact":"../security_probe.txt","trace":"seed-1.json"}',
+        b"ODRL\x00checkpoint",
+    ),
+    "serialized_text": (
+        '{"artifact":"../security_probe.txt","trace":"seed-1.json"}',
+        "checkpoint = '../security_probe.txt'\ntrace = 'seed-1.json'\n",
+    ),
+    "serialized_mapping": (
+        {"artifact": "../security_probe.txt", "trace": "seed-1.json"},
+        {"checkpoint": "seed-1", "resume": True},
+    ),
+    "json_text": (
+        '{"config":"../security_probe.txt","kind":"artifact"}',
+        '{"tool_call":{"name":"json","arguments":{"config":"../security_probe.txt"}}}',
+    ),
+    "json_mapping": (
+        {"config": "../security_probe.txt", "kind": "artifact"},
+        {"tool_call": {"name": "json", "arguments": {"config": "../security_probe.txt"}}},
+    ),
+    "ipc_text": ("ordeal-security-probe", "ordeal/security/probe"),
+    "ipc_bytes": (b"ordeal-security-probe",),
+    "ipc_mapping": (
+        {"channel": "ordeal-security-probe", "checkpoint": "seed-1"},
+        {"segment": "ordeal-security-probe", "descriptor": "ring-0"},
+    ),
+    "import_text": ("json", "json.tool"),
+}
 _SECURITY_SHAPER_TOKENS = {
     "artifact",
     "build",
     "bundle",
     "checkpoint",
     "config",
+    "decode",
+    "descriptor",
+    "frame",
+    "header",
     "normalize",
+    "parse",
     "path",
     "prepare",
     "render",
@@ -241,27 +275,39 @@ _SECURITY_SHAPER_TOKENS = {
     "seed",
     "target",
     "trace",
+    "validate",
     "verify",
 }
 _SECURITY_SIDE_EFFECT_TOKENS = {
+    "accept",
+    "attach",
+    "connect",
     "create",
     "delete",
     "dump",
     "execute",
     "import_module",
+    "listen",
     "load_state",
     "loads(",
     "mkdir",
+    "mmap",
     "open(",
     "pickle.load",
     "pickle.loads",
     "popen",
     "publish",
+    "recv",
     "remove",
     "run(",
     "save",
+    "send_bytes",
+    "sharedmemory",
+    "shared_memory(",
+    "socket(",
     "subprocess",
     "unlink",
+    "unpickler",
     "upload",
     "write(",
     "write_bytes",
@@ -1671,28 +1717,67 @@ def _infer_sink_categories(func: Any, *, security_focus: bool = False) -> list[s
                     (
                         "pickle.load",
                         "pickle.loads",
+                        "msgpack",
+                        "marshal",
+                        "cbor",
                         "yaml.load",
                         "yaml.safe_load",
+                        "plistlib",
+                        "from_bytes",
                         "tomllib.load",
                         "tomllib.loads",
                         "json.loads",
                         "json.load",
                         "literal_eval",
                     ),
-                    {"payload", "blob", "checkpoint", "trace", "bundle", "artifact"},
+                    {
+                        "artifact",
+                        "blob",
+                        "bundle",
+                        "checkpoint",
+                        "config",
+                        "frame",
+                        "manifest",
+                        "payload",
+                        "resume",
+                        "session",
+                        "snapshot",
+                        "state",
+                        "trace",
+                    },
                 ),
                 (
                     "ipc",
                     (
                         "shared_memory",
+                        "sharedmemory",
                         "multiprocessing",
                         "ring buffer",
                         "checkpoint pool",
                         "socket",
+                        "pipe(",
+                        "connection",
+                        "recv_bytes",
+                        "send_bytes",
+                        "sharedmemorymanager",
                         "queue(",
                         "mmap",
                     ),
-                    {"segment", "shared_memory", "channel", "queue", "ring", "checkpoint"},
+                    {
+                        "channel",
+                        "checkpoint",
+                        "descriptor",
+                        "fd",
+                        "mailbox",
+                        "pipe",
+                        "queue",
+                        "ring",
+                        "segment",
+                        "shared_memory",
+                        "shm",
+                        "sock",
+                        "topic",
+                    },
                 ),
                 (
                     "symlink",
@@ -5923,6 +6008,16 @@ def _candidate_inputs(
                 continue
             seen.add(key)
             candidates.append(candidate)
+        for candidate in _artifact_mutation_candidate_inputs(
+            target,
+            boundary_inputs,
+            sink_categories,
+        ):
+            key = repr(sorted(candidate.kwargs.items()))
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(candidate)
 
     return candidates
 
@@ -6048,16 +6143,41 @@ def _semantic_bucket(name: str, hint: Any | None) -> str:
     if any(
         token in lowered
         for token in {
+            "config",
             "pickle",
             "checkpoint",
             "trace",
             "bundle",
             "artifact",
             "blob",
+            "frame",
+            "manifest",
+            "resume",
+            "session",
+            "snapshot",
+            "state",
+            "toml",
         }
     ):
         return "serialized"
-    if any(token in lowered for token in {"channel", "segment", "shared_memory", "queue", "ring"}):
+    if any(
+        token in lowered
+        for token in {
+            "channel",
+            "checkpoint",
+            "descriptor",
+            "fd",
+            "mailbox",
+            "pipe",
+            "queue",
+            "ring",
+            "segment",
+            "shared_memory",
+            "shm",
+            "sock",
+            "topic",
+        }
+    ):
         return "ipc"
     if "link" in lowered or "symlink" in lowered:
         return "symlink"
@@ -6098,9 +6218,13 @@ def _semantic_value_score(bucket: str, value: Any) -> float:
                 1.0 if isinstance(value, str) and ("." in value or value.isidentifier()) else 0.0
             )
         case "serialized":
-            return 1.0 if isinstance(value, (bytes, bytearray, str, Mapping)) else 0.0
+            return 1.0 if isinstance(value, (bytes, bytearray, memoryview, str, Mapping)) else 0.0
         case "ipc":
-            return 1.0 if isinstance(value, (str, bytes, bytearray)) else 0.0
+            return (
+                1.0
+                if isinstance(value, (str, bytes, bytearray, memoryview, Mapping))
+                else 0.0
+            )
         case "symlink":
             return 1.0 if isinstance(value, (str, os.PathLike)) else 0.0
         case "message":
@@ -6164,6 +6288,158 @@ def _security_candidate_inputs(
                     kwargs=kwargs,
                     origin="security_probe",
                     rationale=(f"security probe for {bucket} trust-boundary handling",),
+                )
+            )
+    return candidates
+
+
+def _security_base_kwargs(func: Any) -> dict[str, Any] | None:
+    """Return one conservative kwargs mapping for deterministic security probes."""
+    target = _unwrap(func)
+    try:
+        sig = inspect.signature(target)
+    except Exception:
+        return None
+    hints = safe_get_annotations(target)
+    source_boundaries = _source_boundary_candidates(target)
+    doc_boundaries = _docstring_boundary_candidates(target, hints)
+
+    def _fallback_value(name: str, hint: Any | None) -> Any:
+        values = list(source_boundaries.get(name, ())) or list(doc_boundaries.get(name, ()))
+        if hint is not None:
+            values.extend(_boundary_values_for_hint(hint))
+        if values:
+            return values[0]
+        bucket = _semantic_bucket(name, hint)
+        if hint in _BOUNDARY_SMOKE_VALUES:
+            return _BOUNDARY_SMOKE_VALUES[hint][0]
+        match bucket:
+            case "path" | "symlink":
+                return "artifact.txt"
+            case "shell":
+                return "echo ordeal"
+            case "import":
+                return "json"
+            case "serialized":
+                if hint is dict or get_origin(hint) is dict:
+                    return {"checkpoint": "seed-1"}
+                if hint in {bytes, bytearray, memoryview}:
+                    return b"{}"
+                return "{}"
+            case "ipc":
+                if hint is dict or get_origin(hint) is dict:
+                    return {"channel": "ordeal-base"}
+                if hint in {bytes, bytearray, memoryview}:
+                    return b"ordeal-base"
+                return "ordeal-base"
+            case "mapping" | "json":
+                return {}
+            case "message" | "generic":
+                return "ok"
+            case "numeric":
+                return 1
+            case "collection":
+                return {}
+            case _:
+                return "ok"
+
+    kwargs: dict[str, Any] = {}
+    for name, param in sig.parameters.items():
+        if name in {"self", "cls"}:
+            continue
+        if param.default is not inspect.Signature.empty:
+            kwargs[name] = param.default
+            continue
+        kwargs[name] = _fallback_value(name, hints.get(name))
+    return kwargs
+
+
+def _artifact_mutation_probe_values(
+    *,
+    bucket: str,
+    name: str,
+    hint: Any | None,
+    current_value: Any,
+) -> tuple[Any, ...]:
+    """Return deterministic artifact/config mutations for one semantic bucket."""
+    lowered = name.lower()
+    if bucket == "import":
+        return _SECURITY_ARTIFACT_MUTATION_VALUES["import_text"]
+    if bucket == "serialized":
+        if isinstance(current_value, Mapping) or hint is dict or get_origin(hint) is dict:
+            return _SECURITY_ARTIFACT_MUTATION_VALUES["serialized_mapping"]
+        if isinstance(current_value, (bytes, bytearray, memoryview)) or hint in {
+            bytes,
+            bytearray,
+            memoryview,
+        }:
+            return _SECURITY_ARTIFACT_MUTATION_VALUES["serialized_bytes"]
+        if any(token in lowered for token in {"config", "manifest", "settings", "toml"}):
+            return (
+                _SECURITY_ARTIFACT_MUTATION_VALUES["serialized_text"][1],
+                *_SECURITY_ARTIFACT_MUTATION_VALUES["serialized_mapping"],
+            )
+        return _SECURITY_ARTIFACT_MUTATION_VALUES["serialized_text"]
+    if bucket == "json":
+        if isinstance(current_value, Mapping) or hint is dict or get_origin(hint) is dict:
+            return _SECURITY_ARTIFACT_MUTATION_VALUES["json_mapping"]
+        return _SECURITY_ARTIFACT_MUTATION_VALUES["json_text"]
+    if bucket == "ipc":
+        if isinstance(current_value, Mapping) or hint is dict or get_origin(hint) is dict:
+            return _SECURITY_ARTIFACT_MUTATION_VALUES["ipc_mapping"]
+        if isinstance(current_value, (bytes, bytearray, memoryview)) or hint in {
+            bytes,
+            bytearray,
+            memoryview,
+        }:
+            return _SECURITY_ARTIFACT_MUTATION_VALUES["ipc_bytes"]
+        return _SECURITY_ARTIFACT_MUTATION_VALUES["ipc_text"]
+    return ()
+
+
+def _artifact_mutation_candidate_inputs(
+    func: Any,
+    boundary_inputs: Sequence[Mapping[str, Any]],
+    sink_categories: Sequence[str],
+) -> list[CandidateInput]:
+    """Build deterministic artifact/config mutation candidates for risky data sinks."""
+    if not ({"deserialization", "ipc", "import"} & set(sink_categories)):
+        return []
+    target = _unwrap(func)
+    try:
+        sig = inspect.signature(target)
+    except Exception:
+        return []
+    hints = safe_get_annotations(target)
+    base_kwargs = (
+        dict(boundary_inputs[0])
+        if boundary_inputs
+        else (_security_base_kwargs(target) or {})
+    )
+    if not base_kwargs:
+        return []
+
+    candidates: list[CandidateInput] = []
+    for name, param in sig.parameters.items():
+        if name in {"self", "cls"}:
+            continue
+        if name not in base_kwargs and param.default is inspect.Signature.empty:
+            continue
+        hint = hints.get(name)
+        bucket = _semantic_bucket(name, hint)
+        for probe in _artifact_mutation_probe_values(
+            bucket=bucket,
+            name=name,
+            hint=hint,
+            current_value=base_kwargs.get(name),
+        ):
+            kwargs = dict(base_kwargs)
+            kwargs[name] = probe
+            candidates.append(
+                CandidateInput(
+                    kwargs=kwargs,
+                    origin="artifact_mutation",
+                    rationale=(f"artifact/config mutation for {bucket} trust-boundary handling",),
                 )
             )
     return candidates
@@ -6297,13 +6573,7 @@ def _score_contract_fit(
         contract_fit = min(contract_fit + 0.15, 1.0)
         reasons.append("matches a concrete seed from tests/docs/code")
     realism = sum(realism_scores) / len(realism_scores) if realism_scores else 0.0
-    sink_signal = max(
-        [
-            *sink_scores,
-            *[_SECURITY_SINK_WEIGHTS.get(cat, 0.0) for cat in sink_categories],
-        ],
-        default=0.0,
-    )
+    sink_signal = max(sink_scores, default=0.0)
     return contract_fit, realism, sink_signal, reasons[:6]
 
 
@@ -6337,6 +6607,27 @@ def _looks_like_declared_contract_robustness(
     )
 
 
+def _aligned_security_sinks(
+    kwargs: Mapping[str, Any],
+    profile: Mapping[str, Any],
+) -> list[str]:
+    """Return sink categories supported by both the callable and the concrete input."""
+    params = profile.get("params", {})
+    sink_categories = {str(item) for item in profile.get("sink_categories", ())}
+    aligned: set[str] = set()
+    for name, value in kwargs.items():
+        meta = params.get(name, {})
+        bucket = str(meta.get("semantic", "generic"))
+        if _semantic_value_score(bucket, value) < 0.6:
+            continue
+        aligned.update(
+            sink
+            for sink in _SECURITY_BUCKET_TO_SINKS.get(bucket, ())
+            if sink in sink_categories
+        )
+    return sorted(aligned, key=lambda item: (-_SECURITY_SINK_WEIGHTS.get(item, 0.0), item))
+
+
 def _reachability_score(
     origin: str | None,
     kwargs: Mapping[str, Any],
@@ -6351,6 +6642,7 @@ def _reachability_score(
         "source_boundary": 0.75,
         "pytest_seed": 1.0,
         "seed_mutation": 0.8,
+        "artifact_mutation": 0.8,
         "security_probe": 0.7,
         "boundary": 0.7,
         "random_fuzz": 0.45,
@@ -7594,10 +7886,12 @@ def _test_one_function(
         replayable, replay_attempts, replay_matches = _replay_failure(e)
         contract_fit, realism, sink_signal, rationale = _score_contract_fit(last_kwargs, profile)
         reachability = _reachability_score(last_input_source, last_kwargs, profile)
+        aligned_sinks = _aligned_security_sinks(last_kwargs, profile)
+        aligned_critical_sinks = _critical_security_sinks(aligned_sinks)
         effective_min_contract_fit = min_contract_fit
         effective_min_reachability = min_reachability
         effective_min_realism = min_realism
-        if security_focus and _critical_security_sinks(sink_categories):
+        if security_focus and aligned_critical_sinks:
             effective_min_contract_fit = max(0.45, min_contract_fit - 0.1)
             effective_min_reachability = max(0.35, min_reachability - 0.1)
             effective_min_realism = max(0.5, min_realism - 0.05)

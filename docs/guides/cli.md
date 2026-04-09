@@ -81,7 +81,7 @@ Use `--save-artifacts` when you want the full handoff package. In addition to th
 
 `scan` is evidence-first. In `--mode evidence`, it surfaces replayable crashes, weaker exploratory properties, and expected precondition failures without flattening them into one verdict. `--mode candidate` keeps the same search but ranks only the strongest contract-valid issue candidates at the top. If `[[scan]]` or `[[objects]]` leave fixture completeness too low for the module, `scan` will report that as a block instead of pretending it has real leverage. In that case, add a factory, `state_factory`, or `harness = "stateful"` before expecting useful output. If you need stronger validation for a mature codebase, prefer `ordeal audit` for coverage and mutation comparison, and `ordeal mutate` for direct mutation scoring.
 
-`--security-focus` is the opt-in trust-boundary bias for scan. It expands sink inference beyond shell/path/env to import loading, deserialization, filesystem writes, symlink handling, and checkpoint/IPC paths, then adds deterministic low-side-effect probes for pure path/symlink shapers. Saved proof bundles keep that context under `impact.critical_sinks`, `impact.trust_boundary_signal`, and `contract_basis.security_focus`.
+`--security-focus` is the opt-in trust-boundary bias for scan. It expands sink inference beyond shell/path/env to import loading, deserialization, filesystem writes, symlink handling, and checkpoint/IPC paths, then adds deterministic low-side-effect probes for pure path/symlink shapers plus small artifact/config mutations for deserialization- and IPC-shaped inputs. Saved proof bundles keep that context under `impact.critical_sinks`, `impact.trust_boundary_signal`, and `contract_basis.security_focus`.
 
 Promoted crash findings now carry a proof bundle in Markdown, JSON, and agent output: witness input, contract basis, confidence breakdown, minimal reproduction, failure path, and likely impact. Demoted crashes keep the same structure plus an explicit demotion reason.
 
@@ -125,6 +125,8 @@ ordeal init myapp --ci
 By default, `init` does not install the bundled skill and does not write draft audit gap stub files. Those extra writes are explicit opt-ins.
 
 `init` now also reads `[init]` from `ordeal.toml` when present. That lets you keep bootstrap defaults like `target`, `output_dir`, `close_gaps`, and CI generation in versioned config instead of repeating flags in scripts.
+
+For safety, `audit.save_generated`, `audit.write_gaps_dir`, `init.output_dir`, and `init.gap_output_dir` must stay inside the current workspace root.
 
 | Flag | Default | Description |
 |---|---|---|

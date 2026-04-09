@@ -50,6 +50,8 @@ For security-oriented triage, keep the same API and opt into trust-boundary bias
 result = scan_module("myapp.scoring", mode="candidate", security_focus=True)
 ```
 
+With `security_focus=True`, scan also synthesizes small artifact/config mutations for deserialization- and IPC-shaped parameters, so the same call can surface trust-boundary bugs beyond path-only shapers.
+
 ## fuzz
 
 !!! quote "What this unlocks"

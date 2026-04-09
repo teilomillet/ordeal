@@ -129,7 +129,7 @@ relation_overrides = { normalize = ["equivalent"] }
 
 When you run `pytest --chaos`, ordeal auto-discovers these entries and smoke-tests every public function in each module. Functions without type hints are skipped unless fixtures are provided or a registry supplies them. Known preconditions stay separate from candidate issue ranking so the output stays epistemic.
 
-`security_focus = true` is the opt-in trust-boundary review setting. It widens the sink taxonomy to include import/deserialization/filesystem-write/IPC paths and adds deterministic probes for pure path/symlink shapers without creating a second scan command.
+`security_focus = true` is the opt-in trust-boundary review setting. It widens the sink taxonomy to include import/deserialization/filesystem-write/IPC paths, adds deterministic probes for pure path/symlink shapers, and synthesizes small artifact/config mutations for deserialization- and IPC-shaped parameters without creating a second scan command.
 
 `targets` now acts as a first-class selector list, not just an exact-callable allowlist. Exact names still work, and glob patterns let package-root scans focus on a subset of exported callables without rewriting the module target.
 
@@ -250,6 +250,8 @@ min_fixture_completeness = 0.5
 
 Use `[[audit.targets]]` when one class needs an audit-specific factory or a narrower method subset:
 
+`save_generated` and `write_gaps_dir` are workspace-local output paths. Ordeal rejects values that escape the current repo root.
+
 ```toml
 [[audit.targets]]
 target = "myapp.envs:ComposableEnv"
@@ -285,6 +287,8 @@ close_gaps = true
 gap_output_dir = "tests/gaps"
 scan_max_examples = 12
 ```
+
+`output_dir` and `gap_output_dir` are also workspace-local output paths; values outside the current repo root are rejected.
 
 ## Tuning guide
 

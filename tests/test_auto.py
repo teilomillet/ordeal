@@ -429,6 +429,50 @@ class TestScanModule:
         assert focused.proof_bundle["impact"]["security_focus"] is True
         assert "--security-focus" in focused.proof_bundle["minimal_reproduction"]["command"]
 
+    def test_security_focus_adds_artifact_mutation_probe_for_deserialization_inputs(self):
+        import pickle
+
+        def resume(blob: bytes) -> bytes:
+            if False:
+                pickle.loads(blob)
+            return blob
+
+        candidates = _candidate_inputs(resume, security_focus=True)
+
+        assert any(
+            candidate.origin == "artifact_mutation"
+            and candidate.kwargs["blob"].startswith(b'{"artifact"')
+            for candidate in candidates
+        )
+
+    def test_security_focus_adds_artifact_mutation_probe_for_config_inputs(self):
+        def load_config(config: str) -> str:
+            return config
+
+        candidates = _candidate_inputs(load_config, security_focus=True)
+
+        assert any(
+            candidate.origin == "artifact_mutation"
+            and "checkpoint = '../security_probe.txt'" in candidate.kwargs["config"]
+            for candidate in candidates
+        )
+
+    def test_security_focus_adds_artifact_mutation_probe_for_ipc_inputs(self):
+        from multiprocessing import shared_memory
+
+        def attach(channel: str) -> str:
+            if False:
+                shared_memory.SharedMemory(name=channel)
+            return channel
+
+        candidates = _candidate_inputs(attach, security_focus=True)
+
+        assert any(
+            candidate.origin == "artifact_mutation"
+            and candidate.kwargs["channel"] == "ordeal-security-probe"
+            for candidate in candidates
+        )
+
     def test_security_focus_skips_effectful_path_functions(self):
         def write_output(path: str) -> str:
             Path(path).write_text("payload", encoding="utf-8")
@@ -470,6 +514,104 @@ class TestScanModule:
         assert focused.verdict == "promoted_real_bug"
         assert focused.proof_bundle is not None
         assert focused.proof_bundle["impact"]["critical_sinks"] == ["import"]
+
+    def test_security_focus_promotes_deserialization_sink_with_artifact_mutation(self):
+        import pickle
+
+        def resume(blob: bytes) -> bytes:
+            if False:
+                pickle.loads(blob)
+            if blob.startswith(b'{"artifact"'):
+                raise RuntimeError("checkpoint probe rejected")
+            return blob
+
+        baseline = _test_one_function(
+            "resume",
+            resume,
+            {"blob": st.just(b"trusted")},
+            bytes,
+            max_examples=1,
+            check_return_type=True,
+            mode="candidate",
+        )
+        focused = _test_one_function(
+            "resume",
+            resume,
+            {"blob": st.just(b"trusted")},
+            bytes,
+            max_examples=1,
+            check_return_type=True,
+            mode="candidate",
+            security_focus=True,
+        )
+
+        assert baseline.execution_ok is True
+        assert focused.execution_ok is False
+        assert focused.verdict == "promoted_real_bug"
+        assert focused.input_source == "artifact_mutation"
+        assert focused.proof_bundle is not None
+        assert focused.proof_bundle["impact"]["critical_sinks"] == ["deserialization"]
+
+    def test_security_focus_promotes_ipc_sink_with_artifact_mutation(self):
+        from multiprocessing import shared_memory
+
+        def attach(channel: str) -> str:
+            if False:
+                shared_memory.SharedMemory(name=channel)
+            if channel.startswith("ordeal-security-probe"):
+                raise RuntimeError("ipc descriptor rejected")
+            return channel
+
+        baseline = _test_one_function(
+            "attach",
+            attach,
+            {"channel": st.just("trusted")},
+            str,
+            max_examples=1,
+            check_return_type=True,
+            mode="candidate",
+        )
+        focused = _test_one_function(
+            "attach",
+            attach,
+            {"channel": st.just("trusted")},
+            str,
+            max_examples=1,
+            check_return_type=True,
+            mode="candidate",
+            security_focus=True,
+        )
+
+        assert baseline.execution_ok is True
+        assert focused.execution_ok is False
+        assert focused.verdict == "promoted_real_bug"
+        assert focused.input_source == "artifact_mutation"
+        assert focused.proof_bundle is not None
+        assert focused.proof_bundle["impact"]["critical_sinks"] == ["ipc"]
+
+    def test_security_focus_requires_aligned_risky_parameter_for_threshold_relaxation(self):
+        import importlib
+
+        def load_value(value: object) -> object:
+            if False:
+                importlib.import_module("json")
+            if value == "boom":
+                raise RuntimeError("counter failed")
+            return value
+
+        focused = _test_one_function(
+            "load_value",
+            load_value,
+            {"value": st.just("boom")},
+            object,
+            max_examples=1,
+            check_return_type=True,
+            mode="candidate",
+            security_focus=True,
+        )
+
+        assert focused.crash_category in {"speculative_crash", "invalid_input_crash"}
+        assert focused.verdict in {"exploratory_crash", "invalid_input_crash"}
 
     def test_test_seeds_include_pytest_parametrize_examples(self, tmp_path, monkeypatch):
         pkg = tmp_path / "seedpkg"

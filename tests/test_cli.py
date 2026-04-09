@@ -664,16 +664,19 @@ require_direct_tests = true
                 AssertionError("audit_report should not run when --write-gaps is set")
             ),
         )
+        monkeypatch.chdir(tmp_path)
 
-        gap_dir = tmp_path / "draft-gaps"
+        gap_dir = Path("draft-gaps")
         rc = main(["audit", "pkg.mod", "--write-gaps", str(gap_dir)])
         captured = capsys.readouterr()
 
         assert rc == 0
-        assert (gap_dir / "test_pkg_mod_value_gaps.py").exists()
-        assert (gap_dir / "test_pkg_mod_parse_gaps.py").exists()
-        assert not (gap_dir / "test_pkg_mod_score_gaps.py").exists()
-        parse_stub = (gap_dir / "test_pkg_mod_parse_gaps.py").read_text(encoding="utf-8")
+        assert (tmp_path / gap_dir / "test_pkg_mod_value_gaps.py").exists()
+        assert (tmp_path / gap_dir / "test_pkg_mod_parse_gaps.py").exists()
+        assert not (tmp_path / gap_dir / "test_pkg_mod_score_gaps.py").exists()
+        parse_stub = (tmp_path / gap_dir / "test_pkg_mod_parse_gaps.py").read_text(
+            encoding="utf-8"
+        )
         assert "Reviewed signature: parse(...)" in parse_stub
         assert "Epistemic status: uncovered [none]" in parse_stub
         assert "# - write a direct regression for pkg.mod.parse" in parse_stub
@@ -688,6 +691,64 @@ require_direct_tests = true
         assert "exploratory gaps hidden by default" in captured.out
         assert "score is only indirectly exercised" not in captured.out
         assert "Wrote 2 draft gap stub file(s) to" in captured.err
+
+    def test_audit_rejects_save_generated_path_escape_from_config(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        import ordeal.audit as audit_mod
+
+        config_path = tmp_path / "ordeal.toml"
+        config_path.write_text(
+            "[audit]\n"
+            'modules = ["pkg.mod"]\n'
+            'save_generated = "../escaped/generated.py"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        called = False
+
+        def fake_audit(*args, **kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("audit should not run for rejected output paths")
+
+        monkeypatch.setattr(audit_mod, "audit", fake_audit)
+
+        rc = main(["audit", "--config", str(config_path)])
+        captured = capsys.readouterr()
+
+        assert rc == 2
+        assert called is False
+        assert "Invalid audit output path" in captured.err
+        assert not (tmp_path.parent / "escaped").exists()
+
+    def test_audit_rejects_write_gaps_dir_escape_from_config(self, monkeypatch, tmp_path, capsys):
+        import ordeal.audit as audit_mod
+
+        config_path = tmp_path / "ordeal.toml"
+        config_path.write_text(
+            "[audit]\n"
+            'modules = ["pkg.mod"]\n'
+            'write_gaps_dir = "../escaped/gaps"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        called = False
+
+        def fake_audit(*args, **kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("audit should not run for rejected output paths")
+
+        monkeypatch.setattr(audit_mod, "audit", fake_audit)
+
+        rc = main(["audit", "--config", str(config_path)])
+        captured = capsys.readouterr()
+
+        assert rc == 2
+        assert called is False
+        assert "Invalid audit output path" in captured.err
+        assert not (tmp_path.parent / "escaped").exists()
 
     def test_init_uses_config_defaults_and_audit_settings(self, monkeypatch, tmp_path, capsys):
         import ordeal.audit as audit_mod
@@ -3410,6 +3471,64 @@ scan_max_examples = 12
         assert called is False
         assert "Invalid CI workflow name" in captured.err
         assert not (tmp_path / ".github").exists()
+
+    def test_init_rejects_output_dir_escape_from_config(self, monkeypatch, tmp_path, capsys):
+        import ordeal.mutations as mutations
+
+        config_path = tmp_path / "ordeal.toml"
+        config_path.write_text(
+            "[init]\n"
+            'target = "pkg"\n'
+            f'output_dir = "{(tmp_path.parent / "escaped-tests").as_posix()}"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        called = False
+
+        def fake_init_project(*, target=None, output_dir="tests", dry_run=False):
+            nonlocal called
+            called = True
+            raise AssertionError("init_project should not run for rejected output paths")
+
+        monkeypatch.setattr(mutations, "init_project", fake_init_project)
+
+        rc = main(["init", "--config", str(config_path)])
+        captured = capsys.readouterr()
+
+        assert rc == 2
+        assert called is False
+        assert "Invalid init output path" in captured.err
+        assert not (tmp_path.parent / "escaped-tests").exists()
+
+    def test_init_rejects_gap_output_dir_escape_from_config(self, monkeypatch, tmp_path, capsys):
+        import ordeal.mutations as mutations
+
+        config_path = tmp_path / "ordeal.toml"
+        config_path.write_text(
+            "[init]\n"
+            'target = "pkg"\n'
+            'output_dir = "qa"\n'
+            "close_gaps = true\n"
+            f'gap_output_dir = "{(tmp_path.parent / "escaped-gaps").as_posix()}"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        called = False
+
+        def fake_init_project(*, target=None, output_dir="tests", dry_run=False):
+            nonlocal called
+            called = True
+            raise AssertionError("init_project should not run for rejected output paths")
+
+        monkeypatch.setattr(mutations, "init_project", fake_init_project)
+
+        rc = main(["init", "--config", str(config_path)])
+        captured = capsys.readouterr()
+
+        assert rc == 2
+        assert called is False
+        assert "Invalid init output path" in captured.err
+        assert not (tmp_path.parent / "escaped-gaps").exists()
 
     def test_init_opt_in_installs_skill_and_writes_audit_gap_stubs(
         self, monkeypatch, tmp_path, capsys

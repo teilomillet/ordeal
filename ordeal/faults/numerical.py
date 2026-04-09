@@ -205,7 +205,7 @@ def wrong_shape(
 
 
 def dtype_drift(target: str, kind: DTypeDriftKind = "str") -> PatchFault:
-    """Coerce numeric output of *target* into another dtype-like representation."""
+    """Simulate dtype drift by coercing numeric output of *target* into another representation."""
 
     def _coerce(value: float) -> Any:
         match kind:
@@ -231,7 +231,7 @@ def dtype_drift(target: str, kind: DTypeDriftKind = "str") -> PatchFault:
 
 
 def partial_batch(target: str, fraction: float = 0.5, min_items: int = 1) -> PatchFault:
-    """Return only part of a batch-like output from *target*."""
+    """Simulate a partial batch by returning only part of a batch-like output from *target*."""
 
     def wrapper(original):
         @functools.wraps(original)
@@ -249,7 +249,10 @@ def partial_batch(target: str, fraction: float = 0.5, min_items: int = 1) -> Pat
 
 
 def feature_order_drift(target: str, *, shift: int = 1) -> PatchFault:
-    """Rotate feature order in the output of *target* without dropping values."""
+    """Simulate feature-order drift by rotating output values from *target*.
+
+    Preserves the same values while changing their order.
+    """
 
     def wrapper(original):
         @functools.wraps(original)
@@ -268,7 +271,7 @@ def missing_feature(
     *,
     fill: object = _DROP_FEATURE,
 ) -> PatchFault:
-    """Drop one feature key from dict-like output, or replace it with *fill*."""
+    """Simulate a missing feature by dropping one output key or replacing it with *fill*."""
 
     def wrapper(original):
         @functools.wraps(original)

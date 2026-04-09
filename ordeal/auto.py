@@ -148,9 +148,7 @@ class FunctionResult:
             "coverage_gap",
             "invalid_input_crash",
             "beyond_declared_contract_robustness",
-        } or (
-            self.verdict in {"promoted_real_bug", "semantic_contract"} and not self.promoted
-        )
+        } or (self.verdict in {"promoted_real_bug", "semantic_contract"} and not self.promoted)
 
     def __str__(self) -> str:
         if self.execution_ok and not self.property_violations and not self.contract_violations:
@@ -4305,9 +4303,7 @@ def shell_safe_contract(
     def predicate(value: Any) -> bool:
         tokens = _command_tokens(value)
         if tokens is None:
-            raise ContractNotApplicable(
-                "shell_safe only applies to command-builder outputs"
-            )
+            raise ContractNotApplicable("shell_safe only applies to command-builder outputs")
         for raw in _tracked_string_args(kwargs, tracked_params):
             if any(ch in raw for ch in " \t;&|`$><()[]{}*?"):
                 if _tracked_token_count(tokens, raw) != 1:
@@ -4475,9 +4471,7 @@ def subprocess_argv_contract(
     def predicate(value: Any) -> bool:
         tokens = _command_tokens(value)
         if tokens is None:
-            raise ContractNotApplicable(
-                "subprocess_argv only applies to command-builder outputs"
-            )
+            raise ContractNotApplicable("subprocess_argv only applies to command-builder outputs")
         if not tokens or not isinstance(tokens[0], str) or not tokens[0]:
             return False
         for raw in _tracked_string_args(kwargs, tracked_params):

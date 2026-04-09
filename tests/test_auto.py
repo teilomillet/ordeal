@@ -1675,8 +1675,7 @@ class TestScanModule:
     def test_http_shape_contract_is_not_applicable_for_none_outputs(self):
         mod = types.ModuleType("_test_http_shape_not_applicable")
         exec(
-            "def extract_tunnel_url_from_line(line: str) -> None:\n"
-            "    return None\n",
+            "def extract_tunnel_url_from_line(line: str) -> None:\n    return None\n",
             mod.__dict__,
         )
         sys.modules[mod.__name__] = mod
@@ -1706,8 +1705,7 @@ class TestScanModule:
     def test_command_path_contracts_are_not_applicable_for_non_command_outputs(self):
         mod = types.ModuleType("_test_command_path_not_applicable")
         exec(
-            "def extract_tunnel_url_from_line(line: str) -> None:\n"
-            "    return None\n",
+            "def extract_tunnel_url_from_line(line: str) -> None:\n    return None\n",
             mod.__dict__,
         )
         sys.modules[mod.__name__] = mod
@@ -1749,8 +1747,7 @@ class TestScanModule:
     def test_semantic_contract_returning_none_stays_exploratory_without_shaped_output(self):
         mod = types.ModuleType("_test_semantic_contract_none_output")
         exec(
-            "def validate(line: str) -> None:\n"
-            "    return None\n",
+            "def validate(line: str) -> None:\n    return None\n",
             mod.__dict__,
         )
         sys.modules[mod.__name__] = mod

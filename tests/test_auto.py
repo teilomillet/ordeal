@@ -1645,8 +1645,7 @@ class TestScanModule:
     def test_quoted_paths_contract_is_not_applicable_for_non_command_outputs(self):
         mod = types.ModuleType("_test_quoted_paths_not_applicable")
         exec(
-            "def normalize_path(path: str) -> None:\n"
-            "    return None\n",
+            "def normalize_path(path: str) -> None:\n    return None\n",
             mod.__dict__,
         )
         sys.modules[mod.__name__] = mod

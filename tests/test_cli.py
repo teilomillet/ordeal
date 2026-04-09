@@ -2070,9 +2070,7 @@ scan_max_examples = 12
         mod = types.ModuleType(module_name)
         sys.modules[module_name] = mod
         exec(
-            "class Env:\n"
-            "    def greet(self, name: str) -> str:\n"
-            "        return name\n",
+            "class Env:\n    def greet(self, name: str) -> str:\n        return name\n",
             mod.__dict__,
         )
 

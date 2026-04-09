@@ -3525,8 +3525,7 @@ def _verify_auto_object_runtime(
     except Exception as exc:
         return (
             False,
-            "auto-harness dry-run failed during factory invocation: "
-            f"{type(exc).__name__}: {exc}",
+            f"auto-harness dry-run failed during factory invocation: {type(exc).__name__}: {exc}",
         )
     if not isinstance(instance, owner):
         return (
@@ -4297,9 +4296,7 @@ def quoted_paths_contract(
     def predicate(value: Any) -> bool:
         tokens = _command_tokens(value)
         if tokens is None:
-            raise ContractNotApplicable(
-                "quoted_paths only applies to command-builder outputs"
-            )
+            raise ContractNotApplicable("quoted_paths only applies to command-builder outputs")
         for raw in _tracked_string_args(kwargs, tracked_params):
             if "/" in raw or "\\" in raw or " " in raw:
                 if _tracked_token_count(tokens, raw) != 1:

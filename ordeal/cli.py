@@ -4325,6 +4325,29 @@ def _is_package_module(module_name: str) -> bool:
     return Path(module_file).name == "__init__.py"
 
 
+def _package_root_harness_penalty(row: Mapping[str, Any]) -> float:
+    """Return the support-helper penalty for one broad package-root target."""
+    name = str(row.get("name", "")).strip().lower()
+    source_path = str(row.get("source_path") or "").strip().lower().replace("\\", "/")
+    lifecycle_phase = str(row.get("lifecycle_phase") or "").strip().lower()
+    penalty = 0.0
+    if name.startswith(("make_", "prime_", "setup_", "cleanup_", "teardown_", "scenario_")):
+        penalty += 12.0
+    if any(token in name for token in ("fixture", "factory", "scenario")):
+        penalty += 10.0
+    if any(token in name for token in ("setup", "cleanup", "teardown")):
+        penalty += 8.0
+    if lifecycle_phase in {"setup", "cleanup", "teardown"}:
+        penalty += 8.0
+    if source_path.endswith("conftest.py"):
+        penalty += 10.0
+    if source_path.startswith("tests/") or "/tests/" in source_path:
+        penalty += 6.0
+    if any(token in source_path for token in ("support_factory", "support_factories", "fixtures")):
+        penalty += 6.0
+    return penalty
+
+
 def _package_root_scan_priority(row: Mapping[str, Any]) -> tuple[float, str, str]:
     """Return a descending priority key for representative package-root scan targets."""
     name = str(row.get("name", "")).strip()
@@ -4378,6 +4401,7 @@ def _package_root_scan_priority(row: Mapping[str, Any]) -> tuple[float, str, str
         score -= 6.0
     if name in {"activate", "deactivate", "set_seed"}:
         score -= 4.0
+    score -= _package_root_harness_penalty(row)
     return (-score, source_module, name)
 
 
@@ -6127,10 +6151,18 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
         functions_checked += len(result.functions)
         skipped_functions += len(result.skipped)
 
+        from ordeal.auto import _reportable_crash_category
+
         for function in result.functions:
             qualname = f"{module}.{function.name}"
-            crash_category = getattr(function, "crash_category", None) or "speculative_crash"
-            if function.promoted and crash_category == "likely_bug":
+            raw_crash_category = getattr(function, "crash_category", None) or "speculative_crash"
+            crash_category = _reportable_crash_category(
+                category=raw_crash_category,
+                replayable=function.replayable,
+                proof_bundle=function.proof_bundle,
+                sink_categories=function.sink_categories,
+            )
+            if function.promoted and raw_crash_category == "likely_bug":
                 findings.append(
                     {
                         "kind": "crash",

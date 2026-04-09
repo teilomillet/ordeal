@@ -1110,6 +1110,7 @@ require_direct_tests = true
         }
 
     def test_audit_json_write_gaps_outputs_gap_stub_artifacts(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.chdir(tmp_path)
         verified = CoverageMeasurement(
             Status.VERIFIED,
             CoverageResult(
@@ -1207,6 +1208,7 @@ require_direct_tests = true
         )
 
     def test_audit_json_uses_configured_gap_output_dir(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.chdir(tmp_path)
         verified = CoverageMeasurement(
             Status.VERIFIED,
             CoverageResult(
@@ -1283,6 +1285,7 @@ write_gaps_dir = "{gap_dir.as_posix()}"
     def test_audit_json_include_exploratory_function_gaps_surfaces_details(
         self, monkeypatch, tmp_path, capsys
     ):
+        monkeypatch.chdir(tmp_path)
         verified = CoverageMeasurement(
             Status.VERIFIED,
             CoverageResult(

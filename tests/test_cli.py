@@ -1738,6 +1738,53 @@ scan_max_examples = 12
         assert sample is not None
         assert set(sample["targets"]) == {"auto_configure", "always", "report"}
 
+    def test_package_root_scan_sample_deprioritizes_fixture_and_setup_helpers(
+        self,
+        monkeypatch,
+    ):
+        package = types.ModuleType("samplepkg")
+        package.__path__ = ["samplepkg"]
+        monkeypatch.setattr(ordeal_auto, "_resolve_module", lambda name: package)
+
+        sample = cli._package_root_scan_sample(
+            "samplepkg",
+            [
+                {
+                    "name": "render",
+                    "runnable": True,
+                    "source_module": "samplepkg.runtime",
+                    "kind": "function",
+                    "source_path": "samplepkg/runtime.py",
+                },
+                {
+                    "name": "validate",
+                    "runnable": True,
+                    "source_module": "samplepkg.validation",
+                    "kind": "function",
+                    "source_path": "samplepkg/validation.py",
+                },
+                {
+                    "name": "make_env",
+                    "runnable": True,
+                    "source_module": "samplepkg.support",
+                    "kind": "function",
+                    "source_path": "tests/support_factories.py",
+                },
+                {
+                    "name": "post_sandbox_setup",
+                    "runnable": True,
+                    "source_module": "samplepkg.lifecycle",
+                    "kind": "function",
+                    "source_path": "samplepkg/lifecycle.py",
+                    "lifecycle_phase": "setup",
+                },
+            ],
+            limit=2,
+        )
+
+        assert sample is not None
+        assert set(sample["targets"]) == {"render", "validate"}
+
     def test_scan_cli_target_selectors_override_toml_targets(
         self,
         monkeypatch,

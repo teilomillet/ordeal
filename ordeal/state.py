@@ -315,6 +315,8 @@ class ExplorationState:
     @property
     def findings(self) -> list[str]:
         """Promoted findings worth treating as primary scan output."""
+        from ordeal.auto import _scan_crash_promoted
+
         results: list[str] = []
         for name, fs in self.functions.items():
             if any(
@@ -327,16 +329,28 @@ class ExplorationState:
                 for detail in fs.contract_violation_details
             ):
                 results.append(f"{name}: violates an explicit semantic contract")
-            if fs.crash_free is False and fs.scan_crash_category == "likely_bug":
+            if fs.crash_free is False and _scan_crash_promoted(
+                category=fs.scan_crash_category,
+                replayable=fs.scan_replayable,
+                proof_bundle=fs.scan_proof_bundle,
+                sink_categories=fs.scan_sink_categories,
+            ):
                 results.append(_crash_summary(name, fs.scan_crash_category, fs.scan_replayable))
         return results
 
     @property
     def exploratory_findings(self) -> list[str]:
         """Exploratory scan output that should not fail the run by default."""
+        from ordeal.auto import _reportable_crash_category
+
         results: list[str] = []
         for name, fs in self.functions.items():
-            category = fs.scan_crash_category or "speculative_crash"
+            category = _reportable_crash_category(
+                category=fs.scan_crash_category,
+                replayable=fs.scan_replayable,
+                proof_bundle=fs.scan_proof_bundle,
+                sink_categories=fs.scan_sink_categories,
+            )
             if fs.crash_free is False and (
                 category == "speculative_crash"
                 or category == "coverage_gap"
@@ -353,10 +367,17 @@ class ExplorationState:
     @property
     def finding_details(self) -> list[dict[str, Any]]:
         """Structured finding details for reports and AI handoff."""
+        from ordeal.auto import _reportable_crash_category
+
         details: list[dict[str, Any]] = []
         for name, fs in self.functions.items():
             if fs.crash_free is False:
-                category = fs.scan_crash_category or "speculative_crash"
+                category = _reportable_crash_category(
+                    category=fs.scan_crash_category,
+                    replayable=fs.scan_replayable,
+                    proof_bundle=fs.scan_proof_bundle,
+                    sink_categories=fs.scan_sink_categories,
+                )
                 details.append(
                     {
                         "kind": "crash",

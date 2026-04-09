@@ -80,6 +80,27 @@ class TestExplorationStateSerialization:
             detail["summary"] == "decode: replayable crash on semi-valid inputs, still exploratory"
         )
 
+    def test_critical_sink_crash_needs_replayable_proof_bundle_for_promotion(self):
+        state = ExplorationState("pkg.mod")
+
+        crash = state.function("load_plugin")
+        crash.scanned = True
+        crash.crash_free = False
+        crash.scan_error = "boom"
+        crash.scan_replayable = True
+        crash.scan_crash_category = "likely_bug"
+        crash.scan_sink_categories = ["import"]
+
+        assert state.findings == []
+        assert (
+            "load_plugin: replayable crash on semi-valid inputs, still exploratory"
+            in state.exploratory_findings
+        )
+
+        detail = next(item for item in state.finding_details if item["function"] == "load_plugin")
+        assert detail["category"] == "speculative_crash"
+        assert detail["evidence_class"] == "speculative_crash"
+
     def test_finding_details_preserve_scan_evidence_payloads(self):
         state = ExplorationState("pkg.mod")
         fs = state.function("render")

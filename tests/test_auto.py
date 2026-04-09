@@ -447,6 +447,10 @@ class TestScanModule:
 
     def test_security_focus_adds_artifact_mutation_probe_for_config_inputs(self):
         def load_config(config: str) -> str:
+            if False:
+                import tomllib
+
+                tomllib.loads(config)
             return config
 
         candidates = _candidate_inputs(load_config, security_focus=True)
@@ -472,6 +476,26 @@ class TestScanModule:
             and candidate.kwargs["channel"] == "ordeal-security-probe"
             for candidate in candidates
         )
+
+    def test_security_focus_artifact_mutation_targets_only_real_sink_params(self):
+        import importlib
+
+        def load_plugin(module_name: str, config: str) -> str:
+            if False:
+                importlib.import_module(module_name)
+            return config
+
+        candidates = _candidate_inputs(load_plugin, security_focus=True)
+        artifact_mutations = [
+            candidate for candidate in candidates if candidate.origin == "artifact_mutation"
+        ]
+
+        assert artifact_mutations
+        assert {candidate.kwargs["module_name"] for candidate in artifact_mutations} == {
+            "json",
+            "json.tool",
+        }
+        assert all(candidate.kwargs["config"] == "" for candidate in artifact_mutations)
 
     def test_security_focus_skips_effectful_path_functions(self):
         def write_output(path: str) -> str:
@@ -612,6 +636,30 @@ class TestScanModule:
 
         assert focused.crash_category in {"speculative_crash", "invalid_input_crash"}
         assert focused.verdict in {"exploratory_crash", "invalid_input_crash"}
+
+    def test_unaligned_security_sink_does_not_mark_critical_sinks_in_proof_bundle(self):
+        import importlib
+
+        def load_value(value: object) -> object:
+            if False:
+                importlib.import_module("json")
+            if value == "boom":
+                raise RuntimeError("counter failed")
+            return value
+
+        focused = _test_one_function(
+            "load_value",
+            load_value,
+            {"value": st.just("boom")},
+            object,
+            max_examples=1,
+            check_return_type=True,
+            mode="candidate",
+            security_focus=True,
+        )
+
+        assert focused.proof_bundle is not None
+        assert focused.proof_bundle["impact"]["critical_sinks"] == []
 
     def test_test_seeds_include_pytest_parametrize_examples(self, tmp_path, monkeypatch):
         pkg = tmp_path / "seedpkg"

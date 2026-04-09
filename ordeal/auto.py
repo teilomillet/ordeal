@@ -109,7 +109,7 @@ class FunctionResult:
                 self.verdict = "exploratory_property"
         if self.crash_category is not None and self.error is not None and self.execution_ok:
             self.execution_ok = False
-        if self.verdict in _PROMOTED_SCAN_VERDICTS:
+        if self.promoted:
             self.passed = False
         elif (
             self.verdict != "clean"
@@ -121,6 +121,13 @@ class FunctionResult:
     @property
     def promoted(self) -> bool:
         """Whether this result should count as a promoted failure/finding."""
+        if self.verdict == "promoted_real_bug":
+            return _scan_crash_promoted(
+                category=self.crash_category,
+                replayable=self.replayable,
+                proof_bundle=self.proof_bundle,
+                sink_categories=self.sink_categories,
+            )
         return self.verdict in {
             "promoted_real_bug",
             "semantic_contract",
@@ -136,7 +143,7 @@ class FunctionResult:
             "coverage_gap",
             "invalid_input_crash",
             "beyond_declared_contract_robustness",
-        }
+        } or (self.verdict == "promoted_real_bug" and not self.promoted)
 
     def __str__(self) -> str:
         if self.execution_ok and not self.property_violations and not self.contract_violations:
@@ -1611,8 +1618,12 @@ def _contract_assessment(
     return fit, reachability, reasons, evidence
 
 
-def _infer_sink_categories(func: Any, *, security_focus: bool = False) -> list[str]:
-    """Infer semantic sink categories from source and parameter names."""
+def _sink_category_matches(
+    func: Any,
+    *,
+    security_focus: bool = False,
+) -> list[tuple[str, bool, bool]]:
+    """Return inferred sink categories plus whether source/param evidence matched."""
     target = _unwrap(func)
     source = ""
     with contextlib.suppress(OSError, TypeError):
@@ -1626,7 +1637,7 @@ def _infer_sink_categories(func: Any, *, security_focus: bool = False) -> list[s
     except Exception:
         params = set()
 
-    categories: list[str] = []
+    categories: list[tuple[str, bool, bool]] = []
     checks = [
         (
             "shell",
@@ -1794,7 +1805,31 @@ def _infer_sink_categories(func: Any, *, security_focus: bool = False) -> list[s
         else:
             matched = source_match or param_match
         if matched:
-            categories.append(category)
+            categories.append((category, source_match, param_match))
+    return categories
+
+
+def _source_backed_sink_categories(func: Any, *, security_focus: bool = False) -> list[str]:
+    """Return sink categories backed by concrete source evidence."""
+    return [
+        category
+        for category, source_match, _param_match in _sink_category_matches(
+            func,
+            security_focus=security_focus,
+        )
+        if source_match
+    ]
+
+
+def _infer_sink_categories(func: Any, *, security_focus: bool = False) -> list[str]:
+    """Infer semantic sink categories from source and parameter names."""
+    categories = [
+        category
+        for category, _source_match, _param_match in _sink_category_matches(
+            func,
+            security_focus=security_focus,
+        )
+    ]
     return categories
 
 
@@ -1808,6 +1843,78 @@ def _critical_security_sinks(sink_categories: Sequence[str]) -> list[str]:
         },
         key=lambda name: (-_SECURITY_SINK_WEIGHTS.get(name, 0.0), name),
     )
+
+
+def _semantic_bucket_targets_sink(bucket: str, sink_categories: Sequence[str]) -> bool:
+    """Return whether one semantic bucket can reach the inferred sink set."""
+    return _sink_signal_for_bucket(bucket, sink_categories) > 0.0
+
+
+def _proof_bundle_critical_sinks(proof_bundle: Mapping[str, Any] | None) -> list[str] | None:
+    """Return explicit critical-sink evidence from one proof bundle when present."""
+    if not isinstance(proof_bundle, Mapping):
+        return None
+    for key in ("impact", "contract_basis"):
+        section = proof_bundle.get(key)
+        if isinstance(section, Mapping) and "critical_sinks" in section:
+            return [str(item) for item in list(section.get("critical_sinks", ()) or ())]
+    if "critical_sinks" in proof_bundle:
+        return [str(item) for item in list(proof_bundle.get("critical_sinks", ()) or ())]
+    return None
+
+
+def _proof_bundle_replayable(
+    proof_bundle: Mapping[str, Any] | None,
+    replayable: bool | None,
+) -> bool:
+    """Return whether replay evidence confirms the proof bundle witness."""
+    if isinstance(proof_bundle, Mapping):
+        reproduction = proof_bundle.get("reproduction")
+        if isinstance(reproduction, Mapping) and reproduction.get("replayable") is not None:
+            return bool(reproduction.get("replayable"))
+        confidence = proof_bundle.get("confidence_breakdown")
+        if isinstance(confidence, Mapping):
+            replayability = confidence.get("replayability")
+            if isinstance(replayability, (int, float)):
+                return replayability >= 1.0
+    return bool(replayable)
+
+
+def _scan_crash_promoted(
+    *,
+    category: str | None,
+    replayable: bool | None,
+    proof_bundle: Mapping[str, Any] | None = None,
+    sink_categories: Sequence[str] = (),
+) -> bool:
+    """Return whether one crash should count as a promoted finding."""
+    if category != "likely_bug":
+        return False
+    critical_sinks = _proof_bundle_critical_sinks(proof_bundle)
+    if critical_sinks is None:
+        critical_sinks = _critical_security_sinks(sink_categories)
+    if not critical_sinks:
+        return True
+    return isinstance(proof_bundle, Mapping) and _proof_bundle_replayable(proof_bundle, replayable)
+
+
+def _reportable_crash_category(
+    *,
+    category: str | None,
+    replayable: bool | None,
+    proof_bundle: Mapping[str, Any] | None = None,
+    sink_categories: Sequence[str] = (),
+) -> str:
+    """Return the user-facing crash category after proof-based promotion gating."""
+    normalized = str(category or "speculative_crash")
+    if normalized == "likely_bug" and not _scan_crash_promoted(
+        category=normalized,
+        replayable=replayable,
+        proof_bundle=proof_bundle,
+        sink_categories=sink_categories,
+    ):
+        return "speculative_crash"
+    return normalized
 
 
 def _sink_signal_for_bucket(bucket: str, sink_categories: Sequence[str]) -> float:
@@ -6254,12 +6361,13 @@ def _security_candidate_inputs(
     sink_categories: Sequence[str],
 ) -> list[CandidateInput]:
     """Build deterministic, low-side-effect security probes for shaper callables."""
+    source_backed_sinks = _source_backed_sink_categories(func, security_focus=True)
     safe_probe_sinks = {"path", "symlink"}
     if (
         not boundary_inputs
         or not _callable_looks_like_security_shaper(func)
-        or not set(sink_categories)
-        or not set(sink_categories).issubset(safe_probe_sinks)
+        or not set(source_backed_sinks)
+        or not set(source_backed_sinks).issubset(safe_probe_sinks)
     ):
         return []
     try:
@@ -6275,6 +6383,8 @@ def _security_candidate_inputs(
         if name not in base_kwargs and param.default is inspect.Signature.empty:
             continue
         bucket = _semantic_bucket(name, safe_get_annotations(_unwrap(func)).get(name))
+        if not _semantic_bucket_targets_sink(bucket, source_backed_sinks):
+            continue
         probes = _SECURITY_PROBE_VALUES.get(bucket, ())
         for probe in probes:
             kwargs = dict(base_kwargs)
@@ -6399,7 +6509,8 @@ def _artifact_mutation_candidate_inputs(
     sink_categories: Sequence[str],
 ) -> list[CandidateInput]:
     """Build deterministic artifact/config mutation candidates for risky data sinks."""
-    if not ({"deserialization", "ipc", "import"} & set(sink_categories)):
+    source_backed_sinks = _source_backed_sink_categories(func, security_focus=True)
+    if not ({"deserialization", "ipc", "import"} & set(source_backed_sinks)):
         return []
     target = _unwrap(func)
     try:
@@ -6421,6 +6532,8 @@ def _artifact_mutation_candidate_inputs(
             continue
         hint = hints.get(name)
         bucket = _semantic_bucket(name, hint)
+        if not _semantic_bucket_targets_sink(bucket, source_backed_sinks):
+            continue
         for probe in _artifact_mutation_probe_values(
             bucket=bucket,
             name=name,
@@ -6926,6 +7039,7 @@ def _build_proof_bundle(
     profile: Mapping[str, Any],
     sink_signal: float,
     sink_categories: Sequence[str] = (),
+    aligned_sink_categories: Sequence[str] | None = None,
     min_contract_fit: float = 0.6,
     min_reachability: float = 0.5,
     min_realism: float = 0.55,
@@ -6956,6 +7070,8 @@ def _build_proof_bundle(
     replayability_score = (
         replay_matches / replay_attempts if replay_attempts > 0 else (1.0 if replayable else 0.0)
     )
+    callable_sink_categories = [str(item) for item in sink_categories]
+    impact_sink_categories = [str(item) for item in list(aligned_sink_categories or ())]
     demotion_reason = _proof_demotion_reason(
         category=category,
         replayable=replayable,
@@ -6985,7 +7101,9 @@ def _build_proof_bundle(
         "input_source": input_source,
         "matched_seed_sources": matched_sources,
         "security_focus": bool(security_focus),
-        "critical_sinks": _critical_security_sinks(sink_categories),
+        "sink_categories": list(impact_sink_categories),
+        "callable_sink_categories": list(callable_sink_categories),
+        "critical_sinks": _critical_security_sinks(impact_sink_categories),
     }
     failure_path = {
         "target": full_qualname,
@@ -6998,8 +7116,8 @@ def _build_proof_bundle(
     if contract_check is not None:
         failure_path["contract_check"] = contract_check
     impact_summary = (
-        _sink_likely_impact(sink_categories, error)
-        if sink_categories and error is not None
+        _sink_likely_impact(impact_sink_categories, error)
+        if impact_sink_categories and error is not None
         else _likely_impact(category, sink_signal)
     )
     minimal_reproduction = _proof_minimal_reproduction(
@@ -7011,7 +7129,7 @@ def _build_proof_bundle(
         contract_check=contract_check,
         security_focus=security_focus,
     )
-    critical_sinks = _critical_security_sinks(sink_categories)
+    critical_sinks = _critical_security_sinks(impact_sink_categories)
     return {
         "version": 2,
         "witness": witness,
@@ -7055,15 +7173,17 @@ def _build_proof_bundle(
             "class": (
                 "lifecycle"
                 if category == "lifecycle_contract"
-                else (list(sink_categories)[0] if sink_categories else category)
+                else (list(impact_sink_categories)[0] if impact_sink_categories else category)
             ),
             "evidence_class": evidence_class,
-            "sink_categories": list(sink_categories),
+            "sink_categories": list(impact_sink_categories),
+            "callable_sink_categories": list(callable_sink_categories),
             "critical_sinks": critical_sinks,
             "trust_boundary_signal": round(sink_signal, 4),
             "security_focus": bool(security_focus),
         },
-        "sink_categories": list(sink_categories),
+        "sink_categories": list(impact_sink_categories),
+        "callable_sink_categories": list(callable_sink_categories),
         "likely_impact": impact_summary,
         "verdict": {
             "category": category,
@@ -7924,6 +8044,7 @@ def _test_one_function(
                 profile=profile,
                 sink_signal=sink_signal,
                 sink_categories=sink_categories,
+                aligned_sink_categories=aligned_sinks,
                 min_contract_fit=effective_min_contract_fit,
                 min_reachability=effective_min_reachability,
                 min_realism=effective_min_realism,
@@ -7942,6 +8063,24 @@ def _test_one_function(
                 }
                 if any(value is not None for value in lifecycle_details.values()):
                     proof_bundle["lifecycle"] = lifecycle_details
+        if crash_category == "likely_bug" and not _scan_crash_promoted(
+            category=crash_category,
+            replayable=replayable,
+            proof_bundle=proof_bundle,
+            sink_categories=sink_categories,
+        ):
+            verdict = "exploratory_crash"
+            if isinstance(proof_bundle, dict):
+                proof_verdict = dict(proof_bundle.get("verdict", {}))
+                proof_verdict["promoted"] = False
+                if not proof_verdict.get("demotion_reason") and (
+                    _proof_bundle_critical_sinks(proof_bundle) is not None
+                    or _critical_security_sinks(sink_categories)
+                ):
+                    proof_verdict["demotion_reason"] = (
+                        "critical sink findings require a replayable proof bundle before promotion"
+                    )
+                proof_bundle["verdict"] = proof_verdict
         return FunctionResult(
             name=name,
             passed=verdict not in _PROMOTED_SCAN_VERDICTS,

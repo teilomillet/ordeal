@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.31
+
+**Features:**
+
+- add security-focused scan heuristics
+
+
 ## 0.3.29
 
 **Features:**

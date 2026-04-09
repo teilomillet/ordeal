@@ -7741,6 +7741,27 @@ def _trim_report_value(
     return text if len(text) <= max_string else text[: max_string - 3] + "..."
 
 
+def _json_safe_value(value: Any) -> Any:
+    """Recursively normalize values into JSON-native structures."""
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, BaseException):
+        return {"type": type(value).__name__, "message": str(value)}
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        try:
+            items = sorted(value, key=repr)
+        except TypeError:
+            items = list(value)
+        return [_json_safe_value(item) for item in items]
+    return repr(value)
+
+
 def _json_block(value: Any) -> list[str]:
     """Render a fenced JSON block for Markdown reports."""
     trimmed = _trim_report_value(value)
@@ -8065,7 +8086,7 @@ def _read_json_file(path: Path) -> dict[str, Any]:
 
 def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
     """Write a JSON artifact with stable formatting."""
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(_json_safe_value(payload), indent=2) + "\n", encoding="utf-8")
 
 
 def _resolve_artifact_path(path_str: str | None, *, workspace: str | None = None) -> Path | None:
@@ -8672,7 +8693,7 @@ def _scan_proof_bundle_payload(findings: Sequence[Mapping[str, Any]]) -> dict[st
                 "qualname": finding.get("qualname"),
                 "summary": finding.get("summary"),
                 "evidence_class": finding.get("evidence_class"),
-                "proof_bundle": dict(proof),
+                "proof_bundle": _json_safe_value(dict(proof)),
             }
         )
     return {"version": 1, "entries": entries}
@@ -10490,7 +10511,7 @@ def _write_scan_bundle(
         scenario_library_path=scenario_library_path,
     )
     bundle["artifacts"]["bundle"] = _display_path(path)
-    path.write_text(json.dumps(bundle, indent=2) + "\n", encoding="utf-8")
+    _write_json_file(path, bundle)
     _stderr(f"Scan bundle saved: {path}\n")
     return path, bundle
 

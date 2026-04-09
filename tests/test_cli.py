@@ -3332,6 +3332,71 @@ scan_max_examples = 12
         assert "replay: .ordeal/findings/pkg/mod.replay.md" in captured.out
         assert "scenarios: .ordeal/findings/pkg/mod.scenarios.md" in captured.out
 
+    def test_scan_save_artifacts_sanitizes_callable_proof_bundle_values(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        monkeypatch.chdir(tmp_path)
+        state = SimpleNamespace(
+            module="pkg.mod",
+            confidence=0.74,
+            functions={"normalize": object()},
+            supervisor_info={"seed": 7, "trajectory_steps": 4},
+            tree=SimpleNamespace(size=2),
+            findings=["normalize: candidate issue on contract-valid inputs"],
+            frontier={"normalize": ["candidate issue on contract-valid inputs"]},
+            finding_details=[
+                {
+                    "kind": "crash",
+                    "category": "semantic_contract",
+                    "function": "normalize",
+                    "summary": "command args drift under quoting edge case",
+                    "error": "RuntimeError: command drift",
+                    "failing_args": {"value": "demo path"},
+                    "replayable": True,
+                    "replay_attempts": 2,
+                    "replay_matches": 2,
+                    "contract_fit": 0.91,
+                    "reachability": 0.77,
+                    "realism": 0.88,
+                    "proof_bundle": {
+                        "witness": {"value": "demo path"},
+                        "minimal_reproduction": {
+                            "callable": len,
+                            "python_snippet": (
+                                "from pkg.mod import normalize\nnormalize(value='demo path')\n"
+                            ),
+                        },
+                        "impact": {"summary": "shell command argument stability regression"},
+                    },
+                }
+            ],
+        )
+
+        monkeypatch.setattr(ordeal_state, "explore", lambda *args, **kwargs: state)
+
+        rc = main(["scan", "pkg.mod", "--save-artifacts", "-n", "10"])
+        capsys.readouterr()
+
+        assert rc == 1
+        bundle_path = tmp_path / ".ordeal" / "findings" / "pkg" / "mod.json"
+        proofs_path = tmp_path / ".ordeal" / "findings" / "pkg" / "mod.proofs.json"
+        assert bundle_path.exists()
+        assert proofs_path.exists()
+
+        bundle = json.loads(bundle_path.read_text())
+        proofs = json.loads(proofs_path.read_text())
+        assert (
+            bundle["findings"][0]["proof_bundle"]["minimal_reproduction"]["callable"]
+            == "<built-in function len>"
+        )
+        assert (
+            proofs["entries"][0]["proof_bundle"]["minimal_reproduction"]["callable"]
+            == "<built-in function len>"
+        )
+
     def test_verify_marks_finding_verified(self, monkeypatch, tmp_path, capsys):
         index_path, bundle_path, finding_id = _write_verify_fixture(tmp_path)
         calls: dict[str, object] = {}

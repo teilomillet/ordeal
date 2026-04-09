@@ -158,6 +158,9 @@ This applies everywhere: faults, assertions, invariants, strategies. The user sh
 - Traces are JSON. Replay uses recorded param values, not re-drawing from strategies.
 - Parallel workers share three shared-memory regions: edge bitmap (AFL-style), state bitmap (global dedup), ring buffer (checkpoint exchange with energy propagation). Per-worker slot ownership, CRC32 integrity, no locks.
 - New capabilities (mine, audit, auto, metamorphic, diff, scaling) are lazy-imported via `__getattr__` to keep `import ordeal` fast.
+- `scan` treats pytest fixtures/factories/setup helpers as harness evidence first. They inform `[[objects]]` suggestions, but broad package scans and target sampling should prefer user-facing callables.
+- `--security-focus` only generates deterministic sink probes for parameters that align with source-backed sinks. Broad param names like `config` are not enough without matching sink evidence in code.
+- Critical-sink crashes only promote when the proof bundle is replay-backed. `impact.critical_sinks` is witness-aligned; broader callable sink inference lives under `callable_sink_categories`.
 
 ## When adding a new feature
 

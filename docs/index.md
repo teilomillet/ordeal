@@ -101,6 +101,7 @@ Every goal maps to a starting point — a command to run, a module to import, an
 | I want to... | Start here | Learn more |
 |---|---|---|
 | Capture a bug and lock it in | `ordeal scan mymodule --save-artifacts` | [Bug Bundle](guides/bug-bundle.md) |
+| Understand why `scan` promoted or demoted a crash | Read the scan finding rules | [Scan Finding Rules](guides/scan-finding-rules.md) |
 | Re-run one saved finding | `ordeal verify fnd_123456789abc` | [Bug Bundle](guides/bug-bundle.md) |
 | Bootstrap tests for an existing package | `ordeal init mymodule` | [CLI](guides/cli.md) |
 | Find bugs without writing tests | `ordeal mine mymodule` | [Auto Testing](guides/auto.md) |

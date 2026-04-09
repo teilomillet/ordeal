@@ -63,6 +63,13 @@ available:
 - `.ordeal/findings/ordeal/demo.scenarios.md` lists inferred reusable scenario libraries plus the built-in packs you can use directly in `[[objects]].scenarios`.
 - `.ordeal/findings/index.json` is the append-only local history for saved scan runs. It records the module, findings, paths, and suggested commands.
 
+## Read the proof bundle fields
+
+- `impact.critical_sinks` is witness-aligned: it only lists high-risk sinks supported by the failing input.
+- `impact.callable_sink_categories` keeps the broader callable-level sink inference when you need the larger surface.
+- `verdict.promoted = false` with a `demotion_reason` means ordeal kept the crash exploratory, often because a critical-sink witness did not replay cleanly.
+- For the exact promotion and helper-filtering rules, see [Scan Finding Rules](scan-finding-rules.md).
+
 ## Close the loop
 
 1. Run the generated regression file:

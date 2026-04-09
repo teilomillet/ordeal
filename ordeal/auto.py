@@ -169,6 +169,7 @@ def _normalize_scan_mode(mode: str) -> Literal["coverage_gap", "real_bug"]:
         raise ValueError(f"mode must be one of {set(_SCAN_MODE_ALIASES)}, got {mode!r}")
     return normalized
 
+
 def _public_scan_mode(mode: str) -> str:
     """Return the preferred public label for one scan mode."""
     normalized = _normalize_scan_mode(mode)
@@ -6094,9 +6095,7 @@ def _semantic_value_score(bucket: str, value: Any) -> float:
             return 1.0 if isinstance(value, Mapping) else 0.0
         case "import":
             return (
-                1.0
-                if isinstance(value, str) and ("." in value or value.isidentifier())
-                else 0.0
+                1.0 if isinstance(value, str) and ("." in value or value.isidentifier()) else 0.0
             )
         case "serialized":
             return 1.0 if isinstance(value, (bytes, bytearray, str, Mapping)) else 0.0

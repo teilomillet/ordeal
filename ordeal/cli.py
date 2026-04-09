@@ -6085,7 +6085,7 @@ def _cmd_skill(args: argparse.Namespace) -> int:
 
 def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[str, Any]:
     """Run a bounded, read-only scan over freshly bootstrapped modules."""
-    from ordeal.auto import scan_module
+    from ordeal.auto import _contract_violation_promoted, scan_module
 
     deduped_modules = [module for module in dict.fromkeys(modules) if module]
     findings: list[dict[str, Any]] = []
@@ -6241,7 +6241,11 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
                 )
 
     if any(
-        item.get("category") in {"likely_bug", "semantic_contract", "lifecycle_contract"}
+        item.get("category") == "likely_bug"
+        or (
+            item.get("category") in {"semantic_contract", "lifecycle_contract"}
+            and _contract_violation_promoted(item)
+        )
         for item in findings
     ):
         status = "findings found"

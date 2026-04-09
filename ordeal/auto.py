@@ -111,6 +111,8 @@ class FunctionResult:
             self.execution_ok = False
         if self.promoted:
             self.passed = False
+        elif self.verdict == "semantic_contract" and self.contract_violations:
+            self.passed = True
         elif (
             self.verdict != "clean"
             and not self.contract_violations
@@ -128,9 +130,12 @@ class FunctionResult:
                 proof_bundle=self.proof_bundle,
                 sink_categories=self.sink_categories,
             )
+        if self.verdict == "semantic_contract":
+            return any(
+                _contract_violation_promoted(detail) for detail in self.contract_violation_details
+            )
         return self.verdict in {
             "promoted_real_bug",
-            "semantic_contract",
             "lifecycle_contract",
         }
 
@@ -143,7 +148,9 @@ class FunctionResult:
             "coverage_gap",
             "invalid_input_crash",
             "beyond_declared_contract_robustness",
-        } or (self.verdict == "promoted_real_bug" and not self.promoted)
+        } or (
+            self.verdict in {"promoted_real_bug", "semantic_contract"} and not self.promoted
+        )
 
     def __str__(self) -> str:
         if self.execution_ok and not self.property_violations and not self.contract_violations:
@@ -535,6 +542,8 @@ _BOUNDARY_SMOKE_VALUES: dict[object, tuple[object, ...]] = {
 _VALID_SCAN_MODES: set[str] = set(_SCAN_MODE_ALIASES)
 _WEAK_CONTRACT_FIT = 0.35
 _SECURITY_FOCUS_MIN_FIXTURE_COMPLETENESS = 0.55
+_SEMANTIC_CONTRACT_MIN_FIXTURE_COMPLETENESS = 0.55
+_SEMANTIC_CONTRACT_STRONG_REALISM = 0.75
 
 
 @dataclass(frozen=True)
@@ -1883,6 +1892,31 @@ def _proof_bundle_replayable(
             if isinstance(replayability, (int, float)):
                 return replayability >= 1.0
     return bool(replayable)
+
+
+def _proof_verdict_promoted(
+    proof_bundle: Mapping[str, Any] | None,
+    *,
+    default: bool = False,
+) -> bool:
+    """Return the explicit proof-bundle promotion verdict when present."""
+    if isinstance(proof_bundle, Mapping):
+        verdict = proof_bundle.get("verdict")
+        if isinstance(verdict, Mapping) and verdict.get("promoted") is not None:
+            return bool(verdict.get("promoted"))
+    return default
+
+
+def _contract_violation_promoted(detail: Mapping[str, Any] | None) -> bool:
+    """Return whether one contract violation should count as a promoted finding."""
+    if not isinstance(detail, Mapping):
+        return False
+    category = str(detail.get("category") or "")
+    if category == "lifecycle_contract":
+        return True
+    if category != "semantic_contract":
+        return False
+    return _proof_verdict_promoted(detail.get("proof_bundle"), default=False)
 
 
 def _scan_crash_promoted(
@@ -4271,7 +4305,9 @@ def shell_safe_contract(
     def predicate(value: Any) -> bool:
         tokens = _command_tokens(value)
         if tokens is None:
-            return False
+            raise ContractNotApplicable(
+                "shell_safe only applies to command-builder outputs"
+            )
         for raw in _tracked_string_args(kwargs, tracked_params):
             if any(ch in raw for ch in " \t;&|`$><()[]{}*?"):
                 if _tracked_token_count(tokens, raw) != 1:
@@ -4321,7 +4357,9 @@ def command_arg_stability_contract(
     def predicate(value: Any) -> bool:
         tokens = _command_tokens(value)
         if tokens is None:
-            return False
+            raise ContractNotApplicable(
+                "command_arg_stability only applies to command-builder outputs"
+            )
         for raw in _tracked_string_args(kwargs, tracked_params):
             if _tracked_token_count(tokens, raw) != 1:
                 return False
@@ -4400,10 +4438,24 @@ def http_shape_contract(
                     return False
         return True
 
+    def _body_is_httpish(value: Any) -> bool:
+        return value is None or isinstance(
+            value,
+            (str, bytes, bytearray, memoryview, Mapping, list, tuple),
+        )
+
     def predicate(value: Any) -> bool:
         if isinstance(value, Mapping):
             return _mapping_is_httpish(value)
-        return isinstance(value, (str, bytes, tuple, list))
+        if isinstance(value, (list, tuple)):
+            items = list(value)
+            if len(items) == 2 and isinstance(items[0], Mapping):
+                return _mapping_is_httpish(items[0]) and _body_is_httpish(items[1])
+            if len(items) == 3 and isinstance(items[0], int) and isinstance(items[1], Mapping):
+                return _mapping_is_httpish(items[1]) and _body_is_httpish(items[2])
+        raise ContractNotApplicable(
+            "http_shape only applies to HTTP-like mapping or response outputs"
+        )
 
     return ContractCheck(
         name="http_shape",
@@ -4422,6 +4474,10 @@ def subprocess_argv_contract(
 
     def predicate(value: Any) -> bool:
         tokens = _command_tokens(value)
+        if tokens is None:
+            raise ContractNotApplicable(
+                "subprocess_argv only applies to command-builder outputs"
+            )
         if not tokens or not isinstance(tokens[0], str) or not tokens[0]:
             return False
         for raw in _tracked_string_args(kwargs, tracked_params):
@@ -7095,7 +7151,7 @@ def _proof_demotion_reason(
     """Return the concrete reason a finding was not promoted as a candidate issue."""
     if forced_reason:
         return forced_reason
-    if category in {"likely_bug", "semantic_contract", "lifecycle_contract"}:
+    if category in {"likely_bug", "lifecycle_contract"}:
         return None
     if category == "expected_precondition_failure":
         return "the raised exception matches a documented precondition instead of a bug."
@@ -7218,6 +7274,7 @@ def _build_proof_bundle(
     contract_check: str | None = None,
     security_focus: bool = False,
     forced_demotion_reason: str | None = None,
+    promoted: bool | None = None,
 ) -> dict[str, Any]:
     """Build the proof payload carried through reports and agent output."""
     evidence_class = (
@@ -7304,6 +7361,11 @@ def _build_proof_bundle(
         security_focus=security_focus,
     )
     critical_sinks = _critical_security_sinks(impact_sink_categories)
+    promoted_verdict = (
+        bool(promoted)
+        if promoted is not None
+        else category in {"likely_bug", "semantic_contract", "lifecycle_contract"}
+    )
     return {
         "version": 2,
         "witness": witness,
@@ -7362,7 +7424,7 @@ def _build_proof_bundle(
         "verdict": {
             "category": category,
             "evidence_class": evidence_class,
-            "promoted": category in {"likely_bug", "semantic_contract", "lifecycle_contract"},
+            "promoted": promoted_verdict,
             "demotion_reason": demotion_reason,
         },
     }
@@ -7634,6 +7696,106 @@ def _resolve_contract_check_entries(
     return resolved
 
 
+def _replay_contract_failure(
+    func: Any,
+    check: ContractCheck,
+    *,
+    kwargs: Mapping[str, Any],
+) -> tuple[bool, int, int]:
+    """Replay one explicit contract failure and confirm it still fails."""
+    attempts = 2
+    matches = 0
+    for _ in range(attempts):
+        error_obj: BaseException | None = None
+        try:
+            value = _call_sync(func, **dict(kwargs))
+        except BaseException as exc:
+            error_obj = exc
+            value = None
+        call_context = getattr(func, "__ordeal_last_call_context__", None)
+        try:
+            passed = _call_contract_predicate(
+                check.predicate,
+                value,
+                func=func,
+                call_context=call_context,
+                kwargs=kwargs,
+                error=error_obj,
+            )
+        except ContractNotApplicable:
+            return False, attempts, matches
+        except Exception:
+            passed = False
+        if not passed:
+            matches += 1
+    return matches == attempts, attempts, matches
+
+
+def _semantic_contract_gate(
+    *,
+    func: Any,
+    check: ContractCheck,
+    value: Any,
+    error_obj: BaseException | None,
+    kwargs: Mapping[str, Any],
+    profile: Mapping[str, Any],
+    realism: float,
+    fixture_completeness: float,
+) -> tuple[bool, bool, int, int, str | None]:
+    """Return promotion and replay evidence for one semantic contract failure."""
+    skip_reason = _callable_skip_reason(func)
+    if skip_reason is not None:
+        return False, False, 0, 0, skip_reason
+    if getattr(func, "__ordeal_auto_harness__", False) and not getattr(
+        func, "__ordeal_harness_verified__", True
+    ):
+        return (
+            False,
+            False,
+            0,
+            0,
+            str(
+                getattr(func, "__ordeal_harness_dry_run_error__", None)
+                or "auto-harness dry-run failed"
+            ),
+        )
+    if fixture_completeness < _SEMANTIC_CONTRACT_MIN_FIXTURE_COMPLETENESS:
+        return (
+            False,
+            False,
+            0,
+            0,
+            "fixture completeness stayed below the semantic-contract promotion bar "
+            f"({fixture_completeness:.0%} < "
+            f"{_SEMANTIC_CONTRACT_MIN_FIXTURE_COMPLETENESS:.0%})",
+        )
+
+    replayable, replay_attempts, replay_matches = _replay_contract_failure(
+        func,
+        check,
+        kwargs=kwargs,
+    )
+    aligned_sinks = _aligned_security_sinks(kwargs, profile)
+    shaped_output_failure = error_obj is None and value is not None
+    replay_demonstrates_impact = replayable and (
+        shaped_output_failure or error_obj is not None or bool(aligned_sinks)
+    )
+    if shaped_output_failure:
+        return True, replayable, replay_attempts, replay_matches, None
+    if aligned_sinks and realism >= _SEMANTIC_CONTRACT_STRONG_REALISM:
+        return True, replayable, replay_attempts, replay_matches, None
+    if replay_demonstrates_impact:
+        return True, replayable, replay_attempts, replay_matches, None
+    return (
+        False,
+        replayable,
+        replay_attempts,
+        replay_matches,
+        "semantic contract remains exploratory until it fails on a shaped output, "
+        "a sink-aligned witness reaches stronger realism, or replay demonstrates impact",
+    )
+
+
 def _evaluate_contract_checks(
     func: Any,
     contract_checks: list[ContractCheck] | None,
@@ -7660,6 +7822,7 @@ def _evaluate_contract_checks(
         seed_from_call_sites=seed_from_call_sites,
         treat_any_as_weak=treat_any_as_weak,
     )
+    fixture_completeness = _profile_fixture_completeness(profile)
     qualname = str(profile.get("qualname", getattr(func, "__qualname__", "?")))
     seed_examples = list(profile.get("seed_examples", []))
     probe_kwargs = dict(seed_examples[0].kwargs) if seed_examples else _contract_seed_kwargs(func)
@@ -7743,6 +7906,28 @@ def _evaluate_contract_checks(
             continue
 
         summary = check.summary or f"explicit contract failed: {check.name}"
+        promoted = True
+        replayable = True
+        replay_attempts = 1
+        replay_matches = 1
+        forced_demotion_reason: str | None = None
+        if detail_category == "semantic_contract":
+            (
+                promoted,
+                replayable,
+                replay_attempts,
+                replay_matches,
+                forced_demotion_reason,
+            ) = _semantic_contract_gate(
+                func=func,
+                check=check,
+                value=value,
+                error_obj=error_obj,
+                kwargs=kwargs,
+                profile=profile,
+                realism=realism,
+                fixture_completeness=fixture_completeness,
+            )
         violations.append(summary)
         detail = {
             "kind": "contract",
@@ -7756,6 +7941,9 @@ def _evaluate_contract_checks(
             "realism": realism,
             "sink_signal": max(sink_signal, 1.0),
             "input_source": "explicit_contract",
+            "replayable": replayable,
+            "replay_attempts": replay_attempts,
+            "replay_matches": replay_matches,
         }
         if call_context:
             detail["lifecycle_phase"] = call_context.get("lifecycle_phase")
@@ -7776,9 +7964,9 @@ def _evaluate_contract_checks(
             reachability=1.0,
             realism=realism,
             rationale=rationale,
-            replayable=True,
-            replay_attempts=1,
-            replay_matches=1,
+            replayable=replayable,
+            replay_attempts=replay_attempts,
+            replay_matches=replay_matches,
             category=detail_category,
             profile=profile,
             sink_signal=max(sink_signal, 1.0),
@@ -7786,9 +7974,16 @@ def _evaluate_contract_checks(
             min_contract_fit=0.0,
             min_reachability=0.0,
             min_realism=0.0,
+            min_fixture_completeness=(
+                _SEMANTIC_CONTRACT_MIN_FIXTURE_COMPLETENESS
+                if detail_category == "semantic_contract"
+                else None
+            ),
             harness_mode=getattr(func, "__ordeal_harness__", None),
             callable_kind=getattr(func, "__ordeal_kind__", None),
             contract_check=check.name,
+            forced_demotion_reason=forced_demotion_reason,
+            promoted=promoted,
         )
         if call_context and call_context.get("lifecycle_probe") is not None:
             detail["proof_bundle"]["lifecycle"] = dict(call_context["lifecycle_probe"])

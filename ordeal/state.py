@@ -315,17 +315,19 @@ class ExplorationState:
     @property
     def findings(self) -> list[str]:
         """Promoted findings worth treating as primary scan output."""
-        from ordeal.auto import _scan_crash_promoted
+        from ordeal.auto import _contract_violation_promoted, _scan_crash_promoted
 
         results: list[str] = []
         for name, fs in self.functions.items():
             if any(
-                detail.get("category") == "lifecycle_contract"
+                _contract_violation_promoted(detail)
+                and detail.get("category") == "lifecycle_contract"
                 for detail in fs.contract_violation_details
             ):
                 results.append(f"{name}: violates an explicit lifecycle contract")
             if any(
-                detail.get("category") == "semantic_contract"
+                _contract_violation_promoted(detail)
+                and detail.get("category") == "semantic_contract"
                 for detail in fs.contract_violation_details
             ):
                 results.append(f"{name}: violates an explicit semantic contract")

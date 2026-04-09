@@ -190,6 +190,34 @@ class TestExplorationStateSerialization:
             detail["category"] == "semantic_contract" for detail in explored.finding_details
         )
 
+    def test_unpromoted_semantic_contract_stays_out_of_primary_findings(self):
+        state = ExplorationState("pkg.mod")
+
+        fn = state.function("validate")
+        fn.contract_violations = ["explicit contract failed: must return a payload"]
+        fn.contract_violation_details = [
+            {
+                "kind": "contract",
+                "category": "semantic_contract",
+                "summary": "explicit contract failed: must return a payload",
+                "proof_bundle": {
+                    "verdict": {
+                        "promoted": False,
+                        "demotion_reason": (
+                            "semantic contract remains exploratory until replay "
+                            "demonstrates impact"
+                        ),
+                    }
+                },
+            }
+        ]
+
+        assert state.findings == []
+        assert (
+            "validate: explicit contract failed: must return a payload"
+            in state.exploratory_findings
+        )
+
     def test_explore_scan_forwards_method_targets_and_object_factories(self, monkeypatch):
         import ordeal.auto as auto_mod
         from ordeal.state import explore_scan

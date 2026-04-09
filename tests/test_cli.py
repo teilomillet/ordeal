@@ -2461,6 +2461,77 @@ scan_max_examples = 12
 
         assert defaults.min_fixture_completeness == pytest.approx(0.55)
 
+    def test_blocked_callable_listing_reason_treats_missing_factory_as_gap(
+        self,
+    ):
+        missing_factory_rows = [
+            {"name": "Env.greet", "runnable": False, "skip_reason": "missing object factory"},
+            {
+                "name": "Env.async_greet",
+                "runnable": False,
+                "skip_reason": "missing object factory",
+            },
+        ]
+        low_fixture_rows = [
+            {"name": "Env.greet", "runnable": True, "skip_reason": None},
+            {
+                "name": "Env.async_greet",
+                "runnable": False,
+                "skip_reason": "missing object factory",
+            },
+        ]
+
+        assert (
+            cli._blocked_callable_listing_reason(missing_factory_rows)
+            == "need instance/state harness or object/state factory for discovered methods"
+        )
+        assert (
+            cli._blocked_callable_listing_reason(low_fixture_rows, threshold=0.75)
+            == "fixture completeness is too low for meaningful exploration (50% < 75%)"
+        )
+
+    def test_run_init_scan_treats_unpromoted_semantic_contract_as_exploratory(
+        self,
+        monkeypatch,
+    ):
+        scan_result = ordeal_auto.ScanResult(
+            module="pkg.mod",
+            functions=[
+                ordeal_auto.FunctionResult(
+                    name="validate",
+                    passed=True,
+                    contract_violations=["explicit contract failed: must return a payload"],
+                    contract_violation_details=[
+                        {
+                            "kind": "contract",
+                            "category": "semantic_contract",
+                            "summary": "explicit contract failed: must return a payload",
+                            "proof_bundle": {
+                                "verdict": {
+                                    "promoted": False,
+                                    "demotion_reason": (
+                                        "semantic contract remains exploratory until replay "
+                                        "demonstrates impact"
+                                    ),
+                                }
+                            },
+                        }
+                    ],
+                )
+            ],
+        )
+
+        monkeypatch.setattr(ordeal_auto, "scan_module", lambda *args, **kwargs: scan_result)
+        monkeypatch.setattr(
+            cli,
+            "_resolve_scan_runtime_defaults",
+            lambda *args, **kwargs: cli.ScanRuntimeDefaults(max_examples=1),
+        )
+
+        report = cli._run_init_scan(["pkg.mod"], max_examples=1)
+
+        assert report["status"] == "exploratory findings"
+
     def test_object_config_suggestions_prefer_highest_scored_factory_hint(self):
         rows = [
             {

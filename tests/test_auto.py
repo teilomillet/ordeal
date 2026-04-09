@@ -900,6 +900,8 @@ class TestScanModule:
             skipped = dict(result.skipped)
             assert skipped["Env.greet"] == "missing object factory"
             assert skipped["Env.async_greet"] == "missing object factory"
+            assert result.failed == 0
+            assert "missing object factory" in result.summary()
         finally:
             del sys.modules[module_name]
 
@@ -1667,6 +1669,114 @@ class TestScanModule:
             assert fn.passed is True
             assert fn.contract_violations == []
             assert result.failed == 0
+        finally:
+            del sys.modules[mod.__name__]
+
+    def test_http_shape_contract_is_not_applicable_for_none_outputs(self):
+        mod = types.ModuleType("_test_http_shape_not_applicable")
+        exec(
+            "def extract_tunnel_url_from_line(line: str) -> None:\n"
+            "    return None\n",
+            mod.__dict__,
+        )
+        sys.modules[mod.__name__] = mod
+        try:
+            result = scan_module(
+                mod,
+                max_examples=5,
+                contract_checks={
+                    "extract_tunnel_url_from_line": [
+                        auto_mod.builtin_contract_check(
+                            "http_shape",
+                            kwargs={"line": ""},
+                        )
+                    ]
+                },
+            )
+
+            fn = next(
+                item for item in result.functions if item.name == "extract_tunnel_url_from_line"
+            )
+            assert fn.passed is True
+            assert fn.contract_violations == []
+            assert result.failed == 0
+        finally:
+            del sys.modules[mod.__name__]
+
+    def test_command_path_contracts_are_not_applicable_for_non_command_outputs(self):
+        mod = types.ModuleType("_test_command_path_not_applicable")
+        exec(
+            "def extract_tunnel_url_from_line(line: str) -> None:\n"
+            "    return None\n",
+            mod.__dict__,
+        )
+        sys.modules[mod.__name__] = mod
+        try:
+            result = scan_module(
+                mod,
+                max_examples=5,
+                contract_checks={
+                    "extract_tunnel_url_from_line": [
+                        auto_mod.builtin_contract_check(
+                            "shell_safe",
+                            kwargs={"path": "demo files/input.txt"},
+                        ),
+                        auto_mod.builtin_contract_check(
+                            "quoted_paths",
+                            kwargs={"path": "demo files/input.txt"},
+                        ),
+                        auto_mod.builtin_contract_check(
+                            "command_arg_stability",
+                            kwargs={"path": "demo files/input.txt"},
+                        ),
+                        auto_mod.builtin_contract_check(
+                            "subprocess_argv",
+                            kwargs={"path": "demo files/input.txt"},
+                        ),
+                    ]
+                },
+            )
+
+            fn = next(
+                item for item in result.functions if item.name == "extract_tunnel_url_from_line"
+            )
+            assert fn.passed is True
+            assert fn.contract_violations == []
+            assert result.failed == 0
+        finally:
+            del sys.modules[mod.__name__]
+
+    def test_semantic_contract_returning_none_stays_exploratory_without_shaped_output(self):
+        mod = types.ModuleType("_test_semantic_contract_none_output")
+        exec(
+            "def validate(line: str) -> None:\n"
+            "    return None\n",
+            mod.__dict__,
+        )
+        sys.modules[mod.__name__] = mod
+        try:
+            result = scan_module(
+                mod,
+                max_examples=5,
+                contract_checks={
+                    "validate": [
+                        ContractCheck(
+                            name="must return a payload",
+                            kwargs={"line": ""},
+                            predicate=lambda value: value is not None,
+                        )
+                    ]
+                },
+            )
+
+            fn = next(item for item in result.functions if item.name == "validate")
+            assert fn.verdict == "semantic_contract"
+            assert fn.promoted is False
+            assert fn.passed is True
+            assert fn.contract_violations == ["explicit contract failed: must return a payload"]
+            proof = fn.contract_violation_details[0]["proof_bundle"]
+            assert proof["verdict"]["promoted"] is False
+            assert "demonstrates impact" in str(proof["verdict"]["demotion_reason"])
         finally:
             del sys.modules[mod.__name__]
 

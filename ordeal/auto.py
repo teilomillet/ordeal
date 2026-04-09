@@ -3169,6 +3169,7 @@ def _state_param_name_for_callable(func: Any) -> str | None:
 
 def _call_with_optional_instance_arg(hook: Any, instance: Any) -> Any:
     """Call *hook* with zero or one instance argument."""
+    hook = _unwrap(hook)
     try:
         signature = inspect.signature(hook)
     except (TypeError, ValueError):
@@ -3553,7 +3554,7 @@ def _verify_auto_object_runtime(
     if factory is None:
         return False, "auto-harness dry-run could not find an object factory"
     try:
-        instance = _call_sync(factory)
+        instance = _call_sync(_unwrap(factory))
     except Exception as exc:
         return (
             False,
@@ -3618,7 +3619,7 @@ def _apply_instance_hook(instance: Any, hook: Any | None) -> Any:
         return instance
     if isinstance(hook, Mapping):
         return _apply_instance_scenario_spec(instance, hook)
-    result = _call_sync(hook, instance)
+    result = _call_sync(_unwrap(hook), instance)
     return instance if result is None else result
 
 

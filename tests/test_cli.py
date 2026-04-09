@@ -1672,6 +1672,42 @@ scan_max_examples = 12
         assert "selected=yes" in mutate_line
         assert "selected=no" in scan_module_line
 
+    def test_scan_list_targets_accepts_module_tail_selectors_from_toml(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        monkeypatch.delitem(sys.modules, "pkg.interception_utils", raising=False)
+        monkeypatch.delitem(sys.modules, "pkg", raising=False)
+        pkg = tmp_path / "pkg"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "interception_utils.py").write_text(
+            "def extract_tunnel_url_from_line(line: str) -> str | None:\n"
+            "    return line or None\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "ordeal.toml").write_text(
+            "[[scan]]\n"
+            'module = "pkg.interception_utils"\n'
+            'targets = ["interception_utils.extract_tunnel_url_from_line"]\n',
+            encoding="utf-8",
+        )
+
+        rc = main(["scan", "pkg.interception_utils", "--list-targets"])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        line = next(
+            row
+            for row in out.splitlines()
+            if row.lstrip().startswith("extract_tunnel_url_from_line ")
+        )
+        assert "selected=yes" in line
+
     def test_package_root_scan_sample_prefers_distinct_source_modules(self, monkeypatch):
         package = types.ModuleType("samplepkg")
         package.__path__ = ["samplepkg"]

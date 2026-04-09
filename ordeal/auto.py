@@ -4240,11 +4240,15 @@ def _callable_matches_target_selector(module_name: str, name: str, selector: str
     raw_selector = str(selector).strip()
     if not raw_selector:
         return False
-    variants = (
+    variants: list[str] = [
         name,
         f"{module_name}.{name}",
         f"{module_name}:{name}",
-    )
+    ]
+    module_parts = [part for part in str(module_name).split(".") if part]
+    for index in range(1, len(module_parts)):
+        suffix = ".".join(module_parts[index:])
+        variants.extend((f"{suffix}.{name}", f"{suffix}:{name}"))
     return any(fnmatch.fnmatchcase(variant, raw_selector) for variant in variants)
 
 

@@ -850,6 +850,27 @@ class TestScanModule:
         finally:
             del sys.modules[mod.__name__]
 
+    def test_target_selectors_accept_module_tail_prefixes(self):
+        import sys
+        import types
+
+        mod = types.ModuleType("pkg.interception_utils")
+        exec(
+            "def extract_tunnel_url_from_line(line: str) -> str | None:\n"
+            "    return line or None\n",
+            mod.__dict__,
+        )
+        sys.modules[mod.__name__] = mod
+        try:
+            result = scan_module(
+                mod,
+                max_examples=2,
+                targets=["interception_utils.extract_tunnel_url_from_line"],
+            )
+            assert [f.name for f in result.functions] == ["extract_tunnel_url_from_line"]
+        finally:
+            del sys.modules[mod.__name__]
+
     def test_catches_crash(self):
         result = scan_module("tests._auto_target", max_examples=50)
         divide_result = next(f for f in result.functions if f.name == "divide")

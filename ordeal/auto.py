@@ -333,6 +333,10 @@ class ContractCheck:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+class ContractNotApplicable(RuntimeError):
+    """Signal that a semantic contract does not apply to one observed output."""
+
+
 @dataclass
 class ScanResult:
     """Result of scanning a module."""
@@ -530,6 +534,7 @@ _BOUNDARY_SMOKE_VALUES: dict[object, tuple[object, ...]] = {
 }
 _VALID_SCAN_MODES: set[str] = set(_SCAN_MODE_ALIASES)
 _WEAK_CONTRACT_FIT = 0.35
+_SECURITY_FOCUS_MIN_FIXTURE_COMPLETENESS = 0.55
 
 
 @dataclass(frozen=True)
@@ -3491,6 +3496,60 @@ def _mined_object_runtime(owner: type, method_name: str) -> AutoObjectRuntime:
     )
 
 
+def _verify_auto_object_runtime(
+    owner: type,
+    *,
+    factory: Any | None,
+    setup: Any | None = None,
+    scenarios: Sequence[Any] | None = None,
+    state_factory: Any | None = None,
+    state_param: str | None = None,
+    factory_source: str | None = None,
+    setup_source: str | None = None,
+    scenario_source: str | None = None,
+    state_factory_source: str | None = None,
+) -> tuple[bool, str | None]:
+    """Dry-run mined object harness pieces before treating a method as runnable."""
+    mined_sources = {
+        "factory": factory_source,
+        "setup": setup_source,
+        "scenario": scenario_source,
+        "state_factory": state_factory_source,
+    }
+    if not any(source == "mined" for source in mined_sources.values()):
+        return True, None
+    if factory is None:
+        return False, "auto-harness dry-run could not find an object factory"
+    try:
+        instance = _call_sync(factory)
+    except Exception as exc:
+        return (
+            False,
+            "auto-harness dry-run failed during factory invocation: "
+            f"{type(exc).__name__}: {exc}",
+        )
+    if not isinstance(instance, owner):
+        return (
+            False,
+            "auto-harness dry-run returned "
+            f"{type(instance).__name__}, expected {owner.__qualname__}",
+        )
+    try:
+        if setup is not None and setup_source == "mined":
+            instance = _apply_instance_hook(instance, setup)
+        if scenarios and scenario_source == "mined":
+            instance = _apply_instance_hooks(instance, scenarios)
+        if state_factory is not None and state_factory_source == "mined" and state_param:
+            _build_state_value(state_factory, instance=instance)
+    except Exception as exc:
+        return (
+            False,
+            "auto-harness dry-run failed while preparing the instance: "
+            f"{type(exc).__name__}: {exc}",
+        )
+    return True, None
+
+
 def _build_state_value(
     state_factory: Any | None,
     *,
@@ -3745,6 +3804,18 @@ def _resolve_method_callable(
                     harness_hints=mined_runtime.hints,
                 ),
             )
+        harness_verified, harness_dry_run_error = _verify_auto_object_runtime(
+            owner,
+            factory=factory,
+            setup=setup,
+            scenarios=scenarios,
+            state_factory=state_factory,
+            state_param=state_param,
+            factory_source=factory_source,
+            setup_source=setup_source,
+            scenario_source=scenario_source,
+            state_factory_source=state_factory_source,
+        )
         return (
             qualname,
             _make_bound_method_callable(
@@ -3765,6 +3836,8 @@ def _resolve_method_callable(
                 state_factory_source=state_factory_source,
                 teardown_source=teardown_source,
                 harness_source=harness_source,
+                harness_verified=harness_verified,
+                harness_dry_run_error=harness_dry_run_error,
             ),
         )
 
@@ -3790,6 +3863,8 @@ def _make_bound_method_callable(
     state_factory_source: str | None = None,
     teardown_source: str | None = None,
     harness_source: str | None = None,
+    harness_verified: bool = True,
+    harness_dry_run_error: str | None = None,
 ) -> Any:
     """Build a sync wrapper that creates a fresh object per invocation."""
     target = _unwrap(method)
@@ -3797,80 +3872,103 @@ def _make_bound_method_callable(
 
     @functools.wraps(target)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
-        instance = _call_sync(factory)
+        instance: Any = None
         result: Any = None
         error: BaseException | None = None
-        before_state = _snapshot_instance_state(instance)
+        before_state = None
         call_args = tuple(args)
         call_kwargs = dict(kwargs)
         teardown_called = False
         teardown_error: str | None = None
         probe_cleanup: Callable[[], None] | None = None
         probe_context: dict[str, Any] = {}
+        lifecycle_runtime: dict[str, Any] = {}
+        call_stage = "factory"
+        failure_stage: str | None = None
         fault_names = tuple(getattr(wrapped, "__ordeal_contract_faults__", ()))
-        with _lifecycle_fault_runtime(
-            instance,
-            owner,
-            method_name=method_name,
-            setup=setup,
-            teardown=teardown,
-            fault_names=fault_names,
-        ) as lifecycle_runtime:
-            runtime_setup = lifecycle_runtime.get("setup_hook", setup)
-            runtime_teardown = lifecycle_runtime.get("teardown_hook", teardown)
-            try:
-                probe_cleanup, probe_context = _instance_probe_result(
-                    getattr(wrapped, "__ordeal_instance_probe__", None),
-                    instance=instance,
-                    owner=owner,
-                    method_name=method_name,
-                )
-                instance = _apply_instance_hook(instance, runtime_setup)
-                instance = _apply_instance_hooks(instance, scenarios)
-                before_state = _snapshot_instance_state(instance)
-                bound = getattr(instance, method_name)
-                call_args, call_kwargs = _prepare_bound_method_call(
-                    target,
-                    args,
-                    kwargs,
-                    instance=instance,
-                    state_factory=state_factory,
-                    state_param=state_param,
-                )
-                result = _call_sync(bound, *call_args, **call_kwargs)
-                return result
-            except BaseException as exc:
-                error = exc
-                raise
-            finally:
-                if runtime_teardown is not None:
-                    teardown_called = True
-                    try:
-                        _call_with_optional_instance_arg(runtime_teardown, instance)
-                    except BaseException as exc:
-                        teardown_error = f"{type(exc).__name__}: {exc}"
-                        if error is None:
-                            error = exc
-                            raise
-                wrapped.__ordeal_last_call_context__ = {
-                    "instance": instance,
-                    "before_state": before_state,
-                    "after_state": _snapshot_instance_state(instance),
-                    "kwargs": dict(call_kwargs),
-                    "args": tuple(call_args),
-                    "method_name": method_name,
-                    "owner": owner,
-                    "harness": harness,
-                    "result": result,
-                    "error": error,
-                    "teardown_called": teardown_called,
-                    "teardown_error": teardown_error,
-                    "lifecycle_phase": lifecycle_phase,
-                    "lifecycle_runtime": lifecycle_runtime,
-                    **probe_context,
-                }
-                if probe_cleanup is not None:
-                    probe_cleanup()
+        try:
+            instance = _call_sync(factory)
+            before_state = _snapshot_instance_state(instance)
+            with _lifecycle_fault_runtime(
+                instance,
+                owner,
+                method_name=method_name,
+                setup=setup,
+                teardown=teardown,
+                fault_names=fault_names,
+            ) as lifecycle_runtime:
+                runtime_setup = lifecycle_runtime.get("setup_hook", setup)
+                runtime_teardown = lifecycle_runtime.get("teardown_hook", teardown)
+                try:
+                    call_stage = "probe"
+                    probe_cleanup, probe_context = _instance_probe_result(
+                        getattr(wrapped, "__ordeal_instance_probe__", None),
+                        instance=instance,
+                        owner=owner,
+                        method_name=method_name,
+                    )
+                    call_stage = "setup"
+                    instance = _apply_instance_hook(instance, runtime_setup)
+                    call_stage = "scenario"
+                    instance = _apply_instance_hooks(instance, scenarios)
+                    before_state = _snapshot_instance_state(instance)
+                    bound = getattr(instance, method_name)
+                    call_stage = "prepare"
+                    call_args, call_kwargs = _prepare_bound_method_call(
+                        target,
+                        args,
+                        kwargs,
+                        instance=instance,
+                        state_factory=state_factory,
+                        state_param=state_param,
+                    )
+                    call_stage = "invoke"
+                    result = _call_sync(bound, *call_args, **call_kwargs)
+                    return result
+                except BaseException as exc:
+                    error = exc
+                    failure_stage = call_stage
+                    raise
+                finally:
+                    if runtime_teardown is not None:
+                        call_stage = "teardown"
+                        teardown_called = True
+                        try:
+                            _call_with_optional_instance_arg(runtime_teardown, instance)
+                        except BaseException as exc:
+                            teardown_error = f"{type(exc).__name__}: {exc}"
+                            if error is None:
+                                error = exc
+                                raise
+        except BaseException as exc:
+            error = exc
+            if failure_stage is None:
+                failure_stage = call_stage
+            raise
+        finally:
+            wrapped.__ordeal_last_call_context__ = {
+                "instance": instance,
+                "before_state": before_state,
+                "after_state": (
+                    _snapshot_instance_state(instance) if instance is not None else None
+                ),
+                "kwargs": dict(call_kwargs),
+                "args": tuple(call_args),
+                "method_name": method_name,
+                "owner": owner,
+                "harness": harness,
+                "result": result,
+                "error": error,
+                "teardown_called": teardown_called,
+                "teardown_error": teardown_error,
+                "lifecycle_phase": lifecycle_phase,
+                "lifecycle_runtime": lifecycle_runtime,
+                "call_stage": call_stage,
+                "failure_stage": failure_stage,
+                **probe_context,
+            }
+            if probe_cleanup is not None:
+                probe_cleanup()
 
     try:
         wrapped.__signature__ = _signature_without_first_context(
@@ -3912,6 +4010,8 @@ def _make_bound_method_callable(
             harness_source,
         )
     )
+    wrapped.__ordeal_harness_verified__ = harness_verified
+    wrapped.__ordeal_harness_dry_run_error__ = harness_dry_run_error
     wrapped.__ordeal_harness_hints__ = tuple(
         harness_hints or _mine_object_harness_hints(owner.__module__, owner.__name__, method_name)
     )
@@ -4197,7 +4297,9 @@ def quoted_paths_contract(
     def predicate(value: Any) -> bool:
         tokens = _command_tokens(value)
         if tokens is None:
-            return False
+            raise ContractNotApplicable(
+                "quoted_paths only applies to command-builder outputs"
+            )
         for raw in _tracked_string_args(kwargs, tracked_params):
             if "/" in raw or "\\" in raw or " " in raw:
                 if _tracked_token_count(tokens, raw) != 1:
@@ -6923,6 +7025,62 @@ def _profile_fixture_completeness(profile: Mapping[str, Any]) -> float:
     return completeness
 
 
+def _bootstrap_failure_demotion(
+    func: Any,
+    *,
+    category: str,
+    call_context: Mapping[str, Any] | None,
+) -> tuple[str, str | None]:
+    """Demote mined harness bootstrap failures before they become promoted findings."""
+    if category in {"invalid_input_crash", "beyond_declared_contract_robustness"}:
+        return category, None
+    if not getattr(func, "__ordeal_auto_harness__", False):
+        return category, None
+    if getattr(func, "__ordeal_harness_verified__", True):
+        return category, None
+    call_stage = str(
+        (call_context or {}).get("failure_stage") or (call_context or {}).get("call_stage") or ""
+    ).strip()
+    if call_stage in {"", "invoke", "teardown"}:
+        return category, None
+    dry_run_error = str(getattr(func, "__ordeal_harness_dry_run_error__", "") or "").strip()
+    reason = dry_run_error or (
+        "auto-mined object harness needs a successful dry-run factory invocation before "
+        "bound-method crashes can promote"
+    )
+    return "coverage_gap", reason
+
+
+def _security_focus_demotion(
+    *,
+    category: str,
+    mode: ScanMode,
+    security_focus: bool,
+    input_source: str | None,
+    replayable: bool,
+    fixture_completeness: float,
+    aligned_sink_categories: Sequence[str],
+) -> tuple[str, str | None]:
+    """Apply stricter candidate-mode security-focus promotion gates."""
+    if category != "likely_bug":
+        return category, None
+    if input_source == "artifact_mutation" and (not replayable or not aligned_sink_categories):
+        return (
+            "coverage_gap",
+            "artifact mutation probes stay exploratory until they produce a "
+            "replayable, sink-aligned failure",
+        )
+    if security_focus and mode == "real_bug":
+        if fixture_completeness < _SECURITY_FOCUS_MIN_FIXTURE_COMPLETENESS:
+            return (
+                "coverage_gap",
+                "fixture completeness stayed below the security-focus promotion bar "
+                f"({fixture_completeness:.0%} < "
+                f"{_SECURITY_FOCUS_MIN_FIXTURE_COMPLETENESS:.0%})",
+            )
+    return category, None
+
+
 def _proof_demotion_reason(
     *,
     category: str,
@@ -6930,11 +7088,16 @@ def _proof_demotion_reason(
     contract_fit: float,
     reachability: float,
     realism: float,
+    fixture_completeness: float | None = None,
     min_contract_fit: float,
     min_reachability: float,
     min_realism: float,
+    min_fixture_completeness: float | None = None,
+    forced_reason: str | None = None,
 ) -> str | None:
     """Return the concrete reason a finding was not promoted as a candidate issue."""
+    if forced_reason:
+        return forced_reason
     if category in {"likely_bug", "semantic_contract", "lifecycle_contract"}:
         return None
     if category == "expected_precondition_failure":
@@ -6955,6 +7118,15 @@ def _proof_demotion_reason(
     if realism < min_realism:
         reasons.append(
             f"the input realism stayed below the promotion bar ({realism:.0%} < {min_realism:.0%})"
+        )
+    if (
+        min_fixture_completeness is not None
+        and fixture_completeness is not None
+        and fixture_completeness < min_fixture_completeness
+    ):
+        reasons.append(
+            "fixture completeness stayed below the promotion bar "
+            f"({fixture_completeness:.0%} < {min_fixture_completeness:.0%})"
         )
     if category == "invalid_input_crash":
         reasons.append("the crash still looks driven by out-of-contract input")
@@ -7043,10 +7215,12 @@ def _build_proof_bundle(
     min_contract_fit: float = 0.6,
     min_reachability: float = 0.5,
     min_realism: float = 0.55,
+    min_fixture_completeness: float | None = None,
     harness_mode: str | None = None,
     callable_kind: str | None = None,
     contract_check: str | None = None,
     security_focus: bool = False,
+    forced_demotion_reason: str | None = None,
 ) -> dict[str, Any]:
     """Build the proof payload carried through reports and agent output."""
     evidence_class = (
@@ -7078,9 +7252,12 @@ def _build_proof_bundle(
         contract_fit=contract_fit,
         reachability=reachability,
         realism=realism,
+        fixture_completeness=fixture_completeness,
         min_contract_fit=min_contract_fit,
         min_reachability=min_reachability,
         min_realism=min_realism,
+        min_fixture_completeness=min_fixture_completeness,
+        forced_reason=forced_demotion_reason,
     )
     witness = {
         "input": _json_ready_proof(dict(failing_args)),
@@ -7557,6 +7734,8 @@ def _evaluate_contract_checks(
                 kwargs=kwargs,
                 error=error_obj,
             )
+        except ContractNotApplicable:
+            continue
         except Exception as exc:
             passed = False
             error = f"{type(exc).__name__}: {exc}"
@@ -7907,6 +8086,7 @@ def _test_one_function(
         seed_from_call_sites=seed_from_call_sites,
         treat_any_as_weak=treat_any_as_weak,
     )
+    fixture_completeness = _profile_fixture_completeness(profile)
     seed_examples = list(profile.get("seed_examples", []))
     strategies = _bias_strategies_with_seed_examples(strategies, seed_examples)
     auto_checks, sink_categories = _auto_contract_checks(
@@ -7972,6 +8152,7 @@ def _test_one_function(
 
         test()
     except Exception as e:
+        call_context = getattr(func, "__ordeal_last_call_context__", None)
         precondition = _documented_precondition_failure(
             func,
             e,
@@ -8003,10 +8184,13 @@ def _test_one_function(
         effective_min_contract_fit = min_contract_fit
         effective_min_reachability = min_reachability
         effective_min_realism = min_realism
+        effective_min_fixture_completeness: float | None = None
         if security_focus and aligned_critical_sinks:
             effective_min_contract_fit = max(0.45, min_contract_fit - 0.1)
             effective_min_reachability = max(0.35, min_reachability - 0.1)
             effective_min_realism = max(0.5, min_realism - 0.05)
+        if security_focus and mode == "real_bug":
+            effective_min_fixture_completeness = _SECURITY_FOCUS_MIN_FIXTURE_COMPLETENESS
         robustness_case = _looks_like_declared_contract_robustness(
             last_kwargs,
             profile,
@@ -8025,6 +8209,22 @@ def _test_one_function(
             min_realism=effective_min_realism,
             require_replayable=require_replayable,
         )
+        crash_category, forced_demotion_reason = _bootstrap_failure_demotion(
+            func,
+            category=crash_category,
+            call_context=call_context,
+        )
+        crash_category, security_focus_demotion_reason = _security_focus_demotion(
+            category=crash_category,
+            mode=mode,
+            security_focus=security_focus,
+            input_source=last_input_source,
+            replayable=replayable,
+            fixture_completeness=fixture_completeness,
+            aligned_sink_categories=aligned_sinks,
+        )
+        if security_focus_demotion_reason is not None:
+            forced_demotion_reason = security_focus_demotion_reason
         verdict = _verdict_for_crash(crash_category)
         proof_bundle = None
         if proof_bundles:
@@ -8048,11 +8248,12 @@ def _test_one_function(
                 min_contract_fit=effective_min_contract_fit,
                 min_reachability=effective_min_reachability,
                 min_realism=effective_min_realism,
+                min_fixture_completeness=effective_min_fixture_completeness,
                 harness_mode=getattr(func, "__ordeal_harness__", None),
                 callable_kind=getattr(func, "__ordeal_kind__", None),
                 security_focus=security_focus,
+                forced_demotion_reason=forced_demotion_reason,
             )
-            call_context = getattr(func, "__ordeal_last_call_context__", None)
             if call_context:
                 lifecycle_details = {
                     "phase": call_context.get("lifecycle_phase"),

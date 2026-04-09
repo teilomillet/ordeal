@@ -2065,6 +2065,39 @@ scan_max_examples = 12
         assert row["scenario_source"] == "mined"
         assert row["auto_harness"] is True
 
+    def test_scan_list_targets_marks_unverified_auto_harness_unrunnable(self, monkeypatch):
+        module_name = "_test_cli_unverified_auto_harness"
+        mod = types.ModuleType(module_name)
+        sys.modules[module_name] = mod
+        exec(
+            "class Env:\n"
+            "    def greet(self, name: str) -> str:\n"
+            "        return name\n",
+            mod.__dict__,
+        )
+
+        def bad_factory() -> object:
+            raise RuntimeError("needs pytest request")
+
+        monkeypatch.setattr(
+            ordeal_auto,
+            "_mined_object_runtime",
+            lambda owner, method_name: ordeal_auto.AutoObjectRuntime(
+                factory=bad_factory,
+                factory_source="mined",
+            ),
+        )
+
+        try:
+            rows = cli._callable_listing_rows(module_name)
+            row = next(item for item in rows if item["name"] == "Env.greet")
+            assert row["auto_harness"] is True
+            assert row["harness_verified"] is False
+            assert row["runnable"] is False
+            assert "dry-run" in str(row["skip_reason"])
+        finally:
+            del sys.modules[module_name]
+
     def test_scan_list_targets_text_shows_harness_config_hints(
         self,
         monkeypatch,
@@ -2418,6 +2451,17 @@ scan_max_examples = 12
         assert any("[audit]" in snippet for snippet in snippets)
         assert any("[[objects]]" in snippet for snippet in snippets)
         assert any('target = "pkg.mod:Env"' in snippet for snippet in snippets)
+
+    def test_scan_runtime_defaults_use_nonzero_fixture_completeness_floor(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        monkeypatch.chdir(tmp_path)
+
+        defaults = cli._resolve_scan_runtime_defaults("pkg.mod", requested_examples=7)
+
+        assert defaults.min_fixture_completeness == pytest.approx(0.55)
 
     def test_object_config_suggestions_prefer_highest_scored_factory_hint(self):
         rows = [

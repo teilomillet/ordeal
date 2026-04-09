@@ -11,14 +11,33 @@ code behaves correctly under all reachable conditions.
 
 from __future__ import annotations
 
+import re
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _get_version
 from pathlib import Path
 
-try:
-    __version__ = _get_version("ordeal")
-except PackageNotFoundError:
-    __version__ = "0.1.0"
+
+def _source_tree_version() -> str | None:
+    """Return the version declared by the local source tree when available."""
+    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    if not pyproject.exists():
+        return None
+    match = re.search(
+        r'(?m)^version\s*=\s*"([^"]+)"\s*$',
+        pyproject.read_text(encoding="utf-8"),
+    )
+    return match.group(1) if match is not None else None
+
+
+def _resolve_version() -> str:
+    """Prefer the installed package version, then fall back to the source tree."""
+    try:
+        return _get_version("ordeal")
+    except PackageNotFoundError:
+        return _source_tree_version() or "0.0.0+unknown"
+
+
+__version__ = _resolve_version()
 
 __all__ = [
     # Core

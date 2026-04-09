@@ -46,6 +46,7 @@ _SAFE_LISTING_CONFIG_WARNING = (
     "were not imported during target listing; run a real scan/audit/check "
     "to validate them"
 )
+_DEFAULT_SCAN_MIN_FIXTURE_COMPLETENESS = 0.55
 
 
 def _stderr(msg: str) -> None:
@@ -225,7 +226,7 @@ class ScanRuntimeDefaults:
     min_contract_fit: float = 0.55
     min_reachability: float = 0.45
     min_realism: float = 0.55
-    min_fixture_completeness: float = 0.0
+    min_fixture_completeness: float = _DEFAULT_SCAN_MIN_FIXTURE_COMPLETENESS
     security_focus: bool = False
     fixtures: dict[str, Any] | None = None
     targets: list[str] = field(default_factory=list)
@@ -1264,9 +1265,13 @@ def _callable_listing_rows(
         if resolved_scenario is not None and scenario_count == 0:
             scenario_count = 1
         skip_reason = getattr(func, "__ordeal_skip_reason__", None)
+        harness_verified = bool(getattr(func, "__ordeal_harness_verified__", True))
+        harness_dry_run_error = getattr(func, "__ordeal_harness_dry_run_error__", None)
         inferred_strategies = _infer_strategies(_unwrap(func))
         if factory_required and not factory_configured and not skip_reason:
             skip_reason = "missing object factory"
+        if bool(getattr(func, "__ordeal_auto_harness__", False)) and not harness_verified:
+            skip_reason = str(harness_dry_run_error or "auto-harness dry-run failed")
         if state_param and not state_factory_configured and inferred_strategies is None:
             skip_reason = skip_reason or "missing state factory"
         if inferred_strategies is None and not skip_reason:
@@ -1349,6 +1354,8 @@ def _callable_listing_rows(
             "scenario_count": scenario_count,
             "scenario_source": scenario_source,
             "auto_harness": bool(getattr(func, "__ordeal_auto_harness__", False)),
+            "harness_verified": harness_verified,
+            "harness_dry_run_error": harness_dry_run_error,
             "contract_checks": [str(getattr(check, "name", check)) for check in checks],
             "lifecycle_phase": getattr(func, "__ordeal_lifecycle_phase__", None),
             "harness_hints": harness_hints,
@@ -4008,7 +4015,7 @@ def _resolve_scan_runtime_defaults(
         "min_contract_fit": 0.55,
         "min_reachability": 0.45,
         "min_realism": 0.55,
-        "min_fixture_completeness": 0.0,
+        "min_fixture_completeness": _DEFAULT_SCAN_MIN_FIXTURE_COMPLETENESS,
         "security_focus": False,
         "fixtures": None,
         "targets": [],
@@ -4170,7 +4177,9 @@ def _resolve_scan_runtime_defaults(
     values["min_contract_fit"] = float(match.min_contract_fit)
     values["min_reachability"] = float(match.min_reachability)
     values["min_realism"] = float(getattr(match, "min_realism", 0.55))
-    values["min_fixture_completeness"] = float(getattr(match, "min_fixture_completeness", 0.0))
+    values["min_fixture_completeness"] = float(
+        getattr(match, "min_fixture_completeness", _DEFAULT_SCAN_MIN_FIXTURE_COMPLETENESS)
+    )
     values["security_focus"] = bool(getattr(match, "security_focus", False))
     values["targets"] = list(match.targets)
     values["include_private"] = bool(match.include_private)

@@ -506,7 +506,7 @@ class TestScanModule:
 
         assert all(candidate.origin != "security_probe" for candidate in candidates)
 
-    def test_security_focus_relaxes_thresholds_for_critical_sinks(self):
+    def test_security_focus_keeps_critical_sinks_exploratory_without_fixture_completeness(self):
         def load_plugin(module_name: object) -> object:
             if module_name == "json":
                 raise RuntimeError("trusted loader failed")
@@ -534,10 +534,11 @@ class TestScanModule:
 
         assert baseline.crash_category == "speculative_crash"
         assert baseline.verdict == "exploratory_crash"
-        assert focused.crash_category == "likely_bug"
-        assert focused.verdict == "promoted_real_bug"
+        assert focused.crash_category == "coverage_gap"
+        assert focused.verdict == "coverage_gap"
         assert focused.proof_bundle is not None
         assert focused.proof_bundle["impact"]["critical_sinks"] == ["import"]
+        assert "fixture completeness" in str(focused.proof_bundle["verdict"]["demotion_reason"])
 
     def test_security_focus_promotes_deserialization_sink_with_artifact_mutation(self):
         import pickle
@@ -612,6 +613,70 @@ class TestScanModule:
         assert focused.input_source == "artifact_mutation"
         assert focused.proof_bundle is not None
         assert focused.proof_bundle["impact"]["critical_sinks"] == ["ipc"]
+
+    def test_security_focus_candidate_requires_fixture_completeness_for_promotion(
+        self,
+        monkeypatch,
+    ):
+        import importlib
+
+        def load_plugin(module_name: object) -> object:
+            if False:
+                importlib.import_module(module_name)
+            if module_name == "json":
+                raise RuntimeError("trusted loader failed")
+            return module_name
+
+        monkeypatch.setattr(auto_mod, "_profile_fixture_completeness", lambda _profile: 0.2)
+
+        focused = _test_one_function(
+            "load_plugin",
+            load_plugin,
+            {"module_name": st.just("json")},
+            object,
+            max_examples=1,
+            check_return_type=True,
+            mode="candidate",
+            security_focus=True,
+        )
+
+        assert focused.crash_category == "coverage_gap"
+        assert focused.verdict == "coverage_gap"
+        assert focused.proof_bundle is not None
+        assert focused.proof_bundle["confidence_breakdown"]["fixture_completeness"] == 0.2
+        assert "fixture completeness" in str(focused.proof_bundle["verdict"]["demotion_reason"])
+
+    def test_artifact_mutation_probe_stays_exploratory_without_sink_aligned_failure(
+        self,
+        monkeypatch,
+    ):
+        import pickle
+
+        def resume(blob: bytes) -> bytes:
+            if False:
+                pickle.loads(blob)
+            if blob.startswith(b'{"artifact"'):
+                raise RuntimeError("checkpoint probe rejected")
+            return blob
+
+        monkeypatch.setattr(auto_mod, "_aligned_security_sinks", lambda kwargs, profile: [])
+
+        focused = _test_one_function(
+            "resume",
+            resume,
+            {"blob": st.just(b"trusted")},
+            bytes,
+            max_examples=1,
+            check_return_type=True,
+            mode="candidate",
+            security_focus=True,
+        )
+
+        assert focused.input_source == "artifact_mutation"
+        assert focused.crash_category == "coverage_gap"
+        assert focused.verdict == "coverage_gap"
+        assert focused.proof_bundle is not None
+        assert "sink-aligned" in str(focused.proof_bundle["verdict"]["demotion_reason"])
 
     def test_security_focus_requires_aligned_risky_parameter_for_threshold_relaxation(self):
         import importlib
@@ -837,6 +902,43 @@ class TestScanModule:
             assert skipped["Env.async_greet"] == "missing object factory"
         finally:
             del sys.modules[module_name]
+
+    def test_auto_harness_dry_run_failure_demotes_bound_method_crash_to_coverage_gap(
+        self,
+        monkeypatch,
+    ):
+        class Env:
+            def greet(self, name: str) -> str:
+                return f"hi:{name}"
+
+        def bad_factory() -> object:
+            raise RuntimeError("needs pytest request")
+
+        monkeypatch.setattr(
+            auto_mod,
+            "_mined_object_runtime",
+            lambda owner, method_name: auto_mod.AutoObjectRuntime(
+                factory=bad_factory,
+                factory_source="mined",
+            ),
+        )
+
+        _, greet = auto_mod._resolve_method_callable(Env, "greet", Env.__dict__["greet"])
+        result = _test_one_function(
+            "Env.greet",
+            greet,
+            {"name": st.just("demo")},
+            str,
+            max_examples=1,
+            check_return_type=True,
+            mode="candidate",
+        )
+
+        assert getattr(greet, "__ordeal_harness_verified__", True) is False
+        assert result.crash_category == "coverage_gap"
+        assert result.verdict == "coverage_gap"
+        assert result.proof_bundle is not None
+        assert "dry-run" in str(result.proof_bundle["verdict"]["demotion_reason"])
 
     def test_method_factories_enable_async_scan_and_explicit_fuzz_targets(self):
         import sys
@@ -1540,6 +1642,35 @@ class TestScanModule:
         assert contract.predicate(["cp", "demo files/input.txt", "/tmp"])
         assert not contract.predicate(["cp", "demo", "files/input.txt", "/tmp"])
 
+    def test_quoted_paths_contract_is_not_applicable_for_non_command_outputs(self):
+        mod = types.ModuleType("_test_quoted_paths_not_applicable")
+        exec(
+            "def normalize_path(path: str) -> None:\n"
+            "    return None\n",
+            mod.__dict__,
+        )
+        sys.modules[mod.__name__] = mod
+        try:
+            result = scan_module(
+                mod,
+                max_examples=5,
+                contract_checks={
+                    "normalize_path": [
+                        auto_mod.builtin_contract_check(
+                            "quoted_paths",
+                            kwargs={"path": "demo files/input.txt"},
+                        )
+                    ]
+                },
+            )
+
+            fn = next(item for item in result.functions if item.name == "normalize_path")
+            assert fn.passed is True
+            assert fn.contract_violations == []
+            assert result.failed == 0
+        finally:
+            del sys.modules[mod.__name__]
+
     def test_explicit_contract_checks_are_reported_without_failing_scan(self):
         mod = types.ModuleType("_test_contracts")
         exec(
@@ -1787,6 +1918,14 @@ class TestScanModule:
         assert divide_result.proof_bundle["valid_input_witness"]["source"] == "boundary"
         assert divide_result.proof_bundle["reproduction"]["replay_matches"] == 2
         json.dumps(divide_result.proof_bundle)
+
+    def test_version_falls_back_to_source_tree_when_metadata_is_missing(self, monkeypatch):
+        def missing_version(_name: str) -> str:
+            raise ordeal.PackageNotFoundError
+
+        monkeypatch.setattr(ordeal, "_get_version", missing_version)
+
+        assert ordeal._resolve_version() == "0.3.32"
 
     def test_marks_unreplayed_crashes_as_speculative(self):
         calls = iter(range(10_000))

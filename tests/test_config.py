@@ -185,6 +185,7 @@ module = "myapp.scoring"
         )
 
         assert cfg.scan[0].mode == "evidence"
+        assert cfg.scan[0].min_fixture_completeness == pytest.approx(0.55)
 
     def test_invalid_scan_precision_controls(self, tmp_toml):
         with pytest.raises(ConfigError, match="scan.0.mode"):

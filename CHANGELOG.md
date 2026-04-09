@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.35
+
+**Fixes:**
+
+- sanitize scan proof bundle artifacts
+
+
 ## 0.3.34
 
 **Fixes:**

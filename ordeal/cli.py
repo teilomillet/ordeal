@@ -187,6 +187,7 @@ _DEFAULT_FINDINGS_DIR = ".ordeal/findings"
 _PACKAGE_ROOT_SCAN_LIMIT = 8
 CLI_CATALOG_SCHEMA_VERSION = 1
 
+
 @dataclass(frozen=True)
 class ArgumentSpec:
     """Declarative definition of one CLI argument."""
@@ -3025,9 +3026,7 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
                 if call_pattern and key != "cli":
                     print(f"    call_pattern:\n{indent(call_pattern, '      ')}")
                 examples = [
-                    str(value).rstrip()
-                    for value in item.get("examples", [])
-                    if str(value).strip()
+                    str(value).rstrip() for value in item.get("examples", []) if str(value).strip()
                 ]
                 if examples:
                     print("    examples:")

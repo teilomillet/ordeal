@@ -106,7 +106,6 @@ _LAZY_SUBMODULES = (
 _SENTINEL = object()
 
 
-
 def __getattr__(name: str) -> object:
     """Lazy import: search submodules for the requested name."""
     import importlib
@@ -460,9 +459,7 @@ def _annotate_catalog_entry(
     generated_call_pattern = ""
     if section not in {"cli", "skill"} and module_name and attr_name:
         generated_call_pattern = _catalog_call_pattern(module_name, attr_name, obj) or ""
-    call_pattern = str(
-        annotated.get("call_pattern") or generated_call_pattern
-    ).strip()
+    call_pattern = str(annotated.get("call_pattern") or generated_call_pattern).strip()
     examples = [
         str(item).rstrip()
         for item in (

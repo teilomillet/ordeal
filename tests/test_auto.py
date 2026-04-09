@@ -919,7 +919,8 @@ class TestScanModule:
             del sys.modules["_test_imported_helpers"]
 
     def test_harness_hints_include_concrete_config_suggestions(self, tmp_path, monkeypatch):
-        pkg = tmp_path / "hintpkg"
+        package_name = "hintpkg_harness_config"
+        pkg = tmp_path / package_name
         tests_dir = tmp_path / "tests"
         docs_dir = tmp_path / "docs"
         pkg.mkdir()
@@ -939,7 +940,7 @@ class TestScanModule:
             encoding="utf-8",
         )
         (tests_dir / "support_factories.py").write_text(
-            "from hintpkg.envs import Env\n"
+            f"from {package_name}.envs import Env\n"
             "\n"
             "class FakeSandbox:\n"
             "    def execute_command(self, prompt: str) -> None:\n"
@@ -965,7 +966,7 @@ class TestScanModule:
         monkeypatch.chdir(tmp_path)
         monkeypatch.syspath_prepend(str(tmp_path))
 
-        hints = auto_mod._mine_object_harness_hints("hintpkg.envs", "Env", "render")
+        hints = auto_mod._mine_object_harness_hints(f"{package_name}.envs", "Env", "render")
 
         factory_hint = next(hint for hint in hints if hint.kind == "factory")
         state_hint = next(hint for hint in hints if hint.kind == "state_factory")
@@ -973,7 +974,7 @@ class TestScanModule:
         scenario_hint = next(hint for hint in hints if hint.kind == "scenario_pack")
 
         assert factory_hint.config["section"] == "[[objects]]"
-        assert factory_hint.config["target"] == "hintpkg.envs:Env"
+        assert factory_hint.config["target"] == f"{package_name}.envs:Env"
         assert factory_hint.config["key"] == "factory"
         assert factory_hint.config["value"].endswith("make_env")
         assert state_hint.config["key"] == "state_factory"
@@ -986,7 +987,8 @@ class TestScanModule:
         tmp_path,
         monkeypatch,
     ):
-        pkg = tmp_path / "hintpkg"
+        package_name = "hintpkg_factory_rank"
+        pkg = tmp_path / package_name
         tests_dir = tmp_path / "tests"
         pkg.mkdir()
         tests_dir.mkdir()
@@ -1001,12 +1003,14 @@ class TestScanModule:
             encoding="utf-8",
         )
         (tests_dir / "support_factories.py").write_text(
-            "from hintpkg.envs import Env\n\ndef make_env() -> Env:\n    return Env('factory')\n",
+            f"from {package_name}.envs import Env\n\n"
+            "def make_env() -> Env:\n"
+            "    return Env('factory')\n",
             encoding="utf-8",
         )
         (tests_dir / "conftest.py").write_text(
             "import pytest\n"
-            "from hintpkg.envs import Env\n"
+            f"from {package_name}.envs import Env\n"
             "\n"
             "@pytest.fixture\n"
             "def env() -> Env:\n"
@@ -1017,7 +1021,7 @@ class TestScanModule:
         monkeypatch.syspath_prepend(str(tmp_path))
 
         auto_mod._mine_object_harness_hints.cache_clear()
-        hints = auto_mod._mine_object_harness_hints("hintpkg.envs", "Env", "render")
+        hints = auto_mod._mine_object_harness_hints(f"{package_name}.envs", "Env", "render")
         factory_hints = [hint for hint in hints if hint.kind == "factory"]
 
         assert len(factory_hints) >= 2
@@ -1089,7 +1093,8 @@ class TestScanModule:
         tmp_path,
         monkeypatch,
     ):
-        pkg = tmp_path / "hintpkg"
+        package_name = "hintpkg_yield_fixtures"
+        pkg = tmp_path / package_name
         tests_dir = tmp_path / "tests"
         pkg.mkdir()
         tests_dir.mkdir()
@@ -1108,7 +1113,7 @@ class TestScanModule:
         )
         (tests_dir / "conftest.py").write_text(
             "import pytest\n"
-            "from hintpkg.envs import Env\n"
+            f"from {package_name}.envs import Env\n"
             "\n"
             "@pytest.fixture\n"
             "def env() -> Env:\n"
@@ -1125,7 +1130,7 @@ class TestScanModule:
         monkeypatch.syspath_prepend(str(tmp_path))
 
         auto_mod._mine_object_harness_hints.cache_clear()
-        hints = auto_mod._mine_object_harness_hints("hintpkg.envs", "Env", "render")
+        hints = auto_mod._mine_object_harness_hints(f"{package_name}.envs", "Env", "render")
 
         factory_hint = next(hint for hint in hints if hint.kind == "factory")
         state_hint = next(hint for hint in hints if hint.kind == "state_factory")

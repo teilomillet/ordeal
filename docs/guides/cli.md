@@ -81,6 +81,8 @@ Use `--save-artifacts` when you want the full handoff package. In addition to th
 
 `scan` is evidence-first. In `--mode evidence`, it surfaces replayable crashes, weaker exploratory properties, and expected precondition failures without flattening them into one verdict. `--mode candidate` keeps the same search but ranks only the strongest contract-valid issue candidates at the top. If `[[scan]]` or `[[objects]]` leave fixture completeness too low for the module, `scan` will report that as a block instead of pretending it has real leverage. In that case, add a factory, `state_factory`, or `harness = "stateful"` before expecting useful output. If you need stronger validation for a mature codebase, prefer `ordeal audit` for coverage and mutation comparison, and `ordeal mutate` for direct mutation scoring.
 
+`--security-focus` is the opt-in trust-boundary bias for scan. It expands sink inference beyond shell/path/env to import loading, deserialization, filesystem writes, symlink handling, and checkpoint/IPC paths, then adds deterministic low-side-effect probes for pure path/symlink shapers. Saved proof bundles keep that context under `impact.critical_sinks`, `impact.trust_boundary_signal`, and `contract_basis.security_focus`.
+
 Promoted crash findings now carry a proof bundle in Markdown, JSON, and agent output: witness input, contract basis, confidence breakdown, minimal reproduction, failure path, and likely impact. Demoted crashes keep the same structure plus an explicit demotion reason.
 
 Use `--list-targets` when you want to inspect how ordeal sees functions and methods before choosing a target. The listing shows the callable kind, whether it is async or sync, whether a factory is required or configured, and any skip reason if ordeal cannot run it yet. Mined harness hints now carry observed-evidence `score` and `signals`, so the summary and any suggested `[[objects]]` blocks prefer the strongest structurally supported factory or setup hint instead of whichever fixture was discovered first. Use `--target` to limit a module scan to one or more callable selectors. Selectors accept local names, explicit targets, and globs like `mutate`, `Env.*`, or `ordeal:mut*`.
@@ -95,6 +97,7 @@ Most of the tuning knobs for `scan` live in `[[scan]]` inside `ordeal.toml`. Use
 | `--target` | `[]` | Repeatable callable selector filter for module scans; accepts exact names, explicit targets, or glob patterns |
 | `--seed` | `42` | RNG seed for reproducibility |
 | `--max-examples`, `-n` | `50` | Examples per function |
+| `--security-focus`, `--no-security-focus` | off | Bias scan toward trust-boundary sinks and deterministic security probes |
 | `--workers`, `-w` | `1` | Parallel workers for mutation testing |
 | `--time-limit`, `-t` | — | Time budget in seconds |
 | `--json` | off | Print the stable agent-facing JSON envelope |

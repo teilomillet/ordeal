@@ -169,7 +169,6 @@ def _normalize_scan_mode(mode: str) -> Literal["coverage_gap", "real_bug"]:
         raise ValueError(f"mode must be one of {set(_SCAN_MODE_ALIASES)}, got {mode!r}")
     return normalized
 
-
 def _public_scan_mode(mode: str) -> str:
     """Return the preferred public label for one scan mode."""
     normalized = _normalize_scan_mode(mode)
@@ -197,6 +196,75 @@ _CONTRACT_GROUP_ALIASES: dict[str, tuple[str, ...]] = {
         "rollout_cancellation_triggers_cleanup",
     ),
     "json_tool_call_normalization": ("json_roundtrip", "http_shape"),
+}
+
+_SECURITY_SINK_WEIGHTS: dict[str, float] = {
+    "shell": 1.0,
+    "subprocess": 1.0,
+    "filesystem_write": 1.0,
+    "deserialization": 1.0,
+    "import": 0.95,
+    "ipc": 0.95,
+    "symlink": 0.9,
+    "path": 0.85,
+    "env": 0.75,
+    "json_tool_call": 0.7,
+    "http": 0.65,
+    "sql": 0.75,
+}
+_SECURITY_BUCKET_TO_SINKS: dict[str, tuple[str, ...]] = {
+    "shell": ("shell", "subprocess"),
+    "path": ("path", "filesystem_write", "symlink"),
+    "mapping": ("env", "json_tool_call", "http"),
+    "json": ("json_tool_call", "deserialization"),
+    "import": ("import",),
+    "serialized": ("deserialization",),
+    "ipc": ("ipc",),
+    "symlink": ("symlink", "path"),
+}
+_SECURITY_PROBE_VALUES: dict[str, tuple[Any, ...]] = {
+    "path": ("../security_probe.txt", "nested/../../security_probe.txt"),
+    "symlink": ("link/../security_probe.txt",),
+}
+_SECURITY_SHAPER_TOKENS = {
+    "artifact",
+    "build",
+    "bundle",
+    "checkpoint",
+    "config",
+    "normalize",
+    "path",
+    "prepare",
+    "render",
+    "resolve",
+    "seed",
+    "target",
+    "trace",
+    "verify",
+}
+_SECURITY_SIDE_EFFECT_TOKENS = {
+    "create",
+    "delete",
+    "dump",
+    "execute",
+    "import_module",
+    "load_state",
+    "loads(",
+    "mkdir",
+    "open(",
+    "pickle.load",
+    "pickle.loads",
+    "popen",
+    "publish",
+    "remove",
+    "run(",
+    "save",
+    "subprocess",
+    "unlink",
+    "upload",
+    "write(",
+    "write_bytes",
+    "write_text",
 }
 
 
@@ -1496,7 +1564,7 @@ def _contract_assessment(
     return fit, reachability, reasons, evidence
 
 
-def _infer_sink_categories(func: Any) -> list[str]:
+def _infer_sink_categories(func: Any, *, security_focus: bool = False) -> list[str]:
     """Infer semantic sink categories from source and parameter names."""
     target = _unwrap(func)
     source = ""
@@ -1569,16 +1637,101 @@ def _infer_sink_categories(func: Any) -> list[str]:
             {"argv", "command", "cmd"},
         ),
     ]
+    if security_focus:
+        checks.extend(
+            [
+                (
+                    "filesystem_write",
+                    (
+                        "write_text",
+                        "write_bytes",
+                        ".write(",
+                        "mkdir(",
+                        "touch(",
+                        "save_generated",
+                        "write_gaps",
+                        "output_dir",
+                    ),
+                    {"output", "output_dir", "write_gaps", "save_generated", "path", "filename"},
+                ),
+                (
+                    "import",
+                    (
+                        "importlib",
+                        "import_module",
+                        "__import__",
+                        "module_from_spec",
+                        "spec_from_file_location",
+                    ),
+                    {"module", "module_name", "class_path", "target", "hook", "plugin"},
+                ),
+                (
+                    "deserialization",
+                    (
+                        "pickle.load",
+                        "pickle.loads",
+                        "yaml.load",
+                        "yaml.safe_load",
+                        "tomllib.load",
+                        "tomllib.loads",
+                        "json.loads",
+                        "json.load",
+                        "literal_eval",
+                    ),
+                    {"payload", "blob", "checkpoint", "trace", "bundle", "artifact"},
+                ),
+                (
+                    "ipc",
+                    (
+                        "shared_memory",
+                        "multiprocessing",
+                        "ring buffer",
+                        "checkpoint pool",
+                        "socket",
+                        "queue(",
+                        "mmap",
+                    ),
+                    {"segment", "shared_memory", "channel", "queue", "ring", "checkpoint"},
+                ),
+                (
+                    "symlink",
+                    ("symlink", "readlink", "is_symlink", ".resolve("),
+                    {"link", "symlink", "target_path"},
+                ),
+            ]
+        )
     for category, tokens, param_names in checks:
         source_match = any(token in source for token in tokens)
         param_match = bool(params & param_names)
-        if category in {"json_tool_call", "http", "sql"}:
+        if category in {"json_tool_call", "http", "sql", "filesystem_write"}:
             matched = source_match
         else:
             matched = source_match or param_match
         if matched:
             categories.append(category)
     return categories
+
+
+def _critical_security_sinks(sink_categories: Sequence[str]) -> list[str]:
+    """Return high-risk sink categories in descending weight order."""
+    return sorted(
+        {
+            str(category)
+            for category in sink_categories
+            if _SECURITY_SINK_WEIGHTS.get(str(category), 0.0) >= 0.9
+        },
+        key=lambda name: (-_SECURITY_SINK_WEIGHTS.get(name, 0.0), name),
+    )
+
+
+def _sink_signal_for_bucket(bucket: str, sink_categories: Sequence[str]) -> float:
+    """Return the sink weight for one semantic bucket."""
+    weights = [
+        _SECURITY_SINK_WEIGHTS.get(category, 0.0)
+        for category in _SECURITY_BUCKET_TO_SINKS.get(bucket, ())
+        if category in sink_categories
+    ]
+    return max(weights, default=0.0)
 
 
 def _expand_contract_names(names: Sequence[str] | None) -> set[str]:
@@ -1635,6 +1788,16 @@ def _sink_likely_impact(sink_categories: Sequence[str], exc: BaseException) -> s
     """Summarize likely impact for a failing sink-aware witness."""
     if "shell" in sink_categories or "subprocess" in sink_categories:
         return "command construction may break valid shell or subprocess execution"
+    if "filesystem_write" in sink_categories:
+        return "filesystem writes may escape the intended root or clobber generated files"
+    if "import" in sink_categories:
+        return "import resolution may load attacker-chosen modules, hooks, or classes"
+    if "deserialization" in sink_categories:
+        return "artifact or checkpoint parsing may trust unsafe serialized payloads"
+    if "ipc" in sink_categories:
+        return "shared-memory or IPC payload handling may trust forged cross-process data"
+    if "symlink" in sink_categories:
+        return "path resolution may follow symlinks across trust boundaries"
     if "path" in sink_categories:
         return "path quoting or normalization may corrupt filesystem operations"
     if "env" in sink_categories:
@@ -4206,9 +4369,10 @@ def _auto_contract_checks(
     *,
     auto_contracts: Sequence[str] | None,
     ignore_contracts: Sequence[str] | None = None,
+    security_focus: bool = False,
 ) -> tuple[list[ContractCheck], list[str]]:
     """Infer built-in sink-aware contract probes for *func* from source and seeds."""
-    sink_categories = _infer_sink_categories(func)
+    sink_categories = _infer_sink_categories(func, security_focus=security_focus)
 
     enabled = set(_expand_contract_names_ordered(auto_contracts or _DEFAULT_AUTO_CONTRACTS))
     ignored = _expand_contract_names(ignore_contracts)
@@ -5653,6 +5817,7 @@ def _candidate_inputs(
     fixtures: dict[str, st.SearchStrategy[Any]] | None = None,
     mutate_observed_inputs: bool = True,
     mode: ScanMode = "evidence",
+    security_focus: bool = False,
     seed_examples: Sequence[SeedExample] | None = None,
     seed_from_tests: bool = True,
     seed_from_fixtures: bool = True,
@@ -5749,6 +5914,14 @@ def _candidate_inputs(
     else:
         _append_boundary_inputs()
         _append_seed_mutations()
+    if security_focus:
+        sink_categories = _infer_sink_categories(target, security_focus=True)
+        for candidate in _security_candidate_inputs(target, boundary_inputs, sink_categories):
+            key = repr(sorted(candidate.kwargs.items()))
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(candidate)
 
     return candidates
 
@@ -5869,6 +6042,24 @@ def _semantic_bucket(name: str, hint: Any | None) -> str:
         return "path"
     if any(token in lowered for token in {"cmd", "command", "argv", "shell"}):
         return "shell"
+    if any(token in lowered for token in {"module", "plugin", "hook", "entrypoint"}):
+        return "import"
+    if any(
+        token in lowered
+        for token in {
+            "pickle",
+            "checkpoint",
+            "trace",
+            "bundle",
+            "artifact",
+            "blob",
+        }
+    ):
+        return "serialized"
+    if any(token in lowered for token in {"channel", "segment", "shared_memory", "queue", "ring"}):
+        return "ipc"
+    if "link" in lowered or "symlink" in lowered:
+        return "symlink"
     if lowered in {"env", "environ", "headers"} or lowered.endswith("_env"):
         return "mapping"
     if any(token in lowered for token in {"json", "payload", "body", "tool_call"}):
@@ -5901,6 +6092,18 @@ def _semantic_value_score(bucket: str, value: Any) -> float:
             )
         case "mapping" | "json":
             return 1.0 if isinstance(value, Mapping) else 0.0
+        case "import":
+            return (
+                1.0
+                if isinstance(value, str) and ("." in value or value.isidentifier())
+                else 0.0
+            )
+        case "serialized":
+            return 1.0 if isinstance(value, (bytes, bytearray, str, Mapping)) else 0.0
+        case "ipc":
+            return 1.0 if isinstance(value, (str, bytes, bytearray)) else 0.0
+        case "symlink":
+            return 1.0 if isinstance(value, (str, os.PathLike)) else 0.0
         case "message":
             return 1.0 if isinstance(value, (str, Mapping, list, tuple)) else 0.0
         case "numeric":
@@ -5911,9 +6114,66 @@ def _semantic_value_score(bucket: str, value: Any) -> float:
             return 0.5
 
 
+def _callable_looks_like_security_shaper(func: Any) -> bool:
+    """Return whether *func* looks like a pure shaper rather than a side-effect sink."""
+    target = _unwrap(func)
+    name = str(getattr(target, "__name__", "")).lower()
+    source = ""
+    with contextlib.suppress(OSError, TypeError):
+        source = inspect.getsource(target).lower()
+    tokens = set(re.findall(r"[a-z_]{3,}", f"{name} {source}"))
+    if tokens & _SECURITY_SIDE_EFFECT_TOKENS or any(
+        token in source for token in _SECURITY_SIDE_EFFECT_TOKENS
+    ):
+        return False
+    return bool(tokens & _SECURITY_SHAPER_TOKENS)
+
+
+def _security_candidate_inputs(
+    func: Any,
+    boundary_inputs: Sequence[Mapping[str, Any]],
+    sink_categories: Sequence[str],
+) -> list[CandidateInput]:
+    """Build deterministic, low-side-effect security probes for shaper callables."""
+    safe_probe_sinks = {"path", "symlink"}
+    if (
+        not boundary_inputs
+        or not _callable_looks_like_security_shaper(func)
+        or not set(sink_categories)
+        or not set(sink_categories).issubset(safe_probe_sinks)
+    ):
+        return []
+    try:
+        sig = inspect.signature(_unwrap(func))
+    except Exception:
+        return []
+
+    base_kwargs = dict(boundary_inputs[0])
+    candidates: list[CandidateInput] = []
+    for name, param in sig.parameters.items():
+        if name in {"self", "cls"}:
+            continue
+        if name not in base_kwargs and param.default is inspect.Signature.empty:
+            continue
+        bucket = _semantic_bucket(name, safe_get_annotations(_unwrap(func)).get(name))
+        probes = _SECURITY_PROBE_VALUES.get(bucket, ())
+        for probe in probes:
+            kwargs = dict(base_kwargs)
+            kwargs[name] = probe
+            candidates.append(
+                CandidateInput(
+                    kwargs=kwargs,
+                    origin="security_probe",
+                    rationale=(f"security probe for {bucket} trust-boundary handling",),
+                )
+            )
+    return candidates
+
+
 def _likely_contract_profile(
     func: Any,
     *,
+    security_focus: bool = False,
     seed_from_tests: bool = True,
     seed_from_fixtures: bool = True,
     seed_from_docstrings: bool = True,
@@ -5965,7 +6225,8 @@ def _likely_contract_profile(
         "params": profile_params,
         "seed_examples": list(observed),
         "treat_any_as_weak": treat_any_as_weak,
-        "sink_categories": _infer_sink_categories(target),
+        "sink_categories": _infer_sink_categories(target, security_focus=security_focus),
+        "security_focus": bool(security_focus),
     }
 
 
@@ -5984,6 +6245,7 @@ def _score_contract_fit(
     reasons: list[str] = []
     seed_examples = list(profile.get("seed_examples", []))
     treat_any_as_weak = bool(profile.get("treat_any_as_weak", True))
+    sink_categories = list(profile.get("sink_categories", ()))
 
     for name, value in kwargs.items():
         meta = params.get(name, {})
@@ -6027,7 +6289,7 @@ def _score_contract_fit(
                 0.75 if get_origin(hint) is Literal else 0.6,
             )
         realism_scores.append(semantic_score)
-        sink_scores.append(1.0 if semantic in {"path", "shell", "json", "mapping"} else 0.0)
+        sink_scores.append(_sink_signal_for_bucket(semantic, sink_categories))
         score += (semantic_score - 0.5) * 0.4
         fit_scores.append(min(max(score, 0.0), 1.0))
 
@@ -6036,7 +6298,13 @@ def _score_contract_fit(
         contract_fit = min(contract_fit + 0.15, 1.0)
         reasons.append("matches a concrete seed from tests/docs/code")
     realism = sum(realism_scores) / len(realism_scores) if realism_scores else 0.0
-    sink_signal = max(sink_scores, default=0.0)
+    sink_signal = max(
+        [
+            *sink_scores,
+            *[_SECURITY_SINK_WEIGHTS.get(cat, 0.0) for cat in sink_categories],
+        ],
+        default=0.0,
+    )
     return contract_fit, realism, sink_signal, reasons[:6]
 
 
@@ -6084,6 +6352,7 @@ def _reachability_score(
         "source_boundary": 0.75,
         "pytest_seed": 1.0,
         "seed_mutation": 0.8,
+        "security_probe": 0.7,
         "boundary": 0.7,
         "random_fuzz": 0.45,
     }.get(origin or "", 0.4)
@@ -6312,6 +6581,7 @@ def _proof_minimal_reproduction(
     harness_mode: str | None,
     callable_kind: str | None,
     contract_check: str | None = None,
+    security_focus: bool = False,
 ) -> dict[str, Any]:
     """Build a deterministic reproduction payload for reports and JSON bundles."""
     module_name = str(profile.get("module") or "").strip()
@@ -6335,7 +6605,9 @@ def _proof_minimal_reproduction(
         command = f"uv run ordeal check {explicit_target} --contract {contract_check}"
     elif module_name:
         command = (
-            f"uv run ordeal scan {module_name} --mode candidate --targets {explicit_target} -n 1"
+            f"uv run ordeal scan {module_name} --mode candidate "
+            f"{'--security-focus ' if security_focus else ''}"
+            f"--targets {explicit_target} -n 1"
         )
     else:
         command = None
@@ -6377,6 +6649,7 @@ def _build_proof_bundle(
     harness_mode: str | None = None,
     callable_kind: str | None = None,
     contract_check: str | None = None,
+    security_focus: bool = False,
 ) -> dict[str, Any]:
     """Build the proof payload carried through reports and agent output."""
     evidence_class = (
@@ -6428,6 +6701,8 @@ def _build_proof_bundle(
         "supporting_evidence": supporting_evidence,
         "input_source": input_source,
         "matched_seed_sources": matched_sources,
+        "security_focus": bool(security_focus),
+        "critical_sinks": _critical_security_sinks(sink_categories),
     }
     failure_path = {
         "target": full_qualname,
@@ -6451,7 +6726,9 @@ def _build_proof_bundle(
         harness_mode=harness_mode,
         callable_kind=callable_kind,
         contract_check=contract_check,
+        security_focus=security_focus,
     )
+    critical_sinks = _critical_security_sinks(sink_categories)
     return {
         "version": 2,
         "witness": witness,
@@ -6476,6 +6753,7 @@ def _build_proof_bundle(
             "reachability": round(reachability, 4),
             "realism": round(realism, 4),
             "fixture_completeness": round(fixture_completeness, 4),
+            "sink_signal": round(sink_signal, 4),
             "replay_attempts": replay_attempts,
             "replay_matches": replay_matches,
         },
@@ -6498,6 +6776,9 @@ def _build_proof_bundle(
             ),
             "evidence_class": evidence_class,
             "sink_categories": list(sink_categories),
+            "critical_sinks": critical_sinks,
+            "trust_boundary_signal": round(sink_signal, 4),
+            "security_focus": bool(security_focus),
         },
         "sink_categories": list(sink_categories),
         "likely_impact": impact_summary,
@@ -6980,6 +7261,7 @@ def scan_module(
     min_contract_fit: float = 0.6,
     min_reachability: float = 0.5,
     min_realism: float = 0.55,
+    security_focus: bool = False,
 ) -> ScanResult:
     """Smoke-test every public callable in *module*.
 
@@ -7060,6 +7342,8 @@ def scan_module(
         min_contract_fit: Minimum inferred contract-fit score to promote.
         min_reachability: Minimum reachability score to promote.
         min_realism: Minimum semantic realism score to promote.
+        security_focus: Opt into trust-boundary-biased sink detection, scoring,
+            and deterministic low-side-effect security probes.
     """
     if mode not in _VALID_SCAN_MODES:
         raise ValueError(f"mode must be one of {_VALID_SCAN_MODES}, got {mode!r}")
@@ -7152,6 +7436,7 @@ def scan_module(
             min_contract_fit=min_contract_fit,
             min_reachability=min_reachability,
             min_realism=min_realism,
+            security_focus=security_focus,
         )
         result.functions.append(func_result)
 
@@ -7187,6 +7472,7 @@ def _test_one_function(
     min_contract_fit: float = 0.6,
     min_reachability: float = 0.5,
     min_realism: float = 0.55,
+    security_focus: bool = False,
 ) -> FunctionResult:
     """Run no-crash + return-type + mined-property checks on a single function."""
     mode = _normalize_scan_mode(mode)
@@ -7210,6 +7496,7 @@ def _test_one_function(
     last_input_source = "boundary"
     profile = _likely_contract_profile(
         func,
+        security_focus=security_focus,
         seed_from_tests=seed_from_tests,
         seed_from_fixtures=seed_from_fixtures,
         seed_from_docstrings=seed_from_docstrings,
@@ -7224,6 +7511,7 @@ def _test_one_function(
         seed_examples,
         auto_contracts=auto_contracts,
         ignore_contracts=ignore_contracts,
+        security_focus=security_focus,
     )
     effective_contract_checks = [*(contract_checks or []), *auto_checks]
 
@@ -7246,6 +7534,7 @@ def _test_one_function(
                 )
             ),
             mode=mode,
+            security_focus=security_focus,
             seed_examples=seed_examples,
             seed_from_tests=seed_from_tests,
             seed_from_fixtures=seed_from_fixtures,
@@ -7306,6 +7595,13 @@ def _test_one_function(
         replayable, replay_attempts, replay_matches = _replay_failure(e)
         contract_fit, realism, sink_signal, rationale = _score_contract_fit(last_kwargs, profile)
         reachability = _reachability_score(last_input_source, last_kwargs, profile)
+        effective_min_contract_fit = min_contract_fit
+        effective_min_reachability = min_reachability
+        effective_min_realism = min_realism
+        if security_focus and _critical_security_sinks(sink_categories):
+            effective_min_contract_fit = max(0.45, min_contract_fit - 0.1)
+            effective_min_reachability = max(0.35, min_reachability - 0.1)
+            effective_min_realism = max(0.5, min_realism - 0.05)
         robustness_case = _looks_like_declared_contract_robustness(
             last_kwargs,
             profile,
@@ -7319,9 +7615,9 @@ def _test_one_function(
             reachability=reachability,
             realism=realism,
             robustness_case=robustness_case,
-            min_contract_fit=min_contract_fit,
-            min_reachability=min_reachability,
-            min_realism=min_realism,
+            min_contract_fit=effective_min_contract_fit,
+            min_reachability=effective_min_reachability,
+            min_realism=effective_min_realism,
             require_replayable=require_replayable,
         )
         verdict = _verdict_for_crash(crash_category)
@@ -7343,11 +7639,12 @@ def _test_one_function(
                 profile=profile,
                 sink_signal=sink_signal,
                 sink_categories=sink_categories,
-                min_contract_fit=min_contract_fit,
-                min_reachability=min_reachability,
-                min_realism=min_realism,
+                min_contract_fit=effective_min_contract_fit,
+                min_reachability=effective_min_reachability,
+                min_realism=effective_min_realism,
                 harness_mode=getattr(func, "__ordeal_harness__", None),
                 callable_kind=getattr(func, "__ordeal_kind__", None),
+                security_focus=security_focus,
             )
             call_context = getattr(func, "__ordeal_last_call_context__", None)
             if call_context:

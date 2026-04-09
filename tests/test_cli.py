@@ -1043,6 +1043,7 @@ scan_max_examples = 12
             "[[scan]]\n"
             'module = "pkg.mod"\n'
             "max_examples = 7\n"
+            "security_focus = true\n"
             'expected_failures = ["known_bad"]\n'
             'fixture_registries = ["scan_registry"]\n'
             'ignore_properties = ["commutative"]\n'
@@ -1101,6 +1102,7 @@ scan_max_examples = 12
         assert rc == 0
         assert calls["module"] == "pkg.mod"
         assert calls["max_examples"] == 7
+        assert calls["scan_security_focus"] is True
         assert calls["scan_expected_failures"] == ["known_bad"]
         assert calls["scan_ignore_properties"] == ["commutative", "associative"]
         assert calls["scan_ignore_relations"] == [
@@ -1568,6 +1570,23 @@ scan_max_examples = 12
         assert "selected=yes" in out
         assert "direct" in out
         assert "selected=no" in out
+
+    def test_scan_list_targets_persists_security_focus_in_suggestions(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        mod = _make_target_listing_module()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setitem(sys.modules, mod.__name__, mod)
+
+        rc = main(["scan", mod.__name__, "--list-targets", "--security-focus"])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Suggested ordeal.toml:" in out
+        assert "security_focus = true" in out
 
     def test_scan_list_targets_marks_cli_target_selectors_on_package_root(
         self,

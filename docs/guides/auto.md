@@ -44,6 +44,12 @@ With fixtures for params that can't be inferred from types:
 result = scan_module("myapp.scoring", fixtures={"model": model_strategy})
 ```
 
+For security-oriented triage, keep the same API and opt into trust-boundary bias:
+
+```python
+result = scan_module("myapp.scoring", mode="candidate", security_focus=True)
+```
+
 ## fuzz
 
 !!! quote "What this unlocks"

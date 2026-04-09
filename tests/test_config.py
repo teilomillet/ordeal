@@ -151,6 +151,7 @@ mode = "candidate"
 min_contract_fit = 0.8
 min_reachability = 0.7
 min_realism = 0.9
+security_focus = true
 require_replayable = true
 proof_bundles = true
 seed_from_tests = true
@@ -168,6 +169,7 @@ auto_contracts = ["shell_safe", "json_roundtrip"]
         assert scan.min_contract_fit == pytest.approx(0.8)
         assert scan.min_reachability == pytest.approx(0.7)
         assert scan.min_realism == pytest.approx(0.9)
+        assert scan.security_focus is True
         assert scan.seed_from_fixtures is False
         assert scan.seed_from_docstrings is False
         assert scan.auto_contracts == ["shell_safe", "json_roundtrip"]

@@ -100,6 +100,7 @@ class ScanConfig:
     min_reachability: float = 0.45
     min_realism: float = 0.55
     min_fixture_completeness: float = 0.0
+    security_focus: bool = False
     require_replayable: bool = True
     proof_bundles: bool = True
     seed_from_tests: bool = True
@@ -474,6 +475,7 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
                 min_reachability=float(s.get("min_reachability", 0.45)),
                 min_realism=float(s.get("min_realism", 0.55)),
                 min_fixture_completeness=float(s.get("min_fixture_completeness", 0.0)),
+                security_focus=bool(s.get("security_focus", False)),
                 require_replayable=bool(s.get("require_replayable", True)),
                 proof_bundles=bool(s.get("proof_bundles", True)),
                 seed_from_tests=bool(s.get("seed_from_tests", True)),

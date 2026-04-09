@@ -946,6 +946,7 @@ scan_module(
     max_examples: int = 50,
     check_return_type: bool = True,
     fixtures: dict[str, SearchStrategy] | None = None,
+    security_focus: bool = False,
 ) -> ScanResult
 ```
 
@@ -956,6 +957,8 @@ result = scan_module("myapp.scoring")
 assert result.passed
 print(result.summary())
 ```
+
+`security_focus=True` keeps the same API but biases scan toward trust-boundary sinks such as import loading, deserialization, filesystem writes, and checkpoint/IPC handling.
 
 ### fuzz
 

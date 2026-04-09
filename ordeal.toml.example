@@ -122,6 +122,7 @@ verbose = true
 # module = "myapp.scoring"
 # max_examples = 50
 # mode = "evidence"   # or "candidate" for stricter ranking
+# security_focus = true   # opt in to trust-boundary-biased sink detection/probes
 # include_private = false
 #
 # # Optional: focus scan on a subset of callables instead of the whole module

@@ -210,6 +210,7 @@ class ScanRuntimeDefaults:
     min_reachability: float = 0.45
     min_realism: float = 0.55
     min_fixture_completeness: float = 0.0
+    security_focus: bool = False
     fixtures: dict[str, Any] | None = None
     targets: list[str] = field(default_factory=list)
     include_private: bool = False
@@ -1126,6 +1127,7 @@ def _callable_listing_rows(
     object_teardowns: dict[str, Any] | None = None,
     object_harnesses: dict[str, str] | None = None,
     contract_checks: Mapping[str, Sequence[Any]] | None = None,
+    security_focus: bool = False,
 ) -> list[dict[str, Any]]:
     """Return stable discovery rows for callable targets in *module_name*."""
     from ordeal.auto import (
@@ -1286,7 +1288,7 @@ def _callable_listing_rows(
         except Exception:
             docstring_examples = 0
         try:
-            sink_categories = _infer_sink_categories(func)
+            sink_categories = _infer_sink_categories(func, security_focus=security_focus)
         except Exception:
             sink_categories = []
         try:
@@ -2255,6 +2257,7 @@ def _scan_config_suggestions(
     min_contract_fit: float,
     min_reachability: float,
     min_realism: float,
+    security_focus: bool,
     ignore_properties: Sequence[str],
     ignore_relations: Sequence[str],
     auto_contracts: Sequence[str],
@@ -2283,6 +2286,8 @@ def _scan_config_suggestions(
         lines.append(_toml_key_value("min_reachability", min_reachability))
     if min_realism != 0.55:
         lines.append(_toml_key_value("min_realism", min_realism))
+    if security_focus:
+        lines.append(_toml_key_value("security_focus", True))
     if ignore_properties:
         lines.append(_toml_key_value("ignore_properties", list(ignore_properties)))
     if ignore_relations:
@@ -2315,6 +2320,7 @@ def _scan_config_suggestions(
                     ),
                     "mode": public_mode,
                     "max_examples": max_examples,
+                    "security_focus": security_focus,
                 }
             ],
         )
@@ -3987,6 +3993,7 @@ def _resolve_scan_runtime_defaults(
         "min_reachability": 0.45,
         "min_realism": 0.55,
         "min_fixture_completeness": 0.0,
+        "security_focus": False,
         "fixtures": None,
         "targets": [],
         "include_private": False,
@@ -4026,6 +4033,7 @@ def _resolve_scan_runtime_defaults(
             min_reachability=float(values["min_reachability"]),
             min_realism=float(values["min_realism"]),
             min_fixture_completeness=float(values["min_fixture_completeness"]),
+            security_focus=bool(values["security_focus"]),
             fixtures=values["fixtures"],
             targets=list(values["targets"]),
             include_private=bool(values["include_private"]),
@@ -4147,6 +4155,7 @@ def _resolve_scan_runtime_defaults(
     values["min_reachability"] = float(match.min_reachability)
     values["min_realism"] = float(getattr(match, "min_realism", 0.55))
     values["min_fixture_completeness"] = float(getattr(match, "min_fixture_completeness", 0.0))
+    values["security_focus"] = bool(getattr(match, "security_focus", False))
     values["targets"] = list(match.targets)
     values["include_private"] = bool(match.include_private)
     values["fixtures"] = _parse_scan_fixture_specs(match.fixtures)
@@ -4496,6 +4505,7 @@ def _run_configured_scans(
             "min_contract_fit": scan_cfg.min_contract_fit,
             "min_reachability": scan_cfg.min_reachability,
             "min_realism": getattr(scan_cfg, "min_realism", 0.55),
+            "security_focus": bool(getattr(scan_cfg, "security_focus", False)),
             "targets": scan_cfg.targets,
             "include_private": scan_cfg.include_private,
             "fixtures": fixtures,
@@ -4558,6 +4568,11 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         if getattr(args, "min_realism", None) is not None
         else runtime_defaults.min_realism
     )
+    scan_security_focus = (
+        runtime_defaults.security_focus
+        if getattr(args, "security_focus", None) is None
+        else bool(args.security_focus)
+    )
     explicit_target = ":" in scan_target
     cli_target_selectors = _scan_target_selectors(args)
     if explicit_target and cli_target_selectors:
@@ -4598,6 +4613,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             object_teardowns=runtime_defaults.object_teardowns,
             object_harnesses=runtime_defaults.object_harnesses,
             contract_checks=runtime_defaults.contract_checks,
+            security_focus=scan_security_focus,
         )
     except Exception as exc:
         scan_target_rows = []
@@ -4674,6 +4690,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             min_contract_fit=scan_min_contract_fit,
             min_reachability=scan_min_reachability,
             min_realism=scan_min_realism,
+            security_focus=scan_security_focus,
             ignore_properties=scan_ignore_properties,
             ignore_relations=scan_ignore_relations,
             auto_contracts=runtime_defaults.auto_contracts,
@@ -4776,6 +4793,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             scan_min_contract_fit=scan_min_contract_fit,
             scan_min_reachability=scan_min_reachability,
             scan_min_realism=scan_min_realism,
+            scan_security_focus=scan_security_focus,
             run_mine=False,
             run_scan=True,
             run_mutate=False,
@@ -4791,6 +4809,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         min_contract_fit=scan_min_contract_fit,
         min_reachability=scan_min_reachability,
         min_realism=scan_min_realism,
+        security_focus=scan_security_focus,
         ignore_properties=scan_ignore_properties,
         ignore_relations=scan_ignore_relations,
         auto_contracts=runtime_defaults.auto_contracts,
@@ -10827,6 +10846,8 @@ def _scan_command_description() -> str:
         "For stronger signals on a mature codebase, prefer `ordeal audit` and `ordeal mutate`.\n"
         "Use `--mode evidence` to surface a broad evidence set and `--mode candidate`\n"
         " for stricter ranking; the older `coverage_gap` and `real_bug` names still work.\n"
+        "Use `--security-focus` to bias scan toward trust-boundary sinks such as import,\n"
+        " deserialization, filesystem writes, and checkpoint/IPC handling.\n"
         "Use `--list-targets` to inspect how ordeal sees functions, methods, async callables,\n"
         " and whether object factories are configured.\n"
         "Use `--target` to limit module scans to specific callable selectors or globs such as\n"
@@ -10986,6 +11007,12 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     choices=("evidence", "candidate", "coverage_gap", "real_bug"),
                     default=None,
                     help="Surfacing mode: evidence-first or stricter candidate ranking",
+                ),
+                _arg(
+                    "--security-focus",
+                    action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="Bias scan toward trust-boundary sinks and deterministic security probes",
                 ),
                 _arg(
                     "--seed-from-tests",

@@ -667,6 +667,7 @@ def explore_scan(
     min_contract_fit: float = 0.6,
     min_reachability: float = 0.5,
     min_realism: float = 0.55,
+    security_focus: bool = False,
 ) -> ExplorationState:
     """Scan module for crashes and update state."""
     from ordeal.auto import scan_module
@@ -706,6 +707,7 @@ def explore_scan(
         min_contract_fit=min_contract_fit,
         min_reachability=min_reachability,
         min_realism=min_realism,
+        security_focus=security_focus,
     )
     state.scan_mode = mode
     if "scan" not in state.active_dimensions:
@@ -918,6 +920,7 @@ def explore(
     scan_min_contract_fit: float = 0.6,
     scan_min_reachability: float = 0.5,
     scan_min_realism: float = 0.55,
+    scan_security_focus: bool = False,
     run_mine: bool = True,
     run_scan: bool = True,
     run_mutate: bool = True,
@@ -1065,6 +1068,7 @@ def explore(
                 min_contract_fit=scan_min_contract_fit,
                 min_reachability=scan_min_reachability,
                 min_realism=scan_min_realism,
+                security_focus=scan_security_focus,
             )
             scan_hash = hash(("scanned", state.confidence))
             state.tree.checkpoint(

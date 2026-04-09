@@ -342,6 +342,34 @@ def _install_stateful_target_module(module_name: str):
 
 
 class TestScanModule:
+    def test_security_focus_expands_sink_taxonomy(self):
+        import importlib
+        import pickle
+        from multiprocessing import shared_memory
+
+        def load_plugin(module_name: str):
+            return importlib.import_module(module_name)
+
+        def resume(blob: bytes):
+            return pickle.loads(blob)
+
+        def write_output(path: str, text: str) -> None:
+            Path(path).write_text(text, encoding="utf-8")
+
+        def attach(channel: str):
+            return shared_memory.SharedMemory(name=channel)
+
+        assert "import" not in auto_mod._infer_sink_categories(load_plugin)
+        assert "deserialization" not in auto_mod._infer_sink_categories(resume)
+        assert "filesystem_write" not in auto_mod._infer_sink_categories(write_output)
+        assert "ipc" not in auto_mod._infer_sink_categories(attach)
+        assert "import" in auto_mod._infer_sink_categories(load_plugin, security_focus=True)
+        assert "deserialization" in auto_mod._infer_sink_categories(resume, security_focus=True)
+        assert "filesystem_write" in auto_mod._infer_sink_categories(
+            write_output, security_focus=True
+        )
+        assert "ipc" in auto_mod._infer_sink_categories(attach, security_focus=True)
+
     def test_real_bug_prefers_observed_inputs_before_boundary_smoke(self, monkeypatch):
         def target(value: int) -> int:
             if value < 0:
@@ -366,6 +394,82 @@ class TestScanModule:
 
         assert [candidate.origin for candidate in candidates[:2]] == ["test", "fixture"]
         assert candidates[-1].origin == "boundary"
+
+    def test_security_focus_adds_deterministic_path_probe(self):
+        def build_output_path(path: str) -> str:
+            if ".." in path:
+                raise RuntimeError("path traversal mishandled")
+            return f"reports/{path}"
+
+        baseline = _test_one_function(
+            "build_output_path",
+            build_output_path,
+            {"path": st.just("report.txt")},
+            str,
+            max_examples=1,
+            check_return_type=True,
+            mode="candidate",
+        )
+        focused = _test_one_function(
+            "build_output_path",
+            build_output_path,
+            {"path": st.just("report.txt")},
+            str,
+            max_examples=1,
+            check_return_type=True,
+            mode="candidate",
+            security_focus=True,
+        )
+
+        assert baseline.execution_ok is True
+        assert focused.execution_ok is False
+        assert focused.verdict == "promoted_real_bug"
+        assert focused.input_source == "security_probe"
+        assert focused.proof_bundle is not None
+        assert focused.proof_bundle["impact"]["security_focus"] is True
+        assert "--security-focus" in focused.proof_bundle["minimal_reproduction"]["command"]
+
+    def test_security_focus_skips_effectful_path_functions(self):
+        def write_output(path: str) -> str:
+            Path(path).write_text("payload", encoding="utf-8")
+            return path
+
+        candidates = _candidate_inputs(write_output, security_focus=True)
+
+        assert all(candidate.origin != "security_probe" for candidate in candidates)
+
+    def test_security_focus_relaxes_thresholds_for_critical_sinks(self):
+        def load_plugin(module_name: object) -> object:
+            if module_name == "json":
+                raise RuntimeError("trusted loader failed")
+            return module_name
+
+        baseline = _test_one_function(
+            "load_plugin",
+            load_plugin,
+            {"module_name": st.just("json")},
+            object,
+            max_examples=1,
+            check_return_type=True,
+            mode="candidate",
+        )
+        focused = _test_one_function(
+            "load_plugin",
+            load_plugin,
+            {"module_name": st.just("json")},
+            object,
+            max_examples=1,
+            check_return_type=True,
+            mode="candidate",
+            security_focus=True,
+        )
+
+        assert baseline.crash_category == "speculative_crash"
+        assert baseline.verdict == "exploratory_crash"
+        assert focused.crash_category == "likely_bug"
+        assert focused.verdict == "promoted_real_bug"
+        assert focused.proof_bundle is not None
+        assert focused.proof_bundle["impact"]["critical_sinks"] == ["import"]
 
     def test_test_seeds_include_pytest_parametrize_examples(self, tmp_path, monkeypatch):
         pkg = tmp_path / "seedpkg"

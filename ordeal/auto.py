@@ -6220,11 +6220,7 @@ def _semantic_value_score(bucket: str, value: Any) -> float:
         case "serialized":
             return 1.0 if isinstance(value, (bytes, bytearray, memoryview, str, Mapping)) else 0.0
         case "ipc":
-            return (
-                1.0
-                if isinstance(value, (str, bytes, bytearray, memoryview, Mapping))
-                else 0.0
-            )
+            return 1.0 if isinstance(value, (str, bytes, bytearray, memoryview, Mapping)) else 0.0
         case "symlink":
             return 1.0 if isinstance(value, (str, os.PathLike)) else 0.0
         case "message":
@@ -6412,9 +6408,7 @@ def _artifact_mutation_candidate_inputs(
         return []
     hints = safe_get_annotations(target)
     base_kwargs = (
-        dict(boundary_inputs[0])
-        if boundary_inputs
-        else (_security_base_kwargs(target) or {})
+        dict(boundary_inputs[0]) if boundary_inputs else (_security_base_kwargs(target) or {})
     )
     if not base_kwargs:
         return []
@@ -6621,9 +6615,7 @@ def _aligned_security_sinks(
         if _semantic_value_score(bucket, value) < 0.6:
             continue
         aligned.update(
-            sink
-            for sink in _SECURITY_BUCKET_TO_SINKS.get(bucket, ())
-            if sink in sink_categories
+            sink for sink in _SECURITY_BUCKET_TO_SINKS.get(bucket, ()) if sink in sink_categories
         )
     return sorted(aligned, key=lambda item: (-_SECURITY_SINK_WEIGHTS.get(item, 0.0), item))
 

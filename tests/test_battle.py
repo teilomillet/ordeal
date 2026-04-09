@@ -795,6 +795,7 @@ class TestAutoSecurityFocusBattle:
 
         for critical_sink, strategies, return_type in cases:
             if critical_sink == "deserialization":
+
                 def target(blob: bytes) -> bytes:
                     if False:
                         pickle.loads(blob)
@@ -802,6 +803,7 @@ class TestAutoSecurityFocusBattle:
                         raise RuntimeError("checkpoint probe rejected")
                     return blob
             else:
+
                 def target(channel: str) -> str:
                     if False:
                         shared_memory.SharedMemory(name=channel)

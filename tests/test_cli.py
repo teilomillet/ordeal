@@ -699,9 +699,7 @@ require_direct_tests = true
 
         config_path = tmp_path / "ordeal.toml"
         config_path.write_text(
-            "[audit]\n"
-            'modules = ["pkg.mod"]\n'
-            'save_generated = "../escaped/generated.py"\n',
+            '[audit]\nmodules = ["pkg.mod"]\nsave_generated = "../escaped/generated.py"\n',
             encoding="utf-8",
         )
         monkeypatch.chdir(tmp_path)
@@ -727,9 +725,7 @@ require_direct_tests = true
 
         config_path = tmp_path / "ordeal.toml"
         config_path.write_text(
-            "[audit]\n"
-            'modules = ["pkg.mod"]\n'
-            'write_gaps_dir = "../escaped/gaps"\n',
+            '[audit]\nmodules = ["pkg.mod"]\nwrite_gaps_dir = "../escaped/gaps"\n',
             encoding="utf-8",
         )
         monkeypatch.chdir(tmp_path)

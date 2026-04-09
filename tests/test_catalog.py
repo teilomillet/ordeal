@@ -82,6 +82,31 @@ class TestTopLevelCatalog:
             "benchmark mutate target records repeatable semantics",
         )
 
+    def test_catalog_entries_include_discovery_metadata(self):
+        c = catalog()
+        required = {
+            "subsystem",
+            "subsystem_summary",
+            "capability",
+            "applies_to",
+            "inputs",
+            "outputs",
+            "learn_more",
+        }
+        for section, entries in c.items():
+            for entry in entries:
+                missing = required - set(entry.keys())
+                always(not missing, f"{section}/{entry['name']} exposes discovery metadata")
+
+    def test_high_value_entries_include_examples_or_call_patterns(self):
+        c = catalog()
+        scan = next(entry for entry in c["cli"] if entry["name"] == "scan")
+        mine = next(entry for entry in c["mining"] if entry["name"] == "mine")
+        scan_module = next(entry for entry in c["auto"] if entry["name"] == "scan_module")
+        always(bool(scan["examples"]), "scan command exposes example invocations")
+        always(bool(mine["examples"]), "mine API exposes neutral example patterns")
+        always(bool(scan_module["examples"]), "scan_module exposes neutral example patterns")
+
 
 class TestFaultsCatalog:
     def test_all_modules_represented(self):

@@ -106,6 +106,7 @@ _LAZY_SUBMODULES = (
 _SENTINEL = object()
 
 
+
 def __getattr__(name: str) -> object:
     """Lazy import: search submodules for the requested name."""
     import importlib
@@ -155,6 +156,358 @@ def __dir__() -> list[str]:
     return sorted(names)
 
 
+def _catalog_call_pattern(
+    module_name: str,
+    attr_name: str,
+    obj: object | None = None,
+) -> str | None:
+    """Return a neutral import-plus-call pattern for one catalog entry."""
+    if not module_name or not attr_name:
+        return None
+    import_line = f"from {module_name} import {attr_name}"
+    if obj is None:
+        return f"{import_line}\n{attr_name}(...)"
+
+    import inspect as _inspect
+
+    try:
+        sig = _inspect.signature(obj)
+    except (TypeError, ValueError):
+        return f"{import_line}\n{attr_name}(...)"
+
+    args: list[str] = []
+    for index, param in enumerate(sig.parameters.values()):
+        if index >= 3:
+            args.append("...")
+            break
+        if param.kind is _inspect.Parameter.VAR_POSITIONAL:
+            args.append(f"*{param.name}")
+            continue
+        if param.kind is _inspect.Parameter.VAR_KEYWORD:
+            args.append(f"**{param.name}")
+            continue
+        if param.default is _inspect.Signature.empty:
+            args.append(param.name)
+        else:
+            args.append(f"{param.name}={param.name}")
+    joined = ", ".join(args)
+    return f"{import_line}\n{attr_name}({joined})"
+
+
+def _catalog_first_line(text: str) -> str:
+    """Return the first non-empty line from *text*."""
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
+
+
+def _catalog_detail_paragraph(text: str) -> str:
+    """Return the first descriptive paragraph after the summary line."""
+    paragraphs = [" ".join(block.split()) for block in str(text or "").split("\n\n")]
+    filtered = [
+        paragraph
+        for paragraph in paragraphs
+        if paragraph
+        and not paragraph.lower().startswith(("args:", "returns:", "example", "examples:"))
+    ]
+    return filtered[1] if len(filtered) > 1 else ""
+
+
+def _catalog_module_summary(module_name: str) -> str:
+    """Return the first line of one module docstring when importable."""
+    if not module_name:
+        return ""
+    import importlib
+
+    try:
+        mod = importlib.import_module(module_name)
+    except Exception:
+        return ""
+    return _catalog_first_line(getattr(mod, "__doc__", "") or "")
+
+
+def _catalog_resolve_object(qualname: str) -> object | None:
+    """Resolve one qualified runtime object when possible."""
+    module_name, _, attr_name = str(qualname or "").rpartition(".")
+    if not (module_name and attr_name):
+        return None
+    import importlib
+
+    try:
+        obj: object = importlib.import_module(module_name)
+    except Exception:
+        return None
+    try:
+        for part in attr_name.split("."):
+            obj = getattr(obj, part)
+    except Exception:
+        return None
+    return obj
+
+
+def _catalog_annotation_text(annotation: object) -> str:
+    """Render one annotation into compact text."""
+    import inspect as _inspect
+
+    if annotation is _inspect.Signature.empty:
+        return ""
+    if isinstance(annotation, str):
+        return annotation
+    if getattr(annotation, "__module__", "") == "builtins" and getattr(annotation, "__name__", ""):
+        return str(annotation.__name__)
+    text = repr(annotation)
+    return text.removeprefix("typing.")
+
+
+def _catalog_default_text(value: object) -> str:
+    """Render one default value into compact text."""
+    text = repr(value)
+    return text if len(text) <= 40 else f"{text[:37]}..."
+
+
+def _catalog_object_signature(obj: object | None) -> dict[str, object]:
+    """Return structured signature metadata for one runtime object."""
+    import inspect as _inspect
+
+    if obj is None:
+        return {"kind": "unknown", "parameters": [], "returns": ""}
+    kind = "class" if _inspect.isclass(obj) else "callable"
+    try:
+        sig = _inspect.signature(obj)
+    except (TypeError, ValueError):
+        return {"kind": kind, "parameters": [], "returns": ""}
+
+    parameters: list[dict[str, object]] = []
+    for param in sig.parameters.values():
+        annotation = _catalog_annotation_text(param.annotation)
+        has_default = param.default is not _inspect.Signature.empty
+        parameters.append(
+            {
+                "name": param.name,
+                "kind": param.kind.name.lower(),
+                "annotation": annotation,
+                "required": not has_default,
+                "default": _catalog_default_text(param.default) if has_default else None,
+            }
+        )
+    return {
+        "kind": kind,
+        "parameters": parameters,
+        "returns": _catalog_annotation_text(sig.return_annotation),
+    }
+
+
+def _catalog_parameter_summaries(parameters: list[dict[str, object]]) -> list[str]:
+    """Render structured signature metadata into compact input summaries."""
+    summaries: list[str] = []
+    for item in parameters[:6]:
+        name = str(item.get("name", "")).strip()
+        if not name:
+            continue
+        text = name
+        annotation = str(item.get("annotation", "")).strip()
+        if annotation:
+            text += f": {annotation}"
+        default = item.get("default")
+        if default is not None and str(default).strip():
+            text += f" = {default}"
+        summaries.append(text)
+    return summaries
+
+
+def _catalog_outputs_from_signature(
+    *,
+    entry_name: str,
+    kind: str,
+    returns: str,
+) -> list[str]:
+    """Infer output summaries from signature metadata."""
+    if returns:
+        return [returns]
+    if kind == "class":
+        return [f"{entry_name} instance"]
+    return ["Python return value"]
+
+
+def _catalog_applies_to_from_parameters(parameters: list[dict[str, object]]) -> str:
+    """Infer a neutral applicability hint from parameter names."""
+    names = {str(item.get("name", "")).strip().lower() for item in parameters}
+    hints: list[str] = []
+    if {"target", "targets"} & names:
+        hints.append("named callable or module targets")
+    if {"module", "modules"} & names:
+        hints.append("module-level inputs")
+    if "trace_file" in names:
+        hints.append("saved trace files")
+    if "finding_id" in names:
+        hints.append("saved finding identifiers")
+    if "config" in names:
+        hints.append("config-driven runs")
+    return ", ".join(dict.fromkeys(hints))
+
+
+def _catalog_entrypoint_name(name: str, obj: object | None) -> bool:
+    """Return whether one object is re-exported from the top-level package."""
+    top_level = globals().get(name, _SENTINEL)
+    if top_level is not _SENTINEL:
+        return True
+    return obj is not None and name in __all__
+
+
+def _catalog_learn_more(section: str, entry: dict[str, object]) -> list[str]:
+    """Return generic adjacent discovery surfaces for one entry."""
+    if section == "cli":
+        name = str(entry.get("name", "")).strip()
+        return [f"ordeal {name} --help", "ordeal catalog --json"] if name else ["ordeal --help"]
+    if section == "skill":
+        return ["ordeal skill", "ordeal catalog --detail"]
+    qualname = str(entry.get("qualname", "")).strip()
+    module_name, _, _ = qualname.rpartition(".")
+    hints = ["from ordeal import catalog; catalog()", "ordeal catalog --detail"]
+    if module_name:
+        hints.insert(0, module_name)
+    return list(dict.fromkeys(hints))
+
+
+def _catalog_section_summary(section: str, entries: list[dict[str, object]]) -> str:
+    """Return a neutral summary for one catalog section."""
+    summaries: list[str] = []
+    for entry in entries:
+        qualname = str(entry.get("qualname", "")).strip()
+        module_name, _, _ = qualname.rpartition(".")
+        summary = _catalog_module_summary(module_name)
+        if summary and summary not in summaries:
+            summaries.append(summary)
+    if summaries:
+        return summaries[0]
+    if section == "cli":
+        return "CLI commands derived from argparse."
+    if section == "skill":
+        return "Bundled local skill guidance."
+    return f"{section} capabilities discovered at runtime."
+
+
+def _annotate_catalog_entry(
+    section: str,
+    entry: dict[str, object],
+    *,
+    subsystem_summary: str,
+) -> dict[str, object]:
+    """Attach neutral capability metadata to one catalog entry."""
+    annotated = dict(entry)
+    qualname = str(annotated.get("qualname", "")).strip()
+    module_name, _, attr_name = qualname.rpartition(".")
+    obj = _catalog_resolve_object(qualname) if section not in {"cli", "skill"} else None
+    signature_meta = _catalog_object_signature(obj)
+    parameters = list(signature_meta.get("parameters", []))
+    returns = str(signature_meta.get("returns", "")).strip()
+    kind = str(signature_meta.get("kind", "unknown")).strip()
+    doc = str(annotated.get("doc", "")).strip()
+    detail_paragraph = _catalog_detail_paragraph(
+        getattr(obj, "__doc__", "") if obj is not None else ""
+    )
+    module_summary = _catalog_module_summary(module_name)
+
+    capability = str(
+        annotated.get("capability")
+        or _catalog_first_line(str(annotated.get("description", "")))
+        or doc
+        or module_summary
+        or subsystem_summary
+    ).strip()
+    applies_to = str(
+        annotated.get("applies_to")
+        or detail_paragraph
+        or (module_summary if module_summary and module_summary != capability else "")
+        or _catalog_applies_to_from_parameters(parameters)
+        or f"{section} capability surface"
+    ).strip()
+    inputs = [
+        str(item).strip()
+        for item in (
+            annotated.get("inputs")
+            or _catalog_parameter_summaries(parameters)
+            or ([str(annotated.get("usage", "")).strip()] if section == "cli" else [])
+        )
+        if str(item).strip()
+    ]
+    if not inputs:
+        if section == "skill" and str(annotated.get("install", "")).strip():
+            inputs = [str(annotated.get("install", "")).strip()]
+        elif section == "cli":
+            inputs = ["no arguments"]
+        elif kind in {"callable", "class"}:
+            inputs = ["no parameters"]
+    outputs = [
+        str(item).strip()
+        for item in (
+            annotated.get("outputs")
+            or _catalog_outputs_from_signature(
+                entry_name=str(annotated.get("name", "")),
+                kind=kind,
+                returns=returns,
+            )
+        )
+        if str(item).strip()
+    ]
+    learn_more = [
+        str(item).strip()
+        for item in (annotated.get("learn_more") or _catalog_learn_more(section, annotated))
+        if str(item).strip()
+    ]
+    generated_call_pattern = ""
+    if section not in {"cli", "skill"} and module_name and attr_name:
+        generated_call_pattern = _catalog_call_pattern(module_name, attr_name, obj) or ""
+    call_pattern = str(
+        annotated.get("call_pattern") or generated_call_pattern
+    ).strip()
+    examples = [
+        str(item).rstrip()
+        for item in (
+            annotated.get("examples")
+            or ([str(annotated.get("usage", "")).strip()] if section == "cli" else [])
+            or ([call_pattern] if call_pattern else [])
+        )
+        if str(item).strip()
+    ]
+
+    if capability:
+        annotated["capability"] = capability
+    if subsystem_summary:
+        annotated["subsystem_summary"] = subsystem_summary
+    annotated["applies_to"] = applies_to
+    annotated["inputs"] = inputs
+    annotated["outputs"] = outputs
+    annotated["learn_more"] = learn_more
+    if call_pattern:
+        annotated["call_pattern"] = call_pattern
+    if examples:
+        annotated["examples"] = examples
+    if parameters:
+        annotated["parameters"] = parameters
+    if returns:
+        annotated["returns"] = returns
+    if kind:
+        annotated["object_kind"] = kind
+    annotated["subsystem"] = section
+    annotated["entrypoint"] = section == "cli" or _catalog_entrypoint_name(attr_name, obj)
+    return annotated
+
+
+def _annotate_catalog_section(
+    section: str,
+    entries: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Attach discoverability metadata to one catalog section."""
+    subsystem_summary = _catalog_section_summary(section, entries)
+    return [
+        _annotate_catalog_entry(section, entry, subsystem_summary=subsystem_summary)
+        for entry in entries
+    ]
+
+
 def catalog() -> dict[str, list]:
     """Discover all ordeal capabilities via runtime introspection.
 
@@ -169,6 +522,11 @@ def catalog() -> dict[str, list]:
     for Python APIs and the argparse command registry for the CLI. Adding a
     new fault, invariant, or command makes it appear here automatically.
 
+    Each entry now includes neutral discovery metadata for models and tools:
+    ``capability`` (what it does), ``applies_to`` (where it is relevant),
+    ``inputs`` and ``outputs`` (expected shapes), ``examples`` (usage
+    patterns), and ``learn_more`` (adjacent surfaces).
+
     Example::
 
         from ordeal import catalog
@@ -176,7 +534,10 @@ def catalog() -> dict[str, list]:
         for key in sorted(c):
             print(f"\\n{key}:")
             for item in c[key]:
-                print(f"  {item['qualname']}  -- {item['doc']}")
+                print(f"  {item['qualname']}")
+                print(f"    capability: {item['capability']}")
+                print(f"    applies_to: {item['applies_to']}")
+                print(f"    outputs: {item['outputs']}")
     """
     from ordeal.assertions import catalog as _assertions_catalog
     from ordeal.cli import command_catalog as _cli_catalog
@@ -290,7 +651,13 @@ def catalog() -> dict[str, list]:
         )
     except ImportError:
         pass
-    return result
+    return {
+        section: _annotate_catalog_section(
+            section,
+            [dict(item) for item in entries],
+        )
+        for section, entries in result.items()
+    }
 
 
 def _introspect_module(mod: object, include: set[str] | None = None) -> list[dict]:
@@ -326,6 +693,7 @@ def _introspect_module(mod: object, include: set[str] | None = None) -> list[dic
                 "qualname": f"{mod.__name__}.{attr_name}",
                 "signature": sig,
                 "doc": (_inspect.getdoc(obj) or "").split("\n")[0],
+                "call_pattern": _catalog_call_pattern(mod.__name__, attr_name, obj),
             }
         )
     return entries

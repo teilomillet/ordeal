@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from pprint import pformat
+from textwrap import indent
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
@@ -185,7 +186,6 @@ _DEFAULT_REGRESSION_PATH = "tests/test_ordeal_regressions.py"
 _DEFAULT_FINDINGS_DIR = ".ordeal/findings"
 _PACKAGE_ROOT_SCAN_LIMIT = 8
 CLI_CATALOG_SCHEMA_VERSION = 1
-
 
 @dataclass(frozen=True)
 class ArgumentSpec:
@@ -2966,26 +2966,19 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
     from ordeal import catalog
 
     c = catalog()
+    if getattr(args, "json", False):
+        print(json.dumps(c, indent=2, sort_keys=True))
+        return 0
+
     total = sum(len(v) for v in c.values())
     print(f"{total} capabilities across {len(c)} subsystems:\n")
-
-    # Derive subsystem descriptions from the first entry's module docstring
     for key in sorted(c):
         entries = c[key]
-        # Get the module docstring's first line as description
-        first_doc = ""
-        if entries:
-            qualname = entries[0].get("qualname", "")
-            mod_path = qualname.rsplit(".", 1)[0] if "." in qualname else ""
-            if mod_path:
-                try:
-                    mod = __import__(mod_path, fromlist=["_"])
-                    first_doc = (mod.__doc__ or "").strip().split("\n")[0]
-                except Exception:
-                    pass
-        if not first_doc:
-            # Fallback: first entry's doc
-            first_doc = entries[0]["doc"] if entries else ""
+        first_doc = str(
+            (entries[0].get("subsystem_summary") if entries else "")
+            or (entries[0].get("capability") if entries else "")
+            or (entries[0].get("doc") if entries else "")
+        ).strip()
         names = ", ".join(e["name"] for e in entries[:4])
         if len(entries) > 4:
             names += ", ..."
@@ -2996,11 +2989,13 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
     if command_entries:
         print("\nCLI commands:")
         for entry in command_entries:
-            print(f"  {entry['name']:<10} {entry.get('doc', '')}")
+            outputs = ", ".join(str(item) for item in entry.get("outputs", [])[:2])
+            suffix = f" | outputs: {outputs}" if outputs else ""
+            print(f"  {entry['name']:<10} {entry.get('capability', entry.get('doc', ''))}{suffix}")
     print("\nRun 'ordeal --help' for the full live CLI surface.")
     print("Run 'ordeal <command> --help' for command-specific options.")
-    print("Run 'ordeal catalog --detail' for signatures and docs.")
-    print("Key CLI entrypoints: scan, init, audit, mutate, verify, skill.")
+    print("Run 'ordeal catalog --detail' for applicability, inputs, outputs, and examples.")
+    print("Run 'ordeal catalog --json' for the machine-readable capability map.")
     print("Run 'ordeal skill' or 'ordeal init --install-skill' for local agent guidance.")
     print("Python: from ordeal import catalog; catalog()")
 
@@ -3014,6 +3009,35 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
                 print(f"  {item['name']}{sig}")
                 if doc:
                     print(f"    {doc}")
+                capability = str(item.get("capability", "")).strip()
+                applies_to = str(item.get("applies_to", "")).strip()
+                if capability and capability != doc:
+                    print(f"    capability: {capability}")
+                if applies_to:
+                    print(f"    applies_to: {applies_to}")
+                inputs = [str(value) for value in item.get("inputs", []) if str(value).strip()]
+                if inputs:
+                    print(f"    inputs: {', '.join(inputs)}")
+                outputs = [str(value) for value in item.get("outputs", []) if str(value).strip()]
+                if outputs:
+                    print(f"    outputs: {', '.join(outputs)}")
+                call_pattern = str(item.get("call_pattern", "")).strip()
+                if call_pattern and key != "cli":
+                    print(f"    call_pattern:\n{indent(call_pattern, '      ')}")
+                examples = [
+                    str(value).rstrip()
+                    for value in item.get("examples", [])
+                    if str(value).strip()
+                ]
+                if examples:
+                    print("    examples:")
+                    for example in examples[:3]:
+                        print(indent(example, "      "))
+                learn_more = [
+                    str(value) for value in item.get("learn_more", []) if str(value).strip()
+                ]
+                if learn_more:
+                    print(f"    learn_more: {', '.join(learn_more)}")
 
     return 0
 
@@ -10980,6 +11004,18 @@ def _scan_command_description() -> str:
     )
 
 
+def _catalog_command_description() -> str:
+    """Return the long-form `ordeal catalog` help description."""
+    return (
+        "Inspect ordeal's live capability surface.\n\n"
+        "The default text view groups capabilities by subsystem.\n"
+        "`--detail` adds applicability, expected inputs/outputs, usage patterns,\n"
+        "and adjacent learning surfaces for each entry.\n"
+        "`--json` prints the same capability map as structured data so agents and\n"
+        "tools can reason over it directly without scraping help text."
+    )
+
+
 def _verify_command_description() -> str:
     """Return the long-form `ordeal verify` help description."""
     return (
@@ -11035,8 +11071,10 @@ def _command_specs() -> tuple[CommandSpec, ...]:
             name="catalog",
             handler=_cmd_catalog,
             help="Show all capabilities — faults, mining, mutations, exploration, ...",
+            description=_catalog_command_description,
             arguments=(
                 _arg("--detail", action="store_true", help="Show full signatures and docstrings"),
+                _arg("--json", action="store_true", help="Emit the capability map as JSON"),
             ),
         ),
         CommandSpec(
@@ -11812,8 +11850,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "  ordeal mutate <target>        mutation testing\n"
             "  ordeal skill                  install the bundled local agent guide\n\n"
             "Run `ordeal <command> --help` for command-specific options.\n"
-            "Use `ordeal catalog` or `from ordeal import catalog; catalog()`"
-            " for runtime discovery."
+            "Use `ordeal catalog` for grouped discovery, `ordeal catalog --detail` for\n"
+            "applicability plus input/output metadata, `ordeal catalog --json` for the\n"
+            "machine-readable capability map, or `from ordeal import catalog; catalog()`\n"
+            "for the same data inside Python."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -11919,6 +11959,93 @@ def _catalog_argument(action: argparse.Action) -> dict[str, Any]:
     return entry
 
 
+def _catalog_text_first_line(text: str) -> str:
+    """Return the first non-empty line from *text*."""
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
+
+
+def _catalog_text_detail(text: str) -> str:
+    """Return a descriptive paragraph from *text* when available."""
+    paragraphs = [" ".join(block.split()) for block in str(text or "").split("\n\n")]
+    filtered = [
+        paragraph
+        for paragraph in paragraphs
+        if paragraph and not paragraph.lower().startswith(("use ", "run "))
+    ]
+    return filtered[1] if len(filtered) > 1 else ""
+
+
+def _cli_catalog_input_summaries(arguments: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Render compact input summaries from structured CLI arguments."""
+    results: list[str] = []
+    for argument in arguments[:8]:
+        flags = list(argument.get("flags", []))
+        label = flags[0] if flags else str(argument.get("name", "")).strip()
+        if not label:
+            continue
+        value_type = str(argument.get("value_type", "")).strip()
+        if argument.get("accepts_value") and value_type and value_type != "bool":
+            label = f"{label}: {value_type}"
+        if bool(argument.get("required")) and not flags:
+            label += " (required)"
+        results.append(label)
+    return results
+
+
+def _cli_catalog_output_summaries(
+    name: str,
+    arguments: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    """Infer output summaries from CLI argument schema."""
+    outputs = ["capability map" if name == "catalog" else "terminal summary"]
+    argument_names = {str(argument.get("name", "")).strip() for argument in arguments}
+    joined_help = " ".join(str(argument.get("help", "")).lower() for argument in arguments)
+    if {"json", "output_json"} & argument_names or " json" in joined_help:
+        outputs.append("JSON")
+    if any("report" in arg_name for arg_name in argument_names) or "markdown" in joined_help:
+        outputs.append("reports")
+    if {"write_regression", "generate_tests", "write_gaps", "save_generated"} & argument_names:
+        outputs.append("generated files")
+    if "save_artifacts" in argument_names:
+        outputs.append("artifact bundle")
+    return list(dict.fromkeys(outputs))
+
+
+def _cli_catalog_applies_to(
+    name: str,
+    description: str,
+    arguments: Sequence[Mapping[str, Any]],
+) -> str:
+    """Infer a neutral applicability hint from command schema."""
+    detail = _catalog_text_detail(description)
+    if detail:
+        return detail
+    names = {str(argument.get("name", "")).strip() for argument in arguments}
+    hints: list[str] = []
+    if {"target", "targets"} & names:
+        hints.append("named callable or module targets")
+    if {"module", "modules"} & names:
+        hints.append("module-level inputs")
+    if "trace_file" in names:
+        hints.append("saved trace files")
+    if "finding_id" in names:
+        hints.append("saved finding identifiers")
+    if "config" in names:
+        hints.append("config-driven runs")
+    if not hints and name == "catalog":
+        hints.append("live capability discovery")
+    return ", ".join(dict.fromkeys(hints)) or "repo-local terminal workflows"
+
+
+def _cli_catalog_learn_more(name: str) -> list[str]:
+    """Return adjacent CLI discovery surfaces for one command."""
+    return [f"ordeal {name} --help", "ordeal catalog --json"]
+
+
 def command_catalog() -> list[dict[str, Any]]:
     """Return a structured catalog of CLI commands derived from argparse."""
     parser = _build_parser()
@@ -11936,6 +12063,8 @@ def command_catalog() -> list[dict[str, Any]]:
             usage = subparser.format_usage().strip()
             if usage.startswith("usage: "):
                 usage = usage.removeprefix("usage: ")
+            description = subparser.description or ""
+            capability = _catalog_text_first_line(description) or choice_help.get(name, "")
             entries.append(
                 {
                     "name": name,
@@ -11943,8 +12072,14 @@ def command_catalog() -> list[dict[str, Any]]:
                     "qualname": f"ordeal.cli.{name}",
                     "doc": choice_help.get(name, ""),
                     "usage": usage,
-                    "description": subparser.description or "",
+                    "description": description,
                     "arguments": arguments,
+                    "capability": capability,
+                    "applies_to": _cli_catalog_applies_to(name, description, arguments),
+                    "inputs": _cli_catalog_input_summaries(arguments),
+                    "outputs": _cli_catalog_output_summaries(name, arguments),
+                    "examples": [usage] if usage else [],
+                    "learn_more": _cli_catalog_learn_more(name),
                 }
             )
         return entries

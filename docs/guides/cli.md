@@ -29,13 +29,15 @@ List everything ordeal exposes, grouped by subsystem. This is the quickest way t
 ```bash
 ordeal catalog
 ordeal catalog --detail
+ordeal catalog --json
 ```
 
-Use `--detail` when you want signatures and the first line of each docstring, which is especially useful for coding agents and repo onboarding.
+Use `--detail` when you want the neutral discovery fields for each entry: capability, applicability, expected inputs, outputs, usage patterns, and adjacent learning surfaces. Those fields are derived from the live parser, docstrings, and signatures rather than a hand-maintained command index. Use `--json` for the same capability map in machine-readable form.
 
 | Flag | Default | Description |
 |---|---|---|
 | `--detail` | off | Show signatures and docstrings for each capability |
+| `--json` | off | Emit the full capability map as structured JSON |
 
 ### `ordeal check`
 

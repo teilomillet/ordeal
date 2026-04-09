@@ -15,22 +15,25 @@ Complete public API with signatures, parameters, and usage.
 ## Discovery
 
 !!! quote "Find everything ordeal offers — programmatically"
-    `catalog()` returns every fault, invariant, assertion, strategy, and integration ordeal has, with names, signatures, and documentation. AI assistants and scripts can use this to discover capabilities at runtime without reading files. When new features are added to ordeal, they appear in the catalog automatically.
+    `catalog()` returns every fault, invariant, assertion, strategy, and integration ordeal has, with names, signatures, and neutral discovery metadata derived from the live runtime surface. AI assistants and scripts can use it to learn what exists, what it applies to, what inputs it expects, what it produces, and where to look next without reading files. When new features are added to ordeal, they appear in the catalog automatically.
 
 ```python
 from ordeal import catalog
 
 c = catalog()
-c["faults"]        # all fault factories — timeout, nan_injection, disk_full, ...
-c["invariants"]    # composable checks — no_nan, bounded, finite, ...
-c["assertions"]    # assertion types — always, sometimes, reachable, unreachable
-c["strategies"]    # adversarial data generation strategies
-c["integrations"]  # API testing, atheris fuzzing entry points
+c["faults"]        # failure injectors
+c["invariants"]    # composable checks
+c["assertions"]    # property assertions
+c["strategies"]    # adversarial data generation helpers
+c["integrations"]  # API and fuzzing adapters
 
-# Each entry has: name, qualname, signature, doc
+# Each entry has: name, qualname, signature, doc, capability,
+# applies_to, inputs, outputs, examples, learn_more
 for fault in c["faults"]:
     print(f"{fault['name']}{fault['signature']}")
-    print(f"  {fault['doc']}")
+    print(f"  {fault['capability']}")
+    print(f"  applies_to: {fault['applies_to']}")
+    print(f"  outputs: {fault['outputs']}")
 ```
 
 ## Core

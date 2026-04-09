@@ -349,6 +349,8 @@ class TestCLI:
         assert "ordeal skill" in out
         assert "ordeal <command> --help" in out
         assert "ordeal catalog" in out
+        assert "ordeal catalog --detail" in out
+        assert "ordeal catalog --json" in out
         assert "catalog()" in out
 
     def test_python_module_entrypoint_runs(self):
@@ -979,11 +981,15 @@ scan_max_examples = 12
         out = capsys.readouterr().out
         assert "Run 'ordeal --help' for the full live CLI surface." in out
         assert "Run 'ordeal <command> --help' for command-specific options." in out
-        assert "Key CLI entrypoints: scan, init, audit, mutate, verify, skill." in out
+        assert (
+            "Run 'ordeal catalog --detail' for applicability, inputs, outputs, "
+            "and examples." in out
+        )
+        assert "Run 'ordeal catalog --json' for the machine-readable capability map." in out
         assert "Run 'ordeal skill' or 'ordeal init --install-skill'" in out
         for entry in cli.command_catalog():
             assert entry["name"] in out
-            assert entry["doc"] in out
+            assert entry["capability"] in out
 
     def test_command_catalog_matches_parser_choices(self):
         parser = cli._build_parser()
@@ -1025,6 +1031,29 @@ scan_max_examples = 12
         targets = next(arg for arg in mutate["arguments"] if arg["name"] == "targets")
         assert targets["variadic"] is True
         assert targets["semantics"] == "variadic"
+        assert entries["scan"]["examples"]
+        assert "terminal summary" in " ".join(entries["scan"]["outputs"]).lower()
+        assert "capability surface" in entries["catalog"]["capability"].lower()
+
+    def test_catalog_detail_prints_discovery_metadata(self, capsys):
+        assert main(["catalog", "--detail"]) == 0
+        out = capsys.readouterr().out
+        assert "applies_to:" in out
+        assert "inputs:" in out
+        assert "outputs:" in out
+        assert "examples:" in out
+        assert "machine-readable capability map" in out
+
+    def test_catalog_json_exposes_discovery_metadata(self, capsys):
+        assert main(["catalog", "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        scan = next(entry for entry in payload["cli"] if entry["name"] == "scan")
+        auto_scan = next(entry for entry in payload["auto"] if entry["name"] == "scan_module")
+        assert scan["examples"]
+        assert scan["outputs"]
+        assert scan["applies_to"]
+        assert auto_scan["call_pattern"].startswith("from ordeal.auto import scan_module")
+        assert auto_scan["capability"]
 
     def test_explore_missing_config(self):
         assert main(["explore", "--config", "/nonexistent.toml"]) == 1

@@ -65,6 +65,7 @@ def _metadata_only_hook(kind: str, label: str) -> Callable[..., Any]:
 
     _placeholder.__name__ = f"_ordeal_metadata_only_{kind}"
     _placeholder.__qualname__ = _placeholder.__name__
+    _placeholder.__ordeal_metadata_only__ = True
     return _placeholder
 
 
@@ -186,6 +187,7 @@ _DEFAULT_REGRESSION_PATH = "tests/test_ordeal_regressions.py"
 _DEFAULT_FINDINGS_DIR = ".ordeal/findings"
 _PACKAGE_ROOT_SCAN_LIMIT = 8
 CLI_CATALOG_SCHEMA_VERSION = 1
+
 
 @dataclass(frozen=True)
 class ArgumentSpec:
@@ -3025,9 +3027,7 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
                 if call_pattern and key != "cli":
                     print(f"    call_pattern:\n{indent(call_pattern, '      ')}")
                 examples = [
-                    str(value).rstrip()
-                    for value in item.get("examples", [])
-                    if str(value).strip()
+                    str(value).rstrip() for value in item.get("examples", []) if str(value).strip()
                 ]
                 if examples:
                     print("    examples:")

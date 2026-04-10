@@ -757,6 +757,29 @@ def _yield_cleanup_mentions(node: ast.AST) -> bool:
     )
 
 
+def _callable_supports_optional_instance_call(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    """Return whether *node* can be called with zero args or one instance arg."""
+    positional = [*node.args.posonlyargs, *node.args.args]
+    if positional and positional[0].arg in {"self", "cls"}:
+        positional = positional[1:]
+    positional_defaults = [
+        None,
+    ] * (len(positional) - len(node.args.defaults)) + list(node.args.defaults)
+    required_positional = [
+        arg
+        for arg, default in zip(positional, positional_defaults, strict=True)
+        if default is None
+    ]
+    required_kwonly = [
+        arg
+        for arg, default in zip(node.args.kwonlyargs, node.args.kw_defaults, strict=True)
+        if default is None
+    ]
+    return not required_kwonly and len(required_positional) <= 1
+
+
 @functools.lru_cache(maxsize=64)
 def _pytest_fixture_catalog(path_keys: tuple[str, ...]) -> dict[str, dict[str, Any]]:
     """Return simple metadata for pytest fixtures across the given files."""
@@ -3204,6 +3227,11 @@ def _call_with_optional_instance_arg(hook: Any, instance: Any) -> Any:
     return _call_sync(hook)
 
 
+def _is_metadata_only_hook(hook: Any) -> bool:
+    """Return whether *hook* is a read-only placeholder from CLI metadata mode."""
+    return bool(getattr(hook, "__ordeal_metadata_only__", False))
+
+
 def _python_source_path_to_module_name(path_str: str) -> str | None:
     """Convert a project-relative Python path into an importable module name."""
     path = Path(path_str)
@@ -3431,7 +3459,7 @@ def _single_resolved_hint(
     second_hint = ranked[1][1]
     top_score = float(top_hint.score)
     second_score = float(second_hint.score)
-    decisive_signals = {"returns_target_instance", "state_compatible", "lifecycle_cleanup"}
+    decisive_signals = {"returns_target_instance", "lifecycle_cleanup"}
     top_strength = _harness_hint_signal_strength(top_hint.signals)
     second_strength = _harness_hint_signal_strength(second_hint.signals)
     if (
@@ -3550,6 +3578,16 @@ def _verify_auto_object_runtime(
         "state_factory": state_factory_source,
     }
     if not any(source == "mined" for source in mined_sources.values()):
+        return True, None
+    if (
+        (factory_source == "configured" and _is_metadata_only_hook(factory))
+        or (setup_source == "configured" and _is_metadata_only_hook(setup))
+        or (
+            scenario_source == "configured"
+            and any(_is_metadata_only_hook(hook) for hook in scenarios or ())
+        )
+        or (state_factory_source == "configured" and _is_metadata_only_hook(state_factory))
+    ):
         return True, None
     if factory is None:
         return False, "auto-harness dry-run could not find an object factory"
@@ -4158,6 +4196,49 @@ def _resolve_explicit_target(
     return qualname, resolved
 
 
+def _is_exact_target_selector(selector: str) -> bool:
+    """Return whether *selector* is an exact callable selector, not a glob."""
+    text = str(selector).strip()
+    return bool(text) and not any(char in text for char in "*?[]")
+
+
+def _resolve_local_target(
+    mod: ModuleType,
+    target: str,
+    *,
+    object_factories: dict[str, Any] | None = None,
+    object_setups: dict[str, Any] | None = None,
+    object_scenarios: dict[str, Any] | None = None,
+    object_state_factories: dict[str, Any] | None = None,
+    object_teardowns: dict[str, Any] | None = None,
+    object_harnesses: dict[str, str] | None = None,
+) -> tuple[str, Any]:
+    """Resolve one local callable selector like ``foo`` or ``Env.render``."""
+    selector = str(target).strip()
+    module_variants = [f"{mod.__name__}."]
+    module_parts = [part for part in str(mod.__name__).split(".") if part]
+    for index in range(1, len(module_parts)):
+        module_variants.append(f"{'.'.join(module_parts[index:])}.")
+    for prefix in module_variants:
+        if selector.startswith(prefix):
+            selector = selector[len(prefix) :]
+            break
+    try:
+        return _resolve_explicit_target(
+            f"{mod.__name__}:{selector}",
+            object_factories=object_factories,
+            object_setups=object_setups,
+            object_scenarios=object_scenarios,
+            object_state_factories=object_state_factories,
+            object_teardowns=object_teardowns,
+            object_harnesses=object_harnesses,
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"target selector {target!r} matched no callables in module {mod.__name__!r}"
+        ) from exc
+
+
 def _selected_public_functions(
     mod: ModuleType,
     *,
@@ -4171,6 +4252,45 @@ def _selected_public_functions(
     object_harnesses: dict[str, str] | None = None,
 ) -> list[tuple[str, Any]]:
     """Return discovered callables filtered to *targets* when provided."""
+    normalized_targets = [str(raw).strip() for raw in targets or () if str(raw).strip()]
+    if normalized_targets and all(
+        _is_exact_target_selector(target) for target in normalized_targets
+    ):
+        selected: list[tuple[str, Any]] = []
+        seen: set[str] = set()
+        for target in normalized_targets:
+            if ":" in target:
+                base_module = target.split(":", 1)[0]
+                if base_module != mod.__name__:
+                    raise ValueError(
+                        f"target {target!r} does not belong to module {mod.__name__!r}"
+                    )
+                name, func = _resolve_explicit_target(
+                    target,
+                    object_factories=object_factories,
+                    object_setups=object_setups,
+                    object_scenarios=object_scenarios,
+                    object_state_factories=object_state_factories,
+                    object_teardowns=object_teardowns,
+                    object_harnesses=object_harnesses,
+                )
+            else:
+                name, func = _resolve_local_target(
+                    mod,
+                    target,
+                    object_factories=object_factories,
+                    object_setups=object_setups,
+                    object_scenarios=object_scenarios,
+                    object_state_factories=object_state_factories,
+                    object_teardowns=object_teardowns,
+                    object_harnesses=object_harnesses,
+                )
+            if name in seen:
+                continue
+            seen.add(name)
+            selected.append((name, func))
+        return selected
+
     discovered = _get_public_functions(
         mod,
         include_private=include_private,
@@ -4181,17 +4301,14 @@ def _selected_public_functions(
         object_teardowns=object_teardowns,
         object_harnesses=object_harnesses,
     )
-    if not targets:
+    if not normalized_targets:
         return discovered
 
     discovered_map = {name: func for name, func in discovered}
     selected: list[tuple[str, Any]] = []
     seen: set[str] = set()
 
-    for raw_target in targets:
-        target = str(raw_target).strip()
-        if not target:
-            continue
+    for target in normalized_targets:
         if ":" in target:
             base_module = target.split(":", 1)[0]
             if base_module != mod.__name__:
@@ -5090,7 +5207,7 @@ def _infer_strategies(
         else:
             return None
 
-    return strategies if strategies else None
+    return strategies
 
 
 def _literal_seed_value(node: ast.AST) -> Any:
@@ -5161,6 +5278,17 @@ def _callable_seed_files(module_name: str) -> list[Path]:
 def _camel_case_tokens(text: str) -> list[str]:
     """Split one identifier into coarse searchable tokens."""
     return [token.lower() for token in re.findall(r"[A-Z]?[a-z]+|[0-9]+", text) if token]
+
+
+def _searchable_tokens(text: str) -> set[str]:
+    """Return coarse word tokens for lightweight harness matching."""
+    tokens: set[str] = set()
+    for raw in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", str(text)):
+        lowered = raw.lower()
+        tokens.add(lowered)
+        tokens.update(part for part in lowered.split("_") if part)
+        tokens.update(_camel_case_tokens(raw))
+    return {token for token in tokens if token}
 
 
 def _harness_doc_files(module_name: str) -> list[Path]:
@@ -5417,6 +5545,7 @@ def _mine_object_harness_hints_cached(
     class_tokens = {class_name.lower(), *(_camel_case_tokens(class_name))}
     method_tokens = {method_name.lower(), *(_camel_case_tokens(method_name))}
     target_tokens = class_tokens | method_tokens
+    state_hint_tokens = {"state", "context", "cache"}
     state_param_name: str | None = None
     collaborator_packs: list[str] = []
     collaborator_evidence: str | None = None
@@ -5505,6 +5634,8 @@ def _mine_object_harness_hints_cached(
                 else ""
             )
             text_lower = " ".join([name_lower, doc_lower, returns_lower])
+            text_tokens = _searchable_tokens(" ".join([node.name, doc_lower, returns_lower]))
+            name_tokens = _searchable_tokens(node.name)
             is_fixture = any(
                 _call_name(decorator.func) == "pytest.fixture"
                 if isinstance(decorator, ast.Call)
@@ -5518,7 +5649,8 @@ def _mine_object_harness_hints_cached(
             returns_mapping = any(isinstance(value, Mapping) for value in fixture_values) or (
                 "dict" in returns_lower or "mapping" in returns_lower
             )
-            mentions_target = any(token in text_lower for token in target_tokens)
+            mentions_target = bool(text_tokens & target_tokens)
+            mentions_state = bool(text_tokens & state_hint_tokens)
             returns_target, instance_names = _function_returns_target_instance(
                 node,
                 direct_aliases=direct_aliases,
@@ -5532,7 +5664,15 @@ def _mine_object_harness_hints_cached(
             attr_packs = _scenario_packs_for_attrs(
                 _instance_attr_names(node, instance_names=instance_names)
             )
-            state_like_name = any(token in name_lower for token in ("state", "context", "cache"))
+            state_like_name = bool(name_tokens & state_hint_tokens)
+            state_param_tokens = (
+                _searchable_tokens(state_param_name) if state_param_name is not None else set()
+            )
+            matches_state_param = bool(
+                state_param_name is not None
+                and (name_lower == state_param_name.lower() or name_tokens & state_param_tokens)
+            )
+            supports_state_factory = _callable_supports_optional_instance_call(node)
             looks_like_factory = (
                 name_lower.startswith(("make_", "build_", "create_", "new_"))
                 or "factory" in name_lower
@@ -5563,29 +5703,17 @@ def _mine_object_harness_hints_cached(
                         "value": symbol_value,
                     },
                 )
-            if (
-                (
-                    "state" in text_lower
-                    and (mentions_target or (state_param_name is not None and returns_target))
-                )
-                or (
-                    state_param_name is not None
-                    and (name_lower == state_param_name.lower() or "state" in name_lower)
-                )
-                or (
-                    state_param_name is not None
-                    and returns_mapping
-                    and any(token in name_lower for token in ("state", "context", "cache"))
-                )
+            if supports_state_factory and (
+                (returns_mapping and (mentions_target or mentions_state or matches_state_param))
+                or matches_state_param
             ):
                 _add_hint(
                     "state_factory",
                     f"[[objects]] state_factory -> {evidence}:{node.name}",
                     evidence,
-                    0.9 if returns_target or returns_mapping else 0.85,
+                    0.9 if returns_mapping else 0.82,
                     signals=(
                         *(("state_compatible",) if state_param_name is not None else ()),
-                        *(("returns_target_instance",) if returns_target else ()),
                         *(("returns_mapping",) if returns_mapping else ()),
                         *(("pytest_fixture",) if is_fixture else ()),
                         *(("mentions_target_tokens",) if mentions_target else ()),
@@ -5720,7 +5848,7 @@ def _mine_object_harness_hints_cached(
                     "docs mention state setup for this target",
                     evidence,
                     0.55,
-                    signals=("state_compatible", "doc_evidence"),
+                    signals=("doc_evidence",),
                     config={
                         "section": "[[objects]]",
                         "target": f"{module_name}:{class_name}",

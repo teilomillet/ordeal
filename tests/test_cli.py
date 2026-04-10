@@ -2161,6 +2161,78 @@ scan_max_examples = 12
         finally:
             del sys.modules[module_name]
 
+    def test_scan_list_targets_keeps_metadata_only_config_hooks_read_only(self):
+        module_name = "_test_cli_metadata_only_hooks"
+        mod = types.ModuleType(module_name)
+        sys.modules[module_name] = mod
+        exec(
+            "class Env:\n"
+            "    def rollout(self, state: dict[str, str], prompt: str) -> str:\n"
+            "        return prompt\n",
+            mod.__dict__,
+        )
+
+        try:
+            rows = cli._callable_listing_rows(
+                module_name,
+                targets=[f"{module_name}:Env.rollout"],
+                selected_targets=[f"{module_name}:Env.rollout"],
+                object_factories={
+                    f"{module_name}:Env": cli._metadata_only_hook(
+                        "factory",
+                        "tests/support.py:make_env",
+                    )
+                },
+                object_state_factories={
+                    f"{module_name}:Env": cli._metadata_only_hook(
+                        "state_factory",
+                        "tests/support.py:make_state",
+                    )
+                },
+                object_harnesses={f"{module_name}:Env": "stateful"},
+            )
+            row = next(item for item in rows if item["name"] == "Env.rollout")
+            assert row["factory_source"] == "configured"
+            assert row["state_factory_source"] == "configured"
+            assert row["harness_verified"] is True
+            assert row["skip_reason"] is None
+            assert row["runnable"] is True
+        finally:
+            del sys.modules[module_name]
+
+    def test_scan_list_targets_marks_zero_arg_stateful_wrappers_runnable(self):
+        module_name = "_test_cli_zero_arg_stateful_wrapper"
+        mod = types.ModuleType(module_name)
+        sys.modules[module_name] = mod
+        exec(
+            "class Env:\n"
+            "    def rollout(self, state: dict[str, str]) -> None:\n"
+            "        return None\n",
+            mod.__dict__,
+        )
+
+        def factory() -> object:
+            return mod.Env()
+
+        def state_factory(_instance: object | None = None) -> dict[str, str]:
+            return {"seed": "demo"}
+
+        try:
+            rows = cli._callable_listing_rows(
+                module_name,
+                targets=[f"{module_name}:Env.rollout"],
+                selected_targets=[f"{module_name}:Env.rollout"],
+                object_factories={f"{module_name}:Env": factory},
+                object_state_factories={f"{module_name}:Env": state_factory},
+                object_harnesses={f"{module_name}:Env": "stateful"},
+            )
+            row = next(item for item in rows if item["name"] == "Env.rollout")
+            assert row["state_factory_source"] == "configured"
+            assert row["skip_reason"] is None
+            assert row["runnable"] is True
+        finally:
+            del sys.modules[module_name]
+
     def test_scan_list_targets_text_shows_harness_config_hints(
         self,
         monkeypatch,

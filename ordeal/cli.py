@@ -65,6 +65,7 @@ def _metadata_only_hook(kind: str, label: str) -> Callable[..., Any]:
 
     _placeholder.__name__ = f"_ordeal_metadata_only_{kind}"
     _placeholder.__qualname__ = _placeholder.__name__
+    _placeholder.__ordeal_metadata_only__ = True
     return _placeholder
 
 

@@ -1320,6 +1320,44 @@ class TestScanModule:
         finally:
             del sys.modules[module_name]
 
+    def test_infer_strategies_returns_empty_mapping_for_zero_arg_callables(self):
+        def ping() -> str:
+            return "pong"
+
+        assert auto_mod._infer_strategies(ping) == {}
+
+    def test_exact_target_selection_bypasses_module_discovery(self, monkeypatch):
+        module_name = "_test_exact_target_selection"
+        mod = types.ModuleType(module_name)
+        sys.modules[module_name] = mod
+        exec(
+            "def ping(name: str) -> str:\n"
+            "    return name\n"
+            "\n"
+            "class Env:\n"
+            "    def greet(self, name: str) -> str:\n"
+            "        return name\n",
+            mod.__dict__,
+        )
+
+        def factory() -> object:
+            return mod.Env()
+
+        def fail_discovery(*_args, **_kwargs):
+            raise AssertionError("_get_public_functions should not run for exact targets")
+
+        monkeypatch.setattr(auto_mod, "_get_public_functions", fail_discovery)
+
+        try:
+            selected = auto_mod._selected_public_functions(
+                mod,
+                targets=[f"{module_name}:ping", "Env.greet"],
+                object_factories={f"{module_name}:Env": factory},
+            )
+            assert [name for name, _func in selected] == ["ping", "Env.greet"]
+        finally:
+            del sys.modules[module_name]
+
     def test_skips_imported_typing_helpers(self):
         import sys
         import types
@@ -1558,6 +1596,70 @@ class TestScanModule:
         assert factory_hint.config["value"].endswith("tests/conftest.py:env")
         assert state_hint.config["value"].endswith("tests/conftest.py:cached_state")
         assert teardown_hint.config["value"].endswith("tests/conftest.py:env")
+
+    def test_harness_hints_ignore_stateful_fixtures_needing_pytest_injection(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        package_name = "hintpkg_stateful_fixture_guard"
+        pkg = tmp_path / package_name
+        tests_dir = tmp_path / "tests"
+        pkg.mkdir()
+        tests_dir.mkdir()
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "envs.py").write_text(
+            "class ExampleStatefulToolEnv:\n"
+            "    pass\n"
+            "\n"
+            "class RLMEnv:\n"
+            "    def render(self, state: dict[str, str], rollout_id: str) -> str:\n"
+            "        return rollout_id\n",
+            encoding="utf-8",
+        )
+        (tests_dir / "support_factories.py").write_text(
+            "def make_rlm_state(_instance: object | None = None) -> dict[str, str]:\n"
+            "    return {'seed': 'demo'}\n",
+            encoding="utf-8",
+        )
+        (tests_dir / "conftest.py").write_text(
+            "import pytest\n"
+            f"from {package_name}.envs import ExampleStatefulToolEnv\n"
+            "\n"
+            "@pytest.fixture\n"
+            "def mock_stateful_tool_env(\n"
+            "    mock_client, sample_chat_dataset\n"
+            ") -> ExampleStatefulToolEnv:\n"
+            "    return ExampleStatefulToolEnv()\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        import importlib
+
+        auto_mod._mine_object_harness_hints.cache_clear()
+        hints = auto_mod._mine_object_harness_hints(f"{package_name}.envs", "RLMEnv", "render")
+        runtime = auto_mod._mined_object_runtime(
+            importlib.import_module(f"{package_name}.envs").RLMEnv,
+            "render",
+        )
+
+        assert any(
+            hint.kind == "state_factory"
+            and str(hint.config.get("value", "")).endswith(
+                "tests/support_factories.py:make_rlm_state"
+            )
+            for hint in hints
+        )
+        assert not any(
+            hint.kind == "state_factory"
+            and str(hint.config.get("value", "")).endswith(
+                "tests/conftest.py:mock_stateful_tool_env"
+            )
+            for hint in hints
+        )
+        assert getattr(auto_mod._unwrap(runtime.state_factory), "__name__", "") == "make_rlm_state"
 
     def test_auto_mined_harness_makes_instance_method_runnable(self, tmp_path, monkeypatch):
         pkg = tmp_path / "autoharnesspkg"

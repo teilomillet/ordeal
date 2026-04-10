@@ -8423,6 +8423,21 @@ def _test_one_function(
                 return example.source
         return fallback
 
+    def _check_result(result: Any) -> None:
+        if check_return_type and return_type is not None:
+            if not _type_matches(result, return_type):
+                raise AssertionError(
+                    f"Expected return type {return_type}, got {type(result).__name__}: {result!r}"
+                )
+
+    def _run_one(kwargs: Mapping[str, Any], fallback: str) -> None:
+        nonlocal last_kwargs
+        nonlocal last_input_source
+        last_kwargs = dict(kwargs)
+        last_input_source = _origin_for_kwargs(kwargs, fallback)
+        result = _call_sync(func, **dict(kwargs))
+        _check_result(result)
+
     try:
         for candidate in _candidate_inputs(
             func,
@@ -8444,32 +8459,19 @@ def _test_one_function(
             seed_from_code=seed_from_code,
             seed_from_call_sites=seed_from_call_sites,
         ):
-            last_kwargs = dict(candidate.kwargs)
-            last_input_source = _origin_for_kwargs(candidate.kwargs, candidate.origin)
-            result = _call_sync(func, **dict(candidate.kwargs))
-            if check_return_type and return_type is not None:
-                if not _type_matches(result, return_type):
-                    raise AssertionError(
-                        f"Expected return type {return_type}, "
-                        f"got {type(result).__name__}: {result!r}"
-                    )
+            _run_one(candidate.kwargs, candidate.origin)
 
-        @given(**strategies)
-        @settings(max_examples=max_examples, database=None)
-        def test(**kwargs: Any) -> None:
-            nonlocal last_kwargs
-            nonlocal last_input_source
-            last_kwargs = dict(kwargs)
-            last_input_source = _origin_for_kwargs(kwargs, "random_fuzz")
-            result = _call_sync(func, **kwargs)
-            if check_return_type and return_type is not None:
-                if not _type_matches(result, return_type):
-                    raise AssertionError(
-                        f"Expected return type {return_type}, "
-                        f"got {type(result).__name__}: {result!r}"
-                    )
+        # Hypothesis rejects @given() with no inferred arguments.
+        if not strategies:
+            _run_one({}, "random_fuzz")
+        else:
 
-        test()
+            @given(**strategies)
+            @settings(max_examples=max_examples, database=None)
+            def test(**kwargs: Any) -> None:
+                _run_one(kwargs, "random_fuzz")
+
+            test()
     except Exception as e:
         call_context = getattr(func, "__ordeal_last_call_context__", None)
         precondition = _documented_precondition_failure(

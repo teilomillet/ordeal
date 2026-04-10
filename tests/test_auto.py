@@ -1326,6 +1326,24 @@ class TestScanModule:
 
         assert auto_mod._infer_strategies(ping) == {}
 
+    def test_test_one_function_handles_zero_arg_callables(self):
+        def ping() -> str:
+            return "pong"
+
+        result = _test_one_function(
+            "ping",
+            ping,
+            {},
+            str,
+            max_examples=5,
+            check_return_type=True,
+            mode="real_bug",
+        )
+
+        assert result.execution_ok is True
+        assert result.passed is True
+        assert result.verdict == "clean"
+
     def test_exact_target_selection_bypasses_module_discovery(self, monkeypatch):
         module_name = "_test_exact_target_selection"
         mod = types.ModuleType(module_name)

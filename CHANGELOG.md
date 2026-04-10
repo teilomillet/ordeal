@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.39
+
+**Fixes:**
+
+- handle zero-arg scan callables
+
+
 ## 0.3.38
 
 **Fixes:**

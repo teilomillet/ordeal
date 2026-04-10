@@ -89,6 +89,7 @@ Pack aliases in `auto_contracts` expand to concrete checks, so names like
 | `module` | `str` | required | Dotted module path to scan |
 | `max_examples` | `int` | `50` | Hypothesis examples per function |
 | `security_focus` | `bool` | `false` | Expand sink inference and trust-boundary probes for security-oriented scans |
+| `shell_injection_check` | `bool` | `false` | Run a static shell-injection oracle before scan execution |
 | `targets` | `list[str]` | `[]` | Optional callable selectors such as `score`, `Env.*`, or `pkg.mod:Env.build_env_vars` |
 | `include_private` | `bool` | `false` | Include single-underscore callables |
 | `fixtures` | `dict[str, str]` | `{}` | Strategy specs for untyped parameters, such as comma-separated `sampled_from` values |
@@ -109,6 +110,7 @@ Pack aliases in `auto_contracts` expand to concrete checks, so names like
 module = "myapp.scoring"
 max_examples = 100
 security_focus = true
+shell_injection_check = true
 targets = ["myapp.scoring:Scorer.score"]
 fixture_registries = ["tests.support.fixtures"]
 ignore_contracts = ["quoted_paths"]
@@ -129,7 +131,7 @@ relation_overrides = { normalize = ["equivalent"] }
 
 When you run `pytest --chaos`, ordeal auto-discovers these entries and smoke-tests every public function in each module. Functions without type hints are skipped unless fixtures are provided or a registry supplies them. Known preconditions stay separate from candidate issue ranking so the output stays epistemic.
 
-`security_focus = true` is the opt-in trust-boundary review setting. It widens the sink taxonomy to include import/deserialization/filesystem-write/IPC paths, adds deterministic probes for pure path/symlink shapers, and synthesizes small artifact/config mutations for deserialization- and IPC-shaped parameters without creating a second scan command.
+`security_focus = true` is the opt-in trust-boundary review setting. It widens the sink taxonomy to include import/deserialization/filesystem-write/IPC paths, adds deterministic probes for pure path/symlink shapers, and synthesizes small artifact/config mutations for deserialization- and IPC-shaped parameters without creating a second scan command. `shell_injection_check = true` complements that by statically tracing metacharacter-bearing string inputs into `subprocess`-style sinks before ordeal executes the target.
 
 `targets` now acts as a first-class selector list, not just an exact-callable allowlist. Exact names still work, and glob patterns let package-root scans focus on a subset of exported callables without rewriting the module target.
 
@@ -193,7 +195,7 @@ Pack aliases such as `shell_path_safety`, `protected_env_vars`,
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `target` | `str` | required | Callable target such as `pkg.mod:Env.build_env_vars` |
-| `checks` | `list[str]` | `[]` | Built-ins and pack aliases: `shell_safe`, `quoted_paths`, `command_arg_stability`, `protected_env_keys`, `shell_path_safety`, `protected_env_vars`, `cleanup_teardown`, `cancellation_safety`, `json_tool_call_normalization` |
+| `checks` | `list[str]` | `[]` | Built-ins and pack aliases: `shell_safe`, `shell_injection`, `quoted_paths`, `command_arg_stability`, `protected_env_keys`, `shell_path_safety`, `shell_injection_check`, `protected_env_vars`, `cleanup_teardown`, `cancellation_safety`, `json_tool_call_normalization` |
 | `kwargs` | `dict[str, object]` | `{}` | Concrete probe inputs |
 | `tracked_params` | `list[str]` | `[]` | String params to track in shell/path checks |
 | `protected_keys` | `list[str]` | `[]` | Env keys that must survive updates |

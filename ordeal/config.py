@@ -103,6 +103,7 @@ class ScanConfig:
     security_focus: bool = False
     require_replayable: bool = True
     proof_bundles: bool = True
+    shell_injection_check: bool = False
     seed_from_tests: bool = True
     seed_from_fixtures: bool = True
     seed_from_docstrings: bool = True
@@ -478,6 +479,7 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
                 security_focus=bool(s.get("security_focus", False)),
                 require_replayable=bool(s.get("require_replayable", True)),
                 proof_bundles=bool(s.get("proof_bundles", True)),
+                shell_injection_check=bool(s.get("shell_injection_check", False)),
                 seed_from_tests=bool(s.get("seed_from_tests", True)),
                 seed_from_fixtures=bool(s.get("seed_from_fixtures", True)),
                 seed_from_docstrings=bool(s.get("seed_from_docstrings", True)),

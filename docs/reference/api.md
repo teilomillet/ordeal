@@ -950,6 +950,7 @@ scan_module(
     check_return_type: bool = True,
     fixtures: dict[str, SearchStrategy] | None = None,
     security_focus: bool = False,
+    shell_injection_check: bool = False,
 ) -> ScanResult
 ```
 
@@ -961,7 +962,7 @@ assert result.passed
 print(result.summary())
 ```
 
-`security_focus=True` keeps the same API but biases scan toward trust-boundary sinks such as import loading, deserialization, filesystem writes, and checkpoint/IPC handling.
+`security_focus=True` keeps the same API but biases scan toward trust-boundary sinks such as import loading, deserialization, filesystem writes, and checkpoint/IPC handling. `shell_injection_check=True` adds a static metacharacter-to-shell-sink oracle that runs before the target is executed.
 
 ### fuzz
 

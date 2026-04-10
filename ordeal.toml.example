@@ -124,6 +124,7 @@ verbose = true
 # mode = "evidence"   # or "candidate" for stricter ranking
 # security_focus = true   # opt in to trust-boundary-biased sink detection, path probes,
 #                        # and small artifact/config mutations for deserialize/IPC inputs
+# shell_injection_check = true  # static input->shell sink oracle, runs before execution
 # include_private = false
 #
 # # Optional: focus scan on a subset of callables instead of the whole module
@@ -143,6 +144,7 @@ verbose = true
 # # Contract packs expand to the concrete built-ins ordeal already knows about.
 # auto_contracts = [
 #   "shell_path_safety",
+#   "shell_injection_check",
 #   "protected_env_vars",
 #   "cleanup_teardown",
 #   "cancellation_safety",
@@ -198,7 +200,7 @@ verbose = true
 # # Optional semantic probes for shell/path/env helpers during scan.
 # [[contracts]]
 # target = "myapp.envs:ComposableEnv.build_env_vars"
-# checks = ["shell_path_safety", "protected_env_vars", "json_tool_call_normalization"]
+# checks = ["shell_path_safety", "shell_injection_check", "protected_env_vars", "json_tool_call_normalization"]
 # kwargs = { path = "tmp/my binary", env_vars = { PATH = "/bin", HOME = "/tmp/home" } }
 # tracked_params = ["path"]
 # protected_keys = ["PATH", "HOME"]

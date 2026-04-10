@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import linecache
 import shlex
 import sys
 import types
@@ -338,6 +339,20 @@ def _install_stateful_target_module(module_name: str):
         "        return state['prompt']\n",
         mod.__dict__,
     )
+    return mod
+
+
+def _install_shell_target_module(module_name: str, source: str):
+    mod = types.ModuleType(module_name)
+    sys.modules[module_name] = mod
+    filename = f"<{module_name}>"
+    linecache.cache[filename] = (
+        len(source),
+        None,
+        [f"{line}\n" for line in source.splitlines()],
+        filename,
+    )
+    exec(compile(source, filename, "exec"), mod.__dict__)
     return mod
 
 
@@ -725,6 +740,120 @@ class TestScanModule:
 
         assert focused.proof_bundle is not None
         assert focused.proof_bundle["impact"]["critical_sinks"] == []
+
+    def test_shell_injection_check_flags_direct_shell_sink_without_execution(self):
+        mod = _install_shell_target_module(
+            "tests._shell_direct_target",
+            (
+                "counter = {'calls': 0}\n"
+                "def install(pkg_name: str) -> str:\n"
+                "    import subprocess\n"
+                "    counter['calls'] += 1\n"
+                "    subprocess.run(f'pip install {pkg_name}', shell=True)\n"
+                "    return pkg_name\n"
+            ),
+        )
+
+        result = _test_one_function(
+            "install",
+            mod.install,
+            {"pkg_name": st.just("requests")},
+            str,
+            max_examples=1,
+            check_return_type=True,
+            mode="candidate",
+            shell_injection_check=True,
+        )
+
+        assert mod.counter["calls"] == 0
+        assert result.execution_ok is True
+        assert result.verdict == "semantic_contract"
+        assert result.passed is False
+        assert result.input_source == "static_contract"
+        assert "shell" in result.contract_violations[0]
+        assert result.contract_violation_details[0]["proof_bundle"]["static_analysis"]["sink"] in {
+            "subprocess.run",
+            "subprocess.Popen",
+        }
+
+    def test_shell_injection_check_propagates_through_local_command_builder(self):
+        mod = _install_shell_target_module(
+            "tests._shell_helper_target",
+            (
+                "def _build_command(pkg_name: str) -> str:\n"
+                "    return f'pip install {pkg_name}'\n"
+                "\n"
+                "counter = {'calls': 0}\n"
+                "def install(pkg_name: str) -> str:\n"
+                "    import subprocess\n"
+                "    counter['calls'] += 1\n"
+                "    command = _build_command(pkg_name)\n"
+                "    subprocess.run(command, shell=True)\n"
+                "    return command\n"
+            ),
+        )
+
+        result = _test_one_function(
+            "install",
+            mod.install,
+            {"pkg_name": st.just("requests")},
+            str,
+            max_examples=1,
+            check_return_type=True,
+            mode="candidate",
+            shell_injection_check=True,
+        )
+
+        assert mod.counter["calls"] == 0
+        assert result.verdict == "semantic_contract"
+        assert result.contract_violation_details[0]["proof_bundle"]["static_analysis"]["sink"] == (
+            "subprocess.run"
+        )
+
+    def test_shell_injection_check_ignores_safe_quoted_shell_and_argv(self):
+        quoted_mod = _install_shell_target_module(
+            "tests._shell_safe_target",
+            (
+                "def install(pkg_name: str) -> str:\n"
+                "    import shlex\n"
+                "    import subprocess\n"
+                "    subprocess.run(f'pip install {shlex.quote(pkg_name)}', shell=True)\n"
+                "    return pkg_name\n"
+            ),
+        )
+        argv_mod = _install_shell_target_module(
+            "tests._shell_argv_target",
+            (
+                "def install(pkg_name: str) -> str:\n"
+                "    import subprocess\n"
+                "    subprocess.run(['pip', 'install', pkg_name], shell=False)\n"
+                "    return pkg_name\n"
+            ),
+        )
+        quoted_check = auto_mod.builtin_contract_check(
+            "shell_injection",
+            kwargs={"pkg_name": "requests"},
+            tracked_params=["pkg_name"],
+        )
+        argv_check = auto_mod.builtin_contract_check(
+            "shell_injection",
+            kwargs={"pkg_name": "requests"},
+            tracked_params=["pkg_name"],
+        )
+
+        quoted_violations, _quoted_details = auto_mod._evaluate_contract_checks(
+            quoted_mod.install,
+            [quoted_check],
+            execute_calls=False,
+        )
+        argv_violations, _argv_details = auto_mod._evaluate_contract_checks(
+            argv_mod.install,
+            [argv_check],
+            execute_calls=False,
+        )
+
+        assert quoted_violations == []
+        assert argv_violations == []
 
     def test_test_seeds_include_pytest_parametrize_examples(self, tmp_path, monkeypatch):
         pkg = tmp_path / "seedpkg"

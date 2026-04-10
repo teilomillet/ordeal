@@ -198,8 +198,14 @@ _CONTRACT_GROUP_ALIASES: dict[str, tuple[str, ...]] = {
     "transport": ("json_roundtrip", "http_shape"),
     "transport_semantics": ("json_roundtrip", "http_shape"),
     "wire": ("json_roundtrip", "http_shape"),
-    "shell": ("shell_safe", "command_arg_stability", "subprocess_argv"),
-    "shell_path_safety": ("shell_safe", "command_arg_stability", "subprocess_argv"),
+    "shell": ("shell_safe", "command_arg_stability", "subprocess_argv", "shell_injection"),
+    "shell_path_safety": (
+        "shell_safe",
+        "command_arg_stability",
+        "subprocess_argv",
+        "shell_injection",
+    ),
+    "shell_injection_check": ("shell_injection",),
     "path": ("quoted_paths",),
     "env": ("protected_env_keys",),
     "protected_env_vars": ("protected_env_keys",),
@@ -268,6 +274,28 @@ _SECURITY_ARTIFACT_MUTATION_VALUES: dict[str, tuple[Any, ...]] = {
     ),
     "import_text": ("json", "json.tool"),
 }
+_SHELL_INJECTION_PROBE_VALUE = "ordeal-probe; echo ordeal_shell_probe"
+_SHELL_INJECTION_META_CHARS = frozenset(";&|`$><()[]{}*?\n")
+_SHELL_TAINT_CLEAN = 0
+_SHELL_TAINT_SAFE = 1
+_SHELL_TAINT_UNSAFE = 2
+_DEFAULT_SHELL_INJECTION_SINK_SPECS: tuple[dict[str, Any], ...] = (
+    {
+        "pattern": r"(^|\.)subprocess\.(run|Popen|check_call|check_output)$",
+        "category": "shell_injection",
+        "taint_args": (0, "args", "command", "cmd", "argv"),
+    },
+    {
+        "pattern": r"(^|\.)os\.(system|popen)$",
+        "category": "shell_injection",
+        "taint_args": (0, "command", "cmd"),
+    },
+    {
+        "pattern": r"(^|\.)(execute_command|run_command|shell)$",
+        "category": "shell_injection",
+        "taint_args": (0, "command", "cmd"),
+    },
+)
 _SECURITY_SHAPER_TOKENS = {
     "artifact",
     "build",
@@ -336,6 +364,17 @@ class ContractCheck:
     kwargs: dict[str, Any] = field(default_factory=dict)
     summary: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _ShellInjectionFlow:
+    """One static shell-injection path from input to sink."""
+
+    sink: str
+    line: int | None = None
+    parameter: str | int | None = None
+    call_path: tuple[str, ...] = ()
+    source_params: tuple[str, ...] = ()
 
 
 class ContractNotApplicable(RuntimeError):
@@ -4415,6 +4454,690 @@ def _tracked_token_count(tokens: Sequence[str], raw: str) -> int:
     return sum(1 for token in tokens if token in variants)
 
 
+def _contract_check_is_static(check: ContractCheck) -> bool:
+    """Return whether *check* is static-only and should avoid execution."""
+    return bool(check.metadata.get("static_only"))
+
+
+def _shell_injection_probe_kwargs(
+    kwargs: Mapping[str, Any],
+    tracked_params: Sequence[str] | None,
+) -> dict[str, Any]:
+    """Return probe kwargs with shell-metacharacter payloads in tracked string fields."""
+    probe_kwargs = dict(kwargs)
+    candidate_names = list(tracked_params or probe_kwargs)
+    mutated = False
+    for name in candidate_names:
+        value = probe_kwargs.get(name)
+        if isinstance(value, (str, os.PathLike)):
+            probe_kwargs[name] = _SHELL_INJECTION_PROBE_VALUE
+            mutated = True
+    if not mutated:
+        for name, value in list(probe_kwargs.items()):
+            if isinstance(value, (str, os.PathLike)):
+                probe_kwargs[name] = _SHELL_INJECTION_PROBE_VALUE
+                mutated = True
+    return probe_kwargs
+
+
+def _shell_value_has_metacharacters(value: Any) -> bool:
+    """Return whether *value* contains shell-significant metacharacters."""
+    if isinstance(value, os.PathLike):
+        value = os.fspath(value)
+    return isinstance(value, str) and any(ch in value for ch in _SHELL_INJECTION_META_CHARS)
+
+
+def _shell_taint_from_value(value: Any) -> int:
+    """Return shell-taint severity for one concrete value."""
+    if _shell_value_has_metacharacters(value):
+        return _SHELL_TAINT_UNSAFE
+    return _SHELL_TAINT_CLEAN
+
+
+def _merge_shell_taint(*states: int) -> int:
+    """Return the most dangerous shell-taint state."""
+    return max(states, default=_SHELL_TAINT_CLEAN)
+
+
+def _merge_shell_envs(*envs: Mapping[str, int]) -> dict[str, int]:
+    """Merge branch-local shell taint environments conservatively."""
+    merged: dict[str, int] = {}
+    keys = {key for env in envs for key in env}
+    for key in keys:
+        merged[key] = _merge_shell_taint(
+            *(int(env.get(key, _SHELL_TAINT_CLEAN)) for env in envs),
+        )
+    return merged
+
+
+def _callable_display_name(func: Any) -> str:
+    """Return a stable display name for *func* in diagnostics."""
+    module_name, qual_parts, leaf_name = _call_target_parts(func)
+    qualname = ".".join([*qual_parts, leaf_name]) if qual_parts else leaf_name
+    return f"{module_name}.{qualname}" if module_name else qualname
+
+
+def _function_ast_bundle(
+    func: Any,
+) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, int, ModuleType | None, type | None] | None:
+    """Return parsed AST plus source metadata for *func* when available."""
+    target = _unwrap(func)
+    try:
+        source_lines, start_line = inspect.getsourcelines(target)
+        tree = ast.parse(textwrap.dedent("".join(source_lines)))
+    except (OSError, TypeError, SyntaxError):
+        return None
+    node = next(
+        (
+            item
+            for item in tree.body
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ),
+        None,
+    )
+    if node is None:
+        return None
+    module_name = getattr(target, "__module__", "")
+    module: ModuleType | None = None
+    with contextlib.suppress(Exception):
+        module = importlib.import_module(module_name)
+    owner = getattr(func, "__ordeal_owner__", None)
+    return node, start_line, module, owner
+
+
+def _resolve_shell_call_name(
+    node: ast.Call,
+    *,
+    module: ModuleType | None,
+    owner: type | None,
+) -> str | None:
+    """Resolve one AST call target into a dotted name when possible."""
+    raw_name = _call_to_string(node)
+    func_expr = node.func
+    if isinstance(func_expr, ast.Name):
+        if module is not None:
+            obj = getattr(module, func_expr.id, None)
+            if callable(obj) and not inspect.isclass(obj):
+                obj = _unwrap(obj)
+                obj_name = getattr(obj, "__name__", func_expr.id)
+                obj_module = getattr(obj, "__module__", "")
+                if obj_module and obj_name:
+                    return f"{obj_module}.{obj_name}"
+        return raw_name
+    if (
+        isinstance(func_expr, ast.Attribute)
+        and isinstance(func_expr.value, ast.Name)
+        and func_expr.value.id in {"self", "cls"}
+        and owner is not None
+    ):
+        method = inspect.getattr_static(owner, func_expr.attr, None)
+        if callable(method) and not inspect.isclass(method):
+            method = _unwrap(method)
+            return ".".join(
+                part
+                for part in (
+                    getattr(owner, "__module__", ""),
+                    getattr(owner, "__name__", ""),
+                    getattr(method, "__name__", func_expr.attr),
+                )
+                if part
+            )
+    return raw_name
+
+
+def _shell_sink_specs() -> tuple[dict[str, Any], ...]:
+    """Return built-in sink specs relevant to shell-injection analysis."""
+    return _DEFAULT_SHELL_INJECTION_SINK_SPECS
+
+
+def _matching_shell_sink_specs(call_name: str | None) -> list[dict[str, Any]]:
+    """Return shell sink specs whose pattern matches *call_name*."""
+    if not call_name:
+        return []
+    matches: list[dict[str, Any]] = []
+    for spec in _shell_sink_specs():
+        pattern = str(spec.get("pattern", "")).strip()
+        if not pattern:
+            continue
+        with contextlib.suppress(re.error):
+            if re.search(pattern, call_name):
+                matches.append(spec)
+    return matches
+
+
+def _shell_call_arg(
+    node: ast.Call,
+    parameter: str | int,
+) -> ast.AST | None:
+    """Return the AST expression bound to one sink parameter selector."""
+    if isinstance(parameter, int):
+        return node.args[parameter] if 0 <= parameter < len(node.args) else None
+    for keyword in node.keywords:
+        if keyword.arg == parameter:
+            return keyword.value
+    return None
+
+
+def _subprocess_shell_enabled(node: ast.Call) -> bool:
+    """Return whether a subprocess-like call explicitly enables shell parsing."""
+    for keyword in node.keywords:
+        if keyword.arg != "shell":
+            continue
+        if isinstance(keyword.value, ast.Constant):
+            return bool(keyword.value.value)
+        return True
+    return False
+
+
+def _shell_expr_taint(
+    expr: ast.AST | None,
+    *,
+    env: Mapping[str, int],
+    module: ModuleType | None,
+    owner: type | None,
+    depth: int,
+    call_path: tuple[str, ...],
+    seen: set[tuple[str, tuple[tuple[str, int], ...], int]],
+) -> tuple[int, _ShellInjectionFlow | None]:
+    """Return shell taint for one expression plus any nested sink flow."""
+    if expr is None:
+        return _SHELL_TAINT_CLEAN, None
+    if isinstance(expr, ast.Name):
+        return int(env.get(expr.id, _SHELL_TAINT_CLEAN)), None
+    if isinstance(expr, ast.Constant):
+        return _shell_taint_from_value(expr.value), None
+    if isinstance(expr, ast.JoinedStr):
+        states = []
+        for value in expr.values:
+            if isinstance(value, ast.FormattedValue):
+                state, flow = _shell_expr_taint(
+                    value.value,
+                    env=env,
+                    module=module,
+                    owner=owner,
+                    depth=depth,
+                    call_path=call_path,
+                    seen=seen,
+                )
+                if flow is not None:
+                    return state, flow
+                states.append(state)
+        if any(state == _SHELL_TAINT_UNSAFE for state in states):
+            return _SHELL_TAINT_UNSAFE, None
+        if any(state == _SHELL_TAINT_SAFE for state in states):
+            return _SHELL_TAINT_SAFE, None
+        return _SHELL_TAINT_CLEAN, None
+    if isinstance(expr, ast.BinOp):
+        left_state, flow = _shell_expr_taint(
+            expr.left,
+            env=env,
+            module=module,
+            owner=owner,
+            depth=depth,
+            call_path=call_path,
+            seen=seen,
+        )
+        if flow is not None:
+            return left_state, flow
+        right_state, flow = _shell_expr_taint(
+            expr.right,
+            env=env,
+            module=module,
+            owner=owner,
+            depth=depth,
+            call_path=call_path,
+            seen=seen,
+        )
+        if flow is not None:
+            return right_state, flow
+        return _merge_shell_taint(left_state, right_state), None
+    if isinstance(expr, (ast.List, ast.Tuple)):
+        states: list[int] = []
+        for item in expr.elts:
+            state, flow = _shell_expr_taint(
+                item,
+                env=env,
+                module=module,
+                owner=owner,
+                depth=depth,
+                call_path=call_path,
+                seen=seen,
+            )
+            if flow is not None:
+                return state, flow
+            states.append(state)
+        if any(state != _SHELL_TAINT_CLEAN for state in states):
+            return _SHELL_TAINT_SAFE, None
+        return _SHELL_TAINT_CLEAN, None
+    if isinstance(expr, ast.Call):
+        call_name = _resolve_shell_call_name(expr, module=module, owner=owner)
+        if call_name:
+            flow = _shell_sink_uses_tainted_input(
+                expr,
+                call_name=call_name,
+                env=env,
+                module=module,
+                owner=owner,
+                depth=depth,
+                call_path=call_path,
+                start_line=0,
+                seen=seen,
+            )
+            if flow is not None:
+                return _SHELL_TAINT_UNSAFE, flow
+        if call_name in {"shlex.quote", "quote"} and expr.args:
+            arg_state, flow = _shell_expr_taint(
+                expr.args[0],
+                env=env,
+                module=module,
+                owner=owner,
+                depth=depth,
+                call_path=call_path,
+                seen=seen,
+            )
+            if flow is not None:
+                return arg_state, flow
+            if arg_state != _SHELL_TAINT_CLEAN:
+                return _SHELL_TAINT_SAFE, None
+            return _SHELL_TAINT_CLEAN, None
+        if (
+            isinstance(expr.func, ast.Attribute)
+            and expr.func.attr == "format"
+            and isinstance(expr.func.value, ast.Constant)
+            and isinstance(expr.func.value.value, str)
+        ):
+            states: list[int] = []
+            for item in (*expr.args, *(keyword.value for keyword in expr.keywords)):
+                state, flow = _shell_expr_taint(
+                    item,
+                    env=env,
+                    module=module,
+                    owner=owner,
+                    depth=depth,
+                    call_path=call_path,
+                    seen=seen,
+                )
+                if flow is not None:
+                    return state, flow
+                states.append(state)
+            return _merge_shell_taint(*states), None
+        if call_name in {"str", "repr", "os.fspath", "pathlib.Path"} and expr.args:
+            return _shell_expr_taint(
+                expr.args[0],
+                env=env,
+                module=module,
+                owner=owner,
+                depth=depth,
+                call_path=call_path,
+                seen=seen,
+            )
+        helper = _resolve_local_shell_helper(call_name, module=module, owner=owner)
+        if helper is not None and depth > 0:
+            arg_states, flow = _shell_call_arg_states(
+                expr,
+                helper,
+                env=env,
+                module=module,
+                owner=owner,
+                depth=depth,
+                call_path=call_path,
+                seen=seen,
+            )
+            if flow is not None:
+                return _SHELL_TAINT_UNSAFE, flow
+            helper_flow, return_state = _analyze_shell_flow(
+                helper,
+                arg_states,
+                depth=depth - 1,
+                call_path=(*call_path, _callable_display_name(helper)),
+                seen=seen,
+            )
+            if helper_flow is not None:
+                return _SHELL_TAINT_UNSAFE, helper_flow
+            return return_state, None
+    return _SHELL_TAINT_CLEAN, None
+
+
+def _resolve_local_shell_helper(
+    call_name: str | None,
+    *,
+    module: ModuleType | None,
+    owner: type | None,
+) -> Any | None:
+    """Resolve same-module or same-class helpers for interprocedural shell analysis."""
+    if not call_name:
+        return None
+    leaf = call_name.rsplit(".", 1)[-1]
+    if module is not None:
+        helper = getattr(module, leaf, None)
+        if callable(helper) and not inspect.isclass(helper):
+            helper = _unwrap(helper)
+            if getattr(helper, "__module__", None) == module.__name__:
+                return helper
+    if owner is not None and "." in call_name and call_name.split(".")[0] in {"self", "cls"}:
+        helper = inspect.getattr_static(owner, leaf, None)
+        if callable(helper) and not inspect.isclass(helper):
+            return helper
+    if owner is not None and call_name.endswith(f".{leaf}"):
+        helper = inspect.getattr_static(owner, leaf, None)
+        if callable(helper) and not inspect.isclass(helper):
+            return helper
+    return None
+
+
+def _shell_call_arg_states(
+    node: ast.Call,
+    helper: Any,
+    *,
+    env: Mapping[str, int],
+    module: ModuleType | None,
+    owner: type | None,
+    depth: int,
+    call_path: tuple[str, ...],
+    seen: set[tuple[str, tuple[tuple[str, int], ...], int]],
+) -> tuple[dict[str, int], _ShellInjectionFlow | None]:
+    """Map one helper call's tainted arguments onto the callee's parameters."""
+    try:
+        params = [
+            param
+            for param in inspect.signature(_unwrap(helper)).parameters.values()
+            if param.name not in {"self", "cls"}
+        ]
+    except Exception:
+        return {}, None
+    states: dict[str, int] = {}
+    for index, arg in enumerate(node.args):
+        if index >= len(params):
+            break
+        state, flow = _shell_expr_taint(
+            arg,
+            env=env,
+            module=module,
+            owner=owner,
+            depth=depth,
+            call_path=call_path,
+            seen=seen,
+        )
+        if flow is not None:
+            return states, flow
+        states[params[index].name] = state
+    param_names = {param.name for param in params}
+    for keyword in node.keywords:
+        if keyword.arg is None or keyword.arg not in param_names:
+            continue
+        state, flow = _shell_expr_taint(
+            keyword.value,
+            env=env,
+            module=module,
+            owner=owner,
+            depth=depth,
+            call_path=call_path,
+            seen=seen,
+        )
+        if flow is not None:
+            return states, flow
+        states[keyword.arg] = state
+    return states, None
+
+
+def _shell_sink_uses_tainted_input(
+    node: ast.Call,
+    *,
+    call_name: str,
+    env: Mapping[str, int],
+    module: ModuleType | None,
+    owner: type | None,
+    depth: int,
+    call_path: tuple[str, ...],
+    start_line: int,
+    seen: set[tuple[str, tuple[tuple[str, int], ...], int]],
+) -> _ShellInjectionFlow | None:
+    """Return a flow when tainted input reaches one shell sink unsafely."""
+    for spec in _matching_shell_sink_specs(call_name):
+        for parameter in tuple(spec.get("taint_args", ())):
+            expr = _shell_call_arg(node, parameter)
+            if expr is None:
+                continue
+            state, nested_flow = _shell_expr_taint(
+                expr,
+                env=env,
+                module=module,
+                owner=owner,
+                depth=depth,
+                call_path=call_path,
+                seen=seen,
+            )
+            if nested_flow is not None:
+                return nested_flow
+            if state != _SHELL_TAINT_UNSAFE:
+                continue
+            if "subprocess." in call_name and not _subprocess_shell_enabled(node):
+                if isinstance(expr, (ast.List, ast.Tuple, ast.Name)):
+                    continue
+            line = start_line + getattr(node, "lineno", 1) - 1 if start_line > 0 else None
+            source_params = tuple(
+                sorted(name for name, value in env.items() if value == _SHELL_TAINT_UNSAFE)
+            )
+            return _ShellInjectionFlow(
+                sink=call_name,
+                line=line,
+                parameter=parameter,
+                call_path=call_path,
+                source_params=source_params,
+            )
+    return None
+
+
+def _shell_bind_targets(target: ast.AST, state: int, env: dict[str, int]) -> None:
+    """Bind one assignment target in the local shell-taint environment."""
+    if isinstance(target, ast.Name):
+        env[target.id] = state
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        for item in target.elts:
+            _shell_bind_targets(item, state, env)
+
+
+def _analyze_shell_statements(
+    statements: Sequence[ast.stmt],
+    *,
+    env: dict[str, int],
+    module: ModuleType | None,
+    owner: type | None,
+    depth: int,
+    call_path: tuple[str, ...],
+    start_line: int,
+    seen: set[tuple[str, tuple[tuple[str, int], ...], int]],
+) -> tuple[_ShellInjectionFlow | None, dict[str, int], int]:
+    """Walk one function body, propagating taint and surfacing the first sink flow."""
+    return_state = _SHELL_TAINT_CLEAN
+    for statement in statements:
+        if isinstance(statement, ast.Assign):
+            state, flow = _shell_expr_taint(
+                statement.value,
+                env=env,
+                module=module,
+                owner=owner,
+                depth=depth,
+                call_path=call_path,
+                seen=seen,
+            )
+            if flow is not None:
+                return flow, env, return_state
+            for target in statement.targets:
+                _shell_bind_targets(target, state, env)
+            continue
+        if isinstance(statement, ast.AnnAssign):
+            state, flow = _shell_expr_taint(
+                statement.value,
+                env=env,
+                module=module,
+                owner=owner,
+                depth=depth,
+                call_path=call_path,
+                seen=seen,
+            )
+            if flow is not None:
+                return flow, env, return_state
+            _shell_bind_targets(statement.target, state, env)
+            continue
+        if isinstance(statement, ast.AugAssign):
+            state, flow = _shell_expr_taint(
+                statement.value,
+                env=env,
+                module=module,
+                owner=owner,
+                depth=depth,
+                call_path=call_path,
+                seen=seen,
+            )
+            if flow is not None:
+                return flow, env, return_state
+            if isinstance(statement.target, ast.Name):
+                env[statement.target.id] = _merge_shell_taint(
+                    env.get(statement.target.id, _SHELL_TAINT_CLEAN),
+                    state,
+                )
+            continue
+        if isinstance(statement, ast.Return):
+            state, flow = _shell_expr_taint(
+                statement.value,
+                env=env,
+                module=module,
+                owner=owner,
+                depth=depth,
+                call_path=call_path,
+                seen=seen,
+            )
+            if flow is not None:
+                return flow, env, return_state
+            return_state = _merge_shell_taint(return_state, state)
+            continue
+        if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+            call_name = _resolve_shell_call_name(statement.value, module=module, owner=owner)
+            flow = _shell_sink_uses_tainted_input(
+                statement.value,
+                call_name=call_name or "",
+                env=env,
+                module=module,
+                owner=owner,
+                depth=depth,
+                call_path=call_path,
+                start_line=start_line,
+                seen=seen,
+            )
+            if flow is not None:
+                return flow, env, return_state
+            state, flow = _shell_expr_taint(
+                statement.value,
+                env=env,
+                module=module,
+                owner=owner,
+                depth=depth,
+                call_path=call_path,
+                seen=seen,
+            )
+            if flow is not None:
+                return flow, env, return_state
+            return_state = _merge_shell_taint(return_state, state)
+            continue
+        branch_lists: list[Sequence[ast.stmt]] = []
+        if isinstance(statement, ast.If):
+            branch_lists = [statement.body, statement.orelse]
+        elif isinstance(statement, (ast.For, ast.AsyncFor, ast.While)):
+            branch_lists = [statement.body, statement.orelse]
+        elif isinstance(statement, (ast.With, ast.AsyncWith)):
+            branch_lists = [statement.body]
+        elif isinstance(statement, ast.Try):
+            branch_lists = [
+                statement.body,
+                statement.orelse,
+                statement.finalbody,
+                *(handler.body for handler in statement.handlers),
+            ]
+        if branch_lists:
+            branch_envs: list[dict[str, int]] = [dict(env)]
+            branch_returns: list[int] = [return_state]
+            for branch in branch_lists:
+                flow, branch_env, branch_return = _analyze_shell_statements(
+                    branch,
+                    env=dict(env),
+                    module=module,
+                    owner=owner,
+                    depth=depth,
+                    call_path=call_path,
+                    start_line=start_line,
+                    seen=seen,
+                )
+                if flow is not None:
+                    return flow, env, return_state
+                branch_envs.append(branch_env)
+                branch_returns.append(branch_return)
+            env = _merge_shell_envs(*branch_envs)
+            return_state = _merge_shell_taint(*branch_returns)
+    return None, env, return_state
+
+
+def _analyze_shell_flow(
+    func: Any,
+    param_states: Mapping[str, int],
+    *,
+    depth: int,
+    call_path: tuple[str, ...],
+    seen: set[tuple[str, tuple[tuple[str, int], ...], int]],
+) -> tuple[_ShellInjectionFlow | None, int]:
+    """Analyze one callable for shell-injection flow and tainted return construction."""
+    key = (
+        _callable_display_name(func),
+        tuple(sorted((str(name), int(state)) for name, state in param_states.items())),
+        depth,
+    )
+    if key in seen:
+        return None, _SHELL_TAINT_CLEAN
+    seen.add(key)
+    bundle = _function_ast_bundle(func)
+    if bundle is None:
+        return None, _SHELL_TAINT_CLEAN
+    node, start_line, module, owner = bundle
+    flow, _env, return_state = _analyze_shell_statements(
+        node.body,
+        env={str(name): int(state) for name, state in param_states.items()},
+        module=module,
+        owner=owner,
+        depth=depth,
+        call_path=call_path,
+        start_line=start_line,
+        seen=seen,
+    )
+    return flow, return_state
+
+
+def _record_static_contract_context(func: Any, context: Mapping[str, Any] | None) -> None:
+    """Store one static-analysis context payload on *func* for later reporting."""
+    setattr(func, "__ordeal_last_static_contract_context__", dict(context or {}))
+
+
+def _static_shell_injection_flow(
+    func: Any,
+    kwargs: Mapping[str, Any],
+) -> _ShellInjectionFlow | None:
+    """Return a static shell-injection flow from *kwargs* into a known shell sink."""
+    param_states = {
+        str(name): _shell_taint_from_value(value)
+        for name, value in kwargs.items()
+        if _shell_taint_from_value(value) != _SHELL_TAINT_CLEAN
+    }
+    if not param_states:
+        return None
+    flow, _return_state = _analyze_shell_flow(
+        func,
+        param_states,
+        depth=3,
+        call_path=(_callable_display_name(func),),
+        seen=set(),
+    )
+    return flow
+
+
 def shell_safe_contract(
     *,
     kwargs: dict[str, Any],
@@ -4437,6 +5160,52 @@ def shell_safe_contract(
         kwargs=dict(kwargs),
         predicate=predicate,
         summary="shell-unsafe string interpolation",
+    )
+
+
+def shell_injection_contract(
+    *,
+    kwargs: dict[str, Any],
+    tracked_params: Sequence[str] | None = None,
+) -> ContractCheck:
+    """Build a static shell-injection oracle for command-executing helpers."""
+
+    def predicate(
+        value: Any,
+        *,
+        func: Any,
+        kwargs: Mapping[str, Any],
+        **_extra: Any,
+    ) -> bool:
+        del value
+        if not any(_shell_value_has_metacharacters(item) for item in kwargs.values()):
+            raise ContractNotApplicable(
+                "shell_injection only applies to string inputs containing shell metacharacters"
+            )
+        flow = _static_shell_injection_flow(func, kwargs)
+        _record_static_contract_context(
+            func,
+            (
+                {
+                    "kind": "shell_injection",
+                    "sink": flow.sink,
+                    "line": flow.line,
+                    "parameter": flow.parameter,
+                    "call_path": list(flow.call_path),
+                    "source_params": list(flow.source_params),
+                }
+                if flow is not None
+                else None
+            ),
+        )
+        return flow is None
+
+    return ContractCheck(
+        name="shell_injection",
+        kwargs=_shell_injection_probe_kwargs(kwargs, tracked_params),
+        predicate=predicate,
+        summary="shell metacharacters can reach a shell sink without quoting",
+        metadata={"static_only": True},
     )
 
 
@@ -4756,6 +5525,8 @@ def builtin_contract_check(
             )
         case "shell_safe":
             return shell_safe_contract(kwargs=kwargs, tracked_params=tracked_params)
+        case "shell_injection":
+            return shell_injection_contract(kwargs=kwargs, tracked_params=tracked_params)
         case "quoted_paths":
             return quoted_paths_contract(kwargs=kwargs, tracked_params=tracked_params)
         case "command_arg_stability":
@@ -4833,12 +5604,15 @@ def _auto_contract_checks(
     *,
     auto_contracts: Sequence[str] | None,
     ignore_contracts: Sequence[str] | None = None,
+    shell_injection_check: bool = False,
     security_focus: bool = False,
 ) -> tuple[list[ContractCheck], list[str]]:
     """Infer built-in sink-aware contract probes for *func* from source and seeds."""
     sink_categories = _infer_sink_categories(func, security_focus=security_focus)
 
     enabled = set(_expand_contract_names_ordered(auto_contracts or _DEFAULT_AUTO_CONTRACTS))
+    if shell_injection_check:
+        enabled.add("shell_injection")
     ignored = _expand_contract_names(ignore_contracts)
     probe_kwargs = dict(seed_examples[0].kwargs) if seed_examples else _contract_seed_kwargs(func)
     tracked_params = list(probe_kwargs)
@@ -4857,6 +5631,8 @@ def _auto_contract_checks(
     contract_names: list[str] = []
     if {"shell", "subprocess"} & set(sink_categories):
         contract_names.extend(["shell_safe", "command_arg_stability", "subprocess_argv"])
+        if shell_injection_check:
+            contract_names.append("shell_injection")
     if "path" in sink_categories:
         contract_names.append("quoted_paths")
     if "env" in sink_categories and protected_keys:
@@ -7834,12 +8610,16 @@ def _replay_contract_failure(
     matches = 0
     for _ in range(attempts):
         error_obj: BaseException | None = None
-        try:
-            value = _call_sync(func, **dict(kwargs))
-        except BaseException as exc:
-            error_obj = exc
+        call_context = None
+        if _contract_check_is_static(check):
             value = None
-        call_context = getattr(func, "__ordeal_last_call_context__", None)
+        else:
+            try:
+                value = _call_sync(func, **dict(kwargs))
+            except BaseException as exc:
+                error_obj = exc
+                value = None
+            call_context = getattr(func, "__ordeal_last_call_context__", None)
         try:
             passed = _call_contract_predicate(
                 check.predicate,
@@ -7870,6 +8650,13 @@ def _semantic_contract_gate(
     fixture_completeness: float,
 ) -> tuple[bool, bool, int, int, str | None]:
     """Return promotion and replay evidence for one semantic contract failure."""
+    if _contract_check_is_static(check):
+        replayable, replay_attempts, replay_matches = _replay_contract_failure(
+            func,
+            check,
+            kwargs=kwargs,
+        )
+        return True, replayable, replay_attempts, replay_matches, None
     skip_reason = _callable_skip_reason(func)
     if skip_reason is not None:
         return False, False, 0, 0, skip_reason
@@ -7933,6 +8720,7 @@ def _evaluate_contract_checks(
     seed_from_code: bool = True,
     seed_from_call_sites: bool = True,
     treat_any_as_weak: bool = True,
+    execute_calls: bool = True,
 ) -> tuple[list[str], list[dict[str, Any]]]:
     """Run explicit contract probes against *func* and collect violations."""
     if not contract_checks:
@@ -7984,30 +8772,37 @@ def _evaluate_contract_checks(
             if str(metadata.get("kind")) == "lifecycle"
             else "semantic_contract"
         )
+        input_source = (
+            "static_contract" if _contract_check_is_static(check) else "explicit_contract"
+        )
         runtime_faults = [
             str(item)
             for item in list(metadata.get("runtime_faults", []) or [])
             if str(item).strip()
         ]
-        try:
-            with (
-                (
-                    _active_instance_probe(func, lifecycle_probe)
-                    if lifecycle_probe is not None
-                    else contextlib.nullcontext()
-                ),
-                (
-                    _active_contract_faults(func, runtime_faults)
-                    if runtime_faults
-                    else contextlib.nullcontext()
-                ),
-            ):
-                value = _call_sync(func, **kwargs)
-            call_context = getattr(func, "__ordeal_last_call_context__", None)
-        except BaseException as exc:
-            error_obj = exc
-            call_context = getattr(func, "__ordeal_last_call_context__", None)
+        if _contract_check_is_static(check) and not execute_calls:
             value = None
+            call_context = None
+        else:
+            try:
+                with (
+                    (
+                        _active_instance_probe(func, lifecycle_probe)
+                        if lifecycle_probe is not None
+                        else contextlib.nullcontext()
+                    ),
+                    (
+                        _active_contract_faults(func, runtime_faults)
+                        if runtime_faults
+                        else contextlib.nullcontext()
+                    ),
+                ):
+                    value = _call_sync(func, **kwargs)
+                call_context = getattr(func, "__ordeal_last_call_context__", None)
+            except BaseException as exc:
+                error_obj = exc
+                call_context = getattr(func, "__ordeal_last_call_context__", None)
+                value = None
 
         if call_context is None:
             call_context = getattr(func, "__ordeal_last_call_context__", None)
@@ -8028,6 +8823,7 @@ def _evaluate_contract_checks(
             error = f"{type(exc).__name__}: {exc}"
         else:
             error = None if error_obj is None else f"{type(error_obj).__name__}: {error_obj}"
+        static_context = getattr(func, "__ordeal_last_static_contract_context__", None)
 
         if passed:
             continue
@@ -8067,7 +8863,7 @@ def _evaluate_contract_checks(
             "reachability": 1.0,
             "realism": realism,
             "sink_signal": max(sink_signal, 1.0),
-            "input_source": "explicit_contract",
+            "input_source": input_source,
             "replayable": replayable,
             "replay_attempts": replay_attempts,
             "replay_matches": replay_matches,
@@ -8078,6 +8874,8 @@ def _evaluate_contract_checks(
             detail["teardown_called"] = call_context.get("teardown_called")
             detail["teardown_error"] = call_context.get("teardown_error")
             detail["lifecycle_runtime"] = call_context.get("lifecycle_runtime")
+        if isinstance(static_context, Mapping) and static_context:
+            detail["static_analysis"] = dict(static_context)
         if error is not None:
             detail["error"] = error[:300]
             if error_obj is not None:
@@ -8086,7 +8884,7 @@ def _evaluate_contract_checks(
             qualname=qualname,
             error=error_obj,
             failing_args=kwargs,
-            input_source="explicit_contract",
+            input_source=input_source,
             contract_fit=contract_fit,
             reachability=1.0,
             realism=realism,
@@ -8114,6 +8912,8 @@ def _evaluate_contract_checks(
         )
         if call_context and call_context.get("lifecycle_probe") is not None:
             detail["proof_bundle"]["lifecycle"] = dict(call_context["lifecycle_probe"])
+        if isinstance(static_context, Mapping) and static_context:
+            detail["proof_bundle"]["static_analysis"] = dict(static_context)
         details.append(detail)
 
     return violations, details
@@ -8158,6 +8958,7 @@ def scan_module(
     treat_any_as_weak: bool = True,
     proof_bundles: bool = True,
     auto_contracts: Sequence[str] | None = None,
+    shell_injection_check: bool = False,
     require_replayable: bool = True,
     min_contract_fit: float = 0.6,
     min_reachability: float = 0.5,
@@ -8239,6 +9040,7 @@ def scan_module(
         treat_any_as_weak: Penalize broad or missing hints instead of trusting them.
         proof_bundles: Attach structured proof payloads to crash findings.
         auto_contracts: Auto-enable sink-aware semantic checks for shell/path/env/json/http.
+        shell_injection_check: Run a static shell-injection oracle before execution.
         require_replayable: Require replayability before promoting a bug candidate.
         min_contract_fit: Minimum inferred contract-fit score to promote.
         min_reachability: Minimum reachability score to promote.
@@ -8333,6 +9135,7 @@ def scan_module(
             treat_any_as_weak=treat_any_as_weak,
             proof_bundles=proof_bundles,
             auto_contracts=auto_contracts,
+            shell_injection_check=shell_injection_check,
             require_replayable=require_replayable,
             min_contract_fit=min_contract_fit,
             min_reachability=min_reachability,
@@ -8369,6 +9172,7 @@ def _test_one_function(
     treat_any_as_weak: bool = True,
     proof_bundles: bool = True,
     auto_contracts: Sequence[str] | None = None,
+    shell_injection_check: bool = False,
     require_replayable: bool = True,
     min_contract_fit: float = 0.6,
     min_reachability: float = 0.5,
@@ -8413,9 +9217,51 @@ def _test_one_function(
         seed_examples,
         auto_contracts=auto_contracts,
         ignore_contracts=ignore_contracts,
+        shell_injection_check=shell_injection_check,
         security_focus=security_focus,
     )
     effective_contract_checks = [*(contract_checks or []), *auto_checks]
+    static_contract_checks = [
+        check for check in effective_contract_checks if _contract_check_is_static(check)
+    ]
+    runtime_contract_checks = [
+        check for check in effective_contract_checks if not _contract_check_is_static(check)
+    ]
+
+    if static_contract_checks:
+        contract_violations, contract_details = _evaluate_contract_checks(
+            func,
+            static_contract_checks,
+            seed_from_tests=seed_from_tests,
+            seed_from_fixtures=seed_from_fixtures,
+            seed_from_docstrings=seed_from_docstrings,
+            seed_from_code=seed_from_code,
+            seed_from_call_sites=seed_from_call_sites,
+            treat_any_as_weak=treat_any_as_weak,
+            execute_calls=False,
+        )
+        if contract_violations:
+            return FunctionResult(
+                name=name,
+                passed=False,
+                execution_ok=True,
+                verdict=(
+                    "lifecycle_contract"
+                    if any(
+                        detail.get("category") == "lifecycle_contract"
+                        for detail in contract_details
+                    )
+                    else "semantic_contract"
+                ),
+                contract_violations=contract_violations,
+                contract_violation_details=contract_details,
+                sink_categories=sink_categories,
+                input_sources=[
+                    {"source": example.source, "evidence": example.evidence}
+                    for example in profile.get("seed_examples", [])
+                ],
+                input_source="static_contract",
+            )
 
     def _origin_for_kwargs(kwargs: Mapping[str, Any], fallback: str) -> str:
         for example in profile.get("seed_examples", []):
@@ -8630,7 +9476,7 @@ def _test_one_function(
 
     contract_violations, contract_details = _evaluate_contract_checks(
         func,
-        effective_contract_checks,
+        runtime_contract_checks,
         seed_from_tests=seed_from_tests,
         seed_from_fixtures=seed_from_fixtures,
         seed_from_docstrings=seed_from_docstrings,

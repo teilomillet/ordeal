@@ -224,6 +224,7 @@ class ScanRuntimeDefaults:
     treat_any_as_weak: bool = True
     proof_bundles: bool = True
     require_replayable: bool = True
+    shell_injection_check: bool = False
     auto_contracts: list[str] = field(default_factory=list)
     min_contract_fit: float = 0.55
     min_reachability: float = 0.45
@@ -4035,6 +4036,7 @@ def _resolve_scan_runtime_defaults(
         "treat_any_as_weak": True,
         "proof_bundles": True,
         "require_replayable": True,
+        "shell_injection_check": False,
         "auto_contracts": [],
         "min_contract_fit": 0.55,
         "min_reachability": 0.45,
@@ -4075,6 +4077,7 @@ def _resolve_scan_runtime_defaults(
             treat_any_as_weak=bool(values["treat_any_as_weak"]),
             proof_bundles=bool(values["proof_bundles"]),
             require_replayable=bool(values["require_replayable"]),
+            shell_injection_check=bool(values["shell_injection_check"]),
             auto_contracts=list(values["auto_contracts"]),
             min_contract_fit=float(values["min_contract_fit"]),
             min_reachability=float(values["min_reachability"]),
@@ -4197,6 +4200,7 @@ def _resolve_scan_runtime_defaults(
     values["treat_any_as_weak"] = bool(match.treat_any_as_weak)
     values["proof_bundles"] = bool(match.proof_bundles)
     values["require_replayable"] = bool(match.require_replayable)
+    values["shell_injection_check"] = bool(getattr(match, "shell_injection_check", False))
     values["auto_contracts"] = list(match.auto_contracts)
     values["min_contract_fit"] = float(match.min_contract_fit)
     values["min_reachability"] = float(match.min_reachability)
@@ -4573,6 +4577,7 @@ def _run_configured_scans(
             "seed_from_call_sites": scan_cfg.seed_from_call_sites,
             "treat_any_as_weak": scan_cfg.treat_any_as_weak,
             "proof_bundles": scan_cfg.proof_bundles,
+            "shell_injection_check": bool(getattr(scan_cfg, "shell_injection_check", False)),
             "auto_contracts": scan_cfg.auto_contracts,
             "require_replayable": scan_cfg.require_replayable,
             "min_contract_fit": scan_cfg.min_contract_fit,
@@ -6137,6 +6142,7 @@ def _run_init_scan(modules: Sequence[str], *, max_examples: int = 10) -> dict[st
                 "treat_any_as_weak": runtime_defaults.treat_any_as_weak,
                 "proof_bundles": runtime_defaults.proof_bundles,
                 "require_replayable": runtime_defaults.require_replayable,
+                "shell_injection_check": runtime_defaults.shell_injection_check,
                 "auto_contracts": runtime_defaults.auto_contracts,
                 "min_contract_fit": runtime_defaults.min_contract_fit,
                 "min_reachability": runtime_defaults.min_reachability,

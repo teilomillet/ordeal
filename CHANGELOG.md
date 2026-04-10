@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.38
+
+**Fixes:**
+
+- tighten scan target and harness resolution
+
+
 ## 0.3.35
 
 **Fixes:**

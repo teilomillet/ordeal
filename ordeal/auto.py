@@ -4528,11 +4528,7 @@ def _function_ast_bundle(
     except (OSError, TypeError, SyntaxError):
         return None
     node = next(
-        (
-            item
-            for item in tree.body
-            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-        ),
+        (item for item in tree.body if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))),
         None,
     )
     if node is None:

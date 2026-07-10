@@ -582,6 +582,89 @@ class TestParallelHardeningHelpers:
 
         assert "0 edges discovered" in result.parallel_fallback_reason
 
+    def test_shared_memory_failure_falls_back_in_parent(self, monkeypatch):
+        def unavailable(*args, **kwargs):
+            raise PermissionError("shared memory denied")
+
+        monkeypatch.setattr("multiprocessing.shared_memory.SharedMemory", unavailable)
+        explorer = explore_mod.Explorer(
+            _CounterChaos,
+            target_modules=["tests"],
+            workers=2,
+            share_edges=True,
+            share_checkpoints=False,
+        )
+
+        def fake_rerun(**kwargs):
+            result = ExplorationResult(total_runs=1, total_steps=1, unique_edges=1)
+            result.parallel_fallback_reason = kwargs["reason"]
+            return result
+
+        monkeypatch.setattr(explorer, "_rerun_sequential_after_parallel", fake_rerun)
+        result = explorer._run_parallel(
+            max_time=0.1,
+            max_runs=2,
+            steps_per_run=1,
+            shrink=False,
+            max_shrink_time=0.1,
+            patience=0,
+            progress=None,
+        )
+
+        assert "shared memory unavailable" in result.parallel_fallback_reason
+        assert "PermissionError" in result.parallel_fallback_reason
+
+    def test_worker_pool_hang_times_out_and_falls_back_in_parent(self, monkeypatch):
+        lifecycle = {"terminated": False, "joined": False}
+
+        class Pending:
+            def get(self, *, timeout):
+                assert timeout >= 30.0
+                raise explore_mod.mp.TimeoutError
+
+        class HungPool:
+            def map_async(self, fn, args):
+                return Pending()
+
+            def terminate(self):
+                lifecycle["terminated"] = True
+
+            def join(self):
+                lifecycle["joined"] = True
+
+        class HungContext:
+            def Pool(self, worker_count):
+                assert worker_count == 2
+                return HungPool()
+
+        monkeypatch.setattr(explore_mod.mp, "get_context", lambda _: HungContext())
+        explorer = explore_mod.Explorer(
+            _CounterChaos,
+            target_modules=["tests"],
+            workers=2,
+            share_edges=False,
+            share_checkpoints=False,
+        )
+
+        def fake_rerun(**kwargs):
+            result = ExplorationResult(total_runs=1, total_steps=1, unique_edges=1)
+            result.parallel_fallback_reason = kwargs["reason"]
+            return result
+
+        monkeypatch.setattr(explorer, "_rerun_sequential_after_parallel", fake_rerun)
+        result = explorer._run_parallel(
+            max_time=0.1,
+            max_runs=2,
+            steps_per_run=1,
+            shrink=False,
+            max_shrink_time=0.1,
+            patience=0,
+            progress=None,
+        )
+
+        assert lifecycle == {"terminated": True, "joined": True}
+        assert "worker pool exceeded parent timeout" in result.parallel_fallback_reason
+
 
 class TestProgressSnapshot:
     def test_fields(self):

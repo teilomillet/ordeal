@@ -1,6 +1,7 @@
 """Coverage-guided exploration engine with checkpointing and seed mutation.
 
-This is ordeal's answer to Antithesis's exploration engine.  It:
+It combines stateful rule execution, coverage-guided checkpointing, and
+input mutation to:
 
 1. Executes ChaosTest rule sequences (including parameterized rules)
 2. Tracks edge coverage of the system under test (AFL-style)
@@ -3145,28 +3146,50 @@ class Explorer:
         # Create shared edge bitmap (65536 bytes, one per edge hash)
         shm: SharedMemory | None = None
         shm_name: str | None = None
-        if self.share_edges:
-            shm = SharedMemory(create=True, size=_EDGE_BITMAP_SIZE)
-            shm.buf[:] = b"\x00" * _EDGE_BITMAP_SIZE
-            shm_name = shm.name
-
-        # Shared state bitmap (same pattern as edges, for global state dedup)
         state_shm: SharedMemory | None = None
         state_shm_name: str | None = None
-        if self.share_edges:
-            state_shm = SharedMemory(create=True, size=_STATE_BITMAP_SIZE)
-            state_shm.buf[:] = b"\x00" * _STATE_BITMAP_SIZE
-            state_shm_name = state_shm.name
-
-        # Shared ring buffer for checkpoint exchange + energy propagation
         ring_shm: SharedMemory | None = None
         ring_shm_name: str | None = None
         pool_auth_key: bytes | None = None
-        if self.share_checkpoints:
-            ring_shm = SharedMemory(create=True, size=_POOL_RING_SIZE)
-            # SharedMemory is zeroed on creation (POSIX shm_open + ftruncate)
-            ring_shm_name = ring_shm.name
-            pool_auth_key = secrets.token_bytes(_POOL_AUTH_TAG_SIZE)
+
+        def release_shared_memory() -> None:
+            """Best-effort parent cleanup for partially allocated regions."""
+            for region in (shm, state_shm, ring_shm):
+                if region is None:
+                    continue
+                try:
+                    region.close()
+                finally:
+                    try:
+                        region.unlink()
+                    except FileNotFoundError:
+                        pass
+
+        try:
+            if self.share_edges:
+                shm = SharedMemory(create=True, size=_EDGE_BITMAP_SIZE)
+                shm.buf[:] = b"\x00" * _EDGE_BITMAP_SIZE
+                shm_name = shm.name
+                state_shm = SharedMemory(create=True, size=_STATE_BITMAP_SIZE)
+                state_shm.buf[:] = b"\x00" * _STATE_BITMAP_SIZE
+                state_shm_name = state_shm.name
+
+            if self.share_checkpoints:
+                ring_shm = SharedMemory(create=True, size=_POOL_RING_SIZE)
+                ring_shm_name = ring_shm.name
+                pool_auth_key = secrets.token_bytes(_POOL_AUTH_TAG_SIZE)
+        except (BufferError, OSError) as exc:
+            release_shared_memory()
+            return self._rerun_sequential_after_parallel(
+                reason=f"shared memory unavailable: {type(exc).__name__}: {exc}",
+                max_time=max_time,
+                max_runs=max_runs,
+                steps_per_run=steps_per_run,
+                shrink=shrink,
+                max_shrink_time=max_shrink_time,
+                patience=patience,
+                progress=progress,
+            )
 
         slots_per_worker = max(1, _POOL_NUM_SLOTS // max(worker_count, 1))
 
@@ -3217,8 +3240,51 @@ class Explorer:
                 )
 
             ctx = mp.get_context("fork" if sys.platform != "win32" else "spawn")
-            with ctx.Pool(worker_count) as pool:
-                worker_results = pool.map(_worker_fn, worker_args)
+            pool = None
+            try:
+                pool = ctx.Pool(worker_count)
+                if hasattr(pool, "map_async"):
+                    parent_timeout = (
+                        max_time
+                        + (max_shrink_time if shrink else 0.0)
+                        + max(30.0, steps_per_run * 0.1)
+                    )
+                    pending = pool.map_async(_worker_fn, worker_args)
+                    worker_results = pending.get(timeout=parent_timeout)
+                else:  # pragma: no cover - compatibility for simple pool test doubles
+                    worker_results = pool.map(_worker_fn, worker_args)
+                if hasattr(pool, "close"):
+                    pool.close()
+                if hasattr(pool, "join"):
+                    pool.join()
+            except mp.TimeoutError:
+                if pool is not None:
+                    pool.terminate()
+                    pool.join()
+                return self._rerun_sequential_after_parallel(
+                    reason=f"worker pool exceeded parent timeout ({parent_timeout:.1f}s)",
+                    max_time=max_time,
+                    max_runs=max_runs,
+                    steps_per_run=steps_per_run,
+                    shrink=shrink,
+                    max_shrink_time=max_shrink_time,
+                    patience=patience,
+                    progress=progress,
+                )
+            except (OSError, RuntimeError) as exc:
+                if pool is not None:
+                    pool.terminate()
+                    pool.join()
+                return self._rerun_sequential_after_parallel(
+                    reason=f"worker pool unavailable: {type(exc).__name__}: {exc}",
+                    max_time=max_time,
+                    max_runs=max_runs,
+                    steps_per_run=steps_per_run,
+                    shrink=shrink,
+                    max_shrink_time=max_shrink_time,
+                    patience=patience,
+                    progress=progress,
+                )
 
             # Aggregate results
             result = ExplorationResult()
@@ -3359,15 +3425,7 @@ class Explorer:
                 )
             return result
         finally:
-            if shm is not None:
-                shm.close()
-                shm.unlink()
-            if state_shm is not None:
-                state_shm.close()
-                state_shm.unlink()
-            if ring_shm is not None:
-                ring_shm.close()
-                ring_shm.unlink()
+            release_shared_memory()
 
 
 def _worker_fn(args: dict[str, Any]) -> dict[str, Any]:

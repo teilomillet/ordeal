@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from ordeal.chaos import ChaosTest
 from ordeal.config import ConfigError, OrdealConfig, load_config
 
 
@@ -22,6 +23,15 @@ def tmp_toml(tmp_path):
 
 
 class TestLoadConfig:
+    def test_repository_config_resolves_current_chaos_tests(self):
+        config_path = Path(__file__).parents[1] / "ordeal.toml"
+        cfg = load_config(config_path)
+
+        assert cfg.explorer.target_modules
+        assert cfg.tests
+        for test_config in cfg.tests:
+            assert issubclass(test_config.resolve(), ChaosTest)
+
     def test_minimal(self, tmp_toml):
         cfg = load_config(tmp_toml('[explorer]\ntarget_modules = ["myapp"]\n'))
         assert cfg.explorer.target_modules == ["myapp"]

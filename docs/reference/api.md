@@ -115,10 +115,30 @@ auto_configure(buggify_probability=0.2, seed=42)
     Assertions are how you tell ordeal what "correct" means. `always` and `unreachable` catch violations the instant they happen. `sometimes` and `reachable` are checked at the end of the session -- they verify that something good happened at least once across all your test runs. All four live in `ordeal/assertions.py`.
 
 ```python
-from ordeal import always, sometimes, reachable, unreachable
+from ordeal import always, declare, report, sometimes, reachable, unreachable
 ```
 
-**Thread safety:** The PropertyTracker is fully lock-guarded — safe for free-threaded Python 3.13+/3.14. All access to `active` and `_properties` is synchronized.
+**Thread safety:** The PropertyTracker is fully lock-guarded — safe for free-threaded Python 3.13+/3.14. Property and reliability coverage state is synchronized.
+
+All assertions accept optional `operation` and `fault` dimensions. Supply both
+to record an operation × fault × property reliability cell.
+
+### declare
+
+```python
+declare(
+    name: str,
+    prop_type: str,
+    *,
+    operation: str | None = None,
+    fault: str | None = None,
+    **details: Any,
+) -> None
+```
+
+Plain declarations support deferred `sometimes` and `reachable` properties.
+With `operation` and `fault`, any assertion type can be declared. A contextual
+declaration with no observations reports `NOT EXERCISED`.
 
 ### always
 
@@ -128,6 +148,8 @@ always(
     name: str,
     *,
     mute: bool = False,
+    operation: str | None = None,
+    fault: str | None = None,
     **details: Any,
 ) -> None
 ```
@@ -150,6 +172,9 @@ sometimes(
     name: str,
     *,
     attempts: int | None = None,
+    warn: bool = False,
+    operation: str | None = None,
+    fault: str | None = None,
     **details: Any,
 ) -> None
 ```
@@ -168,6 +193,9 @@ sometimes(lambda: service.ready(), "service starts", attempts=10)
 ```python
 reachable(
     name: str,
+    *,
+    operation: str | None = None,
+    fault: str | None = None,
     **details: Any,
 ) -> None
 ```
@@ -187,6 +215,8 @@ unreachable(
     name: str,
     *,
     mute: bool = False,
+    operation: str | None = None,
+    fault: str | None = None,
     **details: Any,
 ) -> None
 ```
@@ -213,6 +243,7 @@ Global singleton. Accumulates property results across runs.
 | `record_hit(name, prop_type)` | `None` | Record a hit without condition |
 | `results` | `list[Property]` | All tracked properties |
 | `failures` | `list[Property]` | Only failed properties |
+| `reliability_results` | `list[ReliabilityCell]` | Sorted operation × fault × property cells |
 
 ### Property
 
@@ -229,7 +260,76 @@ from ordeal.assertions import Property
 | `failures` | `int` | Times condition was False |
 | `first_failure_details` | `dict | None` | Details from first failure |
 | `passed` | `bool` | Whether property passed (per type semantics) |
+| `evidence_status` | `str` | `observed`, `violated`, or `unexercised` |
 | `summary` | `str` | One-line `"PASS ..."` or `"FAIL ..."` |
+
+### ReliabilityCell and report
+
+```python
+from ordeal import ReliabilityCell, report
+```
+
+Each cell is keyed by the exact `(operation, fault, property)` strings. The
+same property may therefore pass under one fault and fail under another.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `operation` | `str` | Operation performed by the system |
+| `fault` | `str` | Injected failure being exercised |
+| `property` | `str` | Promise checked by the assertion |
+| `type` | `str` | Assertion semantics used for the cell |
+| `hits` | `int` | Number of observations |
+| `passes` | `int` | True observations for condition assertions |
+| `failures` | `int` | False observations for condition assertions |
+| `status` | `str` | Derived `PASS`, `NOT EXERCISED`, or `FAIL` |
+
+Status is derived from counters, not stored as independent truth:
+
+| Type | `NOT EXERCISED` | `PASS` | `FAIL` |
+|---|---|---|---|
+| `always` | `hits == 0` | hits and no failures | any failure |
+| `sometimes` | `hits == 0` | any pass | hits and no pass |
+| `reachable` | `hits == 0` | any hit | — |
+| `unreachable` | `hits == 0` | — | any hit |
+
+`as_dict()` returns only JSON-safe operation, fault, property, type, status,
+and counters. First-failure details remain on the in-memory cell.
+
+`report()` keeps the existing `passed` and `failed` lists. If at least one
+dimensional cell exists, it also returns `reliability_coverage`. If no cells
+exist, that optional key is absent, preserving the plain report shape.
+
+```python
+coverage = report()["reliability_coverage"]
+assert coverage["dimensions"] == ["operation", "fault", "property"]
+assert set(coverage) == {"dimensions", "rows", "summary"}
+```
+
+Rows are sorted by operation, fault, then property. `summary` contains integer
+`pass`, `not_exercised`, `fail`, and `total` counts.
+
+Both `operation` and `fault` must be supplied together and must be non-empty.
+Conflicting assertion types for one cell raise `ValueError`. A contextual
+`declare()` creates the matrix expectation without creating an unobserved
+global `Property` failure.
+
+### Parallel-worker merge
+
+```python
+tracker.merge_reliability(rows)
+```
+
+`rows` is an iterable of mappings in the `ReliabilityCell.as_dict()` shape.
+Counters must be non-negative. Matching cells are summed and their status is
+derived again after merging; conflicting types are rejected.
+
+The pytest plugin uses this method automatically for pytest-xdist. Workers
+publish their rows during `pytest_sessionfinish`; the controller merges them in
+`pytest_testnodedown` before printing the terminal summary.
+
+For usage patterns, see [Reliability Coverage](../concepts/reliability-coverage.md),
+[Add Reliability Coverage](../guides/reliability-coverage.md), and
+[CI and External Platforms](../guides/reliability-coverage-ci.md).
 
 ---
 
@@ -582,6 +682,202 @@ CoverageCollector(target_paths: list[str])
 
 ---
 
+## Compose service runner
+
+```python
+from ordeal.compose import (
+    ComposeController,
+    ComposeExplorationResult,
+    ComposeFailure,
+    ComposeRunner,
+    ComposeReplayReport,
+    ComposeTrace,
+    ComposeTraceAction,
+    HttpResponse,
+    HttpTransport,
+    replay_compose_trace,
+    run_compose_exploration,
+)
+from ordeal.config import ComposeConfig, ComposeRequestConfig
+```
+
+### ComposeRunner
+
+```python
+ComposeRunner(
+    config: ComposeConfig,
+    *,
+    controller: ComposeController | None = None,
+    transport: HttpTransport | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+)
+```
+
+Starts or reuses a Docker Compose topology, sends seeded repeated HTTP requests,
+preserves captured JSON state, injects `kill`, `restart`, `delay_response`, and
+`corrupt_response` fault cycles, and records every resolved action.
+
+| Method | Returns | Description |
+|---|---|---|
+| `run()` | `ComposeTrace` | Execute a newly selected service exploration |
+| `replay(source)` | `ComposeFailure | None` | Execute a source trace's recorded actions once |
+
+`controller`, `transport`, `monotonic`, and `sleep` are injectable system
+boundaries used for controlled tests or custom embedding. Normal callers pass
+only `config`.
+
+### ComposeController
+
+```python
+ComposeController(
+    config: ComposeConfig,
+    *,
+    run_command: Callable[..., CompletedProcess[str]] = subprocess.run,
+)
+```
+
+Runs Docker with argv lists, never with `shell=True`.
+
+| Method | Result | Compose operation |
+|---|---|---|
+| `start()` | `bool` | `ps -q`, then `up -d`; result says whether ordeal owns cleanup |
+| `stop()` | `None` | `down --remove-orphans`, without volume deletion |
+| `kill(service)` | `None` | `kill -s SIGKILL service` |
+| `start_service(service)` | `None` | `up -d service` |
+| `restart(service)` | `None` | `restart service` |
+
+Failures raise `ComposeCommandError` inside this adapter; `ComposeRunner` records
+them as `compose_command` failures.
+
+### HttpTransport
+
+```python
+HttpTransport().request(
+    method: str,
+    url: str,
+    *,
+    headers: Mapping[str, str],
+    json_body: object | None,
+    timeout: float,
+) -> HttpResponse
+```
+
+Uses the standard library. HTTP error statuses become normal `HttpResponse`
+objects so configured status validation can inspect them. Connection, timeout,
+URL, and OS errors raise `ServiceRequestError`.
+
+### HttpResponse
+
+| Attribute | Type | Description |
+|---|---|---|
+| `status` | `int` | HTTP status code |
+| `headers` | `dict[str, str]` | Response headers |
+| `body` | `bytes` | Complete observed response body |
+| `elapsed` | `float` | Transport duration in seconds |
+
+### ComposeTraceAction
+
+| Attribute | Type | Description |
+|---|---|---|
+| `index` | `int` | Stable zero-based action location |
+| `kind` | `str` | `lifecycle`, `fault`, or `request` |
+| `name` | `str` | Operation, fault, or lifecycle name |
+| `params` | `dict[str, object]` | State-resolved inputs with credential env templates preserved |
+| `result` | `dict[str, object]` | Status, hashes, captures, or error |
+| `timestamp_offset` | `float` | Seconds from original run start |
+
+### ComposeFailure
+
+| Attribute | Type | Description |
+|---|---|---|
+| `kind` | `str` | Stable failure category |
+| `message` | `str` | Exact observed message |
+| `action_index` | `int` | Failing action location |
+| `action_name` | `str` | Failing action label |
+| `signature` | `str` | SHA-256 of all four exact fields |
+
+### ComposeTrace
+
+| Attribute | Type | Description |
+|---|---|---|
+| `seed` | `int` | Selection seed |
+| `compose` | `dict[str, object]` | Self-contained effective config for replay |
+| `actions` | `list[ComposeTraceAction]` | Exact lifecycle, request, and fault sequence |
+| `failure` | `ComposeFailure | None` | Stable failure kind, message, action index, and action name |
+| `failure_signature` | `str | None` | SHA-256 used for exact replay matching |
+| `final_state` | `dict[str, object]` | Captured scenario state after the run |
+| `duration` | `float` | Original run duration |
+| `replay` | `ComposeReplayReport | None` | Immediate repeated replay result |
+| `runner` | `str` | Always `compose` |
+| `schema_version` | `int` | Currently `1` |
+
+| Method | Returns | Description |
+|---|---|---|
+| `to_dict()` | `dict[str, object]` | JSON-safe payload including failure signature |
+| `content_hash()` | `str` | Stable 12-character content hash |
+| `save(path)` | `None` | JSON or `.json.gz` serialization |
+| `ComposeTrace.load(path)` | `ComposeTrace` | Validated round trip |
+| `ComposeTrace.is_trace_file(path)` | `bool` | Detect Compose trace metadata |
+
+### ComposeReplayReport
+
+| Attribute | Type | Description |
+|---|---|---|
+| `attempted` | `int` | Number of action-sequence executions |
+| `reproduced` | `int` | Exact failure-signature matches |
+| `expected_signature` | `str | None` | Saved target signature |
+| `observed_signatures` | `list[str | None]` | One result per attempt |
+| `boundary` | `str` | Explicit real-service nondeterminism statement |
+| `to_dict()` | method | JSON-safe report |
+
+### ComposeExplorationResult
+
+| Attribute | Type | Description |
+|---|---|---|
+| `trace` | `ComposeTrace` | Complete in-memory trace |
+| `trace_path` | `Path` | Saved artifact location |
+| `replay` | `ComposeReplayReport | None` | Replays run after failure |
+| `requests` | `int` | Request actions recorded |
+| `faults` | `int` | Fault actions recorded |
+| `duration` | `float` | Original exploration duration |
+
+### run_compose_exploration
+
+```python
+run_compose_exploration(
+    config: ComposeConfig,
+    *,
+    seed: int | None = None,
+    max_time: float | None = None,
+    replay_attempts: int | None = None,
+) -> ComposeExplorationResult
+```
+
+Saves the trace and, on failure, attempts exact replay `N` times.
+
+### replay_compose_trace
+
+```python
+replay_compose_trace(
+    trace: ComposeTrace,
+    *,
+    attempts: int | None = None,
+) -> ComposeReplayReport
+```
+
+`attempted` is the number of runs; `reproduced` counts exact failure-signature
+matches. The trace is exact, but container scheduling, network timing, and
+external service behavior are explicitly not claimed to be deterministic.
+
+The conceptual and operational references are split by task:
+[overview](../guides/compose-runner.md),
+[configuration](../guides/compose-configuration.md),
+[fault model](../guides/compose-fault-model.md), and
+[traces](../guides/compose-traces.md).
+
+---
+
 ## Trace
 
 ```python
@@ -900,21 +1196,37 @@ Generate all possible mutants from source. Returns list of `(Mutant, modified_as
 | `killed` | `int` | Mutants caught by tests |
 | `survived` | `list[Mutant]` | Mutants tests missed |
 | `score` | `float` | Kill ratio (1.0 = all caught) |
+| `score_text` | `str` | Exact `killed/total (percent)` display |
+| `property_observations` | `list[dict]` | Mined-property names and observation counts used for strength analysis |
+| `kill_attribution()` | `dict[str, list[Mutant]]` | Mutants grouped by the test or property that killed them |
+| `weakest_killers()` | `list[dict]` | Ordered killer counts and operator coverage |
+| `property_strength()` | `list[dict]` | Per-property observations, mutation kills, and strength status |
+| `test_protection_view()` | `dict` | Scoped verdict, mutation score, attribution, survivors, and weak properties |
 | `summary()` | `str` | Human-readable report |
+
+`test_protection_view()` is mutation-only at this level: it judges the tests
+that ran against this `MutationResult`. See the
+[Test Protection Evidence Schema](test-protection-schema.md) for every field,
+decision order, and interpretation boundary.
 
 ### Mutant
 
 | Attribute | Type | Description |
 |---|---|---|
-| `operator` | `str` | `"arithmetic"`, `"comparison"`, `"negate"`, `"return_none"`, `"boundary"`, `"constant"`, `"delete"` |
+| `operator` | `str` | Operator name from `OPERATORS` |
 | `description` | `str` | What changed: `"+ -> -"` |
 | `line` | `int` | Source line |
 | `col` | `int` | Source column |
 | `killed` | `bool` | Whether test caught it |
 | `error` | `str | None` | Compilation error if mutant was invalid |
+| `killed_by` | `str | None` | Observed killing test or primary property |
+| `metadata` | `dict` | Structured context, including all rejecting mined properties when available |
 | `location` | `str` | `"L42:8"` |
 
-**Available operators:** `arithmetic`, `comparison`, `negate`, `return_none`, `boundary`, `constant`, `delete`
+**Available operators:** `argument_swap`, `arithmetic`, `boundary`,
+`break_continue_swap`, `comparison`, `constant`, `delete_statement`,
+`exception_swallow`, `logical`, `negate`, `remove_not`, `return_none`,
+`swap_if_else`, `unary_negate`.
 
 ### mutation_faults
 
@@ -946,11 +1258,44 @@ from ordeal.auto import scan_module, fuzz, chaos_for, register_fixture
 scan_module(
     module: str | ModuleType,
     *,
-    max_examples: int = 50,
+    max_examples: int | dict[str, int] = 50,
     check_return_type: bool = True,
+    targets: Sequence[str] | None = None,
+    include_private: bool = False,
     fixtures: dict[str, SearchStrategy] | None = None,
-    security_focus: bool = False,
+    object_factories: dict[str, Any] | None = None,
+    object_setups: dict[str, Any] | None = None,
+    object_scenarios: dict[str, Any] | None = None,
+    object_state_factories: dict[str, Any] | None = None,
+    object_teardowns: dict[str, Any] | None = None,
+    object_harnesses: dict[str, str] | None = None,
+    expected_failures: list[str] | None = None,
+    expected_preconditions: dict[str, list[str]] | None = None,
+    ignore_properties: list[str] | None = None,
+    ignore_relations: list[str] | None = None,
+    property_overrides: dict[str, list[str]] | None = None,
+    relation_overrides: dict[str, list[str]] | None = None,
+    expected_properties: dict[str, list[str]] | None = None,
+    expected_relations: dict[str, list[str]] | None = None,
+    contract_checks: dict[str, list[ContractCheck]] | None = None,
+    ignore_contracts: list[str] | None = None,
+    contract_overrides: dict[str, list[str]] | None = None,
+    mode: ScanMode = "evidence",
+    seed_from_tests: bool = True,
+    seed_from_fixtures: bool = True,
+    seed_from_docstrings: bool = True,
+    seed_from_code: bool = True,
+    seed_from_call_sites: bool = True,
+    treat_any_as_weak: bool = True,
+    proof_bundles: bool = True,
+    auto_contracts: Sequence[str] | None = None,
     shell_injection_check: bool = False,
+    require_replayable: bool = True,
+    min_contract_fit: float = 0.6,
+    min_reachability: float = 0.5,
+    min_realism: float = 0.55,
+    security_focus: bool = False,
+    minimize_findings: bool = False,
 ) -> ScanResult
 ```
 
@@ -963,6 +1308,22 @@ print(result.summary())
 ```
 
 `security_focus=True` keeps the same API but biases scan toward trust-boundary sinks such as import loading, deserialization, filesystem writes, and checkpoint/IPC handling. `shell_injection_check=True` adds a static metacharacter-to-shell-sink oracle that runs before the target is executed.
+`minimize_findings=True` shrinks and immediately replays suspicious property
+witnesses for a durable regression handoff. The CLI enables it for
+`scan --save-artifacts`.
+See the [Durable Regression Schema](durable-regression-schema.md) for the exact
+evidence-card, binding, manifest, and verification contracts.
+
+Exact `targets` resolve before broad discovery, so selecting one method avoids
+enumerating unrelated class harnesses. Bound methods use the object lifecycle
+maps in factory → setup → scenarios → state injection → method → teardown
+order. Scan builds a fresh instance for each invocation; `object_harnesses`
+with `"stateful"` additionally controls shared-object behavior in `chaos_for`.
+See [Object Harnesses](../guides/scan-object-harnesses.md).
+
+Crash replay matches exception type, message, and terminal source location.
+Result/proof fields and legacy fallback behavior are defined in the
+[Scan Evidence Schema](scan-evidence-schema.md).
 
 ### fuzz
 
@@ -1026,6 +1387,21 @@ Register a named fixture for auto-scan. Highest priority after explicit fixtures
 | `total` | `int` | Functions tested |
 | `failed` | `int` | Failures |
 | `summary()` | `str` | Human-readable report |
+
+### FunctionResult
+
+| Attribute | Type | Description |
+|---|---|---|
+| `name` | `str` | Module-local callable name, including `Class.method` |
+| `execution_ok` | `bool` | Whether direct execution avoided a crash |
+| `verdict` | `str` | Clean, expected, exploratory, coverage, or promoted bucket |
+| `failing_args` | `dict | None` | Exact keyword witness; `{}` is a valid zero-argument witness |
+| `replayable` | `bool | None` | Whether all immediate replay attempts matched |
+| `replay_attempts` / `replay_matches` | `int` | Exact replay counts |
+| `minimization` | `dict | None` | Performed shrink evidence and boundary |
+| `contract_fit` / `reachability` / `realism` | `float | None` | Promotion components |
+| `proof_bundle` | `dict | None` | Versioned witness, reproduction, impact, and verdict evidence |
+| `source_sha256` | `str | None` | Hash of inspected unwrapped callable source |
 
 ### FuzzResult
 
@@ -1122,7 +1498,14 @@ Audit multiple modules and produce a formatted summary report. Every number labe
 | `warnings` | `list[str]` | Every problem visible here |
 | `generated_test` | `str` | Full generated test file content |
 | `coverage_preserved` | `bool` | True if migrated >= current - 2% (False if either failed) |
+| `test_protection_view()` | `dict` | Mutation-first verdict with attribution, property strength, and exact coverage gaps |
 | `summary()` | `str` | Human-readable report with `[verified]`/`FAILED` labels |
+
+The module-level protection view uses migrated coverage and aggregated mined-
+property mutation validation. It therefore describes the resulting generated/
+migrated checks, not a direct mutation run of the current pytest suite. See the
+[Test Protection Guide](../guides/test-protection.md) and
+[Evidence Schema](test-protection-schema.md).
 
 ### CoverageMeasurement
 
@@ -1313,9 +1696,36 @@ suite = benchmark_perf_contract("ordeal.perf.toml")
 print(suite.summary())
 ```
 
-Run a checked-in perf/quality contract. Supports import latency, audit latency, mutation latency, and `audit_compare` cases that fail when one audit validation mode falls too far behind another on mutation score.
+Run a checked-in perf/quality contract. Supports import latency, audit latency,
+mutation latency, and `audit_compare` cases. Quality cases accept `min_score`
+for an absolute floor; differential cases also accept `max_score_gap`.
 
 When used from the CLI, `--output-json PATH` writes a stable artifact with `passed`, `cases`, `failures`, and per-case timing/score details so agents can consume the result without parsing text.
+
+### bug benchmark evidence
+
+```python
+from ordeal.benchmarking import (
+    benchmark_bug_manifest,
+    parse_bug_benchmark_manifest,
+    verify_bug_benchmark_certificate,
+)
+from ordeal import verify_bug_evidence
+
+suite = benchmark_bug_manifest("benchmarks/bug-benchmark.public.toml")
+verification = verify_bug_benchmark_certificate("results.json")
+httpie = verify_bug_evidence(
+    "benchmarks/evidence/httpie-3.toml",
+    online_sources=True,
+)
+```
+
+Run provenance-backed positive bugs and fixed negative controls through the real
+scan CLI. Certification policies can gate recall, precision, specificity,
+Wilson lower bounds, completeness, pairing, and provenance. A single-record
+verification hashes pinned sources and artifacts and freshly replays the exact
+buggy and fixed outcomes. Aggregate JSON certificates remain explicitly
+self-attested.
 
 ### scales_linearly
 
@@ -1367,11 +1777,17 @@ mine(
     fn: Callable,
     *,
     max_examples: int = 500,
+    ignore_properties: list[str] | tuple[str, ...] = (),
+    minimize_findings: bool = False,
     **fixtures: SearchStrategy | Any,
 ) -> MineResult
 ```
 
 Discover likely properties of a function by running it many times with random inputs and observing patterns in outputs.
+
+Set `minimize_findings=True` when producing durable artifacts. Suspicious
+counterexamples are shrunk with `hypothesis.find` and replayed twice; ordinary
+mining keeps the faster observation-only path.
 
 Properties checked: type consistency, never None, no NaN, non-negative, bounded [0,1], never empty, deterministic, idempotent, involution (`f(f(x)) == x`), commutative (`f(a,b) == f(b,a)`), associative (`f(f(a,b),c) == f(a,f(b,c))`), observed range, monotonicity (per numeric input parameter), and length relationships (`len(output) == len(input)`). Float comparisons use `math.isclose` (rel_tol=1e-9, abs_tol=1e-12) so rounding noise doesn't cause false negatives.
 
@@ -1442,6 +1858,10 @@ Things mine() fundamentally cannot discover from random sampling — these requi
 | `holds` | `int` | Times property held |
 | `total` | `int` | Times property was checked |
 | `counterexample` | `dict | None` | First counterexample if not universal |
+| `replayable` | `bool | None` | Whether the minimized witness violated the same property in every replay |
+| `replay_attempts` | `int` | Exact replay attempts |
+| `replay_matches` | `int` | Replays that violated the same inferred property |
+| `minimization` | `dict | None` | Method, size proxy, replay counts, and minimality boundary |
 | `confidence` | `float` | `holds / total` |
 | `universal` | `bool` | True if held on every example |
 
@@ -1522,7 +1942,13 @@ def test_negate(x: float):
 ## Config
 
 ```python
-from ordeal.config import load_config, OrdealConfig, ExplorerConfig, TestConfig, ReportConfig, ScanConfig
+from ordeal.config import (
+    load_config,
+    OrdealConfig,
+    ExplorerConfig,
+    ComposeConfig,
+    ComposeRequestConfig,
+)
 ```
 
 ### load_config
@@ -1541,6 +1967,48 @@ Load and validate an `ordeal.toml`. Raises `FileNotFoundError` if missing, `Conf
 | `tests` | `list[TestConfig]` | `[]` |
 | `scan` | `list[ScanConfig]` | `[]` |
 | `report` | `ReportConfig` | see below |
+| `compose` | `ComposeConfig | None` | `None` |
+
+### ComposeConfig
+
+| Attribute | Type | Default |
+|---|---|---|
+| `base_url` | `str` | required |
+| `file` | `str` | `compose.yaml` |
+| `project_name` | `str | None` | `None` |
+| `health_path` | `str` | `/` |
+| `services` | `list[str]` | `[]` |
+| `requests` | `list[ComposeRequestConfig]` | `[]` |
+| `initial_state` | `dict[str, object]` | `{}` |
+| `max_time` | `float` | `60.0` |
+| `steps` | `int` | `50` |
+| `seed` | `int` | `42` |
+| `fault_probability` | `float` | `0.3` |
+| `faults` | `list[str]` | `[]` programmatically; config loader derives defaults |
+| `delay_seconds` | `float` | `0.5` |
+| `request_timeout` | `float` | `5.0` |
+| `startup_timeout` | `float` | `30.0` |
+| `replay_attempts` | `int` | `3` |
+| `trace_dir` | `str` | `.ordeal/traces` |
+| `keep_running` | `bool` | `False` |
+
+### ComposeRequestConfig
+
+| Attribute | Type | Default |
+|---|---|---|
+| `name` | `str` | `root` programmatically; loader uses `request-N` |
+| `method` | `str` | `GET` |
+| `path` | `str` | `/` |
+| `headers` | `dict[str, str]` | `{}` |
+| `json_body` | `object | None` | `None`; TOML key is `json` |
+| `expect_status` | `list[int]` | `[]`, interpreted as any 2xx |
+| `expect_json` | `dict[str, object]` | `{}` |
+| `capture` | `dict[str, str]` | `{}` |
+| `requires` | `list[str]` | `[]` |
+| `faultable` | `bool` | `True` programmatically; loader derives from method |
+
+See [Compose Configuration](../guides/compose-configuration.md) for TOML path
+resolution, derived defaults, validation, and a complete example.
 
 ### ExplorerConfig
 

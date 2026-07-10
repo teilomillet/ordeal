@@ -11,10 +11,14 @@ permissions:
 jobs:
   perf-nightly:
     runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.12"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.28"
 
       - run: uv python install 3.12
 
@@ -22,16 +26,14 @@ jobs:
 
       - run: uv sync --locked --extra dev
 
+      - run: uv run python -c "import os, platform; assert platform.python_version().startswith(os.environ['UV_PYTHON'] + '.')"
+
       - name: Run full perf contract (all tiers)
         run: |
+          set -o pipefail
           uv run ordeal benchmark --perf-contract ordeal.perf.toml --check \
+            --output-json perf-results.json \
             2>&1 | tee perf-summary.txt
-
-      - name: Save JSON results
-        if: always()
-        run: |
-          uv run ordeal benchmark --perf-contract ordeal.perf.toml --json \
-            > perf-results.json
 
       - name: Upload results
         if: always()

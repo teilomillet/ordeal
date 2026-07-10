@@ -51,6 +51,7 @@ __all__ = [
     "reachable",
     "unreachable",
     "report",
+    "ReliabilityCell",
     # Buggify
     "buggify",
     "buggify_value",
@@ -73,6 +74,9 @@ __all__ = [
     "NoTestsFoundError",
     "generate_starter_tests",
     "init_project",
+    # Evidence
+    "verify_bug_evidence",
+    "BugEvidenceVerification",
     # Everything in _LAZY_SUBMODULES is also importable via
     # ``from ordeal import X`` — see __getattr__ and __dir__.
 ]
@@ -92,8 +96,10 @@ _LAZY_SUBMODULES = (
     "ordeal.metamorphic",
     "ordeal.diff",
     "ordeal.scaling",
+    "ordeal.evidence",
     "ordeal.state",
     "ordeal.explore",
+    "ordeal.compose",
     "ordeal.trace",
     "ordeal.supervisor",
     "ordeal.mutagen",
@@ -512,7 +518,7 @@ def catalog() -> dict[str, list]:
     dicts describing the available items.  Keys: ``cli``, ``chaos``, ``faults``,
     ``invariants``, ``assertions``, ``strategies``, ``mutations``,
     ``integrations``, ``mining``, ``audit``, ``auto``, ``metamorphic``,
-    ``diff``, ``scaling``, ``exploration``, ``trace``, ``supervisor``,
+    ``diff``, ``scaling``, ``evidence``, ``exploration``, ``trace``, ``supervisor``,
     ``mutagen``, ``cmplog``, ``concolic``, ``grammar``, ``equivalence``.
 
     Everything is derived from live runtime structures — source introspection
@@ -571,6 +577,10 @@ def catalog() -> dict[str, list]:
         "scaling": _introspect_module(
             __import__("ordeal.scaling", fromlist=["scaling"]),
         ),
+        "evidence": _introspect_module(
+            __import__("ordeal.evidence", fromlist=["evidence"]),
+            include={"BugEvidenceVerification", "EvidenceCheck", "verify_bug_evidence"},
+        ),
         "chaos": _introspect_module(
             __import__("ordeal.chaos", fromlist=["chaos"]),
             include={"ChaosTest", "RuleTimeoutError", "chaos_test"},
@@ -585,6 +595,16 @@ def catalog() -> dict[str, list]:
                 "ExplorationResult",
                 "CoverageCollector",
                 "Checkpoint",
+            },
+        )
+        + _introspect_module(
+            __import__("ordeal.compose", fromlist=["compose"]),
+            include={
+                "ComposeRunner",
+                "ComposeTrace",
+                "ComposeReplayReport",
+                "run_compose_exploration",
+                "replay_compose_trace",
             },
         ),
         "supervisor": _introspect_module(

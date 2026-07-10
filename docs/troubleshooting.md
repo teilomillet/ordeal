@@ -7,6 +7,16 @@ description: >-
 
 # Troubleshooting
 
+Testing Docker Compose services? Use the dedicated
+[Compose troubleshooting guide](guides/compose-troubleshooting.md) for Docker,
+readiness, state capture, replay, and cleanup problems.
+
+Trouble saving, verifying, binding, or guarding a finding? Use the
+[Durable Regression FAQ](guides/durable-regressions-faq.md).
+
+Trouble with scan targets, object factories, evidence status, exact replay, or
+speed? Use the dedicated [Scan troubleshooting guide](guides/scan-troubleshooting.md).
+
 !!! quote "Find your symptom, follow the fix"
     Something not working? You're probably not alone. Scan the headings below to find your symptom -- each section explains why it happens and exactly how to fix it. Issues are ordered from most common (explorer configuration) to most specific (simulation edge cases). If nothing here matches, check the Getting Help section at the bottom.
 
@@ -188,6 +198,59 @@ The migrated test is generated to `.ordeal/test_<module>_migrated.py`. Check:
 - Provide fixtures for parameters that can't be inferred: `mine(fn, model=mock_model)`
 - Check that the function has type hints — mining uses the same strategy inference as `fuzz()`.
 - A function that always raises won't have observable output properties.
+
+## The reliability coverage matrix is missing
+
+The matrix only appears when at least one assertion or contextual declaration
+supplies both `operation` and `fault` while tracking is active.
+
+Check these in order:
+
+1. Run `pytest --chaos`, or call `auto_configure()` in `conftest.py`.
+2. Supply both labels: `always(ok, "durable", operation="write", fault="crash")`.
+3. Make sure the test containing the assertion actually ran.
+4. For an expected cell that may receive no observations, call contextual
+   `declare()` from an autouse session fixture.
+5. Make sure the Ordeal pytest plugin was not disabled with `-p no:ordeal`.
+
+Supplying `operation` without `fault`, or `fault` without `operation`, raises a
+`ValueError` because a partial cell would be ambiguous.
+
+## A reliability cell says NOT EXERCISED
+
+This means Ordeal saw the declaration but recorded zero matching observations.
+It is useful evidence, not a rendering error.
+
+- Confirm the operation test ran instead of being skipped or deselected.
+- Confirm the fault fixture or harness really activated the named fault.
+- Check spelling: `worker_restart` and `worker-restart` are different cells.
+- Use the same property name and assertion type in `declare()` and observation.
+- Move declarations out of conditional code and into a session fixture.
+
+Remember that `fault="timeout"` is a label. It does not inject a timeout. If
+the harness never creates one, the label cannot make the test meaningful.
+
+No row is different from `NOT EXERCISED`: no row means neither a declaration
+nor an observation ran, so Ordeal has no basis for a claim.
+
+## Reliability coverage differs between local and CI
+
+First make the executions comparable:
+
+- Use the same `--chaos` flag, seed, dependencies, and selected tests.
+- Ensure every xdist worker loads the Ordeal plugin. Worker counters are merged
+  by exact operation, fault, and property names in the controller.
+- Put suite-wide declarations in an autouse session fixture; do not hide them
+  inside a test that CI may deselect.
+- Check that fault fixtures do not depend on local services or timing.
+- Compare raw `hits`, `passes`, and `failures`, not only the final status.
+
+With `sometimes`, one successful observation makes the cell pass, so different
+exploration schedules can change the result. Pin the seed when reproducibility
+matters, then increase exploration separately.
+
+See [Reliability Coverage in CI](guides/reliability-coverage-ci.md) for the JSON
+schema, gating policies, and pytest-xdist lifecycle.
 
 ## Tests pass locally but fail in CI
 

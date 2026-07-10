@@ -53,19 +53,49 @@ nav:
   - Concepts:
       - Chaos Testing: concepts/chaos-testing.md
       - Coverage Guidance: concepts/coverage-guidance.md
+      - Meaningful Tests: concepts/test-meaningfulness.md
+      - Durable Regressions: concepts/durable-regressions.md
+      - Reliability Coverage: concepts/reliability-coverage.md
       - Property Assertions: concepts/property-assertions.md
       - Fault Injection: concepts/fault-injection.md
       - Shrinking: concepts/shrinking.md
   - Guides:
+      - Scan Quickstart: guides/scan-quickstart.md
+      - Object Harnesses and Stateful Replay: guides/scan-object-harnesses.md
+      - Finding Evidence: guides/finding-evidence.md
+      - Durable Regression Workflow: guides/durable-regressions.md
+      - Durable Regressions in CI: guides/durable-regressions-ci.md
+      - Durable Regression FAQ: guides/durable-regressions-faq.md
       - Bug Bundle: guides/bug-bundle.md
+      - Scan Finding Rules: guides/scan-finding-rules.md
+      - Scan Troubleshooting: guides/scan-troubleshooting.md
       - Writing Tests: guides/writing-tests.md
+      - Reliability Coverage: guides/reliability-coverage.md
+      - Reliability Coverage in CI: guides/reliability-coverage-ci.md
       - Explorer: guides/explorer.md
+      - Compose Services:
+          - Overview: guides/compose-runner.md
+          - Quickstart: guides/compose-quickstart.md
+          - Configuration: guides/compose-configuration.md
+          - Stateful Workflows: guides/compose-stateful-workflows.md
+          - Fault Model: guides/compose-fault-model.md
+          - Traces and Replay: guides/compose-traces.md
+          - CI and Operations: guides/compose-operations.md
+          - Troubleshooting: guides/compose-troubleshooting.md
       - Auto Testing: guides/auto.md
       - Configuration: guides/configuration.md
       - CLI: guides/cli.md
       - Mutations: guides/mutations.md
+      - Test Protection: guides/test-protection.md
+      - Test Protection in CI: guides/test-protection-ci.md
+      - Test Protection FAQ: guides/test-protection-faq.md
       - Simulation: guides/simulate.md
       - Integrations: guides/integrations.md
+      - Maintainer Benchmarks: guides/benchmark-manifests.md
+      - Maintainer Evidence Records: guides/bug-evidence-records.md
   - Reference:
       - API: reference/api.md
+      - Scan Evidence Schema: reference/scan-evidence-schema.md
+      - Durable Regression Schema: reference/durable-regression-schema.md
+      - Test Protection Schema: reference/test-protection-schema.md
   - Troubleshooting: troubleshooting.md

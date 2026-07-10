@@ -184,6 +184,7 @@ class _ProgressPrinter:
 
 _BENCHMARK_SIGNAL_CHECKPOINTS: tuple[float, ...] = (5.0, 10.0, 30.0)
 _DEFAULT_REGRESSION_PATH = "tests/test_ordeal_regressions.py"
+_DEFAULT_REGRESSION_MANIFEST = "tests/ordeal-regressions.json"
 _DEFAULT_FINDINGS_DIR = ".ordeal/findings"
 _PACKAGE_ROOT_SCAN_LIMIT = 8
 CLI_CATALOG_SCHEMA_VERSION = 1
@@ -4872,6 +4873,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             scan_min_reachability=scan_min_reachability,
             scan_min_realism=scan_min_realism,
             scan_security_focus=scan_security_focus,
+            scan_minimize_findings=bool(getattr(args, "save_artifacts", False)),
             run_mine=False,
             run_scan=True,
             run_mutate=False,
@@ -4931,6 +4933,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     regression_path = args.write_regression
     written_report_path: Path | None = None
     written_regression_path: Path | None = None
+    written_regression_manifest_path: Path | None = None
     written_config_path: Path | None = None
     written_support_path: Path | None = None
     written_proofs_path: Path | None = None
@@ -4941,17 +4944,22 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     if save_artifacts and has_details:
         report_path = report_path or _default_scan_report_path(state.module)
         regression_path = regression_path or _DEFAULT_REGRESSION_PATH
-    if report_path:
-        written_report_path = _write_scan_report(state, report_path)
     if regression_path:
         written_regression_path = _write_scan_regressions(state, regression_path)
+    if report_path:
+        written_report_path = _write_scan_report(
+            state,
+            report_path,
+            regression_path=written_regression_path,
+        )
     if save_artifacts and not has_details:
         _stderr("No findings yet; no artifacts written.\n")
     if save_artifacts and has_details and written_report_path is not None:
-        report = _build_scan_report(state)
+        report = _build_scan_report(state, regression_path=written_regression_path)
         written_review_artifacts = _write_scan_review_bundle_artifacts(
             state,
             report=report,
+            regression_path=written_regression_path,
         )
         written_config_path = written_review_artifacts.get("config")
         written_support_path = written_review_artifacts.get("support")
@@ -4969,6 +4977,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             replay_path=written_replay_path,
             scenario_library_path=written_scenario_library_path,
         )
+        written_regression_manifest_path = _write_regression_manifest(bundle)
         index_path = _write_scan_artifact_index(
             bundle=bundle,
             bundle_path=bundle_path,
@@ -4980,6 +4989,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                 bundle_path=bundle_path,
                 finding_ids=[finding["finding_id"] for finding in bundle["findings"]],
                 regression_path=written_regression_path,
+                regression_manifest_path=written_regression_manifest_path,
                 config_path=written_config_path,
                 support_path=written_support_path,
                 proofs_path=written_proofs_path,
@@ -4994,6 +5004,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                 state,
                 written_report_path=written_report_path,
                 written_regression_path=written_regression_path,
+                written_regression_manifest_path=written_regression_manifest_path,
                 written_config_path=written_config_path,
                 written_support_path=written_support_path,
                 written_proofs_path=written_proofs_path,
@@ -5006,12 +5017,64 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     return 1 if state.findings else 0
 
 
-def _cmd_explore(args: argparse.Namespace) -> int:
-    """Run coverage-guided exploration from ordeal.toml."""
-    explorer_cls = Explorer
-    if explorer_cls is None:
-        from ordeal.explore import Explorer as explorer_cls
+def _cmd_explore_compose(args: argparse.Namespace, cfg: OrdealConfig) -> int:
+    """Run the long-lived Docker Compose service harness."""
+    from ordeal.compose import REPLAY_BOUNDARY, run_compose_exploration
 
+    if cfg.compose is None:
+        _stderr("No [compose] section in config.\n")
+        return 1
+    unsupported = [
+        option
+        for option, value in (
+            ("--resume", args.resume),
+            ("--save-state", args.save_state),
+            ("--generate-tests", args.generate_tests),
+        )
+        if value
+    ]
+    if unsupported:
+        _stderr(f"Compose runner does not support: {', '.join(unsupported)}\n")
+        return 2
+    if args.workers not in {None, 1}:
+        _stderr("Compose runner owns one long-lived topology; --workers must be 1.\n")
+        return 2
+
+    _stderr(f"Exploring Compose services from {cfg.compose.file}...\n")
+    try:
+        result = run_compose_exploration(
+            cfg.compose,
+            seed=args.seed,
+            max_time=args.max_time,
+            replay_attempts=args.replay_attempts,
+        )
+    except (OSError, ValueError) as exc:
+        _stderr(f"Compose runner error: {exc}\n")
+        return 2
+
+    _stderr(
+        f"  Actions: {len(result.trace.actions)} exact, "
+        f"requests={result.requests}, faults={result.faults}\n"
+    )
+    _stderr(f"  Trace: {result.trace_path}\n")
+    if result.trace.failure is None:
+        _stderr("  No failure recorded; replay not attempted.\n")
+        _stderr(f"  Boundary: {REPLAY_BOUNDARY}\n")
+        return 0
+
+    failure = result.trace.failure
+    _stderr(f"  Failure: {failure.kind}: {failure.message}\n")
+    assert result.replay is not None
+    _stderr(
+        f"  Replay attempted {result.replay.attempted} times, "
+        f"reproduced {result.replay.reproduced} times.\n"
+    )
+    _stderr(f"  Boundary: {result.replay.boundary}\n")
+    return 1
+
+
+def _cmd_explore(args: argparse.Namespace) -> int:
+    """Run coverage-guided or long-lived service exploration from ordeal.toml."""
     try:
         cfg = load_config(args.config)
     except FileNotFoundError:
@@ -5020,6 +5083,13 @@ def _cmd_explore(args: argparse.Namespace) -> int:
     except ConfigError as e:
         _stderr(f"Config error: {e}\n")
         return 1
+
+    if getattr(args, "runner", "python") == "compose":
+        return _cmd_explore_compose(args, cfg)
+
+    explorer_cls = Explorer
+    if explorer_cls is None:
+        from ordeal.explore import Explorer as explorer_cls
 
     # CLI overrides
     if args.seed is not None:
@@ -5162,8 +5232,82 @@ def _cmd_explore(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def _cmd_replay_compose(args: argparse.Namespace) -> int:
+    """Replay a Compose trace repeatedly and report the honest boundary."""
+    from ordeal.compose import ComposeTrace, replay_compose_trace
+
+    incompatible = [
+        option
+        for option, enabled in (
+            ("--shrink", args.shrink),
+            ("--ablate", args.ablate),
+            ("--output", bool(args.output)),
+        )
+        if enabled
+    ]
+    if incompatible:
+        _stderr(f"Compose traces do not support: {', '.join(incompatible)}\n")
+        return 2
+    try:
+        trace = ComposeTrace.load(args.trace_file)
+        report = replay_compose_trace(trace, attempts=args.attempts)
+    except (
+        FileNotFoundError,
+        json.JSONDecodeError,
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "runner": "compose",
+                        "status": "error",
+                        "trace_file": args.trace_file,
+                        "error": str(exc),
+                    },
+                    sort_keys=True,
+                )
+            )
+        else:
+            _stderr(f"Cannot replay Compose trace: {exc}\n")
+        return 2
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "runner": "compose",
+                    "status": "reproduced" if report.reproduced else "not_reproduced",
+                    "trace_file": args.trace_file,
+                    "actions": len(trace.actions),
+                    "failure_signature": trace.failure_signature,
+                    "replay": report.to_dict(),
+                },
+                sort_keys=True,
+            )
+        )
+    else:
+        _stderr(
+            f"Replaying Compose trace ({len(trace.actions)} exact actions, "
+            f"signature={trace.failure_signature or 'none'})...\n"
+        )
+        _stderr(
+            f"Replay attempted {report.attempted} times, reproduced {report.reproduced} times.\n"
+        )
+        _stderr(f"Boundary: {report.boundary}\n")
+    return 1 if report.reproduced else 0
+
+
 def _cmd_replay(args: argparse.Namespace) -> int:
     """Replay a saved trace."""
+    from ordeal.compose import ComposeTrace
+
+    if ComposeTrace.is_trace_file(args.trace_file):
+        return _cmd_replay_compose(args)
+
     from ordeal.trace import Trace, ablate_faults, replay, shrink
 
     try:
@@ -5778,7 +5922,11 @@ def _cmd_mine(args: argparse.Namespace) -> int:
     suspicious = 0
     for name, func in funcs:
         try:
-            result = mine(func, max_examples=max_examples)
+            result = mine(
+                func,
+                max_examples=max_examples,
+                minimize_findings=bool(getattr(args, "write_regression", None)),
+            )
         except (ValueError, TypeError) as e:
             reason = str(e).split(".")[0]
             skipped.append((name, reason))
@@ -5882,6 +6030,11 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     """Measure scaling, mutation latency, or a checked-in perf/quality contract."""
     import os
 
+    from ordeal.benchmarking import benchmark_bug_manifest as _benchmark_bug_manifest
+    from ordeal.benchmarking import (
+        verify_bug_benchmark_certificate as _verify_bug_benchmark_certificate,
+    )
+    from ordeal.evidence import verify_bug_evidence as _verify_bug_evidence
     from ordeal.scaling import analyze as _analyze_scaling
     from ordeal.scaling import benchmark as _benchmark
     from ordeal.scaling import benchmark_perf_contract as _benchmark_perf_contract
@@ -5890,9 +6043,75 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     if explorer_cls is None:
         from ordeal.explore import Explorer as explorer_cls
 
-    if args.output_json and not args.perf_contract:
-        _stderr("--output-json requires --perf-contract\n")
+    if (
+        args.output_json
+        and not args.perf_contract
+        and not getattr(args, "bug_manifest", None)
+        and not getattr(args, "verify_certificate", None)
+        and not getattr(args, "verify_evidence", None)
+    ):
+        _stderr(
+            "--output-json requires a perf contract, bug manifest, certificate, "
+            "or evidence record\n"
+        )
         return 2
+
+    if getattr(args, "verify_evidence", None):
+        try:
+            result = _verify_bug_evidence(
+                args.verify_evidence,
+                online_sources=bool(getattr(args, "online_sources", False)),
+                python_executable=sys.executable,
+            )
+        except (OSError, ValueError) as exc:
+            _stderr(f"Evidence verification error: {exc}\n")
+            return 2
+        if getattr(args, "output_json", None):
+            out_path = Path(args.output_json)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(result.to_json() + "\n", encoding="utf-8")
+        if getattr(args, "json", False):
+            print(result.to_json())
+        else:
+            print(result.summary())
+        return 0 if result.verified else 1
+
+    if getattr(args, "verify_certificate", None):
+        result = _verify_bug_benchmark_certificate(
+            args.verify_certificate,
+            manifest_path=getattr(args, "certificate_manifest", None),
+        )
+        if getattr(args, "output_json", None):
+            out_path = Path(args.output_json)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(result.to_json() + "\n", encoding="utf-8")
+        if getattr(args, "json", False):
+            print(result.to_json())
+        else:
+            print(result.summary())
+        return 0 if result.passed else 1
+
+    if getattr(args, "bug_manifest", None):
+        suite = _benchmark_bug_manifest(
+            args.bug_manifest,
+            python_executable=sys.executable,
+            ordeal_root=str(Path(__file__).resolve().parent.parent),
+            tier=getattr(args, "benchmark_tier", None),
+            bugsinpy_root=getattr(args, "bugsinpy_root", None),
+            checkout_root=getattr(args, "checkout_root", None),
+            online_sources=bool(getattr(args, "online_sources", False)),
+        )
+        if getattr(args, "output_json", None):
+            out_path = Path(args.output_json)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(suite.to_json() + "\n", encoding="utf-8")
+        if getattr(args, "json", False):
+            print(suite.to_json())
+        else:
+            print(suite.summary())
+        if args.check and not getattr(suite, "check_passed", suite.passed):
+            return 1
+        return 0
 
     if args.perf_contract:
         suite = _benchmark_perf_contract(
@@ -6065,10 +6284,20 @@ def _generate_ci_workflow(pkg: str) -> str:
     has_uv_lock = Path("uv.lock").exists()
 
     if has_uv_lock:
-        install_steps = """\
+        runtime_check = (
+            "      - run: uv run python -c 'import os, platform; "
+            'assert platform.python_version().startswith(os.environ["UV_PYTHON"] + ".")\''
+        )
+        install_steps = (
+            """\
       - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.28"
       - run: uv lock --check
       - run: uv sync --locked --extra dev"""
+            + "\n"
+            + runtime_check
+        )
         run_prefix = "uv run "
     else:
         install_steps = """\
@@ -6085,8 +6314,10 @@ on:
 jobs:
   ordeal:
     runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.12"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -7631,6 +7862,17 @@ def _format_scan_summary(state: Any) -> str:
             for detail in expected[:5]:
                 lines.append(f"    - {detail.get('summary', detail.get('function', '?'))}")
 
+    if details:
+        lines.append("  evidence cards:")
+        for raw_detail in details[:5]:
+            detail = _scan_detail_with_evidence(state.module, raw_detail)
+            card = detail["evidence"]
+            lines.append(f"    - {detail['qualname']} [{card['status']}]")
+            for label, value in _evidence_card_fields(card):
+                if label == "Status":
+                    continue
+                lines.append(f"      {label.lower()}: {value}")
+
     frontier = state.frontier
     if frontier:
         lines.append("  gaps to close:")
@@ -7656,6 +7898,172 @@ def _scan_report_details(state: Any) -> list[dict[str, Any]]:
     if details is not None:
         return list(details)
     return []
+
+
+def _scan_detail_with_evidence(
+    module: str,
+    detail: Mapping[str, Any],
+    *,
+    regression_path: Path | None = None,
+    guard_command: str | None = None,
+) -> dict[str, Any]:
+    """Normalize one scan detail and attach its compact evidence card."""
+    from ordeal.finding_evidence import _build_finding_evidence
+
+    normalized = {
+        **dict(detail),
+        "module": module,
+        "qualname": detail.get("qualname") or f"{module}.{detail.get('function', '?')}",
+    }
+    regression_test, regression_binding = _regression_metadata(normalized)
+    evidence = _build_finding_evidence(normalized, module=module)
+    normalized["evidence"] = _evidence_with_regression_binding(
+        evidence,
+        regression_binding,
+        regression_path=regression_path,
+        guard_command=guard_command,
+    )
+    normalized["regression_test"] = regression_test
+    normalized["regression_binding"] = regression_binding
+    return normalized
+
+
+def _regression_metadata(
+    detail: Mapping[str, Any],
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Return the generated regression name and semantic binding for one finding."""
+    from ordeal.regression_evidence import _regression_binding
+
+    module = str(detail.get("module") or "").strip()
+    if not module:
+        return None, None
+    stub = _render_regression_stub(module, dict(detail), trim=False)
+    test_name = _regression_test_name(stub) if stub else None
+    binding = _regression_binding(stub, test_name) if stub and test_name else None
+    return test_name, binding
+
+
+def _evidence_with_regression_binding(
+    evidence: Mapping[str, Any],
+    binding: Mapping[str, Any] | None,
+    *,
+    regression_path: Path | None = None,
+    guard_command: str | None = None,
+) -> dict[str, Any]:
+    """Attach one generated regression binding to a copied evidence card."""
+    copied = dict(evidence)
+    control = copied.get("post_fix_control")
+    if isinstance(control, Mapping) and binding is not None:
+        copied["post_fix_control"] = {
+            **dict(control),
+            "regression_binding": dict(binding),
+        }
+        saved = regression_path is not None
+        copied["regression"] = {
+            "status": "saved" if saved else "generated",
+            "path": _display_path(regression_path) if regression_path is not None else None,
+            "test_name": binding.get("test_name"),
+            "binding": dict(binding),
+        }
+        if saved:
+            copied["ci_guard"] = {
+                "status": "ready",
+                "command": guard_command,
+                "acceptance": "The bound regression must remain unchanged and pass in CI.",
+            }
+        workflow = copied.get("workflow")
+        if isinstance(workflow, Mapping):
+            copied["workflow"] = {
+                **dict(workflow),
+                "save_regression": "saved" if saved else "generated",
+                "guard_ci": "ready" if saved else workflow.get("guard_ci", "not_ready"),
+            }
+    return copied
+
+
+def _evidence_card_fields(card: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """Return compact label/value pairs for text and Markdown renderers."""
+    fields = [
+        ("Status", str(card.get("status") or "unknown")),
+        ("Claim", str(card.get("claim") or "No bounded claim available.")),
+    ]
+    subject = card.get("subject")
+    if isinstance(subject, Mapping):
+        source_sha256 = subject.get("source_sha256")
+        binding = (
+            f"callable source sha256={source_sha256}"
+            if source_sha256
+            else "callable source hash unavailable"
+        )
+        fields.append(("Code binding", binding))
+    witness = card.get("witness")
+    if isinstance(witness, Mapping) and witness.get("available"):
+        rendered_input = json.dumps(
+            _trim_report_value(witness.get("input")),
+            sort_keys=True,
+            default=str,
+        )
+        fields.append(
+            (
+                "Witness",
+                f"sha256={witness.get('sha256')} input={rendered_input}",
+            )
+        )
+    replay = card.get("replay")
+    if isinstance(replay, Mapping):
+        fields.append(
+            (
+                "Replay",
+                f"{replay.get('status')} "
+                f"({replay.get('exact_matches', 0)}/{replay.get('attempts', 0)} exact matches)",
+            )
+        )
+    minimization = card.get("minimization")
+    if isinstance(minimization, Mapping):
+        size = ""
+        if minimization.get("original_complexity") is not None:
+            size = (
+                f" ({minimization.get('original_complexity')}→"
+                f"{minimization.get('minimized_complexity')} complexity units)"
+            )
+        fields.append(
+            (
+                "Minimization",
+                f"{minimization.get('status')}"
+                f" via {minimization.get('method') or 'no method'}{size}",
+            )
+        )
+    regression = card.get("regression")
+    if isinstance(regression, Mapping):
+        location = regression.get("path") or regression.get("test_name") or "not saved"
+        fields.append(("Regression", f"{regression.get('status')}: {location}"))
+    control = card.get("post_fix_control")
+    if isinstance(control, Mapping):
+        fields.append(
+            (
+                "Post-fix control",
+                f"{control.get('status')}: {control.get('acceptance')}",
+            )
+        )
+        binding = control.get("regression_binding")
+        if isinstance(binding, Mapping):
+            import_hashes = ",".join(str(item) for item in binding.get("import_ast_sha256", ()))
+            fields.append(
+                (
+                    "Regression binding",
+                    f"test AST sha256={binding.get('test_ast_sha256')} "
+                    f"import AST sha256=[{import_hashes}]",
+                )
+            )
+    guard = card.get("ci_guard")
+    if isinstance(guard, Mapping):
+        command = f": {guard.get('command')}" if guard.get("command") else ""
+        fields.append(("CI guard", f"{guard.get('status')}{command}"))
+    boundaries = card.get("boundaries")
+    if isinstance(boundaries, Mapping):
+        limits = ", ".join(str(item) for item in boundaries.get("does_not_establish", ()))
+        fields.append(("Boundary", f"{boundaries.get('establishes')} Not: {limits}."))
+    return fields
 
 
 _SPECULATIVE_SCAN_CATEGORIES = {
@@ -8093,19 +8501,35 @@ def _finding_fingerprint(detail: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _annotate_finding(detail: dict[str, Any]) -> dict[str, Any]:
+def _annotate_finding(
+    detail: dict[str, Any],
+    *,
+    regression_path: Path | None = None,
+    guard_command: str | None = None,
+) -> dict[str, Any]:
     """Attach stable IDs to a normalized finding detail record."""
     fingerprint = _finding_fingerprint(detail)
-    module = detail.get("module")
-    stub = _render_regression_stub(module, detail, trim=False) if module else None
+    generated_test, generated_binding = _regression_metadata(detail)
+    regression_test = detail.get("regression_test") or generated_test
+    regression_binding = detail.get("regression_binding") or generated_binding
+    evidence = detail.get("evidence")
+    if isinstance(evidence, Mapping):
+        evidence = _evidence_with_regression_binding(
+            evidence,
+            regression_binding,
+            regression_path=regression_path,
+            guard_command=guard_command,
+        )
     category = detail.get("category")
     return {
         **detail,
+        "evidence": evidence,
         "evidence_class": _evidence_class_for_category(str(category)) if category else None,
         "finding_id": f"fnd_{fingerprint[:12]}",
         "fingerprint": fingerprint,
         "status": "open",
-        "regression_test": _regression_test_name(stub) if stub else None,
+        "regression_test": regression_test,
+        "regression_binding": regression_binding,
     }
 
 
@@ -8174,60 +8598,130 @@ def _render_regression_stub(
     function = detail.get("function")
     if not function:
         return None
+    function = str(function)
 
     slug = _slugify_report_name(detail.get("name") or detail.get("kind", "finding"))
-    test_name = f"test_{function}_{slug}_regression"
-    lines = [f"from {module} import {function}", "", "", f"def {test_name}() -> None:"]
+    function_slug = _slugify_report_name(function)
+    test_name = f"test_{function_slug}_{slug}_regression"
+    function_parts = [part for part in function.split(".") if part]
+    proof = detail.get("proof_bundle")
+    reproduction: Mapping[str, Any] = {}
+    if isinstance(proof, Mapping):
+        candidate = proof.get("minimal_reproduction") or proof.get("reproduction")
+        if isinstance(candidate, Mapping):
+            reproduction = candidate
+
+    if len(function_parts) > 1:
+        import_name = function_parts[0]
+        call_expr = ".".join(function_parts)
+    else:
+        import_name = function
+        call_expr = function
+    lines = [f"from {module} import {import_name}", "", "", f"def {test_name}() -> None:"]
 
     kind = detail.get("kind")
     counterexample = detail.get("counterexample") or {}
     failing_args = detail.get("failing_args")
     raw_input = counterexample.get("input")
     input_args = raw_input if isinstance(raw_input, dict) else None
+    name = detail.get("name")
 
     if kind in {"crash", "coverage_gap", "contract"} and isinstance(failing_args, dict):
+        if len(function_parts) > 1 and not bool(reproduction.get("direct_call_supported")):
+            snippet = reproduction.get("python_snippet")
+            if not bool(reproduction.get("harness_replay_supported")) or not isinstance(
+                snippet, str
+            ):
+                return None
+            lines = [f"def {test_name}() -> None:"]
+            lines.extend(f"    {line}" if line else "" for line in snippet.splitlines())
+            return "\n".join(lines)
         lines.append(f"    args = {_python_literal(failing_args, trim=trim)}")
-        lines.append(f"    {function}(**args)")
+        lines.append(f"    {call_expr}(**args)")
+        return "\n".join(lines)
+
+    if len(function_parts) > 1 and not bool(reproduction.get("direct_call_supported")):
+        return None
+
+    if kind == "property" and name == "bijective":
+        colliding = counterexample.get("colliding_inputs")
+        if not isinstance(colliding, (list, tuple)) or len(colliding) < 2:
+            return None
+        try:
+            first_args = dict(colliding[0])
+            second_args = dict(colliding[1])
+        except (TypeError, ValueError):
+            return None
+        lines.append(f"    first_args = {_python_literal(first_args, trim=trim)}")
+        lines.append(f"    second_args = {_python_literal(second_args, trim=trim)}")
+        lines.append(
+            f"    assert first_args == second_args or "
+            f"{call_expr}(**first_args) != {call_expr}(**second_args)"
+        )
         return "\n".join(lines)
 
     if kind != "property" or not isinstance(input_args, dict) or not input_args:
         return None
 
     first_param = next(iter(input_args))
-    name = detail.get("name")
     lines.append(f"    args = {_python_literal(input_args, trim=trim)}")
 
     if name == "deterministic":
-        lines.append(f"    first = {function}(**args)")
-        lines.append(f"    second = {function}(**args)")
+        lines.append(f"    first = {call_expr}(**args)")
+        lines.append(f"    second = {call_expr}(**args)")
         lines.append("    assert second == first")
         return "\n".join(lines)
 
     if name == "idempotent":
-        lines.append(f"    first = {function}(**args)")
+        lines.append(f"    first = {call_expr}(**args)")
         lines.append("    replay_args = dict(args)")
         lines.append(f"    replay_args[{first_param!r}] = first")
-        lines.append(f"    second = {function}(**replay_args)")
+        lines.append(f"    second = {call_expr}(**replay_args)")
         lines.append("    assert second == first")
         return "\n".join(lines)
 
     if name == "involution":
-        lines.append(f"    first = {function}(**args)")
+        lines.append(f"    first = {call_expr}(**args)")
         lines.append("    replay_args = dict(args)")
         lines.append(f"    replay_args[{first_param!r}] = first")
-        lines.append(f"    second = {function}(**replay_args)")
+        lines.append(f"    second = {call_expr}(**replay_args)")
         lines.append(f"    assert second == args[{first_param!r}]")
         return "\n".join(lines)
 
     if name == "never None":
-        lines.append(f"    assert {function}(**args) is not None")
+        lines.append(f"    assert {call_expr}(**args) is not None")
+        return "\n".join(lines)
+
+    if name == "no NaN":
+        lines.append("    from ordeal.invariants import no_nan")
+        lines.append(f"    no_nan({call_expr}(**args))")
         return "\n".join(lines)
 
     if name == "commutative" and isinstance(counterexample.get("swapped_input"), dict):
         swapped_lit = _python_literal(counterexample["swapped_input"], trim=trim)
         lines.append(f"    swapped = {swapped_lit}")
-        lines.append(f"    left = {function}(**args)")
-        lines.append(f"    right = {function}(**swapped)")
+        lines.append(f"    left = {call_expr}(**args)")
+        lines.append(f"    right = {call_expr}(**swapped)")
+        lines.append("    assert right == left")
+        return "\n".join(lines)
+
+    if name == "associative" and "third" in input_args and len(input_args) == 3:
+        param_names = [param for param in input_args if param != "third"]
+        if len(param_names) != 2:
+            return None
+        left_name, right_name = param_names
+        lines.append(f"    a = args[{left_name!r}]")
+        lines.append(f"    b = args[{right_name!r}]")
+        lines.append("    c = args['third']")
+        lines.append(
+            f"    left = {call_expr}(**{{{left_name!r}: a, {right_name!r}: "
+            f"{call_expr}(**{{{left_name!r}: b, {right_name!r}: c}})}})"
+        )
+        lines.append(
+            f"    right = {call_expr}(**{{{left_name!r}: "
+            f"{call_expr}(**{{{left_name!r}: a, {right_name!r}: b}}), "
+            f"{right_name!r}: c}})"
+        )
         lines.append("    assert right == left")
         return "\n".join(lines)
 
@@ -8285,6 +8779,15 @@ def _append_proof_bundle(lines: list[str], detail: dict[str, Any]) -> None:
         lines.append(f"- Demotion reason: {verdict['demotion_reason']}")
 
 
+def _append_finding_evidence(lines: list[str], detail: Mapping[str, Any]) -> None:
+    """Render the compact user-facing evidence card when present."""
+    card = detail.get("evidence")
+    if not isinstance(card, Mapping):
+        return
+    lines.extend(["", "Evidence card:"])
+    lines.extend(f"- {label}: {value}" for label, value in _evidence_card_fields(card))
+
+
 def _render_finding_section(detail: dict[str, Any]) -> list[str]:
     """Render one finding block for a Markdown dossier."""
     qualname = detail.get("qualname") or detail.get("function", "?")
@@ -8297,6 +8800,7 @@ def _render_finding_section(detail: dict[str, Any]) -> list[str]:
     if category:
         lines.append(f"- Evidence class: {_evidence_class_for_category(str(category))}")
         lines.append(f"- Internal category: {category}")
+    _append_finding_evidence(lines, detail)
 
     if kind == "property":
         holds = detail.get("holds")
@@ -8681,6 +9185,10 @@ def _render_scan_replay_notes_artifact(
         lines.extend([f"## {title}", ""])
         if finding_id:
             lines.append(f"- Finding ID: `{finding_id}`")
+        evidence = finding.get("evidence")
+        if isinstance(evidence, Mapping):
+            for label, value in _evidence_card_fields(evidence):
+                lines.append(f"- {label}: {value}")
         proof = finding.get("proof_bundle")
         if isinstance(proof, Mapping):
             impact = proof.get("impact")
@@ -8723,6 +9231,7 @@ def _scan_proof_bundle_payload(findings: Sequence[Mapping[str, Any]]) -> dict[st
                 "qualname": finding.get("qualname"),
                 "summary": finding.get("summary"),
                 "evidence_class": finding.get("evidence_class"),
+                "evidence": _json_safe_value(finding.get("evidence")),
                 "proof_bundle": _json_safe_value(dict(proof)),
             }
         )
@@ -8775,9 +9284,18 @@ def _write_scan_review_bundle_artifacts(
     state: Any,
     *,
     report: Mapping[str, Any],
+    regression_path: Path | None = None,
 ) -> dict[str, Path]:
     """Write extra review artifacts for `scan --save-artifacts`."""
-    findings = [_annotate_finding(detail) for detail in report.get("details", [])]
+    guard_command = _shell_command("uv", "run", "ordeal", "verify", "--ci")
+    findings = [
+        _annotate_finding(
+            detail,
+            regression_path=regression_path,
+            guard_command=guard_command,
+        )
+        for detail in report.get("details", [])
+    ]
     config_suggestions = list(report.get("config_suggestions", []))
     support_suggestions = list(report.get("support_suggestions", []))
     scenario_records = list(report.get("scenario_libraries", []))
@@ -8824,7 +9342,11 @@ def _write_scan_review_bundle_artifacts(
     return written
 
 
-def _build_scan_report(state: Any) -> dict[str, Any]:
+def _build_scan_report(
+    state: Any,
+    *,
+    regression_path: Path | None = None,
+) -> dict[str, Any]:
     """Normalize scan output into the shared finding report shape."""
     evidence = _scan_evidence_dimensions(state)
     search_depth = evidence["search_depth"]
@@ -8844,12 +9366,18 @@ def _build_scan_report(state: Any) -> dict[str, Any]:
         getattr(state, "supervisor_info", {}).get("support_suggestions", ())
     )
     scenario_libraries = list(getattr(state, "supervisor_info", {}).get("scenario_libraries", ()))
+    guard_command = (
+        _shell_command("uv", "run", "ordeal", "verify", "--ci")
+        if regression_path is not None
+        else None
+    )
     details = [
-        {
-            **detail,
-            "module": state.module,
-            "qualname": f"{state.module}.{detail.get('function', '?')}",
-        }
+        _scan_detail_with_evidence(
+            state.module,
+            detail,
+            regression_path=regression_path,
+            guard_command=guard_command,
+        )
         for detail in _scan_report_details(state)
     ]
     promoted_count = len(getattr(state, "findings", []))
@@ -9002,9 +9530,15 @@ def _build_scan_report(state: Any) -> dict[str, Any]:
     }
 
 
-def _render_scan_report_markdown(state: Any) -> str:
+def _render_scan_report_markdown(
+    state: Any,
+    *,
+    regression_path: Path | None = None,
+) -> str:
     """Render a shareable Markdown finding report for `ordeal scan`."""
-    return _render_findings_report_markdown(_build_scan_report(state))
+    return _render_findings_report_markdown(
+        _build_scan_report(state, regression_path=regression_path)
+    )
 
 
 def _build_scan_bundle(
@@ -9019,8 +9553,16 @@ def _build_scan_bundle(
     scenario_library_path: Path | None = None,
 ) -> dict[str, Any]:
     """Build the machine-readable scan artifact bundle."""
-    report = _build_scan_report(state)
-    findings = [_annotate_finding(detail) for detail in report["details"]]
+    report = _build_scan_report(state, regression_path=regression_path)
+    guard_command = _shell_command("uv", "run", "ordeal", "verify", "--ci")
+    findings = [
+        _annotate_finding(
+            detail,
+            regression_path=regression_path,
+            guard_command=guard_command,
+        )
+        for detail in report["details"]
+    ]
     saved_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     return {
         "version": 1,
@@ -9042,6 +9584,7 @@ def _build_scan_bundle(
             "report": _display_path(report_path),
             "bundle": None,
             "regression": _display_path(regression_path) if regression_path else None,
+            "regression_manifest": (_DEFAULT_REGRESSION_MANIFEST if regression_path else None),
             "config": _display_path(config_path) if config_path else None,
             "support": _display_path(support_path) if support_path else None,
             "proofs": _display_path(proofs_path) if proofs_path else None,
@@ -9065,6 +9608,7 @@ def _build_scan_bundle(
                 state.module,
                 "--save-artifacts",
             ),
+            "ci": guard_command if regression_path else None,
         },
     }
 
@@ -9433,6 +9977,13 @@ def _recommended_action_for_report(report: Mapping[str, Any]) -> str:
         if kind == "property":
             return f"Write a regression test for {qualname} from the recorded counterexample."
         if kind == "crash":
+            evidence = first.get("evidence")
+            replay = evidence.get("replay") if isinstance(evidence, Mapping) else None
+            if isinstance(replay, Mapping) and replay.get("status") == "verified":
+                return (
+                    f"Turn the exact witness for {qualname} into a regression, "
+                    "fix the defect, then require the same witness to pass."
+                )
             return f"Reproduce the crash in a regression test for {qualname}."
         if kind == "mutation":
             return f"Strengthen tests for {qualname} until the surviving mutant is killed."
@@ -9525,6 +10076,7 @@ def _build_scan_agent_envelope(
     *,
     written_report_path: Path | None = None,
     written_regression_path: Path | None = None,
+    written_regression_manifest_path: Path | None = None,
     written_config_path: Path | None = None,
     written_support_path: Path | None = None,
     written_proofs_path: Path | None = None,
@@ -9533,7 +10085,7 @@ def _build_scan_agent_envelope(
     index_path: Path | None = None,
 ) -> Any:
     """Build the agent-facing JSON envelope for `ordeal scan`."""
-    report = _build_scan_report(state)
+    report = _build_scan_report(state, regression_path=written_regression_path)
     evidence = _scan_evidence_dimensions(state)
     detail_categories = {detail.get("category") for detail in report.get("details", [])}
     artifacts: list[Any] = []
@@ -9544,6 +10096,14 @@ def _build_scan_agent_envelope(
     if written_regression_path is not None:
         artifacts.append(
             _agent_artifact("regression", written_regression_path, "generated pytest regressions")
+        )
+    if written_regression_manifest_path is not None:
+        artifacts.append(
+            _agent_artifact(
+                "regression-manifest",
+                written_regression_manifest_path,
+                "portable CI bindings for generated regressions",
+            )
         )
     if written_config_path is not None:
         artifacts.append(
@@ -10110,6 +10670,13 @@ def _build_audit_agent_envelope(
                 for result in results
             ],
         ),
+        (
+            "Test Protection",
+            [
+                (f"{result.module}: {result.test_protection_view()['summary']}")
+                for result in results
+            ],
+        ),
     ]
     if surface_summary.get("entry_count"):
         report["extra_sections"].append(
@@ -10211,6 +10778,13 @@ def _build_audit_agent_envelope(
                 {
                     "module": result.module,
                     **result.mutation_validation_view(),
+                }
+                for result in results
+            ],
+            "protection_views": [
+                {
+                    "module": result.module,
+                    **result.test_protection_view(),
                 }
                 for result in results
             ],
@@ -10506,11 +11080,19 @@ def _build_blocked_agent_envelope(
     )
 
 
-def _write_scan_report(state: Any, path_str: str) -> Path:
+def _write_scan_report(
+    state: Any,
+    path_str: str,
+    *,
+    regression_path: Path | None = None,
+) -> Path:
     """Write a Markdown report for `ordeal scan`."""
     path = Path(path_str)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_render_scan_report_markdown(state), encoding="utf-8")
+    path.write_text(
+        _render_scan_report_markdown(state, regression_path=regression_path),
+        encoding="utf-8",
+    )
     _stderr(f"Scan report saved: {path}\n")
     return path
 
@@ -10621,6 +11203,16 @@ def _write_scan_artifact_index(
                 }
                 for detail in bundle["findings"]
             ],
+            "regressions": [
+                {
+                    "finding_id": detail.get("finding_id"),
+                    "test_name": detail.get("regression_test"),
+                    "binding": detail.get("regression_binding"),
+                    "path": bundle["artifacts"].get("regression"),
+                }
+                for detail in bundle["findings"]
+                if detail.get("regression_binding") is not None
+            ],
             "artifacts": {
                 **bundle["artifacts"],
                 "bundle": bundle["artifacts"]["bundle"] or _display_path(bundle_path),
@@ -10633,6 +11225,67 @@ def _write_scan_artifact_index(
     return path
 
 
+def _write_regression_manifest(bundle: Mapping[str, Any]) -> Path | None:
+    """Persist portable CI bindings beside the generated regression module."""
+    regression_path = bundle.get("artifacts", {}).get("regression")
+    if not regression_path:
+        return None
+    records = []
+    for finding in bundle.get("findings", ()):
+        binding = finding.get("regression_binding")
+        if not isinstance(binding, Mapping):
+            continue
+        evidence = finding.get("evidence")
+        witness = evidence.get("witness") if isinstance(evidence, Mapping) else None
+        subject = evidence.get("subject") if isinstance(evidence, Mapping) else None
+        records.append(
+            {
+                "finding_id": finding.get("finding_id"),
+                "target": finding.get("qualname") or finding.get("function"),
+                "test_file": regression_path,
+                "test_name": finding.get("regression_test"),
+                "binding": dict(binding),
+                "witness_sha256": (
+                    witness.get("sha256") if isinstance(witness, Mapping) else None
+                ),
+                "source_sha256": (
+                    subject.get("source_sha256") if isinstance(subject, Mapping) else None
+                ),
+            }
+        )
+    if not records:
+        return None
+
+    path = Path(_DEFAULT_REGRESSION_MANIFEST)
+    payload: dict[str, Any] = {
+        "schema": "ordeal.regression-manifest/v1",
+        "regressions": [],
+    }
+    if path.is_file():
+        try:
+            loaded = _read_json_file(path)
+        except json.JSONDecodeError:
+            loaded = {}
+        if (
+            isinstance(loaded, dict)
+            and loaded.get("schema") == "ordeal.regression-manifest/v1"
+            and isinstance(loaded.get("regressions"), list)
+        ):
+            payload["regressions"] = list(loaded["regressions"])
+    by_id = {
+        str(item.get("finding_id")): item
+        for item in payload["regressions"]
+        if isinstance(item, Mapping) and item.get("finding_id")
+    }
+    for record in records:
+        by_id[str(record["finding_id"])] = record
+    payload["regressions"] = [by_id[finding_id] for finding_id in sorted(by_id)]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json_file(path, payload)
+    _stderr(f"Regression manifest updated: {path}\n")
+    return path
+
+
 def _print_scan_artifact_workflow(
     *,
     module: str,
@@ -10640,6 +11293,7 @@ def _print_scan_artifact_workflow(
     bundle_path: Path,
     finding_ids: list[str],
     regression_path: Path | None,
+    regression_manifest_path: Path | None,
     config_path: Path | None,
     support_path: Path | None,
     proofs_path: Path | None,
@@ -10656,6 +11310,8 @@ def _print_scan_artifact_workflow(
         print(f"  regression: {_display_path(regression_path)}")
     else:
         print("  regression: not generated from current findings")
+    if regression_manifest_path is not None:
+        print(f"  regression-manifest: {_display_path(regression_manifest_path)}")
     if config_path is not None:
         print(f"  config: {_display_path(config_path)}")
     if support_path is not None:
@@ -10681,6 +11337,8 @@ def _print_scan_artifact_workflow(
     if regression_path is not None:
         run_cmd = _shell_command("uv", "run", "pytest", _display_path(regression_path), "-q")
         print(f"  pytest: {run_cmd}")
+        guard_cmd = _shell_command("uv", "run", "ordeal", "verify", "--ci")
+        print(f"  ci: {guard_cmd}")
     if config_path is not None:
         print(f"  review-config: {_shell_command('cat', _display_path(config_path))}")
     if support_path is not None:
@@ -10718,21 +11376,38 @@ def _locate_saved_finding(
     entries = payload.get("entries")
     if not isinstance(entries, list):
         return None
-    fallback_workspace = str(index_path.parent.parent.parent)
+    current_workspace = _index_workspace(index_path)
 
     for entry in reversed(entries):
         artifacts = entry.get("artifacts") or {}
-        bundle_path = _resolve_artifact_path(
-            artifacts.get("bundle"),
-            workspace=entry.get("workspace") or fallback_workspace,
+        bundle_value = artifacts.get("bundle")
+        if not bundle_value:
+            continue
+        raw_bundle_path = Path(str(bundle_value))
+        candidates = (
+            [raw_bundle_path]
+            if raw_bundle_path.is_absolute()
+            else [
+                current_workspace / raw_bundle_path,
+                Path(str(entry.get("workspace"))) / raw_bundle_path,
+            ]
         )
-        if bundle_path is None or not bundle_path.exists():
+        bundle_path = next((path for path in candidates if path.exists()), None)
+        if bundle_path is None:
             continue
         bundle = _read_json_file(bundle_path)
         for finding in bundle.get("findings", []):
             if finding.get("finding_id") == finding_id:
                 return bundle_path, bundle, finding
     return None
+
+
+def _index_workspace(index_path: Path) -> Path:
+    """Resolve the portable workspace root for a finding index."""
+    resolved = index_path.resolve()
+    if resolved.parent.name == "findings" and resolved.parent.parent.name == ".ordeal":
+        return resolved.parent.parent.parent
+    return Path.cwd().resolve()
 
 
 def _verification_command(
@@ -10761,10 +11436,201 @@ def _verification_command(
     return None
 
 
+def _verify_regression_binding(
+    bundle: Mapping[str, Any],
+    finding: Mapping[str, Any],
+    *,
+    workspace: str | Path | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Verify that the saved witness regression still matches its AST binding."""
+    from ordeal.regression_evidence import _regression_binding, _regression_binding_matches
+
+    expected = finding.get("regression_binding")
+    if not isinstance(expected, Mapping):
+        return (
+            None,
+            "Saved finding has no regression binding; re-run `ordeal scan --save-artifacts`.",
+        )
+    regression_path = _resolve_artifact_path(
+        bundle.get("artifacts", {}).get("regression"),
+        workspace=str(workspace or bundle.get("workspace") or ""),
+    )
+    if regression_path is None or not regression_path.is_file():
+        return None, "The bound regression file is missing; re-run `ordeal scan --save-artifacts`."
+    test_name = str(expected.get("test_name") or "")
+    observed = _regression_binding(regression_path.read_text(encoding="utf-8"), test_name)
+    if observed is None:
+        return None, f"The bound regression test `{test_name}` is missing or invalid."
+    if not _regression_binding_matches(expected, observed):
+        return observed, (
+            "The saved regression test or target import changed after the scan; "
+            "refusing to treat it as the same-witness control."
+        )
+    return observed, None
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    """Return whether a resolved artifact stays inside the CI workspace."""
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _cmd_verify_ci(args: argparse.Namespace) -> int:
+    """Fail closed when any saved regression binding or test fails in CI."""
+    import subprocess
+
+    from ordeal.regression_evidence import _regression_binding, _regression_binding_matches
+
+    manifest_path = Path(args.manifest)
+    if not manifest_path.is_file():
+        _stderr(f"Regression manifest not found: {manifest_path}\n")
+        return 2
+    try:
+        payload = _read_json_file(manifest_path)
+    except json.JSONDecodeError as exc:
+        _stderr(f"Regression manifest is not valid JSON: {exc}\n")
+        return 2
+    if payload.get("schema") != "ordeal.regression-manifest/v1":
+        _stderr("Regression manifest schema must be ordeal.regression-manifest/v1.\n")
+        return 2
+    records = payload.get("regressions")
+    if not isinstance(records, list):
+        _stderr("Regression manifest has no regressions list.\n")
+        return 2
+
+    resolved_manifest = manifest_path.resolve()
+    workspace = (
+        resolved_manifest.parent.parent
+        if resolved_manifest.parent.name == "tests"
+        else Path.cwd().resolve()
+    )
+    if not _path_is_within(resolved_manifest, workspace):
+        _stderr(f"CI guard refused manifest outside workspace: {manifest_path}\n")
+        return 2
+    passed = 0
+    failed = 0
+    errors = 0
+    seen: set[str] = set()
+    for record in records:
+        if not isinstance(record, Mapping):
+            _stderr("CI guard found an invalid regression manifest entry.\n")
+            errors += 1
+            continue
+        finding_id = str(record.get("finding_id") or "").strip()
+        if not finding_id or finding_id in seen:
+            _stderr(f"CI guard found a missing or duplicate finding ID: {finding_id or '?'}\n")
+            errors += 1
+            continue
+        seen.add(finding_id)
+        test_file = str(record.get("test_file") or "").strip()
+        test_name = str(record.get("test_name") or "").strip()
+        expected = record.get("binding")
+        if not test_file or not test_name or not isinstance(expected, Mapping):
+            _stderr(f"CI guard found an incomplete regression record for {finding_id}.\n")
+            errors += 1
+            continue
+        regression_path = _resolve_artifact_path(test_file, workspace=str(workspace))
+        if regression_path is None or not _path_is_within(regression_path, workspace):
+            _stderr(f"CI guard refused regression outside workspace for {finding_id}.\n")
+            errors += 1
+            continue
+        if not regression_path.is_file():
+            _stderr(f"CI guard regression file is missing for {finding_id}: {test_file}\n")
+            errors += 1
+            continue
+        observed = _regression_binding(regression_path.read_text(encoding="utf-8"), test_name)
+        if observed is None or not _regression_binding_matches(expected, observed):
+            _stderr(f"CI guard binding failed for {finding_id}.\n")
+            errors += 1
+            continue
+        nodeid = f"{test_file}::{test_name}"
+        run_args = [sys.executable, "-m", "pytest", nodeid, "-q"]
+        display_command = _shell_command("uv", "run", "pytest", nodeid, "-q")
+        proc = subprocess.run(
+            run_args,
+            cwd=str(workspace),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode == 0:
+            passed += 1
+            print(f"  passed: {finding_id} ({display_command})")
+        elif proc.returncode == 1:
+            failed += 1
+            _stderr(f"CI guard regression failed for {finding_id}: {display_command}\n")
+        else:
+            errors += 1
+            _stderr(
+                f"CI guard could not run {finding_id} (exit {proc.returncode}): "
+                f"{display_command}\n"
+            )
+
+    print(f"verify --ci: {passed} passed, {failed} failed, {errors} error(s)")
+    if errors:
+        return 2
+    return 1 if failed else 0
+
+
+def _record_post_fix_control(
+    finding: dict[str, Any],
+    *,
+    verification_status: str,
+    checked_at: str,
+    command: str,
+    exit_code: int,
+    observed_binding: Mapping[str, Any],
+) -> str | None:
+    """Record the bound regression outcome on a finding evidence card."""
+    evidence = finding.get("evidence")
+    if not isinstance(evidence, Mapping):
+        return None
+    control = evidence.get("post_fix_control")
+    if not isinstance(control, Mapping):
+        return None
+    control_status = {
+        "verified": "passed",
+        "reproduced": "failed",
+        "error": "error",
+    }[verification_status]
+    finding["evidence"] = {
+        **dict(evidence),
+        "post_fix_control": {
+            **dict(control),
+            "status": control_status,
+            "checked_at": checked_at,
+            "command": command,
+            "exit_code": exit_code,
+            "observed_regression_binding": dict(observed_binding),
+        },
+    }
+    workflow = finding["evidence"].get("workflow")
+    if isinstance(workflow, Mapping):
+        finding["evidence"]["workflow"] = {
+            **dict(workflow),
+            "verify_fix": control_status,
+        }
+    return control_status
+
+
 def _cmd_verify(args: argparse.Namespace) -> int:
     """Re-run the saved regression for one finding ID."""
     import subprocess
 
+    if bool(getattr(args, "ci", False)):
+        if args.finding_id:
+            _stderr(
+                "Do not pass a finding ID with --ci; the CI guard checks every saved finding.\n"
+            )
+            return 2
+        return _cmd_verify_ci(args)
+
+    if not args.finding_id:
+        _stderr("A finding ID is required unless --ci is used.\n")
+        return 2
     if not bool(getattr(args, "allow_unsafe_artifacts", False)):
         _stderr(
             "Refusing to load artifact indexes or bundles without "
@@ -10792,11 +11658,21 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         )
         return 2
 
+    workspace = _index_workspace(index_path)
+    observed_binding, binding_error = _verify_regression_binding(
+        bundle,
+        finding,
+        workspace=workspace,
+    )
+    if binding_error is not None:
+        _stderr(f"Regression binding check failed: {binding_error}\n")
+        return 2
+    assert observed_binding is not None
+
     run_args, display_command = command
-    workspace = bundle.get("workspace")
     proc = subprocess.run(
         run_args,
-        cwd=workspace,
+        cwd=str(workspace),
         text=True,
         capture_output=True,
         check=False,
@@ -10821,7 +11697,16 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         "status": verification_status,
         "command": display_command,
         "exit_code": proc.returncode,
+        "regression_binding": observed_binding,
     }
+    control_status = _record_post_fix_control(
+        finding,
+        verification_status=verification_status,
+        checked_at=checked_at,
+        command=display_command,
+        exit_code=proc.returncode,
+        observed_binding=observed_binding,
+    )
     _write_json_file(bundle_path, bundle)
 
     _append_index_entry(
@@ -10830,11 +11715,13 @@ def _cmd_verify(args: argparse.Namespace) -> int:
             "kind": "verification",
             "created_at": checked_at,
             "module": bundle.get("target"),
-            "workspace": workspace,
+            "workspace": str(workspace),
             "finding_id": args.finding_id,
             "status": verification_status,
             "qualname": finding.get("qualname"),
             "exit_code": proc.returncode,
+            "post_fix_control": control_status,
+            "regression_binding": observed_binding,
             "artifacts": dict(bundle.get("artifacts", {})),
             "commands": {
                 "verify": display_command,
@@ -10845,6 +11732,8 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     print(f"verify: {args.finding_id}")
     print(f"  target: {finding.get('qualname', bundle.get('target', '?'))}")
     print(f"  status: {verification_status}")
+    if control_status is not None:
+        print(f"  post-fix control: {control_status}")
     print(f"  command: {display_command}")
     print(f"  bundle: {_display_path(bundle_path)}")
     print(f"  index: {_display_path(index_path)}")
@@ -10996,6 +11885,8 @@ def _scan_command_description() -> str:
         " `--relation-override` to suppress noisy mined signals without changing code.\n"
         "Use explicit targets like `pkg.mod:Env.build_env_vars`, shared `[[objects]]`,\n"
         " and `[[contracts]]` in ordeal.toml for stateful OO code and shell/path/env checks.\n"
+        "A supported crash replay matches exception type, message, and terminal source location.\n"
+        "Bound-method regressions are written only when every harness hook is resolvable.\n"
         "Use --save-artifacts to save the dossier, machine-readable bundle, review-only\n"
         f" config/support sidecars ({_default_scan_report_path('mymod')},"
         f" {_default_scan_bundle_path('mymod')},"
@@ -11004,9 +11895,11 @@ def _scan_command_description() -> str:
         f" {_DEFAULT_REGRESSION_PATH}, then update {_default_artifact_index_path()}.\n"
         "When one finding is saved, the workflow prints an exact"
         " `ordeal verify <finding-id> --allow-unsafe-artifacts` follow-up command.\n"
+        "Verify checks the saved test AST and target-import hashes before running pytest.\n"
         "Use --report-file report.md to save a shareable Markdown bug report.\n"
         f"Use --write-regression or --write-regression PATH to save runnable pytest"
-        f" regressions (default: {_DEFAULT_REGRESSION_PATH})."
+        f" regressions (default: {_DEFAULT_REGRESSION_PATH}).\n"
+        "Docs: https://docs.byordeal.com/guides/scan-quickstart/"
     )
 
 
@@ -11030,14 +11923,20 @@ def _verify_command_description() -> str:
         "For safety, verification requires `--allow-unsafe-artifacts` because "
         "artifact bundles can point pytest at repo-controlled code.\n"
         "Verification updates the bundle status and appends a verification event"
-        " to the artifact index."
+        " to the artifact index. Use `ordeal verify --ci` for a read-only,"
+        " provider-neutral guard over every saved regression and binding."
     )
 
 
 def _audit_command_description() -> str:
     """Return the long-form `ordeal audit` help description."""
     return (
-        "Compare your current tests with ordeal-generated tests.\n\n"
+        "Compare current tests with generated checks and report whether the resulting\n"
+        "checks protect measured behavior. The protection verdict combines migrated\n"
+        "line coverage, mutation survival, and property exercise. A surviving mutant\n"
+        "keeps the verdict WEAK even at 100% line coverage.\n\n"
+        "Use `ordeal mutate` to judge the selected existing pytest tests directly;\n"
+        "audit's protection verdict describes the generated/migrated checks.\n\n"
         "Validation modes:\n"
         "  fast  replay mined inputs against mutants (default, faster)\n"
         "  deep  replay mined inputs, then re-mine mutants for extra search depth\n\n"
@@ -11047,6 +11946,18 @@ def _audit_command_description() -> str:
         "and direct-test policy, and reuse shared `[[objects]]` for bound methods.\n"
         "Use --write-gaps PATH to emit draft review stubs for surviving mutants "
         "and function-level coverage gaps."
+    )
+
+
+def _mutate_command_description() -> str:
+    """Return the long-form `ordeal mutate` help description."""
+    return (
+        "Test whether the selected existing tests notice deliberate code changes.\n\n"
+        "A surviving non-equivalent mutant is direct evidence of a test gap. Mutation\n"
+        "score is scoped to the target, operator preset, filters, and executed tests;\n"
+        "even a 100% score is not a universal correctness proof.\n\n"
+        "Use `ordeal audit` when you also want generated-check coverage, property\n"
+        "strength, exact line gaps, and the combined protection verdict."
     )
 
 
@@ -11292,16 +12203,29 @@ def _command_specs() -> tuple[CommandSpec, ...]:
         CommandSpec(
             name="verify",
             handler=_cmd_verify,
-            help="Re-run the saved regression for one finding ID",
+            help="Verify one saved fix or guard every bound regression in CI",
             description=_verify_command_description,
             formatter_class=argparse.RawDescriptionHelpFormatter,
             arguments=(
-                _arg("finding_id", help="Stable finding ID (e.g. fnd_dcb0fc0808d3)"),
+                _arg(
+                    "finding_id",
+                    nargs="?",
+                    help="Stable finding ID (omit with --ci)",
+                ),
                 _arg(
                     "--index",
                     default=_default_artifact_index_path(),
                     metavar="PATH",
                     help=f"Artifact index path (default: {_default_artifact_index_path()})",
+                ),
+                _arg(
+                    "--manifest",
+                    default=_DEFAULT_REGRESSION_MANIFEST,
+                    metavar="PATH",
+                    help=(
+                        "Portable CI regression manifest "
+                        f"(default: {_DEFAULT_REGRESSION_MANIFEST})"
+                    ),
                 ),
                 _arg(
                     "--allow-unsafe-artifacts",
@@ -11311,12 +12235,20 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                         "pytest regression"
                     ),
                 ),
+                _arg(
+                    "--ci",
+                    action="store_true",
+                    help=(
+                        "Read-only: verify every saved binding and regression inside the "
+                        "current workspace"
+                    ),
+                ),
             ),
         ),
         CommandSpec(
             name="explore",
             handler=_cmd_explore,
-            help="Coverage-guided state exploration (reads ordeal.toml)",
+            help="Coverage-guided or long-lived service exploration (reads ordeal.toml)",
             arguments=(
                 _arg(
                     "--config",
@@ -11324,8 +12256,21 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     default="ordeal.toml",
                     help="Config file (default: ordeal.toml)",
                 ),
+                _arg(
+                    "--runner",
+                    choices=["python", "compose"],
+                    default="python",
+                    help="Execution boundary: Python state machine or Docker Compose services",
+                ),
                 _arg("--seed", type=int, help="Override RNG seed"),
                 _arg("--max-time", type=float, help="Override max_time (seconds)"),
+                _arg(
+                    "--replay-attempts",
+                    type=int,
+                    default=None,
+                    metavar="N",
+                    help="Replay a Compose failure N times (default: [compose].replay_attempts)",
+                ),
                 _arg("--verbose", "-v", action="store_true", help="Live progress"),
                 _arg("--no-shrink", action="store_true", help="Skip shrinking"),
                 _arg("--no-seeds", action="store_true", help="Skip seed corpus replay"),
@@ -11390,6 +12335,13 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     help="Ablate faults to find necessary ones",
                 ),
                 _arg("--output", "-o", help="Save shrunk trace to this path"),
+                _arg(
+                    "--attempts",
+                    type=int,
+                    default=None,
+                    metavar="N",
+                    help="Replay a Compose trace N times (default: recorded config)",
+                ),
                 _arg("--json", action="store_true", help="Output agent-facing JSON"),
             ),
         ),
@@ -11599,26 +12551,93 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     "--check",
                     action="store_true",
                     help=(
-                        "Return exit code 1 when a perf-contract case exceeds a time"
-                        " or score-gap budget"
+                        "Return exit code 1 when a perf-contract case exceeds budget or "
+                        "when a bug-manifest outcome or certificate contract fails"
                     ),
                 ),
                 _arg(
                     "--output-json",
                     default=None,
                     metavar="PATH",
-                    help="Write perf/quality contract results as JSON to PATH",
+                    help=(
+                        "Write contract, benchmark, certificate, or evidence "
+                        "verification JSON to PATH"
+                    ),
                 ),
                 _arg(
                     "--json",
                     action="store_true",
-                    help="Print perf/quality contract results as JSON to stdout",
+                    help=(
+                        "Print contract, benchmark, certificate, or evidence "
+                        "verification JSON to stdout"
+                    ),
                 ),
                 _arg(
                     "--tier",
                     default=None,
                     choices=["pr", "nightly"],
                     help="Only run perf-contract cases matching this tier (default: all)",
+                ),
+                _arg(
+                    "--bug-manifest",
+                    default=None,
+                    metavar="PATH",
+                    help=(
+                        "Run a bug benchmark manifest that scores `ordeal scan --json` "
+                        "against curated public or private cases"
+                    ),
+                ),
+                _arg(
+                    "--verify-certificate",
+                    default=None,
+                    metavar="PATH",
+                    help=(
+                        "Verify a bug-benchmark JSON certificate, its evidence digest, "
+                        "and its declared metrics"
+                    ),
+                ),
+                _arg(
+                    "--verify-evidence",
+                    default=None,
+                    metavar="PATH",
+                    help="Verify one executable, source-backed bug evidence record",
+                ),
+                _arg(
+                    "--online-sources",
+                    action="store_true",
+                    help="Fetch and hash every pinned authoritative evidence URL",
+                ),
+                _arg(
+                    "--certificate-manifest",
+                    default=None,
+                    metavar="PATH",
+                    help=(
+                        "Manifest whose exact bytes must match the certificate's SHA-256 digest"
+                    ),
+                ),
+                _arg(
+                    "--benchmark-tier",
+                    default=None,
+                    metavar="NAME",
+                    help="Only run bug-manifest cases whose `tier` matches NAME",
+                ),
+                _arg(
+                    "--bugsinpy-root",
+                    default=None,
+                    metavar="PATH",
+                    help=(
+                        "Root of a local BugsInPy checkout; used when bug-manifest "
+                        "cases need `bugsinpy-checkout` or `bugsinpy-compile`"
+                    ),
+                ),
+                _arg(
+                    "--checkout-root",
+                    default=None,
+                    metavar="PATH",
+                    help=(
+                        "Directory where bug-manifest runs may materialize temporary "
+                        "BugsInPy checkouts"
+                    ),
                 ),
                 _arg(
                     "--mutate",
@@ -11737,6 +12756,8 @@ def _command_specs() -> tuple[CommandSpec, ...]:
             name="mutate",
             handler=_cmd_mutate,
             help="Test whether your tests catch code changes",
+            description=_mutate_command_description,
+            formatter_class=argparse.RawDescriptionHelpFormatter,
             arguments=(
                 _arg(
                     "targets",

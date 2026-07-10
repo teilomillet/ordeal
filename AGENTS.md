@@ -13,6 +13,23 @@ ordeal scan mypackage                    # assess code without writing files
 ordeal scan mypackage --save-artifacts   # save report + JSON bundle + regressions
 ```
 
+**Turn a finding into a durable regression:**
+
+```bash
+ordeal scan mypackage --save-artifacts   # discover, reproduce, minimize, save
+# fix the production code; keep the witness stable
+ordeal verify <finding-id> --allow-unsafe-artifacts  # verify the same witness
+ordeal verify --ci                       # read-only guard for every saved binding
+```
+
+Prove the generated pytest test fails before the fix and passes afterward.
+Commit `tests/test_ordeal_regressions.py` with `tests/ordeal-regressions.json`;
+the richer `.ordeal/findings/` history may stay local. A `supported` finding is
+bounded replay evidence, not a correctness certificate for the whole project.
+See `docs/concepts/durable-regressions.md` for plain language,
+`docs/guides/durable-regressions.md` for the workflow, and
+`docs/reference/durable-regression-schema.md` for the machine contract.
+
 **When you want files in the repo:**
 
 ```bash
@@ -31,10 +48,34 @@ By default, `init` writes starter tests and `ordeal.toml`, validates them, and p
 ordeal mine mymodule            # discover what functions actually do
 ordeal audit mymodule            # find gaps in existing tests
 ordeal explore                   # coverage-guided exploration (reads ordeal.toml)
+ordeal explore --runner compose  # long-lived Docker Compose services
 ordeal replay trace.json         # reproduce a specific failure
 ordeal mutate mymodule.func      # verify tests catch real code changes
 ordeal mutate mymodule --workers 4 --threshold 0.8  # parallel, CI gate
 ```
+
+**Long-lived Compose services:**
+
+```bash
+ordeal explore --runner compose -c ordeal.toml
+ordeal replay .ordeal/traces/compose-42-abc.json --attempts 10
+```
+
+- `[compose]` configures lifecycle, budgets, services, faults, and replay attempts.
+- `[[compose.requests]]` configures HTTP operations, expectations, state captures, and prerequisites.
+- `kill` and `restart` affect named Compose services; delay and corruption operate at ordeal's client response boundary.
+- Fault-window requests are recorded without validation; clean recovery requests are validated and may capture state.
+- The trace is exact, but external timing is not. Report `attempted N / reproduced M`, never deterministic replay unless evidence supports it.
+- POST and other mutating methods are not faultable by default because a fault cycle may repeat the operation.
+
+Compose documentation:
+- Start here: `docs/guides/compose-runner.md`
+- Beginner walkthrough: `docs/guides/compose-quickstart.md`
+- Exact schema: `docs/guides/compose-configuration.md`
+- Fault semantics: `docs/guides/compose-fault-model.md`
+- Trace and replay: `docs/guides/compose-traces.md`
+- CI and safety: `docs/guides/compose-operations.md`
+- Troubleshooting: `docs/guides/compose-troubleshooting.md`
 
 **Mutation testing — speed and accuracy:**
 
@@ -83,6 +124,23 @@ stubs = result.generate_test_stubs()  # test file for surviving mutants
 - `Score: X/Y (Z%)` — final score line, always printed for CI parsing.
 - `suggest: L42 test when x < 0` — actionable suggestion.
 
+**Reading test protection evidence:**
+- `ordeal mutate target` judges the selected existing tests directly.
+- `ordeal audit target` reports protection for the generated/migrated checks.
+- `WEAK` means a mutant survived, an executable line was uncovered, or a declared property was never exercised.
+- `PROTECTIVE_WITHIN_MEASURED_SCOPE` means every tested mutant died and all measured executable lines were covered. It is not a universal correctness proof.
+- `INCONCLUSIVE` means required mutation or coverage evidence was unavailable.
+- `tautological_or_weak` means a property killed none of the tested mutants; it does not prove a formal tautology.
+- 100% line coverage never overrides a surviving mutant.
+- Agent JSON exposes combined rows at `raw_details.protection_views[]`.
+
+Documentation paths:
+- Plain language: `docs/concepts/test-meaningfulness.md`
+- Practical workflow: `docs/guides/test-protection.md`
+- CI policy: `docs/guides/test-protection-ci.md`
+- FAQ: `docs/guides/test-protection-faq.md`
+- Exact schema: `docs/reference/test-protection-schema.md`
+
 **Discover everything available programmatically:**
 
 ```python
@@ -94,6 +152,15 @@ c = catalog()
 ```
 
 **Deeper understanding:** https://docs.byordeal.com/ — conceptual explanations (in highlighted blocks) before each technical section.
+
+**Scan documentation by audience:**
+- First run and plain-language statuses: `docs/guides/scan-quickstart.md`
+- Bound objects, automatic harnesses, and stateful replay: `docs/guides/scan-object-harnesses.md`
+- Blocked, noisy, slow, or non-replayable scans: `docs/guides/scan-troubleshooting.md`
+- Exact evidence/proof JSON fields: `docs/reference/scan-evidence-schema.md`
+- Promotion policy and security seams: `docs/guides/scan-finding-rules.md`
+
+When explaining `supported`, say what matched: exception type, message, and terminal source location. For bound methods, distinguish per-invocation scan reconstruction from multi-step `chaos_for` state reuse. Never call a saved bound-method regression exact unless `harness_replay_supported` is true.
 
 ---
 

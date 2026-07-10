@@ -22,6 +22,8 @@ Ordeal's design is built on a few key ideas. Each concept has its own deep-dive 
     - **Want to test your service for failures?** → [Chaos Testing](concepts/chaos-testing.md)
     - **Want to know what properties your code has?** → [Property Assertions](concepts/property-assertions.md)
     - **Want ordeal to find bugs automatically?** → [Coverage Guidance](concepts/coverage-guidance.md)
+    - **Want to know which fault behavior was really tested?** → [Reliability Coverage](concepts/reliability-coverage.md)
+    - **Want to know whether your tests would catch wrong behavior?** → [Meaningful Tests](concepts/test-meaningfulness.md)
     - **Want to understand a failure ordeal found?** → [Shrinking](concepts/shrinking.md)
     - **Want to inject specific faults?** → [Fault Injection](concepts/fault-injection.md)
 
@@ -32,6 +34,10 @@ Ordeal's design is built on a few key ideas. Each concept has its own deep-dive 
 - **[Fault Injection](concepts/fault-injection.md)** — External faults (PatchFault) and inline faults (buggify). The FoundationDB model for Python.
 
 - **[Coverage Guidance](concepts/coverage-guidance.md)** — How the Explorer uses edge hashing, checkpoints, and energy scheduling to find bugs that random testing misses.
+
+- **[Reliability Coverage](concepts/reliability-coverage.md)** — Operation × fault × property evidence. Distinguishes tested-and-passed behavior from expected behavior that never ran.
+
+- **[Meaningful Tests](concepts/test-meaningfulness.md)** — Why coverage and passing tests are not enough; mutation score, attribution, property strength, and scoped protection verdicts.
 
 - **[Shrinking](concepts/shrinking.md)** — How ordeal minimizes failures: delta debugging, step elimination, fault simplification. From a 50-step trace to 3.
 
@@ -46,9 +52,11 @@ Ordeal's design is built on a few key ideas. Each concept has its own deep-dive 
 |---|---|---|
 | ChaosTest | Stateful test with nemesis + swarm | Jepsen + Hypothesis |
 | Assertions | Temporal properties across runs | Antithesis |
+| Reliability coverage | Operation × fault × property evidence | Ordeal |
 | Faults | External fault injection via PatchFault | Chaos engineering |
 | Buggify | Inline fault gates — no-op in production | FoundationDB |
 | Explorer | Coverage-guided exploration with checkpoints | Antithesis + AFL |
 | Shrinking | Minimize failing traces to minimal reproduction | Delta debugging |
 | QuickCheck | Boundary-biased property testing | Jane Street |
+| Test protection | Coverage + mutation survival + property evidence | Meta ACH + specification mining |
 | Invariants | Composable checks: `finite & bounded(0, 1)` | — |

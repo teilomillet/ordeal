@@ -13,6 +13,8 @@ pip install ordeal
 ## Quick start
 
 ```
+ordeal scan mymodule --list-targets              # inspect callable surface and harness gaps
+ordeal scan mymodule --save-artifacts             # discover, replay, and save regressions
 ordeal mine mymodule                              # discover properties of functions
 ordeal audit mymodule                             # check test quality with mutation testing
 ordeal explore                                    # coverage-guided state space exploration
@@ -24,10 +26,12 @@ ordeal mutate mymodule --workers 4 --threshold 0.8  # parallel mutation testing 
 - Chaos testing: ChaosTest extends Hypothesis RuleBasedStateMachine with fault injection and a nemesis adversary
 - Fault injection: timeout, NaN, disk full, network errors, concurrency faults (25+ fault types across 5 modules)
 - Property assertions: always, sometimes, reachable, unreachable (Antithesis assertion model)
+- Reliability coverage: operation by fault by property PASS, NOT EXERCISED, and FAIL evidence with JSON and xdist aggregation
 - Mutation testing: 14 AST operators with presets (essential/standard/thorough), batch + parallel mode, equivalence filtering
 - Coverage-guided exploration: AFL-style edge hashing with energy scheduling and shared-memory parallel workers
 - Property mining: automatically discovers what is true about your functions (ordeal mine)
-- Module audit: measures mutation score, property coverage, test gaps (ordeal audit)
+- Module audit: combines generated-check coverage, mutation score, property strength, and exact gaps into a scoped protection verdict (ordeal audit)
+- Test protection: mutation survival overrides line coverage; 100% line coverage can still be weak
 - Auto-scan: smoke-test every public function in a module (scan_module)
 - Metamorphic testing: verify algebraic relations hold (@metamorphic decorator)
 - Differential testing: compare two implementations, find inputs where they disagree (diff)
@@ -59,8 +63,34 @@ ordeal mutate mymodule --workers 4 --threshold 0.8  # parallel mutation testing 
 - [Chaos Testing](https://docs.byordeal.com/concepts/chaos-testing/): ChaosTest, nemesis, swarm mode
 - [Fault Injection](https://docs.byordeal.com/concepts/fault-injection/): PatchFault, BUGGIFY, fault types
 - [Property Assertions](https://docs.byordeal.com/concepts/property-assertions/): always, sometimes, reachable, unreachable
+- [Durable Regressions](https://docs.byordeal.com/concepts/durable-regressions/): Plain-language discover-to-CI model
+- [Finding Evidence](https://docs.byordeal.com/guides/finding-evidence/): Bounded claims, witnesses, replay, and proof limits
+- [Scan Quickstart](https://docs.byordeal.com/guides/scan-quickstart/): Plain-language first run, statuses, artifacts, and exit codes
+- [Object Harnesses](https://docs.byordeal.com/guides/scan-object-harnesses/): Factory, setup, state, scenarios, teardown, and exact replay
+- [Scan Troubleshooting](https://docs.byordeal.com/guides/scan-troubleshooting/): Missing targets, blocked harnesses, replay gaps, and speed
+- [Scan Evidence Schema](https://docs.byordeal.com/reference/scan-evidence-schema/): Exact finding, proof, source, harness, and binding fields
+- [Durable Regression Workflow](https://docs.byordeal.com/guides/durable-regressions/): Copy-paste red-fix-green workflow
+- [Durable Regressions in CI](https://docs.byordeal.com/guides/durable-regressions-ci/): Provider-neutral guard, rollout, and exit codes
+- [Durable Regression FAQ](https://docs.byordeal.com/guides/durable-regressions-faq/): Status, hash, edit, safety, and portability questions
+- [Bug Bundle](https://docs.byordeal.com/guides/bug-bundle/): Human and machine artifacts from saved findings
+- [Durable Regression Schema](https://docs.byordeal.com/reference/durable-regression-schema/): Evidence card, binding, and manifest contract
+- [Reliability Coverage](https://docs.byordeal.com/concepts/reliability-coverage/): What operation by fault by property evidence means
+- [Reliability Coverage Guide](https://docs.byordeal.com/guides/reliability-coverage/): Add declarations and observations
+- [Reliability Coverage in CI](https://docs.byordeal.com/guides/reliability-coverage-ci/): Gating, JSON, xdist, and external platforms
 - [Coverage Guidance](https://docs.byordeal.com/concepts/coverage-guidance/): Explorer, edge hashing, energy scheduling
+- [Compose Services](https://docs.byordeal.com/guides/compose-runner/): Long-lived services, worker faults, stateful requests, repeated replay counts
+- [Compose Quickstart](https://docs.byordeal.com/guides/compose-quickstart/): Safe beginner-first service run
+- [Compose Configuration](https://docs.byordeal.com/guides/compose-configuration/): Every service and request setting
+- [Compose Stateful Workflows](https://docs.byordeal.com/guides/compose-stateful-workflows/): Captures, templates, prerequisites, and idempotency
+- [Compose Fault Model](https://docs.byordeal.com/guides/compose-fault-model/): Exact kill, restart, delay, and corruption cycles
+- [Compose Traces](https://docs.byordeal.com/guides/compose-traces/): Failure signatures and repeated replay interpretation
+- [Compose CI](https://docs.byordeal.com/guides/compose-operations/): Budgets, isolation, artifacts, and cleanup
+- [Compose Troubleshooting](https://docs.byordeal.com/guides/compose-troubleshooting/): Docker, readiness, request, state, and replay failures
 - [Mutation Testing](https://docs.byordeal.com/guides/mutations/): Test quality validation with 14 operators
+- [Are Tests Meaningful?](https://docs.byordeal.com/concepts/test-meaningfulness/): Plain-language model for coverage, mutants, properties, and verdicts
+- [Test Protection](https://docs.byordeal.com/guides/test-protection/): Practical repair workflow
+- [Test Protection in CI](https://docs.byordeal.com/guides/test-protection-ci/): Score and combined-verdict gates
+- [Test Protection Schema](https://docs.byordeal.com/reference/test-protection-schema/): Exact Python and JSON fields
 - [Auto Testing](https://docs.byordeal.com/guides/auto/): Zero-boilerplate: mine, fuzz, scan_module
 - [CLI Reference](https://docs.byordeal.com/guides/cli/): explore, replay, mine, audit, mutate
 - [API Reference](https://docs.byordeal.com/reference/api/): Complete function signatures and types

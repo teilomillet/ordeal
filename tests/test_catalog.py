@@ -29,6 +29,7 @@ class TestTopLevelCatalog:
             "metamorphic",
             "diff",
             "scaling",
+            "evidence",
             "exploration",
             "supervisor",
             "mutagen",

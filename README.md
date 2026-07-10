@@ -3,7 +3,7 @@
 [![CI](https://github.com/teilomillet/ordeal/actions/workflows/ci.yml/badge.svg)](https://github.com/teilomillet/ordeal/actions/workflows/ci.yml)
 [![Docs](https://github.com/teilomillet/ordeal/actions/workflows/docs.yml/badge.svg)](https://docs.byordeal.com/)
 [![PyPI](https://img.shields.io/pypi/v/ordeal)](https://pypi.org/project/ordeal/)
-[![Python 3.10+](https://img.shields.io/pypi/pyversions/ordeal)](https://pypi.org/project/ordeal/)
+[![Python 3.12+](https://img.shields.io/pypi/pyversions/ordeal)](https://pypi.org/project/ordeal/)
 [![License](https://img.shields.io/github/license/teilomillet/ordeal)](LICENSE)
 
 **Your tests pass. Your code still breaks.**
@@ -72,9 +72,80 @@ TestMyServiceChaos = MyServiceChaos.TestCase
 pytest --chaos                    # explore fault interleavings
 pytest --chaos --chaos-seed 42    # reproduce exactly
 ordeal explore                    # coverage-guided, reads ordeal.toml
+ordeal explore --runner compose   # long-lived Docker Compose services
 ```
 
 You declare what can go wrong (faults), what your system does (rules), and what must stay true (assertions). Ordeal explores the combinations.
+
+## Move from functions to real services
+
+Already have a Docker Compose application? Ordeal can keep the topology alive,
+send repeated HTTP requests, kill or restart workers, delay or corrupt responses,
+carry IDs and tokens between operations, and save the exact action sequence.
+
+```toml
+[compose]
+base_url = "http://127.0.0.1:8080"
+health_path = "/health"
+services = ["api", "worker"]
+
+[[compose.requests]]
+name = "list-items"
+path = "/items"
+```
+
+```bash
+ordeal explore --runner compose
+```
+
+Real service timing is not perfectly deterministic. Ordeal says so directly:
+the trace is exact, while replay is reported as `attempted N / reproduced M`.
+Start with the [plain-English overview](https://docs.byordeal.com/guides/compose-runner/),
+then use the linked quickstart, full schema, fault model, trace reference, CI guide,
+or troubleshooting page when you need more depth.
+
+## Know what reliability behavior was actually tested
+
+Line coverage can tell you that order code ran. It cannot tell you whether an
+API timeout happened while an order was created, or whether duplicate charging
+was checked afterward. Add `operation` and `fault` to existing assertions:
+
+```python
+from ordeal import always, declare
+
+declare(
+    "eventual_commit",
+    "sometimes",
+    operation="create_order",
+    fault="worker_restart",
+)
+
+always(
+    charge_count == 1,
+    "no_duplicate_charge",
+    operation="create_order",
+    fault="timeout",
+)
+```
+
+The end of `pytest --chaos` shows the evidence directly:
+
+```text
+operation × fault × property
+create_order × timeout × no_duplicate_charge     PASS
+create_order × worker_restart × eventual_commit  NOT EXERCISED
+refund × stale_response × balance_conserved      FAIL
+```
+
+`PASS` means the cell was observed and held. `NOT EXERCISED` exposes an
+expected test that never happened. `FAIL` means Ordeal observed a violation.
+The same rows are available as JSON from `report()`, including under
+pytest-xdist. Labels describe a fault your test really injected; they do not
+inject it themselves.
+
+Start with [Reliability Coverage](https://docs.byordeal.com/concepts/reliability-coverage/),
+then use the [practical guide](https://docs.byordeal.com/guides/reliability-coverage/)
+and [CI/platform guide](https://docs.byordeal.com/guides/reliability-coverage-ci/).
 
 ## Why ordeal
 
@@ -96,16 +167,52 @@ Ordeal automates this. It brings ideas from the most rigorous engineering cultur
 
 **Read the full [philosophy](https://docs.byordeal.com/philosophy) to understand why this matters.**
 
-## The ordeal standard
+## Evidence you can act on
 
-When a project uses ordeal and passes, it means something:
+`ordeal scan myapp.scoring` gives each finding a bounded evidence card:
 
-- An explorer ran thousands of operation sequences with coverage guidance
-- Faults were injected in combinations no human would write
-- Property assertions held across all runs
-- Mutations were caught
+- the exact claim justified by this finding
+- a SHA-256 binding to the inspected callable source
+- the exact input witness and its canonical hash
+- immediate replay counts, matching the same exception type, message, and source seam
+- a pending same-witness regression to run after the fix
+- explicit limits: no root-cause claim, no claim about untested behavior
 
-That's not "the tests pass." That's evidence — much stronger than green unit tests alone — that the code handles adversity.
+A `supported` finding reproduced exactly in the recorded attempts. An
+`exploratory` finding is still a lead, and an `expected` precondition is not a
+defect. None of these statuses certifies the whole project. The pass or finding
+applies only to the inputs, states, faults, properties, and runtime actually
+exercised. See [Finding Evidence](https://docs.byordeal.com/guides/finding-evidence/).
+For a jargon-free explanation of why this becomes a permanent test, read
+[Fix a Bug Once](https://docs.byordeal.com/concepts/durable-regressions/).
+
+Choose the scan documentation at your depth:
+
+| Reader | Start here |
+|---|---|
+| First-time or non-specialist | [Scan Quickstart](https://docs.byordeal.com/guides/scan-quickstart/) |
+| Testing application/stateful objects | [Object Harnesses and Stateful Replay](https://docs.byordeal.com/guides/scan-object-harnesses/) |
+| Debugging a blocked or noisy scan | [Scan Troubleshooting](https://docs.byordeal.com/guides/scan-troubleshooting/) |
+| Building tools or reviewing proof JSON | [Scan Evidence Schema](https://docs.byordeal.com/reference/scan-evidence-schema/) |
+
+The [durable regression workflow](https://docs.byordeal.com/guides/durable-regressions/)
+is one path, not a report handoff:
+
+```bash
+ordeal scan myapp.scoring --save-artifacts  # discover, replay, minimize, save
+# fix the code
+ordeal verify <finding-id> --allow-unsafe-artifacts
+ordeal verify --ci                          # provider-neutral CI guard
+```
+
+Commit `tests/test_ordeal_regressions.py` and
+`tests/ordeal-regressions.json`; the richer `.ordeal/findings/` dossier can
+remain local.
+
+Use [Durable Regressions in CI](https://docs.byordeal.com/guides/durable-regressions-ci/)
+for rollout and exit codes, the [FAQ](https://docs.byordeal.com/guides/durable-regressions-faq/)
+for common decisions, and the [schema reference](https://docs.byordeal.com/reference/durable-regression-schema/)
+for integrations and proof review.
 
 ## Install
 
@@ -305,10 +412,16 @@ from ordeal.mutations import mutate_function_and_test
 
 result = mutate_function_and_test("myapp.scoring.compute", my_tests)
 print(result.summary())
+print(result.test_protection_view())
 # Mutation score: 15/18 (83%)
 #   SURVIVED  L42:8 + -> -
 #   SURVIVED  L67:4 negate if-condition
 ```
+
+`test_protection_view()` combines the score, survivors, kill attribution, and
+property strength into a scoped `weak`, `inconclusive`, or
+`protective_within_measured_scope` verdict. It never treats line coverage alone
+as proof that assertions are meaningful.
 
 ### Fault library
 
@@ -366,17 +479,22 @@ ordeal audit myapp.scoring --validation-mode deep
 
 ```
 myapp.scoring
-  current:   33 tests |   343 lines | 98% coverage [verified]
-  migrated:  12 tests |   130 lines | 96% coverage [verified]
-  saving:   64% fewer tests | 62% less code | same coverage
+  current suite:         33 tests | 343 lines | 98% coverage [verified]
+  generated incremental: 12 tests | 130 lines | 100% coverage [verified]
   mined:    compute: output in [0, 1] (500/500, >=99% CI)
   mutation: 14/18 (78%)
+  protection: WEAK: 100% line coverage but 4/18 mutation(s) survived
   suggest:
     - L42 in compute(): test when x < 0
     - L67 in normalize(): test that ValueError is raised
 ```
 
-Every number is either `[verified]` (measured and cross-checked) or `FAILED: reason` — the audit never silently returns 0%. When `pytest-cov` is available, ordeal uses its JSON report; otherwise it falls back to an internal tracer. Mined properties include Wilson confidence intervals. `--validation-mode fast` replays mined inputs against mutants for speed; `--validation-mode deep` keeps that replay check and then re-mines each mutant for broader search. When there are coverage gaps, it reads the source and tells you exactly what to test. Use `--show-generated` to inspect the test file, `--save-generated` to keep it. For agent workflows, `ordeal benchmark --perf-contract ... --output-json PATH` writes a stable JSON artifact instead of only text output.
+Every number is either `[verified]` (measured and cross-checked) or `FAILED: reason` — the audit never silently returns 0%. The protection line is mutation-first: a surviving mutant keeps the verdict weak even at 100% line coverage. The verdict applies to the generated/migrated checks; use `ordeal mutate` to measure the selected existing pytest tests directly.
+
+Read [Are your tests meaningful?](https://docs.byordeal.com/concepts/test-meaningfulness/)
+for the plain-language model, then use the
+[Test Protection Guide](https://docs.byordeal.com/guides/test-protection/) or
+[CI Guide](https://docs.byordeal.com/guides/test-protection-ci/) for the full workflow.
 
 ## CLI
 
@@ -386,6 +504,7 @@ ordeal explore                          # run from ordeal.toml
 ordeal explore -w 8                     # parallel with 8 workers
 ordeal explore -c ci.toml -v            # custom config, verbose
 ordeal explore --max-time 300 --seed 99 # override settings
+ordeal explore --runner compose        # persistent services + real worker faults
 ordeal replay trace.json                # reproduce a failure
 ordeal replay --shrink trace.json       # minimize a failure trace
 ordeal explore --generate-tests tests/test_gen.py  # turn traces into pytest tests
@@ -397,11 +516,13 @@ Every goal maps to a starting point — a command to run, a module to import, an
 
 | I want to... | Start here | In the codebase | Docs |
 |---|---|---|---|
-| Find bugs without writing tests | `ordeal mine mymodule` | `ordeal/auto.py` | [Auto Testing](https://docs.byordeal.com/guides/auto) |
-| Check if my tests are good enough | `ordeal audit mymodule` | `ordeal/mutations.py` | [Mutations](https://docs.byordeal.com/guides/mutations) |
+| Find bugs without writing tests | `ordeal scan mymodule` | `ordeal/auto.py` | [Scan Quickstart](https://docs.byordeal.com/guides/scan-quickstart/) |
+| Turn a failure into a CI-guarded regression | `ordeal scan mymodule --save-artifacts` | `ordeal/finding_evidence.py` | [Durable Regression Workflow](https://docs.byordeal.com/guides/durable-regressions/) |
+| Prove whether my tests protect behavior | `ordeal audit mymodule` | `ordeal/audit.py` | [Test Protection](https://docs.byordeal.com/guides/test-protection/) |
 | Write a chaos test | `from ordeal import ChaosTest` | `ordeal/chaos.py` | [Getting Started](https://docs.byordeal.com/getting-started) |
 | Inject specific failures (timeout, NaN, ...) | `from ordeal.faults import timing` | `ordeal/faults/` directory | [Fault Injection](https://docs.byordeal.com/concepts/fault-injection) |
 | Explore all failure combinations | `ordeal explore` | `ordeal/explore.py` | [Explorer](https://docs.byordeal.com/guides/explorer) |
+| Explore long-lived services | `ordeal explore --runner compose` | `ordeal/compose.py` | [Compose Services](https://docs.byordeal.com/guides/compose-runner) |
 | Reproduce and shrink a failure | `ordeal replay trace.json` | `ordeal/trace.py` | [Shrinking](https://docs.byordeal.com/concepts/shrinking) |
 | Add fail-safe gates to production code | `from ordeal.buggify import buggify` | `ordeal/buggify.py` | [Fault Injection](https://docs.byordeal.com/concepts/fault-injection) |
 | Make assertions across all runs | `from ordeal import always, sometimes` | `ordeal/assertions.py` | [Assertions](https://docs.byordeal.com/concepts/property-assertions) |
@@ -432,7 +553,10 @@ ordeal/
 ├── invariants.py      Composable checks — no_nan & bounded(0, 1), works with numpy
 ├── mutations.py       AST mutation testing — 14 operators, count-and-apply pattern
 ├── auto.py            Auto-testing — scan_module, fuzz, mine, diff, chaos_for
+├── finding_evidence.py Bounded claims, witness hashes, replay and fix controls
+├── regression_evidence.py AST bindings for generated witness regressions
 ├── trace.py           Trace recording, JSON serialization, replay, delta-debugging shrink
+├── compose.py         Long-lived Compose services, faults, state, exact trace and replay counts
 ├── config.py          ordeal.toml loader — strict validation
 ├── cli.py             CLI entry point — explore, replay, mine, audit
 ├── plugin.py          Pytest plugin — --chaos, --chaos-seed, --buggify-prob

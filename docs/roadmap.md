@@ -57,10 +57,12 @@ description: >-
 
 ## P2: After that
 
-### 5. Long-lived worker harness
+### 5. Long-lived worker harness — shipped
 
 - Outcome: test persistent model workers, not only one-shot subprocess calls.
-- Modules: `ordeal/supervisor.py`, `ordeal/faults/io.py`, `ordeal/integrations/http.py`.
+- Modules: `ordeal/compose.py`, `ordeal/config.py`, `ordeal/cli.py`.
+- Shipped as `ordeal explore --runner compose`, with exact traces and repeated
+  `attempted N / reproduced M` replay reporting.
 - Ship when:
   - Ordeal can start a child once, send multiple requests, inject failures between requests, and restart on crash
   - traces preserve session state clearly enough to debug

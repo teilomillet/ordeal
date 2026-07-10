@@ -20,20 +20,26 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.14"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.28"
 
-      - run: uv python install 3.13
+      - run: uv python install 3.14
 
       - run: uv lock --check
 
       - run: uv sync --locked --extra docs
 
+      - run: uv run python -c "import os, platform; assert platform.python_version().startswith(os.environ['UV_PYTHON'] + '.')"
+
       - run: uv run mkdocs build --strict
 
-      - uses: actions/upload-pages-artifact@v4
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: site
 

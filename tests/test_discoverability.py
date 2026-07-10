@@ -62,12 +62,20 @@ _TOP_LEVEL_IMPORTS = [
     "NoTestsFoundError",
     "generate_starter_tests",
     "init_project",
+    # Source-backed evidence
+    "verify_bug_evidence",
+    "BugEvidenceVerification",
     # Exploration — the core value prop
     "explore",
     "ExplorationState",
     "Explorer",
     "ExplorationResult",
     "CoverageCollector",
+    "ComposeRunner",
+    "ComposeTrace",
+    "ComposeReplayReport",
+    "run_compose_exploration",
+    "replay_compose_trace",
     # Supervisor
     "DeterministicSupervisor",
     "StateTree",
@@ -169,6 +177,7 @@ _EXPECTED_CATALOG_SECTIONS = [
     "metamorphic",
     "diff",
     "scaling",
+    "evidence",
     "exploration",
     "supervisor",
     "mutagen",
@@ -233,7 +242,10 @@ def test_benchmark_help_exposes_output_json():
         check=True,
     )
     assert "--output-json PATH" in proc.stdout
-    assert "perf/quality contract results as JSON" in proc.stdout
+    assert "certificate, or evidence" in proc.stdout
+    assert "verification JSON" in proc.stdout
+    assert "--verify-evidence PATH" in proc.stdout
+    assert "--online-sources" in proc.stdout
 
 
 # ============================================================================

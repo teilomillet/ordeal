@@ -52,25 +52,40 @@ If your project has a file like `myapp/scoring.py`, the module path is `myapp.sc
 
 ```bash
 uvx ordeal scan myapp.scoring --save-artifacts  # find a bug, save report + regressions
-uvx ordeal verify fnd_123456789abc              # re-run one saved finding later
+uvx ordeal verify fnd_123456789abc --allow-unsafe-artifacts  # verify after a fix
 uvx ordeal init myapp                           # bootstrap starter tests for an existing package
 uvx ordeal mine myapp.scoring       # what do my functions actually do?
 uvx ordeal audit myapp.scoring      # what are my tests missing?
 ```
 
+New to scan? Start with the [Scan Quickstart](guides/scan-quickstart.md). If the
+target is an instance method, continue with
+[Object Harnesses and Stateful Replay](guides/scan-object-harnesses.md). The
+[Scan Evidence Schema](reference/scan-evidence-schema.md) is the exact reference
+for agents, integrations, and proof review.
+
+Want each failure to become a permanent test? Start with the plain-language
+[Fix a Bug Once](concepts/durable-regressions.md), then follow the
+[Durable Regression Workflow](guides/durable-regressions.md).
+
 `audit` goes further — it generates tests for you, measures coverage, and mutation-tests the result:
 
 ```
 myapp.scoring
-  migrated:  12 tests |   130 lines | 96% coverage [verified]
+  generated incremental: 12 tests | 130 lines | 100% coverage [verified]
   mutation: 14/18 (78%)                   ← ordeal flipped operators in your code;
                                              4 changes went undetected by your tests
+  protection: WEAK: 100% line coverage but 4/18 mutation(s) survived
   suggest:
     - L42 in compute(): test when x < 0
     - L67 in normalize(): test that ValueError is raised
 ```
 
-Those `suggest` lines are real. Line 42 of `compute()` behaves differently with negative inputs, and your tests never check that.
+Those `suggest` lines are real. Line 42 of `compute()` behaves differently with
+negative inputs, and your tests never check that. The protection verdict refuses
+to confuse “every line ran” with “the tests noticed wrong behavior.” Start with
+[Are your tests meaningful?](concepts/test-meaningfulness.md) for the plain-language
+explanation or go directly to the [Test Protection Guide](guides/test-protection.md).
 
 ## Let your AI assistant do it
 
@@ -100,18 +115,25 @@ Every goal maps to a starting point — a command to run, a module to import, an
 
 | I want to... | Start here | Learn more |
 |---|---|---|
-| Capture a bug and lock it in | `ordeal scan mymodule --save-artifacts` | [Bug Bundle](guides/bug-bundle.md) |
+| Understand why a failure should become a permanent test | Read the six-stage loop | [Fix a Bug Once](concepts/durable-regressions.md) |
+| Capture a bug and lock it in | `ordeal scan mymodule --save-artifacts` | [Durable Regression Workflow](guides/durable-regressions.md) |
+| Guard every saved regression in CI | `ordeal verify --ci` | [Durable Regressions in CI](guides/durable-regressions-ci.md) |
+| Run scan for the first time | `ordeal scan mymodule --list-targets` | [Scan Quickstart](guides/scan-quickstart.md) |
+| Scan a class or stateful object | Add/review `[[objects]]` | [Object Harnesses](guides/scan-object-harnesses.md) |
 | Understand why `scan` promoted or demoted a crash | Read the scan finding rules | [Scan Finding Rules](guides/scan-finding-rules.md) |
-| Re-run one saved finding | `ordeal verify fnd_123456789abc` | [Bug Bundle](guides/bug-bundle.md) |
+| Diagnose a blocked or slow scan | Inspect targets and evidence | [Scan Troubleshooting](guides/scan-troubleshooting.md) |
+| Re-run one saved finding | `ordeal verify fnd_123456789abc --allow-unsafe-artifacts` | [Durable Regression Workflow](guides/durable-regressions.md) |
 | Bootstrap tests for an existing package | `ordeal init mymodule` | [CLI](guides/cli.md) |
 | Find bugs without writing tests | `ordeal mine mymodule` | [Auto Testing](guides/auto.md) |
-| Check if my tests are good enough | `ordeal audit mymodule` | [Mutations](guides/mutations.md) |
+| Prove whether tests protect behavior | `ordeal audit mymodule` | [Test Protection](guides/test-protection.md) |
 | Write a chaos test | `from ordeal import ChaosTest` | [Getting Started](getting-started.md) |
 | Inject specific failures (timeout, NaN, ...) | `from ordeal.faults import timing` | [Fault Injection](concepts/fault-injection.md) |
 | Explore all failure combinations | `ordeal explore` | [Explorer](guides/explorer.md) |
+| Explore long-lived services | `ordeal explore --runner compose` | [Compose Services](guides/compose-runner.md) |
 | Reproduce and shrink a failure | `ordeal replay trace.json` | [Shrinking](concepts/shrinking.md) |
 | Add fail-safe gates to production code | `from ordeal.buggify import buggify` | [Fault Injection](concepts/fault-injection.md) |
 | Make assertions across all runs | `from ordeal import always, sometimes` | [Assertions](concepts/property-assertions.md) |
+| See behavior tested under each fault | `always(..., operation=..., fault=...)` | [Reliability Coverage](concepts/reliability-coverage.md) |
 | Control time / filesystem in tests | `from ordeal.simulate import Clock` | [Simulation](guides/simulate.md) |
 | Compare two implementations | `ordeal mine-pair mod.fn1 mod.fn2` | [Auto Testing](guides/auto.md) |
 | Test API endpoints for faults | `from ordeal.integrations.openapi import chaos_api_test` | [Integrations](guides/integrations.md) |
@@ -128,8 +150,9 @@ Every goal maps to a starting point — a command to run, a module to import, an
     - **"I have code and want to find bugs"** → Run `ordeal mine mymodule` — see [Auto Testing](guides/auto.md)
     - **"I want to write chaos tests for my service"** → Start with [Getting Started](getting-started.md), then [Writing Tests](guides/writing-tests.md)
     - **"I want to understand the ideas behind ordeal"** → Read [Philosophy](philosophy.md), then the [Concepts](core-concepts.md)
-    - **"I need to check if my tests are any good"** → Run `ordeal audit` — see [Mutations](guides/mutations.md)
+    - **"I need to check if my tests are any good"** → Run `ordeal audit` — see [Test Protection](guides/test-protection.md)
     - **"I want to run ordeal in CI"** → See the [Explorer guide](guides/explorer.md) and [Configuration](guides/configuration.md)
+    - **"I found a failure and never want it back"** → Follow the [Durable Regression Workflow](guides/durable-regressions.md)
     - **"I want to explore the source code"** → See the [Architecture section in the README](https://github.com/teilomillet/ordeal#architecture--code-map) for a full code map
 
 ## Start here
@@ -158,6 +181,18 @@ Every goal maps to a starting point — a command to run, a module to import, an
 
     How the explorer finds bugs: edge hashing, checkpoints, energy scheduling.
 
+-   **[Meaningful Tests](concepts/test-meaningfulness.md)**
+
+    Why passing and coverage are not enough, explained without testing jargon.
+
+-   **[Durable Regressions](concepts/durable-regressions.md)**
+
+    Why a report is temporary but a bound regression can protect every future change.
+
+-   **[Reliability Coverage](concepts/reliability-coverage.md)**
+
+    See which operation, fault, and property combinations passed, failed, or never ran.
+
 -   **[Property Assertions](concepts/property-assertions.md)**
 
     always, sometimes, reachable, unreachable — the Antithesis assertion model.
@@ -177,10 +212,21 @@ Every goal maps to a starting point — a command to run, a module to import, an
 <div class="grid cards" markdown>
 
 -   **[Explorer](guides/explorer.md)** — Run and configure coverage-guided exploration
+-   **[Scan Quickstart](guides/scan-quickstart.md)** — First run, statuses, artifacts, and exit codes in plain language
+-   **[Object Harnesses](guides/scan-object-harnesses.md)** — Factories, state, lifecycle hooks, and exact bound-method replay
+-   **[Finding Evidence](guides/finding-evidence.md)** — Read bounded claims, witnesses, replay, and proof limits
+-   **[Scan Troubleshooting](guides/scan-troubleshooting.md)** — Diagnose missing targets, blocked harnesses, noise, and speed
+-   **[Compose Services](guides/compose-runner.md)** — Start with a plain-English map, then go as deep as configuration, fault semantics, traces, CI, and troubleshooting
 -   **[Writing Tests](guides/writing-tests.md)** — Patterns for effective chaos tests
+-   **[Durable Regression Workflow](guides/durable-regressions.md)** — Discover, reproduce, minimize, save, fix, verify, and guard one failure
+-   **[Durable Regressions in CI](guides/durable-regressions-ci.md)** — Run the provider-neutral, read-only repository guard
+-   **[Durable Regression FAQ](guides/durable-regressions-faq.md)** — Interpret statuses, hashes, edits, portability, and failure modes
+-   **[Reliability Coverage](guides/reliability-coverage.md)** — Add operation × fault × property evidence
+-   **[Reliability Coverage in CI](guides/reliability-coverage-ci.md)** — Gate and export the matrix
 -   **[Auto Testing](guides/auto.md)** — Zero-boilerplate: scan_module, fuzz, mine, diff, chaos_for
 -   **[Simulation](guides/simulate.md)** — Deterministic Clock and FileSystem
 -   **[Mutations](guides/mutations.md)** — Validate that your tests catch real bugs
+-   **[Test Protection](guides/test-protection.md)** — Combine mutations, properties, attribution, and coverage into a scoped verdict
 -   **[Integrations](guides/integrations.md)** — Atheris fuzzing, built-in API chaos testing
 
 </div>
@@ -189,10 +235,12 @@ Every goal maps to a starting point — a command to run, a module to import, an
 
 <div class="grid cards" markdown>
 
--   **[CLI](guides/cli.md)** — ordeal explore, ordeal replay, pytest --chaos
 -   **[CLI](guides/cli.md)** — ordeal scan, verify, init, explore, replay
 -   **[Configuration](guides/configuration.md)** — ordeal.toml schema and tuning
 -   **[API Reference](reference/api.md)** — Every function, every parameter, every type
+-   **[Durable Regression Schema](reference/durable-regression-schema.md)** — Evidence cards, bindings, manifests, states, and exit codes
+-   **[Scan Evidence Schema](reference/scan-evidence-schema.md)** — Finding, source, replay, proof, and harness fields
+-   **[Test Protection Schema](reference/test-protection-schema.md)** — Exact Python and JSON fields for automation
 -   **[Troubleshooting](troubleshooting.md)** — Common issues and how to fix them
 
 </div>

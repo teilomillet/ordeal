@@ -6,7 +6,7 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -15,50 +15,49 @@ concurrency:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.14"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.28"
 
-      - run: uv python install 3.13
+      - run: uv python install 3.14
 
       - run: uv lock --check
 
       - run: uv sync --locked --extra dev
 
+      - run: uv run python -c "import os, platform; assert platform.python_version().startswith(os.environ['UV_PYTHON'] + '.')"
+
       - name: Ruff check
-        run: uv run ruff check --fix .
+        run: uv run ruff check .
 
-      - name: Ruff format
-        run: uv run ruff format .
-
-      - name: Commit lint and format fixes
-        if: github.event_name == 'push'
-        run: |
-          git diff --quiet && exit 0
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "style: auto-fix lint and format with ruff"
-          git pull --rebase origin main || true
-          git push || true
+      - name: Ruff format check
+        run: uv run ruff format --check .
 
   test:
     runs-on: ${{ matrix.os }}
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.12", "3.13", "3.14"]
         include:
           - os: macos-latest
-            python-version: "3.13"
+            python-version: "3.14"
           - os: windows-latest
-            python-version: "3.13"
+            python-version: "3.14"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.28"
 
       - run: uv python install ${{ matrix.python-version }}
 
@@ -66,21 +65,29 @@ jobs:
 
       - run: uv sync --locked --extra dev
 
+      - run: uv run python -c "import os, platform; assert platform.python_version().startswith(os.environ['UV_PYTHON'] + '.')"
+
       - name: Run tests
         run: uv run pytest --tb=short -q
 
   perf-contract-pr:
     runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.12"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.28"
 
       - run: uv python install 3.12
 
       - run: uv lock --check
 
       - run: uv sync --locked --extra dev
+
+      - run: uv run python -c "import os, platform; assert platform.python_version().startswith(os.environ['UV_PYTHON'] + '.')"
 
       - name: Run lean perf gate
         id: perf
@@ -110,16 +117,126 @@ jobs:
         if: steps.perf.outputs.status != '0'
         run: exit 1
 
+  bug-evidence-httpie:
+    runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.12"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.28"
+
+      - run: uv python install 3.12
+
+      - run: uv lock --check
+
+      - run: uv sync --locked --extra dev
+
+      - run: uv run python -c "import os, platform; assert platform.python_version().startswith(os.environ['UV_PYTHON'] + '.')"
+
+      - name: Verify HTTPie bug 3 evidence
+        run: |
+          mkdir -p .artifacts
+          uv run ordeal benchmark \
+            --verify-evidence benchmarks/evidence/httpie-3.toml \
+            --online-sources \
+            --output-json .artifacts/httpie-3-evidence.json
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: httpie-3-evidence
+          path: .artifacts/httpie-3-evidence.json
+          retention-days: 14
+
+  bug-evidence-pysnooper:
+    runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.12"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.28"
+
+      - run: uv python install 3.12
+
+      - run: uv lock --check
+
+      - run: uv sync --locked --extra dev
+
+      - run: uv run python -c "import os, platform; assert platform.python_version().startswith(os.environ['UV_PYTHON'] + '.')"
+
+      - name: Verify PySnooper bug 3 evidence
+        run: |
+          mkdir -p .artifacts
+          uv run ordeal benchmark \
+            --verify-evidence benchmarks/evidence/pysnooper-3.toml \
+            --online-sources \
+            --output-json .artifacts/pysnooper-3-evidence.json
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: pysnooper-3-evidence
+          path: .artifacts/pysnooper-3-evidence.json
+          retention-days: 14
+
+  bug-evidence-tornado:
+    runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.12"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.28"
+
+      - run: uv python install 3.12
+
+      - run: uv lock --check
+
+      - run: uv sync --locked --extra dev
+
+      - run: uv run python -c "import os, platform; assert platform.python_version().startswith(os.environ['UV_PYTHON'] + '.')"
+
+      - name: Verify Tornado bug 14 evidence
+        run: |
+          mkdir -p .artifacts
+          uv run ordeal benchmark \
+            --verify-evidence benchmarks/evidence/tornado-14.toml \
+            --online-sources \
+            --output-json .artifacts/tornado-14-evidence.json
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: tornado-14-evidence
+          path: .artifacts/tornado-14-evidence.json
+          retention-days: 14
+
   bump-and-publish:
     if: github.event_name == 'push'
-    needs: [lint, test, perf-contract-pr]
+    needs:
+      - lint
+      - test
+      - perf-contract-pr
+      - bug-evidence-httpie
+      - bug-evidence-pysnooper
+      - bug-evidence-tornado
     runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.12"
     environment: pypi
     permissions:
       contents: write
       id-token: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -128,6 +245,12 @@ jobs:
           python-version: "3.12"
 
       - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.28"
+
+      - run: uv python install 3.12
+
+      - run: uv run python -c "import os, platform; assert platform.python_version().startswith(os.environ['UV_PYTHON'] + '.')"
 
       - name: Bump patch version
         run: |

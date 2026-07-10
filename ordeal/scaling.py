@@ -332,6 +332,7 @@ class PerfContractSpec:
     test_dir: str = "tests"
     max_examples: int = 20
     max_score_gap: float | None = None
+    min_score: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-friendly view of the contract case specification."""
@@ -353,6 +354,7 @@ class PerfContractSpec:
             "test_dir": self.test_dir,
             "max_examples": self.max_examples,
             "max_score_gap": self.max_score_gap,
+            "min_score": self.min_score,
         }
 
 
@@ -381,6 +383,13 @@ class PerfContractCase:
         return float(gap) if gap is not None else None
 
     @property
+    def observed_score(self) -> float | None:
+        """Return the quality score governed by ``min_score``."""
+        key = "primary_score" if self.spec.kind == "audit_compare" else "score"
+        score = self.details.get(key)
+        return float(score) if score is not None else None
+
+    @property
     def passed(self) -> bool:
         """Whether the observed median stayed within the configured budget."""
         if self.max_seconds is not None and self.median_seconds > self.max_seconds:
@@ -388,6 +397,10 @@ class PerfContractCase:
         if self.spec.max_score_gap is not None:
             gap = self.score_gap
             if gap is None or gap > self.spec.max_score_gap:
+                return False
+        if self.spec.min_score is not None:
+            score = self.observed_score
+            if score is None or score < self.spec.min_score:
                 return False
         return True
 
@@ -417,6 +430,8 @@ class PerfContractCase:
             score = self.details.get("score")
             if score is not None:
                 extras.append(f"score={float(score):.0%}")
+        if self.spec.min_score is not None:
+            extras.append(f"score_floor={self.spec.min_score:.0%}")
         extra_text = f" ({', '.join(extras)})" if extras else ""
         return (
             f"{status} {self.spec.name}: median={self.median_seconds:.3f}s "
@@ -433,6 +448,7 @@ class PerfContractCase:
             "median_seconds": self.median_seconds,
             "budget_seconds": self.max_seconds,
             "score_gap": self.score_gap,
+            "observed_score": self.observed_score,
             "details": dict(self.details),
             "spec": self.spec.to_dict(),
             "summary": self.summary(),
@@ -765,52 +781,56 @@ def _run_audit_differential_trial(
     python_executable: str,
     cwd: str,
 ) -> dict[str, Any]:
-    """Run one fresh-process fast-vs-deep audit comparison."""
-    _clear_audit_artifacts(module, cwd)
-    script = textwrap.dedent(
-        f"""
+    """Run an audit comparison with one fresh process per validation mode."""
+
+    def run_mode(mode: str) -> dict[str, Any]:
+        _clear_audit_artifacts(module, cwd)
+        script = textwrap.dedent(
+            f"""
         import json
         import time
 
         from ordeal.audit import audit
 
         started = time.perf_counter()
-        primary = audit(
+        result = audit(
             {module!r},
             test_dir={test_dir!r},
             max_examples={max_examples},
             workers={workers},
-            validation_mode={validation_mode!r},
-        )
-        middle = time.perf_counter()
-        reference = audit(
-            {module!r},
-            test_dir={test_dir!r},
-            max_examples={max_examples},
-            workers={workers},
-            validation_mode={compare_validation_mode!r},
+            validation_mode={mode!r},
         )
         ended = time.perf_counter()
         payload = {{
             "seconds": ended - started,
-            "primary_seconds": middle - started,
-            "reference_seconds": ended - middle,
-            "primary_score": primary.mutation_score_fraction,
-            "reference_score": reference.mutation_score_fraction,
-            "primary_mutation_score": primary.mutation_score,
-            "reference_mutation_score": reference.mutation_score,
+            "score": result.mutation_score_fraction,
+            "mutation_score": result.mutation_score,
         }}
         print({_AUDIT_DIFF_MARKER!r} + json.dumps(payload, sort_keys=True))
         """
-    )
-    proc = subprocess.run(
-        [python_executable, "-c", script],
-        cwd=cwd,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    return _parse_benchmark_payload(proc.stdout, _AUDIT_DIFF_MARKER)
+        )
+        proc = subprocess.run(
+            [python_executable, "-c", script],
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        return _parse_benchmark_payload(proc.stdout, _AUDIT_DIFF_MARKER)
+
+    primary = run_mode(validation_mode)
+    reference = run_mode(compare_validation_mode)
+    primary_seconds = float(primary["seconds"])
+    reference_seconds = float(reference["seconds"])
+    return {
+        "seconds": primary_seconds + reference_seconds,
+        "primary_seconds": primary_seconds,
+        "reference_seconds": reference_seconds,
+        "primary_score": primary.get("score"),
+        "reference_score": reference.get("score"),
+        "primary_mutation_score": primary.get("mutation_score", ""),
+        "reference_mutation_score": reference.get("mutation_score", ""),
+    }
 
 
 def _parse_perf_contract(path: str) -> list[PerfContractSpec]:
@@ -868,6 +888,9 @@ def _parse_perf_contract(path: str) -> list[PerfContractSpec]:
                 if raw_case.get("max_score_gap") is not None
                 else None
             ),
+            min_score=(
+                float(raw_case["min_score"]) if raw_case.get("min_score") is not None else None
+            ),
         )
 
         if spec.repeats <= 0:
@@ -876,6 +899,10 @@ def _parse_perf_contract(path: str) -> list[PerfContractSpec]:
             raise ValueError(f"Case {name!r} must have max_seconds > 0")
         if spec.max_score_gap is not None and not (0 <= spec.max_score_gap <= 1):
             raise ValueError(f"Case {name!r} must have max_score_gap between 0 and 1")
+        if spec.min_score is not None and not (0 <= spec.min_score <= 1):
+            raise ValueError(f"Case {name!r} must have min_score between 0 and 1")
+        if spec.min_score is not None and spec.kind not in {"audit_compare", "mutate"}:
+            raise ValueError(f"Case {name!r} can only set min_score for audit_compare or mutate")
         if spec.validation_mode not in {"fast", "deep"}:
             raise ValueError(
                 f"Case {name!r} has unsupported validation_mode {spec.validation_mode!r}"

@@ -282,6 +282,17 @@ class TestMutationBenchmark:
 
 
 class TestPerfContract:
+    def test_checked_in_quality_floors_match_cross_version_evidence(self):
+        specs = {spec.name: spec for spec in scaling._parse_perf_contract("ordeal.perf.toml")}
+
+        assert specs["audit_demo_fast_vs_deep"].min_score == pytest.approx(0.80)
+        assert specs["audit_suggest_fast_vs_deep"].min_score == pytest.approx(0.90)
+        assert specs["mutate_tiny_add"].min_score == pytest.approx(0.90)
+
+        quickcheck = specs["audit_quickcheck_fast_vs_deep"]
+        assert quickcheck.min_score is None
+        assert quickcheck.max_score_gap == pytest.approx(0.10)
+
     def test_parse_perf_contract(self, tmp_path: Path):
         contract = tmp_path / "perf.toml"
         contract.write_text(
@@ -316,6 +327,7 @@ target = "pkg.mod.compute"
 repeats = 3
 workers = 2
 max_seconds = 0.25
+min_score = 0.80
 """
         )
 
@@ -334,6 +346,7 @@ max_seconds = 0.25
         assert specs[2].max_score_gap == pytest.approx(0.10)
         assert specs[3].target == "pkg.mod.compute"
         assert specs[3].workers == 2
+        assert specs[3].min_score == pytest.approx(0.80)
 
     def test_benchmark_perf_contract_aggregates_cases(self, monkeypatch, tmp_path: Path):
         contract = tmp_path / "perf.toml"
@@ -508,6 +521,46 @@ max_score_gap = 0.10
         assert "gap=15%" in case.summary()
         assert "gap_budget=5%" in case.summary()
 
+    @pytest.mark.parametrize(
+        ("kind", "details"),
+        [
+            ("mutate", {"score": 0.74}),
+            ("audit_compare", {"primary_score": 0.74, "reference_score": 0.75}),
+        ],
+    )
+    def test_perf_contract_fails_below_absolute_score_floor(self, kind, details):
+        case = scaling.PerfContractCase(
+            spec=scaling.PerfContractSpec(
+                name="quality_floor",
+                kind=kind,
+                target="pkg.mod.run" if kind == "mutate" else None,
+                module="pkg.mod" if kind == "audit_compare" else None,
+                compare_validation_mode="deep" if kind == "audit_compare" else None,
+                min_score=0.80,
+            ),
+            seconds=[0.1],
+            details=details,
+        )
+
+        assert case.passed is False
+        assert case.observed_score == pytest.approx(0.74)
+        assert "score_floor=80%" in case.summary()
+
+    def test_parse_perf_contract_rejects_score_floor_on_import(self, tmp_path: Path):
+        contract = tmp_path / "perf.toml"
+        contract.write_text(
+            """
+[[cases]]
+name = "invalid_floor"
+kind = "import"
+module = "ordeal.cli"
+min_score = 0.5
+"""
+        )
+
+        with pytest.raises(ValueError, match="only set min_score"):
+            scaling._parse_perf_contract(str(contract))
+
     def test_parse_perf_contract_tier_field(self, tmp_path: Path):
         contract = tmp_path / "perf.toml"
         contract.write_text(
@@ -561,6 +614,45 @@ max_score_gap = 0.10
         suite = scaling.benchmark_perf_contract(str(contract), tier="pr")
         assert len(suite.cases) == 1
         assert suite.cases[0].spec.name == "pr_import"
+
+    def test_audit_differential_isolates_validation_modes(self, monkeypatch, tmp_path: Path):
+        calls: list[str] = []
+
+        def fake_run(command, **kwargs):
+            script = command[-1]
+            mode = "deep" if "validation_mode='deep'" in script else "fast"
+            calls.append(mode)
+            score = 0.82 if mode == "deep" else 0.80
+            return SimpleNamespace(
+                stdout=(
+                    scaling._AUDIT_DIFF_MARKER
+                    + json.dumps(
+                        {
+                            "seconds": 0.4 if mode == "deep" else 0.2,
+                            "score": score,
+                            "mutation_score": f"{int(score * 100)}/100 ({score:.0%})",
+                        }
+                    )
+                )
+            )
+
+        monkeypatch.setattr(scaling.subprocess, "run", fake_run)
+
+        payload = scaling._run_audit_differential_trial(
+            "pkg.mod",
+            test_dir="tests",
+            max_examples=10,
+            workers=1,
+            validation_mode="fast",
+            compare_validation_mode="deep",
+            python_executable="python",
+            cwd=str(tmp_path),
+        )
+
+        assert calls == ["fast", "deep"]
+        assert payload["seconds"] == pytest.approx(0.6)
+        assert payload["primary_score"] == pytest.approx(0.80)
+        assert payload["reference_score"] == pytest.approx(0.82)
 
     def test_suite_to_json(self):
         import json

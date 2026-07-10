@@ -1,8 +1,8 @@
 ---
 description: >-
-  Configure ordeal with ordeal.toml: explorer settings, test classes,
-  report format, scan targets, mutation presets. Full schema reference
-  with examples.
+  Configure ordeal with ordeal.toml: explorer and Compose service settings,
+  test classes, report format, scan targets, mutation presets. Full schema
+  reference with examples.
 ---
 
 # Configuration
@@ -23,7 +23,7 @@ One file, checked into your repo, that anyone (or anything) can read and modify.
 ## Schema
 
 !!! quote "Think of it this way"
-    The config file now covers the main CLI workflows too. `[explorer]` and `[[tests]]` drive stateful exploration, `[report]` controls output, `[fixtures]`, `[[scan]]`, `[[objects]]`, and `[[contracts]]` tune exploratory module scans, `[audit]` sets test-quality defaults, and `[init]` sets bootstrap defaults for starter tests and gap-closing passes.
+    The config file now covers the main CLI workflows too. `[explorer]` and `[[tests]]` drive stateful exploration, `[compose]` drives long-lived service exploration, `[report]` controls output, `[fixtures]`, `[[scan]]`, `[[objects]]`, and `[[contracts]]` tune exploratory module scans, `[audit]` sets test-quality defaults, and `[init]` sets bootstrap defaults for starter tests and gap-closing passes.
 
 ### `[explorer]`
 
@@ -60,6 +60,15 @@ One file, checked into your repo, that anyone (or anything) can read and modify.
 | `traces_dir` | `str` | `".ordeal/traces"` | Trace output directory |
 | `verbose` | `bool` | `false` | Live progress to stderr |
 | `corpus_dir` | `str` | `".ordeal/seeds"` | Persistent seed corpus directory |
+
+### `[compose]`
+
+Long-lived service exploration uses `[compose]` plus `[[compose.requests]]` and
+the command `ordeal explore --runner compose`. It starts or reuses a Docker
+Compose topology, retains captured JSON state, injects process/response faults,
+and records exact action traces with repeated replay counts. See the complete
+[Compose Configuration](compose-configuration.md) for every field and default,
+or start with the [plain-English overview](compose-runner.md).
 
 ### `[fixtures]`
 
@@ -149,8 +158,8 @@ Reusable object factories for bound instance methods. `scan` and `audit` use the
 | `factory` | `str?` | `null` | Import path to a sync or async factory |
 | `state_factory` | `str?` | `null` | Optional state builder for harnesses that need a separate state object |
 | `setup` | `str?` | `null` | Optional sync or async hook run after factory creation |
-| `teardown` | `str?` | `null` | Optional sync or async cleanup hook run after audit or chaos execution |
-| `harness` | `str` | `"fresh"` | `fresh` creates a new instance per call, `stateful` reuses one instance across a machine run |
+| `teardown` | `str?` | `null` | Optional sync or async cleanup hook; scan runs it after each invocation |
+| `harness` | `str` | `"fresh"` | `stateful` lets `chaos_for` reuse one instance across a machine run |
 | `scenarios` | `list[str | inline-table]` | `[]` | Repeatable sync/async hooks or inline collaborator scenario specs applied after setup |
 | `methods` | `list[str]` | `[]` | Optional method subset for audit-target expansion |
 | `include_private` | `bool` | `false` | Include single-underscore methods when expanded |
@@ -167,7 +176,7 @@ scenarios = ["subprocess", "sandbox"]
 methods = ["build_env_vars"]
 ```
 
-Use `factory` for construction, `state_factory` when the object needs a separate state payload, `setup` for one-time preparation, `teardown` for cleanup, and `scenarios` for collaborator behavior that should be layered on top of the object before the listed methods are exercised. `harness = "stateful"` tells ordeal to reuse the same instance across a stateful run instead of rebuilding it for every call. Built-in scenario libraries now work directly in TOML, and `scan --save-artifacts` will write a `.scenarios.md` note when it infers a good pack for the current target:
+Use `factory` for construction, `state_factory` when the object needs a separate state payload, `setup` for preparation, `teardown` for cleanup, and `scenarios` for collaborator behavior layered on top before the method runs. `scan` builds this lifecycle for each input and immediate replay. `harness = "stateful"` additionally tells `chaos_for` to reuse one instance across state-machine rule calls. See [Object Harnesses and Stateful Replay](scan-object-harnesses.md) for execution order, automatic discovery, and regression requirements. Built-in scenario libraries work directly in TOML, and `scan --save-artifacts` writes a `.scenarios.md` note when it infers a good pack:
 
 ```toml
 scenarios = ["subprocess", "sandbox", "upload_download", "http", "state_store"]

@@ -505,7 +505,7 @@ class TestCLIAgentJson:
                             "target": "pkg.mod:divide",
                             "command": (
                                 "uv run ordeal scan pkg.mod --mode candidate "
-                                "--targets pkg.mod:divide -n 1"
+                                "--target pkg.mod:divide -n 1"
                             ),
                             "python_snippet": (
                                 "from importlib import import_module\n"
@@ -549,6 +549,16 @@ class TestCLIAgentJson:
         assert proof["verdict"]["evidence_class"] == "candidate_issue"
         assert proof["confidence_breakdown"]["contract_fit"] == 0.92
         assert proof["minimal_reproduction"]["target"] == "pkg.mod:divide"
+        evidence = payload["findings"][0]["details"]["evidence"]
+        assert evidence["schema"] == "ordeal.finding-evidence/v1"
+        assert evidence["status"] == "supported"
+        assert evidence["witness"]["sha256"] == (
+            "d4bbbac5a1a3152e40c88f1b22b2b216344d4d0a69388013046a8f2a4af50a60"
+        )
+        assert evidence["replay"]["status"] == "verified"
+        assert evidence["replay"]["exact_matches"] == 2
+        assert evidence["post_fix_control"]["status"] == "pending"
+        assert "the root cause" in evidence["boundaries"]["does_not_establish"]
 
     def test_mine_json_outputs_agent_envelope(self, monkeypatch, capsys):
         result = MineResult(

@@ -25,6 +25,7 @@ from ordeal.cli import main
 from ordeal.explore import ProgressSnapshot
 from ordeal.mine import MinedProperty, MineResult
 from ordeal.quickcheck import quickcheck
+from ordeal.regression_evidence import _regression_binding
 
 
 def _write_verify_fixture(
@@ -42,8 +43,17 @@ def _write_verify_fixture(
     if regression_path is not None:
         regression_file = tmp_path / regression_path
         regression_file.parent.mkdir(parents=True, exist_ok=True)
-        stub = "def test_normalize_idempotent_regression() -> None:\n    pass\n"
+        stub = (
+            "from pkg.mod import normalize\n\n"
+            "def test_normalize_idempotent_regression() -> None:\n"
+            "    normalize({'xs': [9, 8, 7]})\n"
+        )
         regression_file.write_text(stub)
+    else:
+        stub = ""
+    regression_binding = (
+        _regression_binding(stub, regression_test) if regression_test is not None else None
+    )
 
     bundle = {
         "version": 1,
@@ -68,6 +78,14 @@ def _write_verify_fixture(
                 "summary": "idempotent (87%)",
                 "status": "open",
                 "regression_test": regression_test,
+                "regression_binding": regression_binding,
+                "evidence": {
+                    "post_fix_control": {
+                        "status": "pending",
+                        "method": "same_witness_after_fix",
+                        "regression_binding": regression_binding,
+                    }
+                },
             }
         ],
         "artifacts": {
@@ -114,6 +132,29 @@ def _write_verify_fixture(
 
     bundle_path.write_text(json.dumps(bundle, indent=2) + "\n", encoding="utf-8")
     index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+    manifest_path = tmp_path / "tests" / "ordeal-regressions.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema": "ordeal.regression-manifest/v1",
+                "regressions": [
+                    {
+                        "finding_id": finding_id,
+                        "target": "pkg.mod.normalize",
+                        "test_file": regression_path,
+                        "test_name": regression_test,
+                        "binding": regression_binding,
+                        "witness_sha256": "b" * 64,
+                        "source_sha256": "c" * 64,
+                    }
+                ],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     return index_path, bundle_path, finding_id
 
 
@@ -139,6 +180,43 @@ def _make_target_listing_module(name: str = "tests._cli_targets") -> types.Modul
         mod.__dict__,
     )
     return mod
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        {
+            "kind": "property",
+            "function": "score",
+            "name": "no NaN",
+            "counterexample": {"input": {"x": 0.0}, "value": float("nan")},
+        },
+        {
+            "kind": "property",
+            "function": "combine",
+            "name": "associative",
+            "counterexample": {
+                "input": {"left": 1, "right": 2, "third": 3},
+                "left": 0,
+                "right": 1,
+            },
+        },
+        {
+            "kind": "property",
+            "function": "bucket",
+            "name": "bijective",
+            "counterexample": {
+                "output": 0,
+                "colliding_inputs": [(("x", 1),), (("x", 2),)],
+            },
+        },
+    ],
+)
+def test_all_suspicious_property_shapes_generate_compilable_regressions(detail):
+    stub = cli._render_regression_stub("pkg.mod", detail, trim=False)
+
+    assert stub is not None
+    compile(stub, "<generated-regression>", "exec")
 
 
 def _make_stateful_target_listing_module(
@@ -373,6 +451,17 @@ class TestCLI:
         assert "--write-gaps PATH" in out
         assert "--include-exploratory-function-gaps" in out
         assert "--require-direct-tests" in out
+        assert "surviving mutant" in out
+        assert "100% line coverage" in out
+        assert "generated/migrated checks" in out
+
+    def test_mutate_help_explains_scope_and_audit_difference(self, capsys):
+        with pytest.raises(SystemExit):
+            main(["mutate", "--help"])
+        out = capsys.readouterr().out
+        assert "selected existing tests" in out
+        assert "not a universal correctness proof" in out
+        assert "combined protection verdict" in out
 
     def test_benchmark_help_mentions_perf_contract_quality(self, capsys):
         with pytest.raises(SystemExit):
@@ -381,7 +470,10 @@ class TestCLI:
         assert "--perf-contract PERF_CONTRACT" in out
         assert "--json" in out
         assert "--output-json PATH" in out
-        assert "score-gap budget" in out
+        assert "--bug-manifest PATH" in out
+        assert "--verify-evidence PATH" in out
+        assert "--online-sources" in out
+        assert "bug-manifest outcome or certificate" in out
 
     def test_audit_forwards_validation_mode(self, monkeypatch, capsys):
         import ordeal.audit as audit_mod
@@ -1503,6 +1595,7 @@ scan_max_examples = 12
             "shell_safe",
             "command_arg_stability",
             "subprocess_argv",
+            "shell_injection",
         ]
         assert "shell_path_safety" not in out
 
@@ -2778,6 +2871,9 @@ scan_max_examples = 12
         assert "--report-file PATH" in out
         assert "--write-regression" in out
         assert "default: tests/test_ordeal_regressions.py" in out
+        assert "terminal source location" in out
+        assert "harness hook is resolvable" in out
+        assert "https://docs.byordeal.com/guides/scan-quickstart/" in out
 
     def test_verify_help_mentions_finding_id(self, capsys):
         with pytest.raises(SystemExit):
@@ -2809,6 +2905,19 @@ scan_max_examples = 12
             tree=_FakeTree(),
             findings=["normalize: idempotent (92%)"],
             frontier={"score": ["mutation score 67%", "1 unhardened survivor(s)"]},
+            finding_details=[
+                {
+                    "kind": "property",
+                    "category": "speculative_property",
+                    "function": "normalize",
+                    "name": "idempotent",
+                    "summary": "idempotent (92%)",
+                    "holds": 23,
+                    "total": 25,
+                    "counterexample": {"input": {"xs": [3, 2, 1]}},
+                    "source_sha256": "b" * 64,
+                }
+            ],
         )
 
         def fake_explore(*args, **kwargs):
@@ -2826,6 +2935,10 @@ scan_max_examples = 12
         assert "INNER STDERR NOISE" not in captured.err
         assert "ordeal scan: pkg.mod" in captured.out
         assert "status: findings found" in captured.out
+        assert "evidence cards:" in captured.out
+        assert "pkg.mod.normalize [exploratory]" in captured.out
+        assert "code binding: callable source sha256=" in captured.out
+        assert "post-fix control: pending" in captured.out
         assert "gaps to close:" in captured.out
         assert "--save-artifacts" in captured.out
 
@@ -2945,7 +3058,7 @@ scan_max_examples = 12
                             "target": "pkg.mod:divide",
                             "command": (
                                 "uv run ordeal scan pkg.mod --mode candidate "
-                                "--targets pkg.mod:divide -n 1"
+                                "--target pkg.mod:divide -n 1"
                             ),
                             "python_snippet": (
                                 "from importlib import import_module\n"
@@ -2992,6 +3105,13 @@ scan_max_examples = 12
         assert "Failure path:" in report
         assert "Evidence class: candidate_issue" in report
         assert "Internal category: likely_bug" in report
+        assert "Evidence card:" in report
+        assert "Status: supported" in report
+        assert "Code binding: callable source hash unavailable" in report
+        assert "Witness: sha256=" in report
+        assert "Replay: verified (2/2 exact matches)" in report
+        assert "Post-fix control: pending" in report
+        assert "Boundary:" in report
         assert "Likely impact: valid inputs reach an unchecked divide-by-zero boundary" in report
         assert "Scan report saved:" in captured.err
 
@@ -3078,14 +3198,21 @@ scan_max_examples = 12
         bundle_path = tmp_path / ".ordeal" / "findings" / "pkg" / "mod.json"
         index_path = tmp_path / ".ordeal" / "findings" / "index.json"
         regression_path = tmp_path / "tests" / "test_ordeal_regressions.py"
+        regression_manifest_path = tmp_path / "tests" / "ordeal-regressions.json"
         assert rc == 1
         assert report_path.exists()
         assert bundle_path.exists()
         assert index_path.exists()
         assert regression_path.exists()
+        assert regression_manifest_path.exists()
         assert "Target: `pkg.mod`" in report_path.read_text()
+        assert "Regression: saved: tests/test_ordeal_regressions.py" in report_path.read_text()
+        assert "CI guard: ready: uv run ordeal verify --ci" in report_path.read_text()
         assert "def test_normalize_idempotent_regression() -> None:" in regression_path.read_text()
         bundle = json.loads(bundle_path.read_text())
+        regression_manifest = json.loads(regression_manifest_path.read_text())
+        assert regression_manifest["schema"] == "ordeal.regression-manifest/v1"
+        assert len(regression_manifest["regressions"]) == 1
         assert bundle["tool"] == "scan"
         assert bundle["target"] == "pkg.mod"
         assert bundle["saved_at"]
@@ -3093,11 +3220,20 @@ scan_max_examples = 12
         assert bundle["artifacts"]["report"] == ".ordeal/findings/pkg/mod.md"
         assert bundle["artifacts"]["bundle"] == ".ordeal/findings/pkg/mod.json"
         assert bundle["artifacts"]["regression"] == "tests/test_ordeal_regressions.py"
+        assert bundle["artifacts"]["regression_manifest"] == "tests/ordeal-regressions.json"
         assert bundle["artifacts"]["index"] == ".ordeal/findings/index.json"
         assert bundle["findings"][0]["finding_id"].startswith("fnd_")
         assert len(bundle["findings"][0]["fingerprint"]) == 64
         assert bundle["findings"][0]["status"] == "open"
         assert bundle["findings"][0]["regression_test"] == "test_normalize_idempotent_regression"
+        assert (
+            regression_manifest["regressions"][0]["finding_id"]
+            == (bundle["findings"][0]["finding_id"])
+        )
+        assert (
+            regression_manifest["regressions"][0]["binding"]
+            == (bundle["findings"][0]["regression_binding"])
+        )
         artifact_index = json.loads(index_path.read_text())
         assert artifact_index["version"] == 1
         assert len(artifact_index["entries"]) == 1
@@ -3127,6 +3263,7 @@ scan_max_examples = 12
         assert "report: .ordeal/findings/pkg/mod.md" in captured.out
         assert "bundle: .ordeal/findings/pkg/mod.json" in captured.out
         assert "regression: tests/test_ordeal_regressions.py" in captured.out
+        assert "regression-manifest: tests/ordeal-regressions.json" in captured.out
         assert "index: .ordeal/findings/index.json" in captured.out
         assert "available:" in captured.out
         fid = bundle["findings"][0]["finding_id"]
@@ -3136,6 +3273,7 @@ scan_max_examples = 12
         assert "Scan report saved:" in captured.err
         assert "Scan bundle saved:" in captured.err
         assert "Regression tests written:" in captured.err
+        assert "Regression manifest updated:" in captured.err
         assert "Artifact index updated:" in captured.err
 
     def test_scan_save_artifacts_skips_writes_without_findings(
@@ -3462,6 +3600,25 @@ scan_max_examples = 12
         assert "def make_env() -> Env:" in support_path.read_text()
         assert "tests/ordeal_support.py" in support_path.read_text()
         assert "shell command argument stability regression" in replay_path.read_text()
+        assert "Post-fix control: pending" in replay_path.read_text()
+        assert "Regression: saved: tests/test_ordeal_regressions.py" in replay_path.read_text()
+        assert "CI guard: ready: uv run ordeal verify --ci" in replay_path.read_text()
+        assert bundle["findings"][0]["evidence"]["status"] == "supported"
+        assert bundle["findings"][0]["evidence"]["replay"]["exact_matches"] == 2
+        binding = bundle["findings"][0]["regression_binding"]
+        assert binding["schema"] == "ordeal.regression-binding/v1"
+        assert binding["test_name"] == "test_normalize_crash_regression"
+        assert len(binding["test_ast_sha256"]) == 64
+        assert (
+            bundle["findings"][0]["evidence"]["post_fix_control"]["regression_binding"] == binding
+        )
+        evidence = bundle["findings"][0]["evidence"]
+        assert evidence["regression"]["status"] == "saved"
+        assert evidence["regression"]["path"] == "tests/test_ordeal_regressions.py"
+        assert evidence["ci_guard"]["status"] == "ready"
+        assert evidence["workflow"]["save_regression"] == "saved"
+        assert evidence["workflow"]["guard_ci"] == "ready"
+        assert bundle["commands"]["ci"] == ("uv run ordeal verify --ci")
         assert "`sandbox`" in scenarios_path.read_text()
         assert "config: .ordeal/findings/pkg/mod.ordeal.toml" in captured.out
         assert "support: .ordeal/findings/pkg/mod.ordeal_support.py" in captured.out
@@ -3570,15 +3727,118 @@ scan_max_examples = 12
         assert bundle["verification"]["finding_id"] == finding_id
         assert bundle["verification"]["status"] == "verified"
         assert bundle["verification"]["exit_code"] == 0
+        control = bundle["findings"][0]["evidence"]["post_fix_control"]
+        assert control["status"] == "passed"
+        assert control["exit_code"] == 0
+        assert (
+            control["observed_regression_binding"] == bundle["verification"]["regression_binding"]
+        )
         artifact_index = json.loads(index_path.read_text())
         assert len(artifact_index["entries"]) == 2
         assert artifact_index["entries"][1]["kind"] == "verification"
         assert artifact_index["entries"][1]["finding_id"] == finding_id
         assert artifact_index["entries"][1]["status"] == "verified"
+        assert artifact_index["entries"][1]["post_fix_control"] == "passed"
         assert "verify:" in captured.out
         assert "status: verified" in captured.out
+        assert "post-fix control: passed" in captured.out
         expected = "tests/test_ordeal_regressions.py::test_normalize_idempotent_regression"
         assert expected in captured.out
+
+    def test_verify_ci_guards_all_bindings_without_mutating_evidence(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        index_path, bundle_path, finding_id = _write_verify_fixture(tmp_path)
+        original_bundle = bundle_path.read_text(encoding="utf-8")
+        calls: list[tuple[list[str], str | None]] = []
+
+        def fake_run(cmd, cwd=None, text=None, capture_output=None, check=None):
+            calls.append((cmd, cwd))
+            return SimpleNamespace(returncode=0, stdout="1 passed\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        rc = main(
+            [
+                "verify",
+                "--ci",
+                "--manifest",
+                str(tmp_path / "tests" / "ordeal-regressions.json"),
+            ]
+        )
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert len(calls) == 1
+        assert calls[0][1] == str(tmp_path)
+        assert finding_id in captured.out
+        assert "verify --ci: 1 passed, 0 failed, 0 error(s)" in captured.out
+        assert bundle_path.read_text(encoding="utf-8") == original_bundle
+        assert len(json.loads(index_path.read_text())["entries"]) == 1
+
+    def test_verify_uses_current_checkout_when_recorded_workspace_is_stale(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        index_path, bundle_path, finding_id = _write_verify_fixture(tmp_path)
+        bundle = json.loads(bundle_path.read_text())
+        bundle["workspace"] = "/stale/developer/checkout"
+        bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+        index = json.loads(index_path.read_text())
+        index["entries"][0]["workspace"] = "/stale/developer/checkout"
+        index_path.write_text(json.dumps(index), encoding="utf-8")
+        calls: dict[str, object] = {}
+
+        def fake_run(cmd, cwd=None, text=None, capture_output=None, check=None):
+            calls["cwd"] = cwd
+            return SimpleNamespace(returncode=0, stdout="1 passed\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        assert (
+            main(
+                [
+                    "verify",
+                    finding_id,
+                    "--index",
+                    str(index_path),
+                    "--allow-unsafe-artifacts",
+                ]
+            )
+            == 0
+        )
+        assert calls["cwd"] == str(tmp_path)
+
+    def test_verify_ci_fails_when_a_bound_regression_fails(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        _index_path, _bundle_path, finding_id = _write_verify_fixture(tmp_path)
+
+        def fake_run(cmd, cwd=None, text=None, capture_output=None, check=None):
+            return SimpleNamespace(returncode=1, stdout="F\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        rc = main(
+            [
+                "verify",
+                "--ci",
+                "--manifest",
+                str(tmp_path / "tests" / "ordeal-regressions.json"),
+            ]
+        )
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        assert finding_id in captured.err
+        assert "verify --ci: 0 passed, 1 failed, 0 error(s)" in captured.out
 
     def test_verify_marks_finding_reproduced(self, monkeypatch, tmp_path, capsys):
         index_path, bundle_path, finding_id = _write_verify_fixture(tmp_path)
@@ -3604,10 +3864,46 @@ scan_max_examples = 12
         assert bundle["findings"][0]["status"] == "reproduced"
         assert bundle["verification"]["status"] == "reproduced"
         assert bundle["verification"]["exit_code"] == 1
+        assert bundle["findings"][0]["evidence"]["post_fix_control"]["status"] == "failed"
         artifact_index = json.loads(index_path.read_text())
         assert artifact_index["entries"][1]["kind"] == "verification"
         assert artifact_index["entries"][1]["status"] == "reproduced"
+        assert artifact_index["entries"][1]["post_fix_control"] == "failed"
         assert "status: reproduced" in captured.out
+        assert "post-fix control: failed" in captured.out
+
+    def test_verify_refuses_changed_regression_binding(self, monkeypatch, tmp_path, capsys):
+        index_path, bundle_path, finding_id = _write_verify_fixture(tmp_path)
+        regression = tmp_path / "tests" / "test_ordeal_regressions.py"
+        regression.write_text(
+            regression.read_text().replace("[9, 8, 7]", "[1, 2, 3]"),
+            encoding="utf-8",
+        )
+        called = False
+
+        def fake_run(cmd, cwd=None, text=None, capture_output=None, check=None):
+            nonlocal called
+            called = True
+            return SimpleNamespace(returncode=0, stdout="1 passed\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        rc = main(
+            [
+                "verify",
+                finding_id,
+                "--index",
+                str(index_path),
+                "--allow-unsafe-artifacts",
+            ]
+        )
+
+        assert rc == 2
+        assert called is False
+        assert "Regression binding check failed" in capsys.readouterr().err
+        bundle = json.loads(bundle_path.read_text())
+        assert bundle["findings"][0]["status"] == "open"
+        assert "verification" not in bundle
 
     def test_verify_requires_runnable_regression(self, monkeypatch, tmp_path, capsys):
         index_path, bundle_path, finding_id = _write_verify_fixture(
@@ -4761,12 +5057,177 @@ verbose = false
         out = capsys.readouterr().out
         assert "Performance Contract [FAIL]" in out
 
-    def test_benchmark_output_json_requires_perf_contract(self, capsys):
+    def test_benchmark_bug_manifest_mode(self, monkeypatch, capsys):
+        import ordeal.benchmarking as benchmarking_mod
+
+        calls: dict[str, object] = {}
+
+        class _FakeSuite:
+            passed = True
+
+            def summary(self) -> str:
+                return "Bug Benchmark [PASS]"
+
+            def to_json(self) -> str:
+                return '{"passed": true, "hit_count": 1}'
+
+        def fake_bug_manifest(path, **kwargs):
+            calls["path"] = path
+            calls.update(kwargs)
+            return _FakeSuite()
+
+        monkeypatch.setattr(benchmarking_mod, "benchmark_bug_manifest", fake_bug_manifest)
+
+        rc = main(
+            [
+                "benchmark",
+                "--bug-manifest",
+                "benchmarks/bugsinpy.toml",
+                "--benchmark-tier",
+                "private",
+                "--bugsinpy-root",
+                "/tmp/BugsInPy",
+                "--checkout-root",
+                "/tmp/ordeal-checkouts",
+            ]
+        )
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Bug Benchmark [PASS]" in out
+        assert calls["path"] == "benchmarks/bugsinpy.toml"
+        assert calls["tier"] == "private"
+        assert calls["bugsinpy_root"] == "/tmp/BugsInPy"
+        assert calls["checkout_root"] == "/tmp/ordeal-checkouts"
+
+    def test_benchmark_bug_manifest_writes_json(self, monkeypatch, tmp_path, capsys):
+        import ordeal.benchmarking as benchmarking_mod
+
+        class _FakeSuite:
+            passed = True
+
+            def summary(self) -> str:
+                return "Bug Benchmark [PASS]"
+
+            def to_json(self) -> str:
+                return '{"passed": true, "case_count": 1, "hit_count": 1}'
+
+        monkeypatch.setattr(
+            benchmarking_mod,
+            "benchmark_bug_manifest",
+            lambda *args, **kwargs: _FakeSuite(),
+        )
+
+        out_path = tmp_path / "bugs.json"
+        rc = main(
+            [
+                "benchmark",
+                "--bug-manifest",
+                "benchmarks/bugsinpy.toml",
+                "--output-json",
+                str(out_path),
+            ]
+        )
+
+        assert rc == 0
+        assert (
+            out_path.read_text(encoding="utf-8").strip()
+            == '{"passed": true, "case_count": 1, "hit_count": 1}'
+        )
+        out = capsys.readouterr().out
+        assert "Bug Benchmark [PASS]" in out
+
+    def test_benchmark_verifies_bug_certificate(self, monkeypatch, capsys):
+        import ordeal.benchmarking as benchmarking_mod
+
+        calls: dict[str, object] = {}
+
+        class _Verification:
+            passed = True
+
+            def summary(self) -> str:
+                return "Bug Benchmark Certificate Verification [PASS]"
+
+            def to_json(self) -> str:
+                return '{"passed": true, "valid": true}'
+
+        def fake_verify(path, **kwargs):
+            calls["path"] = path
+            calls.update(kwargs)
+            return _Verification()
+
+        monkeypatch.setattr(benchmarking_mod, "verify_bug_benchmark_certificate", fake_verify)
+
+        rc = main(
+            [
+                "benchmark",
+                "--verify-certificate",
+                "results.json",
+                "--certificate-manifest",
+                "benchmarks/public.toml",
+            ]
+        )
+
+        assert rc == 0
+        assert calls == {
+            "path": "results.json",
+            "manifest_path": "benchmarks/public.toml",
+        }
+        assert "Certificate Verification [PASS]" in capsys.readouterr().out
+
+    def test_benchmark_verifies_one_bug_evidence_record(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        import ordeal.evidence as evidence_mod
+
+        calls: dict[str, object] = {}
+
+        class _Verification:
+            verified = True
+
+            def summary(self) -> str:
+                return "Bug Evidence [VERIFIED] test-bug-1"
+
+            def to_json(self) -> str:
+                return '{"verified": true, "evidence_id": "test-bug-1"}'
+
+        def fake_verify(path, **kwargs):
+            calls["path"] = path
+            calls.update(kwargs)
+            return _Verification()
+
+        monkeypatch.setattr(evidence_mod, "verify_bug_evidence", fake_verify)
+        output = tmp_path / "evidence.json"
+
+        rc = main(
+            [
+                "benchmark",
+                "--verify-evidence",
+                "benchmarks/evidence/test.toml",
+                "--online-sources",
+                "--output-json",
+                str(output),
+            ]
+        )
+
+        assert rc == 0
+        assert calls["path"] == "benchmarks/evidence/test.toml"
+        assert calls["online_sources"] is True
+        assert output.read_text(encoding="utf-8").strip() == (
+            '{"verified": true, "evidence_id": "test-bug-1"}'
+        )
+        assert "Bug Evidence [VERIFIED]" in capsys.readouterr().out
+
+    def test_benchmark_output_json_requires_perf_contract_or_bug_manifest(self, capsys):
         rc = main(["benchmark", "--output-json", "perf.json", "--mutate", "pkg.mod.compute"])
 
         assert rc == 2
         err = capsys.readouterr().err
-        assert "--output-json requires --perf-contract" in err
+        assert "--output-json requires a perf contract, bug manifest, certificate" in err
+        assert "or evidence record" in err
 
     def test_mutate_json_outputs_agent_envelope(self, monkeypatch, capsys):
         import ordeal.mutations as mutations_mod

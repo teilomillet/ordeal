@@ -36,6 +36,7 @@ workers = 1
 validation_mode = "fast"
 compare_validation_mode = "deep"
 max_score_gap = 0.10
+min_score = 0.80
 
 [[cases]]
 name = "audit_suggest_fast_vs_deep"
@@ -48,6 +49,7 @@ workers = 1
 validation_mode = "fast"
 compare_validation_mode = "deep"
 max_score_gap = 0.05
+min_score = 0.90
 
 [[cases]]
 name = "audit_quickcheck_fast_vs_deep"
@@ -71,3 +73,4 @@ preset = "standard"
 filter_equivalent = true
 test_filter = "tiny_add"
 max_seconds = 0.40
+min_score = 0.90

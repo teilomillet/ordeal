@@ -31,6 +31,22 @@ uv add ordeal               # add to project
 uv tool install ordeal       # install CLI globally
 ```
 
+## Prefer to start without writing a test?
+
+Use the read-only scan entry point first:
+
+```bash
+ordeal scan myapp.scoring --list-targets
+ordeal scan myapp.scoring
+```
+
+It discovers callable functions and methods, tries realistic and boundary
+inputs, and explains what it could not construct. Follow the
+[Scan Quickstart](guides/scan-quickstart.md) for the plain-language workflow or
+[Object Harnesses](guides/scan-object-harnesses.md) when methods need setup and
+state. When scan finds a failure, use the [Durable Regression Workflow](guides/durable-regressions.md)
+to keep it fixed. Come back here for a hand-written multi-step chaos test.
+
 ## The idea
 
 Traditional tests check specific scenarios you thought of. A chaos test describes a *system* and lets the machine explore what can go wrong.
@@ -225,6 +241,62 @@ This matters. Get it wrong and your assertions silently do nothing.
 | Property report | No — prints whenever there are tracked results |
 
 **The design principle:** violations are never silent. `always()` and `unreachable()` raise `AssertionError` whether or not `--chaos` is active. The `--chaos` flag adds the *tracking* layer (`sometimes`/`reachable` deferred checks) and activates `buggify()`. The property report prints whenever there are tracked results, regardless of flags. If something is wrong, you'll know immediately.
+
+## See which reliability behavior actually ran
+
+!!! quote "Why this is different from line coverage"
+    A green line only says Python executed it. It does not say which failure
+    was active or which promise you checked. Reliability coverage records all
+    three: **the operation, the fault, and the property**.
+
+Add the two optional labels to an assertion:
+
+```python
+always(
+    order.charge_count == 1,
+    "no_duplicate_charge",
+    operation="create_order",
+    fault="timeout",
+)
+```
+
+Declare combinations you expect to test, even if they might receive no
+observations:
+
+```python
+declare(
+    "eventual_commit",
+    "sometimes",
+    operation="create_order",
+    fault="worker_restart",
+)
+```
+
+Run with tracking enabled:
+
+```bash
+pytest --chaos
+```
+
+Ordeal adds a matrix to the summary:
+
+```text
+operation × fault × property
+create_order × timeout × no_duplicate_charge     PASS
+create_order × worker_restart × eventual_commit  NOT EXERCISED
+```
+
+- `PASS`: the cell ran and the assertion semantics held.
+- `NOT EXERCISED`: you declared the cell, but it received zero observations.
+- `FAIL`: the cell ran and violated the assertion semantics.
+
+The labels do not make a timeout or restart happen. Your fault, fixture, mock,
+or external platform must create that condition. The labels record what truly
+happened so the result stays honest.
+
+Read the [plain-English concept](concepts/reliability-coverage.md), follow the
+[copyable guide](guides/reliability-coverage.md), or configure
+[CI and external platforms](guides/reliability-coverage-ci.md).
 
 **Too loud?** If a known violation fires constantly and you need to focus on something else, pass `mute=True`:
 

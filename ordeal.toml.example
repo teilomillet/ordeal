@@ -92,6 +92,73 @@ corpus_dir = ".ordeal/seeds"
 verbose = true
 
 
+# Long-lived services — use instead of [[tests]] with:
+# ordeal explore --runner compose
+# Full guide: docs/guides/compose-runner.md
+#
+# [compose]
+# # Compose file and optional isolated project name. Relative file paths are
+# # resolved from the directory containing this config.
+# file = "compose.yaml"
+# project_name = "ordeal-test"
+#
+# # Host-reachable service URL. Readiness polls base_url + health_path and
+# # accepts any status below 500.
+# base_url = "http://127.0.0.1:8080"
+# health_path = "/health"
+#
+# # Exact Compose service names eligible for SIGKILL and restart.
+# services = ["api", "worker"]
+#
+# # Values available to {name} templates before any response capture.
+# initial_state = { tenant = "acme" }
+#
+# # Stop after either request-selection budget is reached.
+# steps = 50
+# max_time = 60
+# seed = 42
+#
+# # Each faultable request has this chance of entering a fault cycle.
+# fault_probability = 0.3
+# faults = ["kill", "restart", "delay_response", "corrupt_response"]
+# delay_seconds = 0.5
+#
+# # HTTP and post-start/recovery readiness timeouts.
+# request_timeout = 5
+# startup_timeout = 30
+#
+# # Repeat a recorded failure this many times, reporting attempted N /
+# # reproduced M instead of claiming deterministic replay.
+# replay_attempts = 5
+# trace_dir = ".ordeal/traces"
+#
+# # False: take down only a topology ordeal itself started. Existing running
+# # topologies are always left running. Named volumes are never deleted.
+# keep_running = false
+#
+# [[compose.requests]]
+# name = "create"
+# method = "POST"
+# path = "/{tenant}/items"
+# headers = { Accept = "application/json" }
+# json = { name = "demo", owner = "{tenant}" }
+# expect_status = [200, 201]
+# capture = { item_id = "json.id" }
+# # POST is not faultable by default. Opt in only if repetition is safe.
+# faultable = false
+#
+# [[compose.requests]]
+# name = "read"
+# path = "/items/{item_id}"
+# headers = { Accept = "application/json" }
+# # Do not select this request until create captured item_id.
+# requires = ["item_id"]
+# # Quoted TOML keys preserve the dots used for JSON traversal.
+# expect_json = { "json.name" = "demo" }
+# # GET is faultable by default; this explicit value is documentary.
+# faultable = true
+
+
 # Mutation testing — validate that your tests catch real bugs.
 # Run with:  ordeal mutate
 #

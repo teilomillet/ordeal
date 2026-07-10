@@ -79,19 +79,31 @@ ordeal scan myapp.scoring --write-regression
 ordeal scan myapp.scoring --save-artifacts
 ```
 
-Use `--save-artifacts` when you want the full handoff package. In addition to the Markdown dossier, JSON bundle, regression file, and artifact index, ordeal now saves review-first sidecars for the same scan when it has enough evidence: `.ordeal/findings/<module>.ordeal.toml`, `.ordeal/findings/<module>.ordeal_support.py`, `.ordeal/findings/<module>.proofs.json`, `.ordeal/findings/<module>.replay.md`, and `.ordeal/findings/<module>.scenarios.md`. See [Bug Bundle](bug-bundle.md) for the artifact layout.
+Use the [Scan Quickstart](scan-quickstart.md) for the shortest beginner path,
+[Object Harnesses and Stateful Replay](scan-object-harnesses.md) for classes,
+[Scan Troubleshooting](scan-troubleshooting.md) for blocked/noisy runs, and the
+[Scan Evidence Schema](../reference/scan-evidence-schema.md) for JSON fields.
 
-`scan` is evidence-first. In `--mode evidence`, it surfaces replayable crashes, weaker exploratory properties, and expected precondition failures without flattening them into one verdict. `--mode candidate` keeps the same search but ranks only the strongest contract-valid issue candidates at the top. If `[[scan]]` or `[[objects]]` leave fixture completeness too low for the module, `scan` will report that as a block instead of pretending it has real leverage. In that case, add a factory, `state_factory`, or `harness = "stateful"` before expecting useful output. If you need stronger validation for a mature codebase, prefer `ordeal audit` for coverage and mutation comparison, and `ordeal mutate` for direct mutation scoring.
+Use `--save-artifacts` when you want the full handoff package. It writes the
+pytest regression plus its portable `tests/ordeal-regressions.json` CI
+manifest. The richer local handoff includes a Markdown dossier, JSON bundle,
+artifact index, and review-first sidecars: `.ordeal.toml`, support, proofs,
+replay notes, and scenarios under `.ordeal/findings/<module>.*`. See
+[Bug Bundle](bug-bundle.md) for the artifact layout.
+
+`scan` is evidence-first. In `--mode evidence`, it surfaces replayable crashes, weaker exploratory properties, and expected precondition failures without flattening them into one verdict. `--mode candidate` keeps the same search but ranks only the strongest contract-valid issue candidates at the top. If `[[scan]]` or `[[objects]]` leave fixture completeness too low for the module, `scan` reports that as a block instead of pretending it has real leverage. Add the missing factory, state builder, setup, or collaborator scenario before expecting useful output. If you need stronger validation for a mature codebase, prefer `ordeal audit` for coverage and mutation comparison, and `ordeal mutate` for direct mutation scoring.
 
 `--security-focus` is the opt-in trust-boundary bias for scan. It expands sink inference beyond shell/path/env to import loading, deserialization, filesystem writes, symlink handling, and checkpoint/IPC paths, then adds deterministic low-side-effect probes for pure path/symlink shapers plus small artifact/config mutations for deserialization- and IPC-shaped inputs. Pair it with `shell_injection_check = true` in `[[scan]]` when you want a static input-to-shell-sink oracle to fire before the target is executed. Saved proof bundles keep that context under `impact.critical_sinks`, `impact.trust_boundary_signal`, and `contract_basis.security_focus`.
 
-Promoted crash findings now carry a proof bundle in Markdown, JSON, and agent output: witness input, contract basis, confidence breakdown, minimal reproduction, failure path, and likely impact. Demoted crashes keep the same structure plus an explicit demotion reason.
+Every finding now carries a compact [evidence card](finding-evidence.md) in normal text, Markdown, JSON, and saved replay artifacts. It gives the bounded claim, callable-source hash, exact witness and witness hash, immediate replay result, pending same-witness post-fix control, and explicit claim boundaries. `supported` means the same exception type, message, and terminal source location matched every immediate replay; it is not a correctness certificate. Findings without that replay remain `exploratory`, and documented preconditions remain `expected`. When a bound-method finding uses resolvable factory, setup, scenario, state, and teardown hooks, the saved regression reconstructs that discovered harness before replaying the exact witness. Saved regressions include AST and target-import SHA-256 bindings; `ordeal verify` fails closed if the bound test changes, then records whether the post-fix control passed or still reproduces.
+
+Promoted crash findings also carry the deeper proof bundle: contract basis, confidence breakdown, minimal reproduction, failure path, and likely impact. Demoted crashes keep the same structure plus an explicit demotion reason.
 
 See [Scan Finding Rules](scan-finding-rules.md) for the exact heuristics behind helper filtering, source-backed security probes, witness-aligned `critical_sinks`, and replay-required promotion of critical-sink crashes.
 
 Use `--list-targets` when you want to inspect how ordeal sees functions and methods before choosing a target. The listing shows the callable kind, whether it is async or sync, whether a factory is required or configured, and any skip reason if ordeal cannot run it yet. Mined harness hints now carry observed-evidence `score` and `signals`, so the summary and any suggested `[[objects]]` blocks prefer the strongest structurally supported factory or setup hint instead of whichever fixture was discovered first. Use `--target` to limit a module scan to one or more callable selectors. Selectors accept local names, explicit targets, and globs like `mutate`, `Env.*`, or `ordeal:mut*`.
 
-Most of the tuning knobs for `scan` live in `[[scan]]` inside `ordeal.toml`. Use `[fixtures].registries` for project-wide fixture registrations, `fixture_registries` for scan-specific registry imports, `ignore_properties` and `ignore_relations` to suppress noisy laws, and `property_overrides` or `relation_overrides` when one function needs a narrower set of checks. `expected_failures` keeps known preconditions visible without ranking them as issue candidates. For stateful OO code, `[[objects]]` supplies bound-instance factories, `state_factory`, `teardown`, and `harness = "stateful"` when a class needs persistent lifecycle setup; `[[contracts]]` adds explicit shell/path/env probes.
+Most of the tuning knobs for `scan` live in `[[scan]]` inside `ordeal.toml`. Use `[fixtures].registries` for project-wide fixture registrations, `fixture_registries` for scan-specific registry imports, `ignore_properties` and `ignore_relations` to suppress noisy laws, and `property_overrides` or `relation_overrides` when one function needs a narrower set of checks. `expected_failures` keeps known preconditions visible without ranking them as issue candidates. For OO code, `[[objects]]` supplies bound-instance factories, `state_factory`, scenarios, and teardown. Scan reconstructs that lifecycle for each witness; `harness = "stateful"` additionally lets `chaos_for` reuse one object across state-machine steps. `[[contracts]]` adds explicit shell/path/env probes.
 
 `scan` now surfaces ready-to-paste `ordeal.toml` suggestions too. The text summary prints a `Suggested ordeal.toml:` block, the JSON envelope includes `raw_details.config_suggestions`, and `--save-artifacts` persists the same review bundle to `.ordeal/findings/<module>.ordeal.toml`. Package-root sampled scans emit a repeatable `[[scan]]` block with the sampled targets, while method-heavy runs can also suggest `[[objects]]` or `[[contracts]]` blocks derived from the observed surface and findings, plus a review scaffold for `tests/ordeal_support.py`.
 
@@ -166,6 +178,12 @@ Score: 15/18 (83%)
 Threshold: 80% — PASS
 ```
 
+This score applies to the selected existing tests and mutation configuration.
+Inspect every survivor; the aggregate threshold is not a correctness certificate.
+Use `result.kill_attribution()` and `result.property_strength()` from Python, or
+run `audit` for the combined generated-check protection verdict. See
+[Test Protection](test-protection.md) for interpretation.
+
 | Flag | Default | Description |
 |---|---|---|
 | `targets` | required | Dotted paths (positional, one or more) |
@@ -219,17 +237,25 @@ Output:
 ordeal audit
 
   myapp.scoring
-    current:   33 tests |   343 lines | 98% coverage [verified]
-    migrated:  12 tests |   130 lines | 96% coverage [verified]
-    saving:   64% fewer tests | 62% less code | same coverage
+    current suite:         33 tests | 343 lines | 98% coverage [verified]
+    generated incremental: 12 tests | 130 lines | 100% coverage [verified]
     mined:    deterministic(compute, normalize), output in [0, 1](compute)
     mutation: 14/18 (78%)
+    protection: WEAK: 100% line coverage but 4/18 mutation(s) survived
     suggest:
       - L42 in compute(): test when x < 0
       - L67 in normalize(): test that ValueError is raised
 ```
 
-Every number is `[verified]` (measured and cross-checked for consistency) or `FAILED: reason`. When `pytest-cov` is installed, ordeal uses its JSON report; otherwise it falls back to an internal tracer. Mined properties are grouped by kind. The mutation score shows how many code mutations the mined properties catch — if it's below 100%, the surviving mutants reveal property gaps.
+Every number is `[verified]` (measured and cross-checked for consistency) or
+`FAILED: reason`. The protection verdict combines generated/migrated coverage,
+mutation survival, and property exercise. It stays `WEAK` when a mutant survives,
+even at 100% line coverage. Use `ordeal mutate` when you want the direct verdict
+for the selected existing pytest tests rather than audit's resulting checks.
+
+See the [Test Protection Guide](test-protection.md) for the repair workflow,
+[Test Protection in CI](test-protection-ci.md) for gates, and the
+[Evidence Schema](../reference/test-protection-schema.md) for `--json` consumers.
 
 `audit` is the primary command when you want to judge test quality. It keeps replayable crash evidence separate from exploratory findings, and it returns `weakest_tests` plus `mutation_gap_stubs` so tooling like `init --close-gaps` can write draft follow-up tests without guessing.
 
@@ -330,6 +356,7 @@ ordeal benchmark --max-workers 16         # test up to 16 workers
 ordeal benchmark --time 30                # 30s per trial (default: 10s)
 ordeal benchmark --metric edges           # fit on edges/sec instead of runs/sec
 ordeal benchmark --perf-contract ordeal.perf.toml --check
+ordeal benchmark --bug-manifest benchmarks/bug-benchmark.example.toml --benchmark-tier public
 ordeal benchmark --mutate myapp.scoring.compute --repeat 5 --workers 2
 ```
 
@@ -356,12 +383,32 @@ module = "ordeal.demo"
 validation_mode = "fast"
 compare_validation_mode = "deep"
 max_score_gap = 0.10
+min_score = 0.80
 ```
 
-That case fails if fast audit validation falls more than 10 percentage points behind deep validation on mutation score.
+That case fails if fast validation falls more than 10 percentage points behind
+deep validation or if its absolute mutation score drops below 80%.
 Use `--output-json perf.json` when you want a trendable artifact for CI or nightly runs.
 
 The JSON artifact includes the contract path, per-case pass/fail state, timing medians, and the exact score-gap data for `audit_compare` cases.
+
+For bug-discovery benchmarking, `--bug-manifest` scores the real `ordeal scan --json` workflow on curated public or private bug cases. Use a public tier for comparability and a private tier for optimization without benchmark saturation:
+
+```bash
+ordeal benchmark --bug-manifest benchmarks/bug-benchmark.example.toml --benchmark-tier public
+ordeal benchmark --bug-manifest benchmarks/bug-benchmark.example.toml --benchmark-tier private --check
+ordeal benchmark --verify-evidence benchmarks/evidence/httpie-3.toml --online-sources
+```
+
+Bug-manifest JSON artifacts include positive bugs, fixed negative controls,
+precision/recall/specificity, Wilson bounds, provenance, integrity digests, and
+raw scans. See [Bug Benchmarks](benchmark-manifests.md) and
+[Bug Evidence Records](bug-evidence-records.md) for the deliberately limited
+claims.
+Each case must also declare its oracle source, selection reason, saturation risk, and whether it is allowed for optimization; the runner rejects public cases that are marked as tuning targets.
+Use `requires_python` for the runner constraint and `oracle_python_version` for
+the historical upstream environment. Incompatible runners are `blocked`
+instead of being scored as misses.
 
 You can also benchmark mutation latency instead of scaling by passing one or more `--mutate` targets. That mode runs fresh subprocess trials and reports median wall time plus per-phase timings:
 
@@ -378,10 +425,18 @@ ordeal benchmark --mutate myapp.scoring.compute --test-filter test_compute
 | `--time` | `10` | Seconds per trial |
 | `--metric` | `runs` | `"runs"` (runs/sec) or `"edges"` (edges/sec) |
 | `--perf-contract` | — | Run a checked-in perf/quality contract instead of scaling analysis |
-| `--check` | off | Exit with code 1 if any contract case exceeds its budget |
-| `--output-json` | — | Save perf/quality contract results as JSON |
-| `--json` | off | Print perf/quality contract JSON to stdout |
+| `--check` | off | Exit 1 on contract failure; certified manifests fail closed on thresholds or provenance |
+| `--output-json` | — | Save contract, benchmark, or verification results as JSON |
+| `--json` | off | Print contract, benchmark, or verification JSON to stdout |
 | `--tier` | all | Filter perf-contract cases by tier (`pr` or `nightly`) |
+| `--bug-manifest` | — | Run a curated bug benchmark manifest against `ordeal scan --json` |
+| `--verify-certificate` | — | Verify a bug-benchmark evidence certificate |
+| `--verify-evidence` | — | Verify one executable, source-backed bug record |
+| `--online-sources` | off | Fetch and hash pinned authoritative evidence URLs |
+| `--certificate-manifest` | — | Require exact manifest bytes during certificate verification |
+| `--benchmark-tier` | all | Filter bug-manifest cases by their `tier` label |
+| `--bugsinpy-root` | — | Root of a local BugsInPy checkout used for original-corpus cases |
+| `--checkout-root` | `.ordeal/bug-benchmark` | Where temporary BugsInPy workspaces are materialized |
 | `--mutate` | — | Benchmark mutation latency for this target (repeatable) |
 | `--repeat` | `5` | Fresh subprocess runs per mutation target |
 | `--workers` | `1` | Worker count for mutation benchmarks |
@@ -404,12 +459,33 @@ ordeal explore -c ci.toml              # custom config
 ordeal explore -v                       # live progress
 ordeal explore --max-time 300          # override time
 ordeal explore --seed 99               # override seed
+ordeal explore --runner compose        # long-lived Docker Compose services
+ordeal explore --runner compose --replay-attempts 10
 ordeal explore --no-shrink             # skip failure minimization
 ordeal explore -w 4                    # 4 parallel workers
 ordeal explore --generate-tests tests/test_generated.py  # turn traces into pytest tests
 ```
 
 The `--workers` / `-w` flag runs exploration across multiple processes. Each worker gets a unique seed for independent state-space exploration. Results are aggregated: runs/steps are summed, edges are unioned for true unique count. Use `--workers $(nproc)` for full CPU utilization.
+
+The `compose` runner reads `[compose]` and `[[compose.requests]]`, keeps one service
+topology alive, preserves captured JSON state, injects worker and response faults,
+and saves the exact action sequence. See [Compose Services](compose-runner.md).
+
+| Flag | Python runner | Compose runner |
+|---|---|---|
+| `--runner` | `python` (default) | set `compose` |
+| `--config`, `-c` | `[explorer]` and `[[tests]]` | `[compose]` and `[[compose.requests]]` |
+| `--seed` | exploration seed | request, service, and fault selection seed |
+| `--max-time` | Python exploration budget | service exploration budget |
+| `--replay-attempts` | not used | override immediate failure attempts |
+| `--workers`, `-w` | parallel process count | must be omitted or `1` |
+| `--generate-tests` | supported | rejected |
+| `--resume` / `--save-state` | trusted pickle state | rejected |
+
+For the service runner's full command workflow, start with the
+[Compose Quickstart](compose-quickstart.md). All configuration fields are in
+[Compose Configuration](compose-configuration.md).
 
 ### `ordeal replay`
 
@@ -424,25 +500,55 @@ Use for: triaging a CI failure, sharing a reproducible bug with a colleague, ver
 ordeal replay .ordeal/traces/fail-run-42.json          # reproduce
 ordeal replay --shrink trace.json                       # minimize
 ordeal replay --shrink trace.json -o minimal.json      # save minimized
+ordeal replay compose-trace.json --attempts 10          # probabilistic service replay
 ```
 
 The `--shrink` flag runs delta-debugging to remove unnecessary steps from the trace. Use it when: the trace is too long to understand, or you want the minimal sequence of operations that reproduces the failure. The shrunk trace is often 5-10x shorter than the original.
 
+Compose traces are not shrunk. Ordeal replays their exact actions `N` times and
+reports `attempted N / reproduced M`, because real service timing is not perfectly
+deterministic.
+
+| Replay flag | Python trace | Compose trace |
+|---|---|---|
+| `--shrink` | minimize steps | rejected |
+| `--ablate` | test fault necessity | rejected |
+| `--output`, `-o` | save shrunk trace | rejected |
+| `--attempts N` | not used | repeat exact actions N times |
+| `--json` | agent envelope | Compose trace/replay JSON summary |
+
+See [Compose Traces](compose-traces.md) for failure kinds, exact signature
+matching, exit codes, confidentiality, and the nondeterminism boundary.
+
 ### `ordeal verify`
 
-Re-run one saved regression from the bug-bundle index and record the result back into the bundle history:
+Re-run one saved regression and record the post-fix result, or guard every
+bound regression without modifying evidence history:
 
 ```bash
-ordeal verify fnd_dcb0fc0808d3
-ordeal verify fnd_dcb0fc0808d3 --index .ordeal/findings/index.json
+ordeal verify fnd_dcb0fc0808d3 --allow-unsafe-artifacts
+ordeal verify --ci
 ```
 
-Use this after fixing a bug found by `ordeal scan --save-artifacts`. `verify` looks up the stable `finding_id`, re-runs the saved regression command, and updates the bundle status plus verification history.
+Use the finding form after fixing a bug found by `ordeal scan --save-artifacts`.
+It checks the saved test/import binding, runs only that regression, and records
+the same-witness control. `--ci` is read-only and provider-neutral: it resolves
+repository-relative artifacts in the current checkout, refuses paths outside
+that checkout, and fails if any binding in `tests/ordeal-regressions.json`
+changed or its regression fails. Commit that manifest with
+`tests/test_ordeal_regressions.py`; `.ordeal/findings/` can remain local.
+
+See the [plain-language model](../concepts/durable-regressions.md), the
+[complete workflow](durable-regressions.md), or the
+[machine contract](../reference/durable-regression-schema.md).
 
 | Flag | Default | Description |
 |---|---|---|
-| `finding_id` | required | Stable finding ID from the JSON bundle or index |
+| `finding_id` | required unless `--ci` | Stable finding ID from the JSON bundle or index |
 | `--index` | `.ordeal/findings/index.json` | Artifact index to read and update |
+| `--manifest` | `tests/ordeal-regressions.json` | Portable manifest read by `--ci` |
+| `--allow-unsafe-artifacts` | off | Trust saved repo tests for one post-fix verification |
+| `--ci` | off | Read-only guard over every saved regression and binding |
 
 ### Agent-facing JSON
 
@@ -538,7 +644,11 @@ When you pass `--chaos`, three things happen:
 2. **buggify() activates**: every `buggify()` call in your code has a chance of returning True (default 10%, controlled by `--buggify-prob`).
 3. **Chaos-only tests run**: tests marked with `@pytest.mark.chaos` are collected instead of skipped.
 
-Without `--chaos`, your test suite runs normally. buggify() returns False, assertions are no-ops, and chaos-marked tests are skipped.
+Without `--chaos`, `buggify()` returns False and chaos-marked tests are
+skipped. `always()` and `unreachable()` still raise immediately on violations;
+`sometimes()` and `reachable()` do not accumulate deferred evidence. Use
+`auto_configure()` when another runner needs the same tracking without the CLI
+flag.
 
 ### `@pytest.mark.chaos`
 
@@ -568,6 +678,41 @@ Ordeal prints a property report at the end of the test run whenever there are tr
 ```
 
 `always` properties pass if they held every time they were evaluated. `sometimes` properties pass if they held at least once. `reachable` properties pass if the code path was reached. `unreachable` properties pass if it was never reached.
+
+### The reliability coverage matrix
+
+Add both `operation` and `fault` to any property assertion to record what was
+checked under a specific failure:
+
+```python
+always(
+    charge_count == 1,
+    "no_duplicate_charge",
+    operation="create_order",
+    fault="timeout",
+)
+```
+
+Use contextual `declare()` for cells the suite intends to exercise. A declared
+cell with zero observations remains visible as `NOT EXERCISED`:
+
+```text
+--- Ordeal Reliability Coverage ---
+  operation × fault × property
+  create_order × timeout × no_duplicate_charge     PASS
+  create_order × worker_restart × eventual_commit  NOT EXERCISED
+  refund × stale_response × balance_conserved      FAIL
+
+  1 PASS, 1 NOT EXERCISED, 1 FAIL
+```
+
+The labels do not inject faults. They describe a scenario the test harness
+actually arranged. Under pytest-xdist, workers send raw counters to the
+controller and Ordeal prints one merged matrix.
+
+See the [plain-English explanation](../concepts/reliability-coverage.md),
+[test-author guide](reliability-coverage.md), and
+[CI/platform guide](reliability-coverage-ci.md).
 
 ### `chaos_enabled` fixture
 
@@ -652,6 +797,9 @@ pytest --chaos --buggify-prob 0.3    # aggressive: 30% (pre-release stress)
 Higher probability = more faults per run = finds more bugs but also more noise. Start gentle, increase as your error handling matures.
 
 ## Exit codes
+
+`ordeal scan` returns **0** when no scan findings are counted, **1** when it
+reports findings or a blocked scan, and **2** for invalid command usage.
 
 `ordeal explore` returns **0** on success (no failures found) and **1** if any failure is found or if there is a configuration error. Use this directly in CI scripts:
 

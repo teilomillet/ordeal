@@ -538,7 +538,7 @@ def verify_bug_evidence(
     verified = local_verified and (sources_verified or not online_required)
     return BugEvidenceVerification(
         evidence_id=evidence_id,
-        record_path=str(declared_record_path),
+        record_path=declared_record_path.as_posix(),
         claim=claim,
         scope=scope,
         local_verified=local_verified,

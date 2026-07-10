@@ -30,6 +30,7 @@ from ordeal.compose import (
     save_compose_regression,
 )
 from ordeal.config import ComposeConfig, ComposeRequestConfig, ConfigError, load_config
+from ordeal.finding_evidence import _sha256_json
 from scripts.verify_compose_e2e_trace import EXPECTED_ACTIONS, verify_trace
 
 
@@ -288,6 +289,12 @@ class TestComposeEndToEndGate:
             "expected": "clean",
             "maximum_failures": 0,
         }
+        evidence = record["evidence"]
+        witness = evidence["witness"]
+        assert witness["input"]["trace_path"] == record["trace_file"]
+        assert witness["sha256"] == _sha256_json(witness["input"])
+        assert evidence["replay"]["command"] == f"ordeal replay {record['trace_file']}"
+        assert str(root) not in json.dumps(record)
         trace = ComposeTrace.load(fixture / record["trace_file"])
         assert trace.compose["file"] == "compose.yaml"
         assert trace.replay is not None
@@ -1061,9 +1068,10 @@ class TestComposeEvidenceLoop:
             failure=failure,
             replay=ComposeReplayReport(3, 2, failure.signature),
         )
+        source_trace_path = tmp_path / ".ordeal" / "traces" / "failure.json"
         result = ComposeExplorationResult(
             trace=trace,
-            trace_path=tmp_path / ".ordeal" / "traces" / "failure.json",
+            trace_path=source_trace_path,
             replay=trace.replay,
             requests=1,
             faults=1,
@@ -1073,6 +1081,7 @@ class TestComposeEvidenceLoop:
                 replay=trace.replay,
                 coverage=compose_reliability_coverage(trace),
                 protection={"status": "inconclusive", "protects": None},
+                trace_path=source_trace_path,
             ),
         )
 
@@ -1096,6 +1105,10 @@ class TestComposeEvidenceLoop:
             "maximum_failures": 0,
         }
         assert record["evidence"]["regression"]["status"] == "saved"
+        witness = record["evidence"]["witness"]
+        assert witness["input"]["trace_path"] == record["trace_file"]
+        assert witness["sha256"] == _sha256_json(witness["input"])
+        assert record["evidence"]["replay"]["command"] == (f"ordeal replay {record['trace_file']}")
 
     def test_durable_promotion_rejects_external_compose_file(self, tmp_path: Path) -> None:
         failure = ComposeFailure("unexpected_status", "boom", 0, "read")

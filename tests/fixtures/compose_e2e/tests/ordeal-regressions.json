@@ -253,9 +253,9 @@
               }
             ],
             "seed": 0,
-            "trace_path": "/Users/teilomillet/Code/ordeal/tests/fixtures/compose_e2e/.ordeal/traces/compose-0-6cfb26c5834c.json"
+            "trace_path": "tests/ordeal-compose-regressions/fnd_compose_bac551d3c51dce6b.json"
           },
-          "sha256": "2bd9d6719df47fe7e500cb784c54d4b38ee180ac9eea7f0c241c21037a159ffe",
+          "sha256": "eb562a20a8713d1f947513a64a7ce97ad5551c58c28f1e946f516a23f4855b88",
           "source": "compose_trace"
         },
         "observation": {
@@ -271,7 +271,7 @@
           "attempts": 3,
           "exact_matches": 3,
           "match_basis": "same failure kind, message, action index, and action name",
-          "command": "ordeal replay /Users/teilomillet/Code/ordeal/tests/fixtures/compose_e2e/.ordeal/traces/compose-0-6cfb26c5834c.json",
+          "command": "ordeal replay tests/ordeal-compose-regressions/fnd_compose_bac551d3c51dce6b.json",
           "boundary": "The action and fault trace is exact, but container scheduling, network timing, and external service behavior are not deterministic. Response delay and corruption are injected at the harness transport boundary."
         },
         "minimization": {

@@ -1472,6 +1472,24 @@ def _evidence_with_compose_regression(
 ) -> dict[str, Any]:
     """Attach one committed Compose trace binding to a copied evidence card."""
     copied = copy.deepcopy(dict(evidence))
+    witness = copied.get("witness")
+    if isinstance(witness, Mapping):
+        witness_input = witness.get("input")
+        if isinstance(witness_input, Mapping):
+            portable_input = {**dict(witness_input), "trace_path": trace_path}
+            from ordeal.finding_evidence import _sha256_json
+
+            copied["witness"] = {
+                **dict(witness),
+                "input": portable_input,
+                "sha256": _sha256_json(portable_input),
+            }
+    replay = copied.get("replay")
+    if isinstance(replay, Mapping):
+        copied["replay"] = {
+            **dict(replay),
+            "command": f"ordeal replay {trace_path}",
+        }
     copied["regression"] = {
         "status": "saved",
         "path": trace_path,

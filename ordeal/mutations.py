@@ -6451,6 +6451,17 @@ def mutate_function_and_test(
                     contract_context=contract_context,
                     _stats=stats,
                 )
+            import warnings
+
+            warnings.warn(
+                f"{target!r}: tests killed 0/0 mutants because no matching tests "
+                f"were collected; mine oracle killed "
+                f"{mine_result.killed}/{mine_result.total}. "
+                "Falling back to mine oracle evidence.",
+                UserWarning,
+                stacklevel=2,
+            )
+            mine_result.diagnostics["fallback_reason"] = "no_tests"
             mine_result.diagnostics.update(stats)
             mine_result.diagnostics["tested"] = mine_result.total
             mine_result.timings.update(timings)

@@ -495,7 +495,7 @@ wheels = [
 
 [[package]]
 name = "ordeal"
-version = "0.3.39"
+version = "0.3.40"
 source = { editable = "." }
 dependencies = [
     { name = "coverage" },
@@ -543,7 +543,7 @@ provides-extras = ["atheris", "all", "dev", "docs"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "numpy", marker = "python_full_version >= '3.11'", specifier = ">=1.26.0" },
+    { name = "numpy", specifier = ">=1.26.0" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
 ]
 

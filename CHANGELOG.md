@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.40
+
+**Features:**
+
+- add source-backed public bug benchmarks
+- explore long-lived Compose services
+- bind scan findings to replayable regressions
+- report measured reliability and test protection
+
+**Fixes:**
+
+- normalize evidence paths across platforms
+- keep benchmark evidence stable on Windows
+
+
 ## 0.3.39
 
 **Fixes:**

@@ -159,6 +159,64 @@ def test_accessing_lazy_exports_loads_modules_on_demand():
     assert proc.stdout.splitlines() == ["1", "1"]
 
 
+def test_lazy_sibling_import_does_not_hide_diff_entrypoint():
+    """Resolving a sibling export must leave ``diff`` as the public callable."""
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from ordeal import Operation, diff; print(Operation.__name__, callable(diff))",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc.stdout.strip() == "Operation True"
+
+
+def test_catalog_preserves_dotted_module_imports():
+    """Capability discovery must not replace dotted modules with functions."""
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import ordeal; ordeal.catalog(); "
+                "import ordeal.audit as audit_mod; "
+                "import ordeal.mine as mine_mod; "
+                "print(hasattr(audit_mod, 'audit'), hasattr(mine_mod, 'mine'))"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc.stdout.strip() == "True True"
+
+
+def test_callable_entrypoint_modules_support_both_import_forms():
+    """Colliding top-level calls and explicit child-module imports must coexist."""
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import ordeal.audit as audit_mod; "
+                "import ordeal.diff as diff_mod; "
+                "import ordeal.mine as mine_mod; "
+                "from ordeal import audit, diff, mine; "
+                "print(callable(audit), audit is audit_mod, hasattr(audit_mod, 'ModuleAudit')); "
+                "print(callable(diff), diff is diff_mod, hasattr(diff_mod, 'DiffResult')); "
+                "print(callable(mine), mine is mine_mod, hasattr(mine_mod, 'MineResult'))"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc.stdout.splitlines() == ["True True True"] * 3
+
+
 # ============================================================================
 # catalog() completeness: every subsystem must be present and non-empty
 # ============================================================================

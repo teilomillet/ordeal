@@ -14,7 +14,7 @@ import hashlib
 import inspect
 import json
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -30,6 +30,15 @@ from ordeal.finding_evidence import (
     _json_ready,
     _sha256_json,
 )
+from ordeal.system_diff import (
+    FaultEvent,
+    Operation,
+    PerformanceBudget,
+    SystemDiffResult,
+    SystemEvent,
+    _diff_system,
+)
+
 DiffStatus = Literal[
     "divergent",
     "no_divergence_observed",
@@ -42,9 +51,13 @@ __all__ = [
     "DiffResult",
     "DiffWitness",
     "DivergenceWitness",
+    "FaultEvent",
     "Mismatch",
+    "Operation",
     "OutcomeObservation",
+    "PerformanceBudget",
     "SideEffect",
+    "SystemDiffResult",
     "diff",
 ]
 
@@ -790,10 +803,15 @@ def diff(
     normalize: Callable[[Any], Any] | None = None,
     replay_attempts: int = 2,
     artifact_dir: str | Path | None = None,
-    side_effects: Mapping[str, SideEffect] | None = None,
+    side_effects: Mapping[str, SideEffect] | Callable[[Any], Any] | None = None,
     equivalence_proof: Callable[[Callable[..., Any], Callable[..., Any]], bool] | None = None,
+    sequence: Sequence[SystemEvent] | None = None,
+    state: Callable[[Any], Any] | None = None,
+    apply_fault: Callable[[Any, FaultEvent], None] | None = None,
+    performance: PerformanceBudget | None = None,
+    minimize: bool = True,
     **fixtures: st.SearchStrategy[Any] | Any,
-) -> DiffResult:
+) -> DiffResult | SystemDiffResult:
     """Search two revisions for a full-envelope behavioral divergence.
 
     Every observed divergence is minimized, replayed on the same input, and
@@ -808,9 +826,64 @@ def diff(
     observable channels. Only an explicit successful ``equivalence_proof``
     produces ``status == "proven_equivalent"``.
 
+    Providing ``sequence`` switches to system mode. The same ordered
+    operations and fault transitions run against fresh instances from both
+    zero-argument factories. Public exports, signatures, outcomes, public
+    state, selected side effects, and recovery are reported together;
+    ``performance`` remains a separate measured contract.
+
+    System example::
+
+        result = diff(
+            OldStore,
+            NewStore,
+            sequence=[
+                FaultEvent("timeout", "activate"),
+                Operation("read"),
+                FaultEvent("timeout", "deactivate"),
+                Operation("read"),
+            ],
+            state=lambda store: store.snapshot(),
+        )
+
+    See ``docs/concepts/system-differential.md`` for the layman model and
+    ``docs/guides/system-differential.md`` for a complete copyable tutorial.
     """
     if replay_attempts < 1:
         raise ValueError("replay_attempts must be >= 1")
+    if sequence is not None:
+        if fixtures:
+            raise TypeError("system diff does not accept function fixtures")
+        if equivalence_proof is not None:
+            raise TypeError("system diff does not accept equivalence_proof")
+        if side_effects is not None and not callable(side_effects):
+            raise TypeError("system diff side_effects must be a system probe")
+        normalizer = normalize or _identity
+
+        def return_compare(a: Any, b: Any) -> bool:
+            normalized_a = normalizer(a)
+            normalized_b = normalizer(b)
+            if compare is not None:
+                return bool(compare(normalized_a, normalized_b))
+            return _default_compare(normalized_a, normalized_b, rtol, atol)
+
+        return _diff_system(
+            fn_a,
+            fn_b,
+            sequence,
+            return_compare=return_compare,
+            state_compare=_state_equal,
+            state=state,
+            side_effects=side_effects,
+            apply_fault=apply_fault,
+            performance=performance,
+            minimize=minimize,
+            replay_attempts=replay_attempts,
+        )
+    if any(value is not None for value in (state, apply_fault, performance)):
+        raise TypeError("system diff options require sequence=")
+    if side_effects is not None and not isinstance(side_effects, Mapping):
+        raise TypeError("function diff side_effects must map names to SideEffect objects")
     selected_side_effects = dict(side_effects or {})
     invalid_effects = [
         name

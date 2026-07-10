@@ -12,9 +12,11 @@ code behaves correctly under all reachable conditions.
 from __future__ import annotations
 
 import re
+import sys
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _get_version
 from pathlib import Path
+from types import ModuleType
 
 
 def _source_tree_version() -> str | None:
@@ -110,6 +112,41 @@ _LAZY_SUBMODULES = (
 )
 
 _SENTINEL = object()
+_CALLABLE_SUBMODULES = frozenset({"ordeal.audit", "ordeal.diff", "ordeal.mine"})
+
+
+class _CallableEntrypointModule(ModuleType):
+    """A submodule that also delegates calls to its same-named entrypoint."""
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        """Call the function whose name matches this submodule's final component."""
+        name = self.__name__.rpartition(".")[2]
+        entrypoint = getattr(self, name, None)
+        if not callable(entrypoint):
+            raise TypeError(f"module {self.__name__!r} has no callable {name!r}")
+        return entrypoint(*args, **kwargs)
+
+
+def _make_callable_entrypoint_module(module: ModuleType) -> None:
+    """Preserve module imports while making true entrypoint collisions callable."""
+    if module.__name__ in _CALLABLE_SUBMODULES and not isinstance(
+        module, _CallableEntrypointModule
+    ):
+        module.__class__ = _CallableEntrypointModule
+
+
+class _OrdealPackage(ModuleType):
+    """Prepare explicitly imported colliding submodules when accessed."""
+
+    def __getattribute__(self, name: str) -> object:
+        """Keep child modules intact while making their public entrypoints callable."""
+        value = super().__getattribute__(name)
+        if isinstance(value, ModuleType):
+            _make_callable_entrypoint_module(value)
+        return value
+
+
+sys.modules[__name__].__class__ = _OrdealPackage
 
 
 def __getattr__(name: str) -> object:
@@ -128,10 +165,13 @@ def __getattr__(name: str) -> object:
             mod = importlib.import_module(mod_path)
         except ImportError:
             continue
+        _make_callable_entrypoint_module(mod)
         obj = getattr(mod, name, _SENTINEL)
         if obj is not _SENTINEL:
-            globals()[name] = obj  # cache for subsequent access
-            return obj
+            leaf_name = mod_path.rpartition(".")[2]
+            resolved = mod if name == leaf_name and callable(mod) else obj
+            globals()[name] = resolved  # cache for subsequent access
+            return resolved
     raise AttributeError(f"module 'ordeal' has no attribute {name!r}")
 
 
@@ -148,6 +188,7 @@ def __dir__() -> list[str]:
             mod = importlib.import_module(mod_path)
         except ImportError:
             continue
+        _make_callable_entrypoint_module(mod)
         for attr in dir(mod):
             if attr.startswith("_"):
                 continue
@@ -158,7 +199,18 @@ def __dir__() -> list[str]:
             obj_mod = getattr(obj, "__module__", None)
             if obj_mod == mod_path or (_inspect.isclass(obj) and obj_mod == mod_path):
                 names.add(attr)
+    _restore_lazy_entrypoint_collisions()
     return sorted(names)
+
+
+def _restore_lazy_entrypoint_collisions() -> None:
+    """Keep colliding child modules intact and callable after discovery imports."""
+    for module_name in _CALLABLE_SUBMODULES:
+        module = sys.modules.get(module_name)
+        if module is None:
+            continue
+        _make_callable_entrypoint_module(module)
+        globals()[module_name.rpartition(".")[2]] = module
 
 
 def _catalog_call_pattern(
@@ -668,13 +720,15 @@ def catalog() -> dict[str, list]:
         )
     except ImportError:
         pass
-    return {
+    annotated = {
         section: _annotate_catalog_section(
             section,
             [dict(item) for item in entries],
         )
         for section, entries in result.items()
     }
+    _restore_lazy_entrypoint_collisions()
+    return annotated
 
 
 def _introspect_module(mod: object, include: set[str] | None = None) -> list[dict]:

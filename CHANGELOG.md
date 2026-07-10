@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.42
+
+**Features:**
+
+- close source-bound subprocess timeout gaps
+- add evidence closure to scan
+- strengthen release evidence and scan workflow
+
+
 ## 0.3.41
 
 **Features:**

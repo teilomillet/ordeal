@@ -52,6 +52,14 @@ result = scan_module("myapp.scoring", mode="candidate", security_focus=True)
 
 With `security_focus=True`, scan also synthesizes small artifact/config mutations for deserialization- and IPC-shaped parameters, so the same call can surface trust-boundary bugs beyond path-only shapers.
 
+For callable selection, evidence statuses, artifact saving, and exit codes, use
+the [Scan Quickstart](scan-quickstart.md). Bound methods accept
+`object_factories`, `object_setups`, `object_scenarios`,
+`object_state_factories`, `object_teardowns`, and `object_harnesses`; see
+[Object Harnesses and Stateful Replay](scan-object-harnesses.md). Exact result
+and proof fields are listed in the
+[Scan Evidence Schema](../reference/scan-evidence-schema.md).
+
 ## fuzz
 
 !!! quote "What this unlocks"

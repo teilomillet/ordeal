@@ -1,6 +1,6 @@
 ---
 title: Scan Finding Rules
-description: How ordeal scan filters helper targets, chooses security probes, and promotes findings.
+description: How scan filters helpers, detects source-backed seams, validates harnesses, replays, and promotes findings.
 ---
 
 # Scan Finding Rules
@@ -41,10 +41,27 @@ The first command shows how ordeal ranks the surface. The second shows which cra
 - If `critical_sinks` is non-empty, ordeal also requires a replayable proof bundle before treating the crash as a top finding.
 - When replay does not confirm the witness, ordeal keeps the crash exploratory and writes the reason into `verdict.demotion_reason`.
 
+## 5. Crash replay is source-seam specific
+
+- Immediate replay matches exception type, message, and the terminal traceback
+  filename, line, and function.
+- The same message raised from another line is not counted as the same failure.
+- Evidence cards preserve the recorded `match_basis`; older bundles are not
+  silently upgraded to the stronger rule.
+
+## 6. Bound regressions must reconstruct the harness
+
+- Direct functions can replay from their module and keyword witness.
+- Instance methods also require stable owner, factory, setup, scenario, state,
+  and teardown references.
+- Importable or file-backed module-level symbols are supported. Lambdas and
+  nested locals are not portable.
+- If exact harness reconstruction is unavailable, ordeal skips the regression
+  instead of emitting syntactically valid but behaviorally false scaffolding.
+
 ## Where to look in saved artifacts
 
 - `.ordeal/findings/<module>.proofs.json` keeps the proof bundle for each saved finding.
 - `impact.critical_sinks` tells you which high-risk sink the witness actually reached.
 - `impact.callable_sink_categories` tells you the wider sink surface the callable appears to expose.
 - `verdict.promoted` and `verdict.demotion_reason` tell you whether the crash became a top finding or stayed exploratory.
-

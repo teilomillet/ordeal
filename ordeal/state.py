@@ -42,7 +42,7 @@ def _source_hash(func: Any) -> str | None:
     """Hash a function's source code.  Returns ``None`` if unavailable."""
     try:
         source = inspect.getsource(func)
-        return hashlib.sha256(source.encode()).hexdigest()[:16]
+        return hashlib.sha256(source.encode()).hexdigest()
     except (OSError, TypeError):
         return None
 
@@ -117,6 +117,7 @@ class FunctionState:
     scan_replayable: bool | None = None
     scan_replay_attempts: int = 0
     scan_replay_matches: int = 0
+    scan_minimization: dict[str, Any] | None = None
     scan_contract_fit: float | None = None
     scan_reachability: float | None = None
     scan_realism: float | None = None
@@ -187,6 +188,7 @@ class FunctionState:
         self.scan_replayable = None
         self.scan_replay_attempts = 0
         self.scan_replay_matches = 0
+        self.scan_minimization = None
         self.scan_contract_fit = None
         self.scan_reachability = None
         self.scan_realism = None
@@ -392,6 +394,7 @@ class ExplorationState:
                         "replayable": fs.scan_replayable,
                         "replay_attempts": fs.scan_replay_attempts,
                         "replay_matches": fs.scan_replay_matches,
+                        "minimization": fs.scan_minimization,
                         "contract_fit": fs.scan_contract_fit,
                         "reachability": fs.scan_reachability,
                         "realism": fs.scan_realism,
@@ -400,6 +403,7 @@ class ExplorationState:
                         "input_sources": fs.scan_input_sources,
                         "input_source": fs.scan_input_source,
                         "proof_bundle": fs.scan_proof_bundle,
+                        "source_sha256": fs.source_hash,
                         "lifecycle_signal": (
                             1.0
                             if isinstance(fs.scan_proof_bundle, dict)
@@ -412,6 +416,7 @@ class ExplorationState:
                 details.append(
                     {
                         "function": name,
+                        "source_sha256": fs.source_hash,
                         "evidence_class": _evidence_class(str(item.get("category", ""))),
                         "lifecycle_signal": (
                             1.0
@@ -429,6 +434,7 @@ class ExplorationState:
                         "category": "speculative_property",
                         "evidence_class": "speculative_property",
                         "function": name,
+                        "source_sha256": fs.source_hash,
                         **item,
                     }
                 )
@@ -649,6 +655,11 @@ def explore_mine(
                     "holds": prop.holds,
                     "total": prop.total,
                     "counterexample": prop.counterexample,
+                    "replayable": prop.replayable,
+                    "replay_attempts": prop.replay_attempts,
+                    "replay_matches": prop.replay_matches,
+                    "replay_match_basis": prop.replay_match_basis,
+                    "minimization": prop.minimization,
                 }
             )
     return state
@@ -691,6 +702,7 @@ def explore_scan(
     min_reachability: float = 0.5,
     min_realism: float = 0.55,
     security_focus: bool = False,
+    minimize_findings: bool = False,
 ) -> ExplorationState:
     """Scan module for crashes and update state."""
     from ordeal.auto import scan_module
@@ -731,6 +743,7 @@ def explore_scan(
         min_reachability=min_reachability,
         min_realism=min_realism,
         security_focus=security_focus,
+        minimize_findings=minimize_findings,
     )
     state.scan_mode = mode
     if "scan" not in state.active_dimensions:
@@ -742,6 +755,7 @@ def explore_scan(
             existing_skips.add((name, reason))
     for fr in result.functions:
         fs = state.function(fr.name)
+        fs.source_hash = fr.source_sha256 or fs.source_hash
         fs.scanned = True
         fs.crash_free = fr.execution_ok
         fs.scan_error = fr.error
@@ -750,6 +764,7 @@ def explore_scan(
         fs.scan_replayable = fr.replayable
         fs.scan_replay_attempts = fr.replay_attempts
         fs.scan_replay_matches = fr.replay_matches
+        fs.scan_minimization = fr.minimization
         fs.scan_contract_fit = fr.contract_fit
         fs.scan_reachability = fr.reachability
         fs.scan_realism = fr.realism
@@ -944,6 +959,7 @@ def explore(
     scan_min_reachability: float = 0.5,
     scan_min_realism: float = 0.55,
     scan_security_focus: bool = False,
+    scan_minimize_findings: bool = False,
     run_mine: bool = True,
     run_scan: bool = True,
     run_mutate: bool = True,
@@ -1092,6 +1108,7 @@ def explore(
                 min_reachability=scan_min_reachability,
                 min_realism=scan_min_realism,
                 security_focus=scan_security_focus,
+                minimize_findings=scan_minimize_findings,
             )
             scan_hash = hash(("scanned", state.confidence))
             state.tree.checkpoint(

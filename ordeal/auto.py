@@ -26,6 +26,7 @@ import contextlib
 import copy
 import fnmatch
 import functools
+import hashlib
 import importlib
 import importlib.util
 import inspect
@@ -76,6 +77,7 @@ class FunctionResult:
     replayable: bool | None = None
     replay_attempts: int = 0
     replay_matches: int = 0
+    minimization: dict[str, Any] | None = None
     contract_fit: float | None = None
     reachability: float | None = None
     realism: float | None = None
@@ -84,6 +86,7 @@ class FunctionResult:
     input_sources: list[dict[str, str]] = field(default_factory=list)
     input_source: str | None = None
     proof_bundle: dict[str, Any] | None = None
+    source_sha256: str | None = None
 
     def __post_init__(self) -> None:
         """Normalize legacy manual constructions onto the verdict model."""
@@ -193,6 +196,8 @@ _PROMOTED_SCAN_VERDICTS = {
     "semantic_contract",
     "lifecycle_contract",
 }
+
+_REPLAY_MATCH_BASIS = "same exception type, message, and terminal source location"
 
 _CONTRACT_GROUP_ALIASES: dict[str, tuple[str, ...]] = {
     "transport": ("json_roundtrip", "http_shape"),
@@ -2061,6 +2066,19 @@ def _traceback_path(exc: BaseException) -> list[str]:
     return frames[-6:]
 
 
+def _exception_replay_signature(
+    exc: BaseException,
+) -> tuple[type[BaseException], str, tuple[str, int, str] | None]:
+    """Return the stable failure identity used by immediate scan replay."""
+    frames = traceback.extract_tb(exc.__traceback__)
+    if not frames:
+        terminal = None
+    else:
+        frame = frames[-1]
+        terminal = (str(Path(frame.filename).resolve()), frame.lineno, frame.name)
+    return type(exc), str(exc), terminal
+
+
 def _json_ready_proof(value: Any) -> Any:
     """Convert proof-bundle payloads into JSON-friendly structures."""
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -3294,10 +3312,13 @@ def _python_source_path_to_module_name(path_str: str) -> str | None:
 
 
 _DISCOVERY_IGNORED_PATH_PARTS = {
+    ".claude",
+    ".codex",
     ".git",
     ".hypothesis",
     ".mypy_cache",
     ".nox",
+    ".ordeal",
     ".pytest_cache",
     ".ruff_cache",
     ".tox",
@@ -3308,6 +3329,8 @@ _DISCOVERY_IGNORED_PATH_PARTS = {
     "site-packages",
     "venv",
 }
+
+_DISCOVERY_IGNORED_ROOT_NAMES = {"site"}
 
 
 def _is_project_discovery_path(path: Path, *, workspace_root: Path | None = None) -> bool:
@@ -6015,7 +6038,8 @@ def _is_simple_literal_node(node: ast.AST) -> bool:
 
 def _test_search_roots(module_name: str) -> list[Path]:
     """Return likely roots containing valid example seeds for *module_name*."""
-    roots = [Path.cwd() / "tests", Path.cwd()]
+    workspace_root = Path.cwd().resolve()
+    roots = [workspace_root]
     try:
         module = importlib.import_module(module_name)
     except Exception:
@@ -6023,9 +6047,37 @@ def _test_search_roots(module_name: str) -> list[Path]:
     module_file = getattr(module, "__file__", None)
     if module_file:
         module_dir = Path(module_file).resolve().parent
-        if module_dir not in roots:
+        if (
+            module_dir not in roots
+            and _is_project_discovery_path(module_dir, workspace_root=workspace_root)
+            and not module_dir.is_relative_to(workspace_root)
+        ):
             roots.append(module_dir)
     return [root for root in roots if root.exists()]
+
+
+def _project_files_matching(root: Path, patterns: Sequence[str]) -> list[Path]:
+    """Return matching files while pruning non-project directories before descent."""
+    resolved_root = root.resolve()
+    if not _is_project_discovery_path(resolved_root):
+        return []
+    matches: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(resolved_root):
+        directory = Path(dirpath)
+        dirnames[:] = sorted(
+            name
+            for name in dirnames
+            if name not in _DISCOVERY_IGNORED_PATH_PARTS
+            and not (directory == resolved_root and name in _DISCOVERY_IGNORED_ROOT_NAMES)
+            and _is_project_discovery_path(directory / name)
+        )
+        for filename in sorted(filenames):
+            if not any(fnmatch.fnmatch(filename, pattern) for pattern in patterns):
+                continue
+            path = (directory / filename).resolve()
+            if path.is_file() and _is_project_discovery_path(path):
+                matches.append(path)
+    return matches
 
 
 def _callable_seed_files(module_name: str) -> list[Path]:
@@ -6033,17 +6085,14 @@ def _callable_seed_files(module_name: str) -> list[Path]:
     candidates: list[Path] = []
     seen: set[Path] = set()
     for root in _test_search_roots(module_name):
-        for pattern in ("test_*.py", "*_test.py", "conftest.py"):
-            for path in root.rglob(pattern):
-                resolved = path.resolve()
-                if (
-                    resolved in seen
-                    or not resolved.is_file()
-                    or not _is_project_discovery_path(resolved)
-                ):
-                    continue
-                seen.add(resolved)
-                candidates.append(resolved)
+        for resolved in _project_files_matching(
+            root,
+            ("test_*.py", "*_test.py", "conftest.py"),
+        ):
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            candidates.append(resolved)
     return sorted(candidates)
 
 
@@ -6372,15 +6421,9 @@ def _mine_object_harness_hints_cached(
     support_files = list(_callable_seed_files(module_name))
     extra_patterns = ("*factory*.py", "*fixture*.py", "*support*.py", "conftest.py")
     for root in _test_search_roots(module_name):
-        for pattern in extra_patterns:
-            for path in root.rglob(pattern):
-                resolved = path.resolve()
-                if (
-                    resolved.is_file()
-                    and resolved not in support_files
-                    and _is_project_discovery_path(resolved)
-                ):
-                    support_files.append(resolved)
+        for resolved in _project_files_matching(root, extra_patterns):
+            if resolved not in support_files:
+                support_files.append(resolved)
 
     fixture_catalog = _pytest_fixture_catalog(
         tuple(str(path.resolve()) for path in support_files if path.exists())
@@ -8093,6 +8136,121 @@ def _proof_demotion_reason(
     return "; ".join(dict.fromkeys(reasons)) or None
 
 
+def _replay_symbol_path(value: Any) -> str | None:
+    """Return a resolvable symbol path for one harness replay dependency."""
+    module_name = str(getattr(value, "__module__", "") or "").strip()
+    qualname = str(getattr(value, "__qualname__", "") or "").strip()
+    if not module_name or not qualname or "<locals>" in qualname or "<lambda>" in qualname:
+        return None
+
+    try:
+        resolved: Any = importlib.import_module(module_name)
+        for part in qualname.split("."):
+            resolved = getattr(resolved, part)
+    except (AttributeError, ImportError, ModuleNotFoundError):
+        resolved = None
+    if resolved is value:
+        return f"{module_name}:{qualname}"
+
+    try:
+        source_path = Path(inspect.getsourcefile(value) or inspect.getfile(value)).resolve()
+    except (OSError, TypeError):
+        return None
+    if not source_path.is_file():
+        return None
+    try:
+        display_path = source_path.relative_to(Path.cwd().resolve()).as_posix()
+    except ValueError:
+        display_path = str(source_path)
+    return f"{display_path}:{qualname}"
+
+
+def _bound_method_replay_payload(
+    func: Any,
+    failing_args: Mapping[str, Any],
+) -> tuple[str, dict[str, Any]] | None:
+    """Build an exact replay snippet for one resolved instance-method harness."""
+    owner = getattr(func, "__ordeal_owner__", None)
+    method_name = str(getattr(func, "__ordeal_method_name__", "") or "").strip()
+    factory = getattr(func, "__ordeal_factory__", None)
+    if not inspect.isclass(owner) or not method_name or factory is None:
+        return None
+
+    dependencies = {
+        "owner": owner,
+        "factory": factory,
+        "setup": getattr(func, "__ordeal_setup__", None),
+        "state_factory": getattr(func, "__ordeal_state_factory__", None),
+        "teardown": getattr(func, "__ordeal_teardown__", None),
+    }
+    scenarios = tuple(getattr(func, "__ordeal_scenarios__", ()))
+    refs: dict[str, str | None] = {
+        name: _replay_symbol_path(value) if value is not None else None
+        for name, value in dependencies.items()
+    }
+    scenario_refs = [_replay_symbol_path(scenario) for scenario in scenarios]
+    if refs["owner"] is None or refs["factory"] is None:
+        return None
+    if any(value is not None and refs[name] is None for name, value in dependencies.items()):
+        return None
+    if any(reference is None for reference in scenario_refs):
+        return None
+
+    owner_key = f"{owner.__module__}:{owner.__qualname__}"
+    lines = [
+        "from inspect import getattr_static",
+        "from ordeal.auto import _resolve_method_callable",
+        "from ordeal.cli import _resolve_symbol_path",
+        "",
+        f"owner = _resolve_symbol_path({refs['owner']!r})",
+        f"factory = _resolve_symbol_path({refs['factory']!r})",
+    ]
+    for name in ("setup", "state_factory", "teardown"):
+        reference = refs[name]
+        if reference is not None:
+            lines.append(f"{name} = _resolve_symbol_path({reference!r})")
+    for index, reference in enumerate(scenario_refs):
+        lines.append(f"scenario_{index} = _resolve_symbol_path({reference!r})")
+
+    resolve_kwargs = [f"object_factories={{{owner_key!r}: factory}}"]
+    if refs["setup"] is not None:
+        resolve_kwargs.append(f"object_setups={{{owner_key!r}: setup}}")
+    if scenario_refs:
+        scenario_names = ", ".join(f"scenario_{index}" for index in range(len(scenario_refs)))
+        resolve_kwargs.append(f"object_scenarios={{{owner_key!r}: [{scenario_names}]}}")
+    if refs["state_factory"] is not None:
+        resolve_kwargs.append(f"object_state_factories={{{owner_key!r}: state_factory}}")
+    if refs["teardown"] is not None:
+        resolve_kwargs.append(f"object_teardowns={{{owner_key!r}: teardown}}")
+    harness = str(getattr(func, "__ordeal_harness__", "fresh") or "fresh")
+    resolve_kwargs.append(f"object_harnesses={{{owner_key!r}: {harness!r}}}")
+
+    lines.extend(
+        [
+            "_, target = _resolve_method_callable(",
+            "    owner,",
+            f"    {method_name!r},",
+            f"    getattr_static(owner, {method_name!r}),",
+            *(f"    {item}," for item in resolve_kwargs),
+            ")",
+            f"args = {pformat(_json_ready_proof(dict(failing_args)), width=88, sort_dicts=False)}",
+            "target(**args)",
+        ]
+    )
+    metadata = {
+        "mode": harness,
+        "owner": refs["owner"],
+        "method": method_name,
+        "factory": refs["factory"],
+        "setup": refs["setup"],
+        "scenarios": scenario_refs,
+        "state_factory": refs["state_factory"],
+        "state_param": getattr(func, "__ordeal_state_param__", None),
+        "teardown": refs["teardown"],
+    }
+    return "\n".join(lines), metadata
+
+
 def _proof_minimal_reproduction(
     *,
     qualname: str,
@@ -8100,6 +8258,7 @@ def _proof_minimal_reproduction(
     profile: Mapping[str, Any],
     harness_mode: str | None,
     callable_kind: str | None,
+    callable_obj: Any | None = None,
     contract_check: str | None = None,
     security_focus: bool = False,
 ) -> dict[str, Any]:
@@ -8112,36 +8271,53 @@ def _proof_minimal_reproduction(
         f"mod = import_module({module_name!r})" if module_name else "mod = None",
         f"args = {pformat(_json_ready_proof(dict(failing_args)), width=88, sort_dicts=False)}",
     ]
+    harness_replay = None
     if direct_call_supported and module_name:
         expr = "mod"
         for part in [part for part in qualname.split(".") if part]:
             expr = f"{expr}.{part}"
         snippet_lines.append(f"{expr}(**args)")
     else:
-        snippet_lines.append(
-            "# This target requires the configured object harness before invoking the method."
+        harness_replay = (
+            _bound_method_replay_payload(callable_obj, failing_args)
+            if callable_obj is not None
+            else None
         )
+        if harness_replay is None:
+            snippet_lines.append(
+                "# This target requires the configured object harness before invoking the method."
+            )
+        else:
+            snippet_lines = harness_replay[0].splitlines()
     if contract_check is not None:
         command = f"uv run ordeal check {explicit_target} --contract {contract_check}"
     elif module_name:
         command = (
             f"uv run ordeal scan {module_name} --mode candidate "
             f"{'--security-focus ' if security_focus else ''}"
-            f"--targets {explicit_target} -n 1"
+            f"--target {explicit_target} -n 1"
         )
     else:
         command = None
     note = None
     if not direct_call_supported:
-        note = (
-            "Bound instance method: replay requires the configured object factory/setup/scenario "
-            f"(harness={harness_mode or 'fresh'})."
-        )
+        if harness_replay is None:
+            note = (
+                "Bound instance method: exact replay requires resolvable object "
+                f"factory/setup/scenario hooks (harness={harness_mode or 'fresh'})."
+            )
+        else:
+            note = (
+                "Bound instance method: the snippet reconstructs the discovered object harness "
+                f"before replay (harness={harness_mode or 'fresh'})."
+            )
     return {
         "target": explicit_target,
         "command": command,
         "python_snippet": "\n".join(snippet_lines),
         "direct_call_supported": direct_call_supported,
+        "harness_replay_supported": harness_replay is not None,
+        "harness": harness_replay[1] if harness_replay is not None else None,
         "note": note,
     }
 
@@ -8170,6 +8346,7 @@ def _build_proof_bundle(
     min_fixture_completeness: float | None = None,
     harness_mode: str | None = None,
     callable_kind: str | None = None,
+    callable_obj: Any | None = None,
     contract_check: str | None = None,
     security_focus: bool = False,
     forced_demotion_reason: str | None = None,
@@ -8256,6 +8433,7 @@ def _build_proof_bundle(
         profile=profile,
         harness_mode=harness_mode,
         callable_kind=callable_kind,
+        callable_obj=callable_obj,
         contract_check=contract_check,
         security_focus=security_focus,
     )
@@ -8300,6 +8478,7 @@ def _build_proof_bundle(
             "replayable": replayable,
             "replay_attempts": replay_attempts,
             "replay_matches": replay_matches,
+            "match_basis": _REPLAY_MATCH_BASIS,
             "failing_args": _json_ready_proof(dict(failing_args)),
             **minimal_reproduction,
         },
@@ -8902,6 +9081,7 @@ def _evaluate_contract_checks(
             ),
             harness_mode=getattr(func, "__ordeal_harness__", None),
             callable_kind=getattr(func, "__ordeal_kind__", None),
+            callable_obj=func,
             contract_check=check.name,
             forced_demotion_reason=forced_demotion_reason,
             promoted=promoted,
@@ -8960,6 +9140,7 @@ def scan_module(
     min_reachability: float = 0.5,
     min_realism: float = 0.55,
     security_focus: bool = False,
+    minimize_findings: bool = False,
 ) -> ScanResult:
     """Smoke-test every public callable in *module*.
 
@@ -9043,6 +9224,7 @@ def scan_module(
         min_realism: Minimum semantic realism score to promote.
         security_focus: Opt into trust-boundary-biased sink detection, scoring,
             and deterministic low-side-effect security probes.
+        minimize_findings: Shrink and replay suspicious property witnesses.
     """
     if mode not in _VALID_SCAN_MODES:
         raise ValueError(f"mode must be one of {_VALID_SCAN_MODES}, got {mode!r}")
@@ -9137,7 +9319,14 @@ def scan_module(
             min_reachability=min_reachability,
             min_realism=min_realism,
             security_focus=security_focus,
+            minimize_findings=minimize_findings,
         )
+        try:
+            source = inspect.getsource(_unwrap(func))
+        except (OSError, TypeError):
+            func_result.source_sha256 = None
+        else:
+            func_result.source_sha256 = hashlib.sha256(source.encode("utf-8")).hexdigest()
         result.functions.append(func_result)
 
     return result
@@ -9174,26 +9363,27 @@ def _test_one_function(
     min_reachability: float = 0.5,
     min_realism: float = 0.55,
     security_focus: bool = False,
+    minimize_findings: bool = False,
 ) -> FunctionResult:
     """Run no-crash + return-type + mined-property checks on a single function."""
     mode = _normalize_scan_mode(mode)
 
     def _replay_failure(exc: Exception) -> tuple[bool, int, int]:
-        if not last_kwargs:
+        if not last_invocation_recorded:
             return False, 0, 0
         attempts = 2
         matches = 0
-        expected_type = type(exc)
-        expected_text = str(exc)
+        expected_signature = _exception_replay_signature(exc)
         for _ in range(attempts):
             try:
                 _call_sync(func, **dict(last_kwargs))
             except Exception as replay_exc:
-                if type(replay_exc) is expected_type and str(replay_exc) == expected_text:
+                if _exception_replay_signature(replay_exc) == expected_signature:
                     matches += 1
         return matches == attempts, attempts, matches
 
     last_kwargs: dict[str, Any] = {}
+    last_invocation_recorded = False
     last_input_source = "boundary"
     profile = _likely_contract_profile(
         func,
@@ -9275,8 +9465,10 @@ def _test_one_function(
     def _run_one(kwargs: Mapping[str, Any], fallback: str) -> None:
         nonlocal last_kwargs
         nonlocal last_input_source
+        nonlocal last_invocation_recorded
         last_kwargs = dict(kwargs)
         last_input_source = _origin_for_kwargs(kwargs, fallback)
+        last_invocation_recorded = True
         result = _call_sync(func, **dict(kwargs))
         _check_result(result)
 
@@ -9316,11 +9508,15 @@ def _test_one_function(
             test()
     except Exception as e:
         call_context = getattr(func, "__ordeal_last_call_context__", None)
-        precondition = _documented_precondition_failure(
-            func,
-            e,
-            last_kwargs,
-            expected_patterns=expected_preconditions,
+        precondition = (
+            _documented_precondition_failure(
+                func,
+                e,
+                last_kwargs,
+                expected_patterns=expected_preconditions,
+            )
+            if last_invocation_recorded
+            else None
         )
         if precondition is not None:
             return FunctionResult(
@@ -9329,7 +9525,7 @@ def _test_one_function(
                 execution_ok=True,
                 verdict="expected_precondition_failure",
                 error_type=precondition["error_type"],
-                failing_args=last_kwargs or None,
+                failing_args=dict(last_kwargs) if last_invocation_recorded else None,
                 contract_violations=[str(precondition["summary"])],
                 contract_violation_details=[precondition],
                 sink_categories=sink_categories,
@@ -9390,7 +9586,7 @@ def _test_one_function(
             forced_demotion_reason = security_focus_demotion_reason
         verdict = _verdict_for_crash(crash_category)
         proof_bundle = None
-        if proof_bundles:
+        if proof_bundles and last_invocation_recorded:
             proof_bundle = _build_proof_bundle(
                 qualname=str(profile.get("qualname", name)),
                 error=e,
@@ -9414,6 +9610,7 @@ def _test_one_function(
                 min_fixture_completeness=effective_min_fixture_completeness,
                 harness_mode=getattr(func, "__ordeal_harness__", None),
                 callable_kind=getattr(func, "__ordeal_kind__", None),
+                callable_obj=func,
                 security_focus=security_focus,
                 forced_demotion_reason=forced_demotion_reason,
             )
@@ -9452,11 +9649,35 @@ def _test_one_function(
             verdict=verdict,
             error=str(e)[:300],
             error_type=type(e).__name__,
-            failing_args=last_kwargs or None,
+            failing_args=dict(last_kwargs) if last_invocation_recorded else None,
             crash_category=crash_category,
             replayable=replayable,
             replay_attempts=replay_attempts,
             replay_matches=replay_matches,
+            minimization=(
+                {
+                    "status": "verified",
+                    "method": "hypothesis",
+                    "original_complexity": None,
+                    "minimized_complexity": None,
+                    "replay_attempts": replay_attempts,
+                    "replay_matches": replay_matches,
+                    "boundary": (
+                        "Hypothesis shrank within the declared input strategies; this does not "
+                        "prove global minimality."
+                    ),
+                }
+                if bool(strategies) and last_input_source == "random_fuzz" and replayable
+                else {
+                    "status": "not_run",
+                    "method": None,
+                    "original_complexity": None,
+                    "minimized_complexity": None,
+                    "replay_attempts": 0,
+                    "replay_matches": 0,
+                    "boundary": "No minimization claim is supported for this witness.",
+                }
+            ),
             contract_fit=contract_fit,
             reachability=reachability,
             realism=realism,
@@ -9486,14 +9707,16 @@ def _test_one_function(
         try:
             from ordeal.mine import _is_suspicious_property, mine
 
-            mine_result = mine(
-                func,
-                max_examples=min(max_examples, 30),
-                ignore_properties=ignore_properties or [],
-                ignore_relations=ignore_relations or [],
-                property_overrides=property_overrides or {},
-                relation_overrides=relation_overrides or {},
-            )
+            mine_kwargs = {
+                "max_examples": min(max_examples, 30),
+                "ignore_properties": ignore_properties or [],
+                "ignore_relations": ignore_relations or [],
+                "property_overrides": property_overrides or {},
+                "relation_overrides": relation_overrides or {},
+            }
+            if minimize_findings:
+                mine_kwargs["minimize_findings"] = True
+            mine_result = mine(func, **mine_kwargs)
             for prop in mine_result.properties:
                 if _is_suspicious_property(prop):
                     label = f"{prop.name} ({prop.confidence:.0%})"
@@ -9506,6 +9729,11 @@ def _test_one_function(
                             "holds": prop.holds,
                             "total": prop.total,
                             "counterexample": prop.counterexample,
+                            "replayable": prop.replayable,
+                            "replay_attempts": prop.replay_attempts,
+                            "replay_matches": prop.replay_matches,
+                            "replay_match_basis": prop.replay_match_basis,
+                            "minimization": prop.minimization,
                         }
                     )
         except Exception:

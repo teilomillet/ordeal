@@ -1091,6 +1091,22 @@ class TestScanModule:
         assert result.verdict == "coverage_gap"
         assert result.proof_bundle is not None
         assert "dry-run" in str(result.proof_bundle["verdict"]["demotion_reason"])
+        assert result.proof_bundle["minimal_reproduction"]["harness_replay_supported"] is False
+
+        from ordeal.cli import _render_regression_stub
+
+        assert (
+            _render_regression_stub(
+                "tests.fake_target",
+                {
+                    "kind": "coverage_gap",
+                    "function": "Env.greet",
+                    "failing_args": result.failing_args,
+                    "proof_bundle": result.proof_bundle,
+                },
+            )
+            is None
+        )
 
     def test_method_factories_enable_async_scan_and_explicit_fuzz_targets(self):
         import sys
@@ -1130,6 +1146,62 @@ class TestScanModule:
             assert fuzz_result.passed
         finally:
             del sys.modules[module_name]
+
+    def test_stateful_method_finding_carries_a_runnable_exact_harness_replay(self):
+        from ordeal.cli import _render_regression_stub
+        from tests import _auto_harness_support as support
+
+        key = "tests._auto_harness_target:ReplayBox"
+        result = scan_module(
+            "tests._auto_harness_target",
+            targets=["ReplayBox.run"],
+            max_examples=1,
+            fixtures={"value": st.just("boom")},
+            object_factories={key: support.make_replay_box},
+            object_setups={key: support.prepare_replay_box},
+            object_state_factories={key: support.make_replay_box_state},
+            object_teardowns={key: support.close_replay_box},
+            object_harnesses={key: "stateful"},
+            seed_from_tests=False,
+            seed_from_fixtures=False,
+            seed_from_docstrings=False,
+            seed_from_code=False,
+            seed_from_call_sites=False,
+        )
+
+        run_result = next(
+            function for function in result.functions if function.name == "ReplayBox.run"
+        )
+        assert run_result.replayable is True
+        assert run_result.proof_bundle is not None
+        reproduction = run_result.proof_bundle["minimal_reproduction"]
+        assert reproduction["direct_call_supported"] is False
+        assert reproduction["harness_replay_supported"] is True
+        assert reproduction["harness"]["mode"] == "stateful"
+        assert reproduction["harness"]["factory"].endswith(
+            "tests._auto_harness_support:make_replay_box"
+        )
+
+        stub = _render_regression_stub(
+            "tests._auto_harness_target",
+            {
+                "kind": "crash",
+                "function": "ReplayBox.run",
+                "failing_args": run_result.failing_args,
+                "proof_bundle": run_result.proof_bundle,
+            },
+            trim=False,
+        )
+
+        assert stub is not None
+        assert "from tests._auto_harness_target import ReplayBox.run" not in stub
+        compile(stub, "<generated-regression>", "exec")
+        namespace: dict[str, object] = {}
+        exec(stub, namespace)
+        replay_test = namespace["test_replaybox_run_crash_regression"]
+        assert callable(replay_test)
+        with pytest.raises(RuntimeError, match="supported boom"):
+            replay_test()
 
     def test_package_root_discovery_skips_nonfatal_lazy_exports(self, tmp_path, monkeypatch):
         package_dir = tmp_path / "lazy_pkg"
@@ -1180,6 +1252,19 @@ class TestScanModule:
 
         assert tests_dir / "test_feature.py" in seed_files
         assert all(".venv" not in str(path) for path in seed_files)
+
+    def test_project_file_walk_prunes_generated_roots_before_descent(self, tmp_path, monkeypatch):
+        descended_into: list[str] = []
+
+        def fake_walk(root: Path):
+            dirnames = ["tests", ".venv", ".ordeal", "site", "site-packages"]
+            yield str(root), dirnames, []
+            descended_into.extend(dirnames)
+
+        monkeypatch.setattr(auto_mod.os, "walk", fake_walk)
+
+        assert auto_mod._project_files_matching(tmp_path, ("*.py",)) == []
+        assert descended_into == ["tests"]
 
     def test_python_source_path_to_module_name_falls_back_to_package_structure(self, tmp_path):
         package_dir = tmp_path / "demo_pkg"
@@ -2248,6 +2333,7 @@ class TestScanModule:
             ignore_relations=(),
             property_overrides=None,
             relation_overrides=None,
+            minimize_findings=False,
         ):
             return type(
                 "_FakeMineResult",
@@ -2293,7 +2379,82 @@ class TestScanModule:
         )
         assert divide_result.proof_bundle["valid_input_witness"]["source"] == "boundary"
         assert divide_result.proof_bundle["reproduction"]["replay_matches"] == 2
+        assert divide_result.proof_bundle["reproduction"]["match_basis"] == (
+            "same exception type, message, and terminal source location"
+        )
+        assert divide_result.source_sha256 is not None
+        assert len(divide_result.source_sha256) == 64
+        int(divide_result.source_sha256, 16)
         json.dumps(divide_result.proof_bundle)
+
+    def test_records_and_replays_empty_argument_witness(self):
+        def fail_without_arguments() -> None:
+            raise RuntimeError("boom")
+
+        result = _test_one_function(
+            "fail_without_arguments",
+            fail_without_arguments,
+            {},
+            None,
+            max_examples=1,
+            check_return_type=False,
+        )
+
+        assert result.failing_args == {}
+        assert result.replayable is True
+        assert result.replay_attempts == 2
+        assert result.replay_matches == 2
+        assert result.proof_bundle is not None
+        assert result.proof_bundle["witness"]["input"] == {}
+
+    def test_replay_requires_the_same_terminal_source_seam(self):
+        calls = 0
+
+        def first_seam() -> None:
+            raise RuntimeError("same message")
+
+        def second_seam() -> None:
+            raise RuntimeError("same message")
+
+        def moves_between_seams() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                first_seam()
+            second_seam()
+
+        result = _test_one_function(
+            "moves_between_seams",
+            moves_between_seams,
+            {},
+            None,
+            max_examples=1,
+            check_return_type=False,
+        )
+
+        assert result.replayable is False
+        assert result.replay_attempts == 2
+        assert result.replay_matches == 0
+        assert result.crash_category == "speculative_crash"
+
+    def test_does_not_invent_witness_when_strategy_fails_before_call(self):
+        def broken_strategy():
+            raise RuntimeError("strategy construction failed")
+
+        result = _test_one_function(
+            "identity",
+            lambda x: x,
+            {"x": st.deferred(broken_strategy)},
+            None,
+            max_examples=1,
+            check_return_type=False,
+        )
+
+        assert result.execution_ok is False
+        assert result.failing_args is None
+        assert result.replay_attempts == 0
+        assert result.replay_matches == 0
+        assert result.proof_bundle is None
 
     def test_version_falls_back_to_source_tree_when_metadata_is_missing(self, monkeypatch):
         def missing_version(_name: str) -> str:
@@ -2371,6 +2532,7 @@ class TestScanModule:
             ignore_relations=(),
             property_overrides=None,
             relation_overrides=None,
+            minimize_findings=False,
         ):
             props = [MinedProperty("commutative", 17, 20), MinedProperty("idempotent", 17, 20)]
             suppressed = set(ignore_properties)
@@ -2404,6 +2566,7 @@ class TestScanModule:
             ignore_relations=(),
             property_overrides=None,
             relation_overrides=None,
+            minimize_findings=False,
         ):
             captured["ignore_relations"] = list(ignore_relations)
             captured["relation_overrides"] = relation_overrides

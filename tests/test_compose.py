@@ -264,7 +264,9 @@ class TestComposeEndToEndGate:
         job = workflow.split("  compose-e2e:\n", 1)[1].split("  bump-and-publish:\n", 1)[0]
         assert "docker compose" in job
         assert "verify_compose_evidence_loop.py" in job
+        assert "verify_compose_service_matrix.py" in job
         assert "compose-evidence-loop.json" in job
+        assert "compose-service-matrix.json" in job
         assert "shared_memory_failure_falls_back_in_parent" in job
         service = (fixture / "service.py").read_text(encoding="utf-8")
         compose = (fixture / "compose.yaml").read_text(encoding="utf-8")
@@ -272,6 +274,30 @@ class TestComposeEndToEndGate:
         assert "ORDEAL_SERVICE_VARIANT" in compose
         publish_needs = workflow.split("  bump-and-publish:\n", 1)[1].split("    runs-on:", 1)[0]
         assert "      - compose-e2e\n" in publish_needs
+
+    def test_service_matrix_fixtures_cover_persistence_concurrency_and_broader_faults(
+        self,
+    ) -> None:
+        root = Path(__file__).parents[1]
+        persistence = load_config(
+            root / "tests" / "fixtures" / "compose_persistence" / "ordeal.toml"
+        ).compose
+        concurrency = load_config(
+            root / "tests" / "fixtures" / "compose_concurrency" / "ordeal.toml"
+        ).compose
+        assert persistence is not None and concurrency is not None
+        assert persistence.services == ["api"]
+        assert persistence.faults == ["restart"]
+        assert persistence.steps == 2
+        assert concurrency.faults == ["delay_response", "corrupt_response"]
+        assert concurrency.steps == 3
+        assert concurrency.requests[0].expect_json["json.max_concurrency"] == 8
+        matrix = (root / "scripts" / "verify_compose_service_matrix.py").read_text(
+            encoding="utf-8"
+        )
+        assert 'persistence["services"] == ["api", "store"]' in matrix
+        assert 'concurrency["services"] == ["api", "worker"]' in matrix
+        assert '{"delay_response", "corrupt_response"}' in matrix
 
     def test_checked_in_service_regression_is_portable_and_replay_bounded(self) -> None:
         root = Path(__file__).parents[1]
@@ -302,6 +328,22 @@ class TestComposeEndToEndGate:
         assert trace.replay.reproduced == 3
         assert trace.replay.observed_signatures == [trace.failure_signature] * 3
         assert [(action.kind, action.name) for action in trace.actions] == EXPECTED_ACTIONS[:-1]
+        control = evidence["post_fix_control"]
+        assert control["status"] == "passed"
+        assert control["fixed_state"]["status"] == "complete"
+        assert control["fixed_state"]["reliability_coverage"]["summary"] == {
+            "pass": 9,
+            "not_exercised": 0,
+            "fail": 0,
+            "total": 9,
+        }
+        assert (
+            control["fixed_state"]["workload_protection"]["status"]
+            == "protective_within_measured_scope"
+        )
+        assert control["fixed_state"]["workload_protection"]["mutation_score"] == ("4/4 (100%)")
+        assert control["fixed_state_sha256"] == _sha256_json(control["fixed_state"])
+        assert evidence["workflow"]["verify_fix"] == "passed"
 
     def test_fixed_fixture_shape_covers_all_cells_and_controls_both_paths(self) -> None:
         root = Path(__file__).parents[1]
@@ -1208,6 +1250,56 @@ class TestHttpTransport:
 
 
 class TestComposeCLI:
+    def test_clean_compose_cli_persists_complete_run_evidence(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        config_path = tmp_path / "ordeal.toml"
+        config_path.write_text('[compose]\nbase_url = "http://localhost:8000"\n')
+        trace = ComposeTrace(
+            seed=42,
+            compose={"base_url": "http://localhost:8000", "requests": []},
+        )
+        result = ComposeExplorationResult(
+            trace=trace,
+            trace_path=tmp_path / ".ordeal" / "traces" / "clean.json",
+            replay=None,
+            requests=2,
+            faults=1,
+            duration=0.1,
+            coverage={"summary": {"pass": 2, "not_exercised": 0, "fail": 0, "total": 2}},
+            protection={
+                "status": "protective_within_measured_scope",
+                "mutation_score": "2/2 (100%)",
+            },
+        )
+        monkeypatch.setattr(compose_module, "run_compose_exploration", lambda *a, **k: result)
+
+        code = main(
+            [
+                "explore",
+                "--runner",
+                "compose",
+                "-c",
+                str(config_path),
+                "--save-artifacts",
+                "--json",
+            ]
+        )
+
+        assert code == 0
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+        assert payload["schema"] == "ordeal.compose-run/v1"
+        assert payload["status"] == "clean"
+        assert payload["reliability_coverage"] == result.coverage
+        assert payload["workload_protection"] == result.protection
+        evidence_path = result.trace_path.with_suffix(".evidence.json")
+        assert json.loads(evidence_path.read_text(encoding="utf-8")) == payload
+        assert "Complete run evidence" in captured.err
+
     def test_explore_runner_compose_reports_trace_and_replay_boundary(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -1345,6 +1437,53 @@ class TestComposeCLI:
 
         monkeypatch.setattr(compose_module, "replay_compose_trace", fake_replay)
 
+        fixed_trace = ComposeTrace(
+            seed=1,
+            compose={
+                **trace.compose,
+                "file": str(tmp_path / "compose.yaml"),
+                "trace_dir": str(tmp_path / ".ordeal" / "traces"),
+            },
+        )
+        fixed_result = ComposeExplorationResult(
+            trace=fixed_trace,
+            trace_path=tmp_path / ".ordeal" / "traces" / "fixed.json",
+            replay=None,
+            requests=1,
+            faults=1,
+            duration=0.1,
+            coverage={
+                "dimensions": ["operation", "fault", "property"],
+                "rows": [],
+                "summary": {"pass": 1, "not_exercised": 0, "fail": 0, "total": 1},
+            },
+            protection={
+                "status": "protective_within_measured_scope",
+                "protects": True,
+                "mutation_score": "2/2 (100%)",
+            },
+        )
+        monkeypatch.setattr(
+            compose_module,
+            "run_compose_exploration",
+            lambda *args, **kwargs: fixed_result,
+        )
+
+        finding_id = json.loads(artifacts.manifest_path.read_text())["regressions"][0][
+            "finding_id"
+        ]
+        code = main(
+            [
+                "verify",
+                finding_id,
+                "--manifest",
+                str(artifacts.manifest_path),
+                "--allow-unsafe-artifacts",
+            ]
+        )
+        assert code == 0
+        capsys.readouterr()
+
         code = main(["verify", "--ci", "--manifest", str(artifacts.manifest_path)])
 
         assert code == 0
@@ -1375,9 +1514,6 @@ class TestComposeCLI:
 
         monkeypatch.setattr(compose_module, "replay_compose_trace", fake_replay)
 
-        finding_id = json.loads(artifacts.manifest_path.read_text())["regressions"][0][
-            "finding_id"
-        ]
         code = main(
             [
                 "verify",
@@ -1390,6 +1526,18 @@ class TestComposeCLI:
 
         assert code == 0
         assert f"verified: {finding_id} (Compose clean replays 2/2)" in capsys.readouterr().out
+        persisted = json.loads(artifacts.manifest_path.read_text(encoding="utf-8"))
+        persisted_record = persisted["regressions"][0]
+        control = persisted_record["evidence"]["post_fix_control"]
+        assert control["status"] == "passed"
+        assert control["exact_replay"]["clean"] == 2
+        assert control["fixed_state"]["reliability_coverage"]["summary"]["fail"] == 0
+        assert control["fixed_state_sha256"] == _sha256_json(control["fixed_state"])
+        assert (
+            control["fixed_state"]["workload_protection"]["status"]
+            == "protective_within_measured_scope"
+        )
+        assert persisted_record["verification"]["fixed_state_status"] == "complete"
 
     def test_replay_compose_trace_accepts_attempt_count_and_json(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

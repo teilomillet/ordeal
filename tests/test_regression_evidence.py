@@ -2,7 +2,69 @@
 
 from __future__ import annotations
 
-from ordeal.regression_evidence import _regression_binding, _regression_binding_matches
+import struct
+from collections import OrderedDict
+
+import pytest
+
+from ordeal.regression_evidence import (
+    _decode_replay_value,
+    _encode_replay_value,
+    _regression_binding,
+    _regression_binding_matches,
+)
+
+
+@pytest.mark.parametrize(
+    "bits",
+    [
+        "8000000000000000",  # Negative zero.
+        "7ff0000000000000",  # Positive infinity.
+        "7ff8000000000001",  # NaN with a non-default payload.
+        "fff8000000000001",  # Negative NaN with a non-default payload.
+    ],
+)
+def test_replay_codec_preserves_every_float_bit(bits: str) -> None:
+    original = struct.unpack(">d", bytes.fromhex(bits))[0]
+
+    decoded = _decode_replay_value(_encode_replay_value(original))
+
+    assert struct.pack(">d", decoded).hex() == bits
+
+
+def test_replay_codec_preserves_mapping_order_and_shared_aliases() -> None:
+    shared: list[int] = [1]
+    original = {"second": shared, "first": shared}
+
+    decoded = _decode_replay_value(_encode_replay_value(original))
+
+    assert isinstance(decoded, dict)
+    assert list(decoded) == ["second", "first"]
+    assert decoded["second"] is decoded["first"]
+
+
+def test_replay_codec_preserves_mutable_cycles() -> None:
+    original: list[object] = []
+    original.append(original)
+
+    decoded = _decode_replay_value(_encode_replay_value(original))
+
+    assert isinstance(decoded, list)
+    assert decoded[0] is decoded
+
+
+def test_replay_codec_rejects_container_subclasses_instead_of_coercing() -> None:
+    with pytest.raises(TypeError, match="not a replayable literal"):
+        _encode_replay_value(OrderedDict((("first", 1), ("second", 2))))
+
+
+def test_replay_codec_rejects_immutable_cycles_it_cannot_reconstruct() -> None:
+    mutable: list[object] = []
+    original = (mutable,)
+    mutable.append(original)
+
+    with pytest.raises(TypeError, match="reference cycle"):
+        _encode_replay_value(original)
 
 
 def test_binding_ignores_formatting_but_rejects_semantic_changes() -> None:

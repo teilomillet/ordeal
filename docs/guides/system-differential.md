@@ -102,6 +102,23 @@ new version. `result.status` becomes `divergent`. The report includes:
 Use `result.sequence` as the compact debugging story. Use
 `result.mismatches[0]` to inspect the first differing observation.
 
+## Preserve the minimized system witness
+
+Use importable module-level factories and probes with the shared durable path:
+
+```python
+result = diff(
+    OldStore, NewStore, sequence=story,
+    artifact_dir=".ordeal/diff",
+    regression_path="tests/test_ordeal_system_diff.py",
+    manifest_path="tests/ordeal-regressions.json",
+)
+```
+
+The generated pytest fails while the paired divergence remains and passes after
+the fix. `ordeal verify --ci` checks its source binding and executes it. Local
+lambdas and non-literal event values fail closed instead of being serialized.
+
 ## Choose the right entry point
 
 This page uses the Python API for two factories in one process:

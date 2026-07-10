@@ -19,6 +19,9 @@ diff(
     performance: PerformanceBudget | None = None,
     minimize: bool = True,
     replay_attempts: int = 2,
+    artifact_dir: str | Path | None = None,
+    regression_path: str | Path | None = None,
+    manifest_path: str | Path | None = None,
     compare: Callable[[Any, Any], bool] | None = None,
     normalize: Callable[[Any], Any] | None = None,
     rtol: float | None = None,
@@ -45,12 +48,14 @@ system must expose `apply_fault(event)`.
 |---|---|
 | Interface | Public static and dynamic names plus callable signatures |
 | Outcome | Return comparison or exact exception type and message |
-| State | Deep copy of public instance attributes |
+| State | Lossless structural snapshot of public instance attributes |
 | Side effects | Not checked until `side_effects=` is supplied |
 | Recovery | Operations after `deactivate`, `recover`, `restart`, or `clear` |
 
 `compare`, `normalize`, `rtol`, and `atol` apply to returned values. State and
 side-effect observations use Ordeal's canonical exact evidence comparison.
+Event, outcome, state, and side-effect copies must be structurally faithful and
+must not retain mutable aliases. Unsupported observations return `inconclusive`.
 
 ## `SystemDiffResult`
 
@@ -69,7 +74,14 @@ side-effect observations use Ordeal's canonical exact evidence comparison.
 | `replay_attempts` | Exact final-sequence reruns requested |
 | `replay_matches` | Reruns reproducing the exact first mismatch |
 | `replay_verified` | Every requested replay matched, or `None` without mismatch |
+| `expected_signature` | Recorded canonical first-mismatch signature |
+| `observed_signatures` | Canonical signature or `null` for each replay |
+| `reason` | Lossless-observation blocker for an inconclusive result |
 | `performance` | Separate `PerformanceResult`, or `None` |
+| `artifact`, `artifact_path` | Shared source-bound divergence record and optional JSON path |
+| `regression_path` | Generated paired-witness pytest path, when requested |
+| `manifest_path`, `finding_id` | Shared `verify --ci` registration |
+| `regression_error` | Why exact durable replay could not be serialized |
 
 `result.equivalent` is `False` after a divergence and otherwise `None`; sampled
 agreement is not a universal equivalence proof.

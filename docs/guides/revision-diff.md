@@ -10,8 +10,7 @@ description: Check a committed Python refactor in isolated worktrees, then read 
     creates test cards; the new code receives copies of those exact cards.
     Ordeal reports anything they do differently.
 
-Use this after a committed refactor, optimization, or dependency upgrade when
-both versions live in Git. For two functions already importable together, use
+Use this after a committed refactor when both versions live in Git. For two functions already importable together, use
 the [function quickstart](differential-quickstart.md) instead.
 Read [Divergence Evidence](../concepts/divergence-evidence.md) to understand why
 each runtime mismatch binds both commits, comparison rules, observations, and
@@ -49,7 +48,7 @@ the command finishes, including after a worker error.
 
 | Result | Plain meaning | Exit |
 |---|---|---:|
-| `DIVERGENT` | A public function changed, or a runtime difference has complete source bindings and matched every immediate replay | `1` |
+| `DIVERGENT` | A public function changed, or a runtime difference has one minimized witness with complete source bindings and full immediate replay | `1` |
 | `NO DIVERGENCE OBSERVED` | The generated cases matched; untested cases may still differ | `0` |
 | `INCONCLUSIVE` | Import, input generation, isolation, or replay was not trustworthy | `2` |
 
@@ -58,9 +57,17 @@ divergence proves that the recorded versions differ for the recorded input; it
 does not decide which version is correct.
 
 For module targets, ordeal also compares public function names and signatures.
-For calls, it compares return values, exact exception type/message, and mutated
-arguments. Unbound instance methods need an object harness and fail closed as
-`INCONCLUSIVE`.
+For calls, it follows the inspected signature: positional-only and ordinary
+positional parameters are passed positionally, while keyword-only parameters
+are passed by name. It invokes the resolved wrapper itself instead of silently
+unwrapping it, then compares return values, exact exception type/message, and
+mutated arguments. Unbound instance methods need an object harness and fail
+closed as `INCONCLUSIVE`.
+
+The base worker canonicalizes observations before candidate code is imported.
+If several generated cases differ, ordeal keeps the shortest replay-stable
+canonical case as the one runtime witness; the mismatch count still reports all
+observed differences. This shrinking is bounded to the generated sample.
 
 ## Save a review handoff
 
@@ -68,7 +75,8 @@ arguments. Unbound instance methods need an object harness and fail closed as
 ordeal diff mypkg.scoring \
   --base-ref origin/main \
   --candidate-ref HEAD \
-  --save-artifacts
+  --save-artifacts \
+  --write-regression
 ```
 
 This writes:
@@ -81,6 +89,7 @@ This writes:
 The JSON binds both commit hashes, callable source hashes, comparison settings,
 same-input observations, and replay counts. See the
 [revision diff schema](../reference/revision-diff-schema.md) for every field.
+Commit the generated pytest with `tests/ordeal-regressions.json`, then run `ordeal verify --ci`.
 
 ## Keep repeatable settings in TOML
 
@@ -110,6 +119,12 @@ If anything is surprising, use [Revision Diff Troubleshooting](revision-diff-tro
 For the broader idea and proof limits, read
 [Differential Testing, Without Jargon](../concepts/differential-testing.md).
 
-If both versions are available as factories and the contract is a multi-step
-operation-and-fault story, use the Python
-[system comparison path](../concepts/system-differential.md) instead.
+For a zero-argument system factory, save JSON events and keep Git isolation:
+
+```json
+[{"kind":"operation","name":"read"},{"kind":"fault","name":"timeout","action":"activate"}]
+```
+
+Run `ordeal diff mypkg.Store --sequence-file story.json --base-ref origin/main`.
+Faults call `system.apply_fault(event)`; the result uses the same artifact,
+generated regression, and `verify --ci` path as function revision mode.

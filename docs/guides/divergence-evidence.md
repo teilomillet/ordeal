@@ -53,7 +53,7 @@ This writes `.ordeal/diff/mypkg.pricing.json` and `.md`. `HEAD` means committed
 
 | Status | Plain meaning | Next action |
 |---|---|---|
-| `divergent` | A replay-supported difference was established | Inspect the witness |
+| `divergent` | A minimized, replay-supported difference was established | Inspect the witness |
 | `no_divergence_observed` | Sampled observations matched | Keep the evidence boundary |
 | `inconclusive` | A sound claim could not be made | Fix the stated blocker |
 | `proven_equivalent` | A caller-supplied proof accepted the full domain | Review that proof |

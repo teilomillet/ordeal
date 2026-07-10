@@ -1,13 +1,18 @@
 ---
+title: Custom Chaos Tests
 description: >-
-  Write your first Python chaos test in 5 minutes with ordeal. Fault
-  injection, property assertions, automatic shrinking. From install to
-  your first bug.
+  Write a custom Python chaos test with faults, state-machine rules,
+  property assertions, and automatic shrinking.
 ---
 
-# Getting Started
+# Write a custom chaos test
 
-From zero to your first chaos test in 5 minutes. By the end, you'll understand not just *how* to write a chaos test, but *why* each piece exists.
+This is the advanced path for describing a multi-step system yourself. If your
+goal is simply to find a bug in existing code, start with `ordeal scan .` and the
+[Scan Quickstart](guides/scan-quickstart.md); no custom test is required.
+
+By the end of this page, you will understand how to write a stateful chaos test
+and why each piece exists.
 
 Throughout this page, **highlighted blocks** explain concepts in plain English — start with those if the code feels unfamiliar, or skip them if you just want the mechanics.
 
@@ -31,21 +36,20 @@ uv add ordeal               # add to project
 uv tool install ordeal       # install CLI globally
 ```
 
-## Prefer to start without writing a test?
+## Before writing a test
 
-Use the read-only scan entry point first:
+Use the scan entry point unless you already know you need a custom multi-step
+model:
 
 ```bash
-ordeal scan myapp.scoring --list-targets
-ordeal scan myapp.scoring
+ordeal scan .
 ```
 
 It discovers callable functions and methods, tries realistic and boundary
-inputs, and explains what it could not construct. Follow the
-[Scan Quickstart](guides/scan-quickstart.md) for the plain-language workflow or
-[Object Harnesses](guides/scan-object-harnesses.md) when methods need setup and
-state. When scan finds a failure, use the [Durable Regression Workflow](guides/durable-regressions.md)
-to keep it fixed. Come back here for a hand-written multi-step chaos test.
+inputs, and explains what it could not construct. Come back here when the
+behavior depends on a sequence of operations, injected faults, and invariants
+across shared state. When a scan finding needs to stay fixed, use the
+[Durable Regression Workflow](guides/durable-regressions.md).
 
 ## The idea
 

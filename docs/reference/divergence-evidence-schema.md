@@ -6,7 +6,9 @@ description: Exact fields and promotion rules for source-bound divergence cards.
 # Divergence evidence schema
 
 The schema identifier is `ordeal.divergence-evidence/v1`. One card describes
-one behavioral mismatch; a revision run can contain many cards.
+one behavioral mismatch. Git revision diff retains at most one canonical runtime
+card per shared function; a module run can still contain cards for several
+functions.
 
 ## Top-level contract
 
@@ -54,9 +56,19 @@ provenance certificate.
 
 ## Witness and observations
 
-`witness.original_input` preserves the first relevant input.
-`witness.input` is the minimized or recorded replay input. Each has a canonical
-SHA-256. `source` names how the input was obtained.
+| Witness field | Type | Meaning |
+|---|---|---|
+| `available` | `bool` | Whether a concrete witness was recorded |
+| `original_input` | `object` | Human-facing first relevant input |
+| `original_canonical_input` | `object` | Typed graph used for original identity |
+| `original_sha256` | `str` | Hash of `original_canonical_input` |
+| `input` | `object` | Human-facing minimized or selected input |
+| `canonical_input` | `object` | Typed graph preserving types, cycles, and aliases |
+| `sha256` | `str` | Hash of `canonical_input` |
+| `source` | `str` | How the witness was obtained |
+
+Human-facing fields are for inspection; identity and replay use the canonical
+fields and hashes.
 
 Each observation records a return or exception plus the measured envelope:
 
@@ -64,6 +76,13 @@ Each observation records a return or exception plus the measured envelope:
 - arguments after invocation;
 - bound receiver state when measured;
 - explicitly selected side effects when measured.
+
+Canonical fields use `ordeal.canonical-observation/v1`: a typed root plus graph
+nodes and references that preserve container types, domain-object attributes and
+slots, cycles, and alias topology. Human-facing value fields are conveniences;
+replay signatures are computed from the canonical fields without calling target
+`__eq__` or `repr`. If any selected value has no lossless structural encoding,
+the result is `inconclusive` and no supported card is emitted.
 
 Git revision observations use the same `a`/`b` roles for base and candidate.
 
@@ -73,20 +92,22 @@ Git revision observations use the same `a`/`b` roles for base and candidate.
 |---|---|
 | `status` | `verified` when every attempt matched; otherwise `failed` |
 | `attempts` | Immediate executions of the same paired witness |
-| `exact_matches` | Attempts matching the full expected signature |
+| `exact_matches` | Attempts whose recorded, computed expected, and observed signatures all match |
 | `expected_signature` | Hash of the discovery observation pair |
 | `observed_signatures` | One signature or `null` per attempt |
 | `match_basis` | Exact identity used to count a replay |
 
-A card is `supported` only when replay is verified **and** source binding is
-complete. Otherwise it remains `exploratory`; callers must not silently promote
-it to a deterministic defect claim.
+A card is `supported` only when replay is verified, source binding is complete,
+and minimization is verified. A witness with `minimization.status = not_run`
+remains `exploratory` even when every replay matches. Callers must not silently
+promote incomplete evidence to a deterministic defect claim.
 
 ## Minimization and boundary
 
 In-process `diff()` records Hypothesis shrinking. Git revision diff records
-`method: not_run` because it preserves each deterministic generated case.
-`minimization.boundary` states which search space was or was not explored.
+canonical observed-case shrinking: it selects the shortest replay-stable JSON
+input from the generated divergent cases. `minimization.boundary` makes clear
+that inputs outside the generated sample were not explored.
 
 `boundaries.establishes` scopes the positive claim. `does_not_establish` keeps
 root cause, correctness, untested inputs/states, and general equivalence open.

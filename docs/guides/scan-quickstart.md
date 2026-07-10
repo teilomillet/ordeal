@@ -18,15 +18,21 @@ arbitrary target's side effects.
 ## Your first minute
 
 ```bash
-ordeal scan myapp.scoring --list-targets
-ordeal scan myapp.scoring
+cd your-project
+ordeal scan .
 ```
 
-The first command is an inventory. It shows what ordeal can call, what it will
-skip, and whether an instance method needs a factory. The second command runs
-the scan.
+Ordeal auto-detects the package and samples representative public callables. If
+the project layout cannot be inferred, pass a module or Python file:
 
-If a package exposes many functions, start with one target:
+```bash
+ordeal scan myapp.scoring
+ordeal scan myapp/scoring.py
+```
+
+Do not start with target inventory or tuning. Use `--list-targets` only if the
+scan is blocked or you need to inspect its scope. Narrow a large package only
+after the first result:
 
 ```bash
 ordeal scan myapp.scoring --target normalize
@@ -52,12 +58,13 @@ inputs, all process state, or whole-project correctness. See
 ## Save a real finding
 
 ```bash
-ordeal scan myapp.scoring --save-artifacts
+ordeal scan . --save
 ```
 
 When findings exist, this saves a readable dossier, JSON proof data, replay
 notes, reviewable config suggestions, and—when an exact witness can be rendered—a
-pytest regression. The output prints the paths and follow-up commands.
+pytest regression. The output prints the paths and one follow-up command.
+`--save-artifacts` remains the compatible long spelling of `--save`.
 
 The durable loop is:
 

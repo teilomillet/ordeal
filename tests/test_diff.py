@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import json
+import runpy
+import subprocess
 from dataclasses import FrozenInstanceError
+from types import SimpleNamespace
 
 import hypothesis.strategies as st
 import pytest
 
+from ordeal.cli import main
 from ordeal.diff import SideEffect, diff
+from ordeal.finding_evidence import _sha256_json
 
 
 def add_v1(x: int, y: int) -> int:
@@ -31,6 +36,17 @@ def scale_v1(x: float, factor: float) -> float:
 
 def scale_v2(x: float, factor: float) -> float:
     return x * factor + 1e-10  # tiny drift
+
+
+_DURABLE_FUNCTION_FIXED = False
+
+
+def durable_function_baseline(x: int) -> int:
+    return x
+
+
+def durable_function_candidate(x: int) -> int:
+    return x if _DURABLE_FUNCTION_FIXED else x + 1
 
 
 class TestDiff:
@@ -155,6 +171,27 @@ class TestDiff:
 
         assert result.status == "inconclusive"
         assert "reconstruct" in (result.reason or "")
+
+    def test_deepcopy_that_returns_shared_mutable_input_fails_closed(self) -> None:
+        class SharedDomainObject:
+            def __init__(self) -> None:
+                self.events: list[str] = []
+
+            def __deepcopy__(self, memo: dict[int, object]) -> SharedDomainObject:
+                return self
+
+        def left(value: SharedDomainObject) -> None:
+            value.events.append("left")
+
+        def right(value: SharedDomainObject) -> None:
+            value.events.append("right")
+
+        original = SharedDomainObject()
+        result = diff(left, right, max_examples=1, value=original)
+
+        assert result.status == "inconclusive"
+        assert "shared mutable" in (result.reason or "")
+        assert original.events == []
 
     def test_sampled_agreement_is_not_general_equivalence(self):
         result = diff(add_v1, add_v2, max_examples=10)
@@ -454,6 +491,39 @@ class TestDurableDivergenceEvidence:
         assert artifact["observations"]["a"]["normalized_value"] == 2
         assert artifact["observations"]["b"]["normalized_value"] == 3
 
+    def test_normalizer_removes_nondeterministic_request_ids_during_replay(self) -> None:
+        request_id = 0
+
+        def next_id() -> str:
+            nonlocal request_id
+            request_id += 1
+            return f"req-{request_id}"
+
+        def left() -> dict[str, str]:
+            return {"request_id": next_id(), "status": "old"}
+
+        def right() -> dict[str, str]:
+            return {"request_id": next_id(), "status": "new"}
+
+        def stable_fields(payload: dict[str, str]) -> dict[str, str]:
+            return {"status": payload["status"]}
+
+        result = diff(
+            left,
+            right,
+            max_examples=1,
+            replay_attempts=3,
+            normalize=stable_fields,
+        )
+
+        assert result.status == "divergent"
+        assert result.witness is not None
+        assert result.witness.replay_matches == 3
+        artifact = result.artifacts[0]
+        assert artifact["replay"]["exact_matches"] == 3
+        assert artifact["observations"]["a"]["value"]["request_id"] == "req-1"
+        assert artifact["observations"]["b"]["value"]["request_id"] == "req-2"
+
     def test_artifact_dir_persists_the_canonical_json(self, tmp_path) -> None:
         result = diff(
             add_v1,
@@ -470,3 +540,83 @@ class TestDurableDivergenceEvidence:
             persisted = json.load(artifact_file)
         assert persisted == result.artifacts[0]
         assert path.endswith(f"{persisted['artifact_id']}.json")
+
+    def test_function_diff_generates_a_source_bound_ci_regression(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        global _DURABLE_FUNCTION_FIXED
+
+        _DURABLE_FUNCTION_FIXED = False
+        regression_path = tmp_path / "tests" / "test_function_diff_regression.py"
+        manifest_path = tmp_path / "tests" / "ordeal-regressions.json"
+        result = diff(
+            durable_function_baseline,
+            durable_function_candidate,
+            x=0,
+            max_examples=1,
+            artifact_dir=tmp_path / ".ordeal" / "findings",
+            regression_path=regression_path,
+            manifest_path=manifest_path,
+        )
+
+        assert result.divergent
+        assert result.regression_error is None
+        assert result.regression_path == regression_path.as_posix()
+        assert result.manifest_path == manifest_path.as_posix()
+        generated_test = runpy.run_path(str(regression_path))["test_ordeal_diff_regression"]
+        with pytest.raises(AssertionError, match="not fixed"):
+            generated_test()
+
+        _DURABLE_FUNCTION_FIXED = True
+        try:
+            generated_test()
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            record = manifest["regressions"][0]
+            assert record["change_kind"] == "function"
+            assert record["test_basis"] == "paired_minimized_witness"
+            assert record["change_artifact_ids"] == [result.artifacts[0]["artifact_id"]]
+            assert record["binding"]["test_name"] == "test_ordeal_diff_regression"
+            monkeypatch.setattr(
+                subprocess,
+                "run",
+                lambda *args, **kwargs: SimpleNamespace(
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                ),
+            )
+            assert main(["verify", "--ci", "--manifest", str(manifest_path)]) == 0
+            artifact_path = (
+                tmp_path / ".ordeal" / "findings" / (f"{result.artifacts[0]['artifact_id']}.json")
+            )
+            original_artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+            tampered = json.loads(json.dumps(original_artifact))
+            tampered["claim"] = "edited while retaining the trusted artifact ID"
+            artifact_path.write_text(json.dumps(tampered), encoding="utf-8")
+            assert main(["verify", "--ci", "--manifest", str(manifest_path)]) == 2
+
+            invalid_claims = (
+                ("status", "exploratory"),
+                ("replay.status", "failed"),
+                ("minimization.status", "not_run"),
+            )
+            for field, value in invalid_claims:
+                invalid = json.loads(json.dumps(original_artifact))
+                if "." in field:
+                    section, key = field.split(".", 1)
+                    invalid[section][key] = value
+                else:
+                    invalid[field] = value
+                unhashed = dict(invalid)
+                unhashed.pop("artifact_id")
+                invalid_id = f"div_{_sha256_json(unhashed)[:16]}"
+                invalid["artifact_id"] = invalid_id
+                artifact_path.write_text(json.dumps(invalid), encoding="utf-8")
+                invalid_manifest = json.loads(json.dumps(manifest))
+                invalid_manifest["regressions"][0]["change_artifact_ids"] = [invalid_id]
+                manifest_path.write_text(json.dumps(invalid_manifest), encoding="utf-8")
+                assert main(["verify", "--ci", "--manifest", str(manifest_path)]) == 2
+        finally:
+            _DURABLE_FUNCTION_FIXED = False

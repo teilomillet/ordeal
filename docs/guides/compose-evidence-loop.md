@@ -4,8 +4,7 @@ description: Copy a complete path from one real Compose recovery failure to a po
 
 # Turn a service failure into a permanent CI guard
 
-This operational companion to the plain-language
-[service evidence loop](../concepts/service-evidence-loop.md) takes one recovery failure to a portable CI guard.
+This companion to the [service evidence loop](../concepts/service-evidence-loop.md) takes one recovery failure to a portable CI guard.
 
 ```text
 explore → coverage → exact replay → bounded finding → portable regression
@@ -31,8 +30,7 @@ expect_status = 200
 expect_json = {"json.state" = "committed"}
 ```
 
-`expect_status` and `expect_json` are business promises, not just health checks. Start with safe `GET` requests;
-mutating requests are not faultable by default because a recovery cycle may repeat them.
+`expect_status` and `expect_json` are business promises. Start with safe `GET` requests; mutating requests are not faultable by default.
 
 ## 1. Explore the real service
 
@@ -40,8 +38,7 @@ mutating requests are not faultable by default because a recovery cycle may repe
 ordeal explore --runner compose -c ordeal.toml
 ```
 
-Ordeal keeps the topology alive, introduces allowed faults, waits for recovery, and checks the clean response.
-The report contains one row per operation × fault × property:
+Ordeal keeps the topology alive, introduces faults, waits for recovery, and reports operation × fault × property:
 
 | Status | Meaning |
 |---|---|
@@ -51,8 +48,7 @@ The report contains one row per operation × fault × property:
 
 ## 2. Demand repeated, exact replay
 
-Ordeal records the exact action order and replays those values instead of drawing a new scenario. Read the count literally:
-`attempted 3 / reproduced 3` means three signatures matched. Actions are exact; external timing is not assumed deterministic.
+`attempted 3 / reproduced 3` means three exact action signatures matched; external timing is not assumed deterministic.
 
 For an existing trace, choose the count explicitly:
 
@@ -73,8 +69,7 @@ tests/ordeal-compose-regressions/fnd_compose_<id>.json
 tests/ordeal-regressions.json
 ```
 
-The first file is the portable trace; the second is the shared regression manifest. Paths are repository-relative,
-so the pair is not tied to GitHub Actions, another CI vendor, or the discovery machine.
+The portable trace and shared manifest use repository-relative paths and are CI-provider neutral.
 
 Harness and configuration errors remain diagnostics, not service defects.
 
@@ -117,10 +112,15 @@ With Docker Compose available, run from the repository root:
 ```bash
 uv run python scripts/verify_compose_evidence_loop.py \
   --output .artifacts/compose-evidence-loop.json
+uv run python scripts/verify_compose_service_matrix.py \
+  --recovery-report .artifacts/compose-evidence-loop.json \
+  --output .artifacts/compose-service-matrix.json
 ```
 
-The example in `tests/fixtures/compose_e2e/` proves a real kill/restart defect. The buggy guard exits `1` with exact
-replay `3/3`; the fixed guard exits `0` with clean replay `3/3`; all nine cells pass; and four wrong expectations are caught.
+The first fixture proves a kill/restart defect and normal-CLI post-fix control.
+The matrix adds two-service persistence across API restart and eight-way fan-out
+under delay and corruption faults. Every declared cell passes and each workload
+catches four wrong expectations.
 
 ## Evidence boundary and deeper reference
 

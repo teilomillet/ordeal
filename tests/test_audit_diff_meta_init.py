@@ -51,6 +51,29 @@ class TestAuditReport:
 
 
 class TestMismatch:
+    def test_diff_witness_preserves_legacy_positional_slots(self):
+        """New persistence metadata does not shift the public constructor."""
+        from ordeal.diff import DiffOutcome, DiffWitness
+
+        outcome = DiffOutcome(True, 1, None, None, {}, None, {})
+        artifact = {"schema": "ordeal.divergence-evidence/v1"}
+
+        witness = DiffWitness(
+            {"x": 1},
+            outcome,
+            outcome,
+            ("return_value",),
+            3,
+            3,
+            True,
+            artifact,
+            "evidence.json",
+        )
+
+        assert witness.artifact is artifact
+        assert witness.artifact_path == "evidence.json"
+        assert witness.replay_args_json is None
+
     def test_str_format(self):
         """DiffWitness.__str__ produces readable envelope output."""
         from ordeal.diff import DiffOutcome, DiffWitness

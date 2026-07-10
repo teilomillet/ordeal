@@ -7,7 +7,7 @@
       "trace_file": "tests/ordeal-compose-regressions/fnd_compose_bac551d3c51dce6b.json",
       "binding": {
         "schema": "ordeal.compose-regression-binding/v1",
-        "trace_sha256": "76888a71701de7b2efcda43b95cf4f97a44b855d750b8e71b239d7ee845198e2",
+        "trace_sha256": "1f4437baad05ba496854b109623083eb5ed85033fc43c35a9e930bf70f98c278",
         "failure_signature": "5e33768132ba62325e43394f9f136157163ee77e8034c2b090d3b0d911471acd",
         "action_count": 8
       },
@@ -25,8 +25,8 @@
           "target": "ordeal-compose-e2e",
           "runner": "compose",
           "source_sha256": null,
-          "trace_sha256": "76888a71701de7b2efcda43b95cf4f97a44b855d750b8e71b239d7ee845198e2",
-          "config_sha256": "1617c56f0e87dd230f6c080f410ac9143cbc8115a2948585b2ac563e24b1b0bf"
+          "trace_sha256": "1f4437baad05ba496854b109623083eb5ed85033fc43c35a9e930bf70f98c278",
+          "config_sha256": "a3cc3e4fecbc936e893b88d061a4cfbe230cb686ab7a6c4432a8be5846e48a35"
         },
         "witness": {
           "available": true,
@@ -40,7 +40,7 @@
                 "result": {
                   "owned_cleanup": true
                 },
-                "timestamp_offset": 1.9291008356958628e-05
+                "timestamp_offset": 2.3957996745593846e-05
               },
               {
                 "index": 1,
@@ -54,7 +54,7 @@
                   "attempts": 1,
                   "status": 200
                 },
-                "timestamp_offset": 0.9720464160054689
+                "timestamp_offset": 0.18939891700574663
               },
               {
                 "index": 2,
@@ -81,12 +81,12 @@
                 "result": {
                   "body_sha256": "ee56f9e7221811b29c4b8139933bd106dfb086aabbd48ca6d86e8ce05184ff8a",
                   "captured_state": {},
-                  "elapsed_seconds": 0.0012279170041438192,
+                  "elapsed_seconds": 0.0011439999943831936,
                   "expected_fault_window": false,
                   "headers": {
                     "Content-Length": "57",
                     "Content-Type": "application/json",
-                    "Date": "Fri, 10 Jul 2026 09:40:08 GMT",
+                    "Date": "Fri, 10 Jul 2026 13:33:11 GMT",
                     "Server": "BaseHTTP/0.6 Python/3.12.13"
                   },
                   "original_body_sha256": "ee56f9e7221811b29c4b8139933bd106dfb086aabbd48ca6d86e8ce05184ff8a",
@@ -115,7 +115,7 @@
                   "response_fault": null,
                   "status": 200
                 },
-                "timestamp_offset": 1.1749172910058405
+                "timestamp_offset": 0.35184483299963176
               },
               {
                 "index": 3,
@@ -128,7 +128,7 @@
                   "service": "api",
                   "signal": "SIGKILL"
                 },
-                "timestamp_offset": 1.1764000830007717
+                "timestamp_offset": 0.35323433300072793
               },
               {
                 "index": 4,
@@ -156,7 +156,7 @@
                   "expected_fault_window": true,
                   "request_error": "<urlopen error [Errno 61] Connection refused>"
                 },
-                "timestamp_offset": 1.4213950000121258
+                "timestamp_offset": 0.5119618750031805
               },
               {
                 "index": 5,
@@ -169,7 +169,7 @@
                   "service": "api",
                   "started": true
                 },
-                "timestamp_offset": 1.4217136660008691
+                "timestamp_offset": 0.5122647920070449
               },
               {
                 "index": 6,
@@ -192,7 +192,7 @@
                   ],
                   "status": 200
                 },
-                "timestamp_offset": 1.8661237910127966
+                "timestamp_offset": 0.6368504999991274
               },
               {
                 "index": 7,
@@ -218,14 +218,14 @@
                 },
                 "result": {
                   "body_sha256": "434bb98ff2cf2151b4b6e4f85241caa8eebd0c980cb60fc15d2d6d33af41c703",
-                  "elapsed_seconds": 0.0019344169995747507,
+                  "elapsed_seconds": 0.0012580000038724393,
                   "error": "GET http://127.0.0.1:18080/state response differed at 'json.status'",
                   "expected_fault_window": false,
                   "failure_kind": "unexpected_json",
                   "headers": {
                     "Content-Length": "63",
                     "Content-Type": "application/json",
-                    "Date": "Fri, 10 Jul 2026 09:40:08 GMT",
+                    "Date": "Fri, 10 Jul 2026 13:33:12 GMT",
                     "Server": "BaseHTTP/0.6 Python/3.12.13"
                   },
                   "original_body_sha256": "434bb98ff2cf2151b4b6e4f85241caa8eebd0c980cb60fc15d2d6d33af41c703",
@@ -249,13 +249,13 @@
                   "response_fault": null,
                   "status": 200
                 },
-                "timestamp_offset": 1.9026355410023825
+                "timestamp_offset": 0.6716007920040283
               }
             ],
             "seed": 0,
             "trace_path": "tests/ordeal-compose-regressions/fnd_compose_bac551d3c51dce6b.json"
           },
-          "sha256": "eb562a20a8713d1f947513a64a7ce97ad5551c58c28f1e946f516a23f4855b88",
+          "sha256": "57d60507cf7dbdb76b77e19f9a5ff128bd6296c2aaf5e6a2ea213a609712fa0d",
           "source": "compose_trace"
         },
         "observation": {
@@ -401,17 +401,50 @@
               "property": "json:json.status"
             }
           ],
-          "inconclusive_mutants": 0,
-          "killed_mutants": 0,
+          "inconclusive_mutants": 1,
+          "killed_mutants": 3,
           "label": "compose workload protection",
           "mutation_scope": "recorded Compose response oracles, not service source code",
-          "mutation_score": null,
-          "mutations": [],
+          "mutation_score": "3/3 (100%)",
+          "mutations": [
+            {
+              "action_index": 2,
+              "fault": "none",
+              "observed_failure_kind": "unexpected_status",
+              "operation": "probe",
+              "property": "status:200",
+              "status": "killed"
+            },
+            {
+              "action_index": 2,
+              "fault": "none",
+              "observed_failure_kind": "unexpected_json",
+              "operation": "probe",
+              "property": "json:json.status",
+              "status": "killed"
+            },
+            {
+              "action_index": 2,
+              "fault": "none",
+              "observed_failure_kind": "unexpected_json",
+              "operation": "probe",
+              "property": "json:json.service",
+              "status": "killed"
+            },
+            {
+              "action_index": 7,
+              "fault": "kill",
+              "operation": "probe",
+              "property": "status:200",
+              "reason": "unmodified control prefix did not replay cleanly",
+              "status": "inconclusive"
+            }
+          ],
           "protects": false,
           "status": "weak",
           "summary": "1 reliability cell(s) failed",
           "surviving_mutants": 0,
-          "tested_mutants": 0,
+          "tested_mutants": 3,
           "unexercised_properties": [
             {
               "fault": "kill",
@@ -426,15 +459,185 @@
           "test_name": null,
           "binding": {
             "schema": "ordeal.compose-regression-binding/v1",
-            "trace_sha256": "76888a71701de7b2efcda43b95cf4f97a44b855d750b8e71b239d7ee845198e2",
+            "trace_sha256": "1f4437baad05ba496854b109623083eb5ed85033fc43c35a9e930bf70f98c278",
             "failure_signature": "5e33768132ba62325e43394f9f136157163ee77e8034c2b090d3b0d911471acd",
             "action_count": 8
           }
         },
         "post_fix_control": {
-          "status": "pending",
-          "method": "same_trace_after_fix",
-          "acceptance": "After the fix, the same trace must stop reproducing the exact failure signature."
+          "status": "passed",
+          "checked_at": "2026-07-10T13:33:25.524405Z",
+          "method": "same_trace_then_fixed_state_rescan",
+          "acceptance": "Every exact trace replay is clean; the fixed-state rescan records coverage and configured workload-strength evidence.",
+          "exact_replay": {
+            "attempted": 3,
+            "clean": 3,
+            "observed_signatures": [
+              null,
+              null,
+              null
+            ]
+          },
+          "fixed_state": {
+            "status": "complete",
+            "trace": ".ordeal/traces/compose-0-e8a374c0efc6.json",
+            "failure": null,
+            "reliability_coverage": {
+              "dimensions": [
+                "operation",
+                "fault",
+                "property"
+              ],
+              "rows": [
+                {
+                  "operation": "probe",
+                  "fault": "kill",
+                  "property": "json:json.service",
+                  "type": "always",
+                  "hits": 1,
+                  "passes": 1,
+                  "failures": 0,
+                  "status": "PASS"
+                },
+                {
+                  "operation": "probe",
+                  "fault": "kill",
+                  "property": "json:json.status",
+                  "type": "always",
+                  "hits": 1,
+                  "passes": 1,
+                  "failures": 0,
+                  "status": "PASS"
+                },
+                {
+                  "operation": "probe",
+                  "fault": "kill",
+                  "property": "service_ready",
+                  "type": "always",
+                  "hits": 1,
+                  "passes": 1,
+                  "failures": 0,
+                  "status": "PASS"
+                },
+                {
+                  "operation": "probe",
+                  "fault": "kill",
+                  "property": "status:200",
+                  "type": "always",
+                  "hits": 1,
+                  "passes": 1,
+                  "failures": 0,
+                  "status": "PASS"
+                },
+                {
+                  "operation": "probe",
+                  "fault": "kill",
+                  "property": "valid_json",
+                  "type": "always",
+                  "hits": 1,
+                  "passes": 1,
+                  "failures": 0,
+                  "status": "PASS"
+                },
+                {
+                  "operation": "probe",
+                  "fault": "none",
+                  "property": "json:json.service",
+                  "type": "always",
+                  "hits": 1,
+                  "passes": 1,
+                  "failures": 0,
+                  "status": "PASS"
+                },
+                {
+                  "operation": "probe",
+                  "fault": "none",
+                  "property": "json:json.status",
+                  "type": "always",
+                  "hits": 1,
+                  "passes": 1,
+                  "failures": 0,
+                  "status": "PASS"
+                },
+                {
+                  "operation": "probe",
+                  "fault": "none",
+                  "property": "status:200",
+                  "type": "always",
+                  "hits": 1,
+                  "passes": 1,
+                  "failures": 0,
+                  "status": "PASS"
+                },
+                {
+                  "operation": "probe",
+                  "fault": "none",
+                  "property": "valid_json",
+                  "type": "always",
+                  "hits": 1,
+                  "passes": 1,
+                  "failures": 0,
+                  "status": "PASS"
+                }
+              ],
+              "summary": {
+                "pass": 9,
+                "not_exercised": 0,
+                "fail": 0,
+                "total": 9
+              }
+            },
+            "workload_protection": {
+              "label": "compose workload protection",
+              "status": "protective_within_measured_scope",
+              "protects": true,
+              "summary": "all 4 tested workload oracle mutation(s) were killed",
+              "mutation_scope": "recorded Compose response oracles, not service source code",
+              "mutation_score": "4/4 (100%)",
+              "killed_mutants": 4,
+              "tested_mutants": 4,
+              "surviving_mutants": 0,
+              "inconclusive_mutants": 0,
+              "failed_properties": [],
+              "unexercised_properties": [],
+              "mutations": [
+                {
+                  "operation": "probe",
+                  "fault": "none",
+                  "property": "status:200",
+                  "action_index": 2,
+                  "status": "killed",
+                  "observed_failure_kind": "unexpected_status"
+                },
+                {
+                  "operation": "probe",
+                  "fault": "none",
+                  "property": "json:json.service",
+                  "action_index": 2,
+                  "status": "killed",
+                  "observed_failure_kind": "unexpected_json"
+                },
+                {
+                  "operation": "probe",
+                  "fault": "none",
+                  "property": "json:json.status",
+                  "action_index": 2,
+                  "status": "killed",
+                  "observed_failure_kind": "unexpected_json"
+                },
+                {
+                  "operation": "probe",
+                  "fault": "kill",
+                  "property": "status:200",
+                  "action_index": 7,
+                  "status": "killed",
+                  "observed_failure_kind": "unexpected_status"
+                }
+              ]
+            },
+            "workload_mutation_budget": 4
+          },
+          "fixed_state_sha256": "d0d285b49f93b5b1e07eb02b2ff8a4b308d76fc2c57d13e9275c08ae46e2272f"
         },
         "ci_guard": {
           "status": "ready",
@@ -446,7 +649,7 @@
           "reproduce": "verified",
           "minimize": "not_run",
           "save_regression": "saved",
-          "verify_fix": "pending",
+          "verify_fix": "passed",
           "guard_ci": "ready"
         },
         "boundaries": {
@@ -462,6 +665,13 @@
           "python_version": "3.12.11",
           "python_implementation": "CPython"
         }
+      },
+      "verification": {
+        "status": "verified",
+        "checked_at": "2026-07-10T13:33:25.524405Z",
+        "clean_replays": 3,
+        "attempted_replays": 3,
+        "fixed_state_status": "complete"
       }
     }
   ]

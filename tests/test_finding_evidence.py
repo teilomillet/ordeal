@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from ordeal.finding_evidence import _build_finding_evidence
+from ordeal.finding_evidence import _build_divergence_evidence, _build_finding_evidence
 
 
 def _crash_detail(**overrides: object) -> dict[str, object]:
@@ -56,6 +56,35 @@ def test_replay_verified_crash_has_bounded_supported_claim() -> None:
     assert "2/2 immediate replays" in card["boundaries"]["establishes"]
     assert "the root cause" in card["boundaries"]["does_not_establish"]
     json.dumps(card)
+
+
+def test_divergence_without_minimization_cannot_be_supported() -> None:
+    artifact = _build_divergence_evidence(
+        revisions={
+            "a": {"source_sha256": "a" * 64},
+            "b": {"source_sha256": "b" * 64},
+        },
+        comparison={
+            "comparator": {"source_sha256": "c" * 64},
+            "normalizer": {"source_sha256": "d" * 64},
+        },
+        original_input={"value": 1},
+        minimized_input={"value": 1},
+        original_observations={"a": 1, "b": 2},
+        observations={"a": 1, "b": 2},
+        differences=["return_value"],
+        replay_attempts=2,
+        replay_matches=2,
+        expected_signature="same",
+        observed_signatures=["same", "same"],
+        minimization_method="not_run",
+        minimization_boundary="No reducer was run.",
+    )
+
+    assert artifact["replay"]["status"] == "verified"
+    assert artifact["minimization"]["status"] == "not_run"
+    assert artifact["status"] == "exploratory"
+    assert "minimization was not established" in artifact["boundaries"]["establishes"]
 
 
 def test_replay_mismatch_remains_exploratory() -> None:

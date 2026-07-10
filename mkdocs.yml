@@ -47,72 +47,72 @@ extra:
 
 nav:
   - Home: index.md
-  - Philosophy: philosophy.md
-  - Product Direction: roadmap.md
-  - Getting Started: getting-started.md
-  - Core Concepts: core-concepts.md
-  - Concepts:
-      - Chaos Testing: concepts/chaos-testing.md
-      - Coverage Guidance: concepts/coverage-guidance.md
-      - Meaningful Tests: concepts/test-meaningfulness.md
-      - Differential Testing: concepts/differential-testing.md
-      - Divergence Evidence, Explained Simply: concepts/divergence-evidence.md
-      - System Differential Testing: concepts/system-differential.md
-      - Safe Module Migrations: concepts/safe-migrations.md
-      - Durable Regressions: concepts/durable-regressions.md
-      - Service Evidence Loop: concepts/service-evidence-loop.md
-      - Reliability Coverage: concepts/reliability-coverage.md
-      - Property Assertions: concepts/property-assertions.md
-      - Fault Injection: concepts/fault-injection.md
-      - Shrinking: concepts/shrinking.md
-  - Guides:
-      - Scan Quickstart: guides/scan-quickstart.md
-      - Object Harnesses and Stateful Replay: guides/scan-object-harnesses.md
-      - Finding Evidence: guides/finding-evidence.md
-      - Durable Regression Workflow: guides/durable-regressions.md
-      - Durable Regressions in CI: guides/durable-regressions-ci.md
-      - Durable Regression FAQ: guides/durable-regressions-faq.md
-      - Bug Bundle: guides/bug-bundle.md
-      - Scan Finding Rules: guides/scan-finding-rules.md
+  - Start Here:
+      - Scan Your Project: guides/scan-quickstart.md
+      - Methods That Need Setup: guides/scan-object-harnesses.md
+      - Understand a Finding: guides/finding-evidence.md
+      - Fix It Once: concepts/durable-regressions.md
+      - Save, Fix, and Verify: guides/durable-regressions.md
+      - Guard It in CI: guides/durable-regressions-ci.md
+      - Common Decisions: guides/durable-regressions-faq.md
       - Scan Troubleshooting: guides/scan-troubleshooting.md
-      - Writing Tests: guides/writing-tests.md
-      - Reliability Coverage: guides/reliability-coverage.md
-      - Reliability Coverage in CI: guides/reliability-coverage-ci.md
-      - Explorer: guides/explorer.md
-      - Compose Services:
-          - Overview: guides/compose-runner.md
-          - Quickstart: guides/compose-quickstart.md
+  - Advanced Workflows:
+      - Test Quality:
+          - Plain-Language Model: concepts/test-meaningfulness.md
+          - Test Protection: guides/test-protection.md
+          - Test Protection in CI: guides/test-protection-ci.md
+          - Test Protection FAQ: guides/test-protection-faq.md
+          - Mutation Testing: guides/mutations.md
+      - Long-Lived Services:
+          - Service Evidence Loop: concepts/service-evidence-loop.md
+          - Compose Overview: guides/compose-runner.md
+          - Compose Quickstart: guides/compose-quickstart.md
           - Configuration: guides/compose-configuration.md
           - Stateful Workflows: guides/compose-stateful-workflows.md
           - Fault Model: guides/compose-fault-model.md
           - Traces and Replay: guides/compose-traces.md
-          - "Evidence Loop: Failure to CI Guard": guides/compose-evidence-loop.md
+          - Failure to CI Guard: guides/compose-evidence-loop.md
           - CI and Operations: guides/compose-operations.md
           - Troubleshooting: guides/compose-troubleshooting.md
-      - Auto Testing: guides/auto.md
-      - Differential Testing:
-          - Quickstart: guides/differential-quickstart.md
+          - Reliability Coverage: concepts/reliability-coverage.md
+          - Reliability Coverage Guide: guides/reliability-coverage.md
+          - Reliability Coverage in CI: guides/reliability-coverage-ci.md
+      - Refactors and Migrations:
+          - Differential Testing: concepts/differential-testing.md
+          - First Function Comparison: guides/differential-quickstart.md
           - State and Side Effects: guides/differential-state-and-effects.md
           - Evidence and Statuses: guides/differential-evidence.md
+          - Divergence Evidence: concepts/divergence-evidence.md
           - Divergence Artifact Workflow: guides/divergence-evidence.md
-          - Divergence Artifact Troubleshooting: guides/divergence-evidence-troubleshooting.md
+          - Divergence Troubleshooting: guides/divergence-evidence-troubleshooting.md
           - Git Revision Diff: guides/revision-diff.md
           - Git Revision Diff Troubleshooting: guides/revision-diff-troubleshooting.md
+          - System Differential Testing: concepts/system-differential.md
           - First System Comparison: guides/system-differential.md
           - System Recipes: guides/system-differential-recipes.md
           - System Troubleshooting: guides/system-differential-troubleshooting.md
-      - Base-to-Candidate Migration: guides/migration-workflow.md
-      - Configuration: guides/configuration.md
-      - CLI: guides/cli.md
-      - Mutations: guides/mutations.md
-      - Test Protection: guides/test-protection.md
-      - Test Protection in CI: guides/test-protection-ci.md
-      - Test Protection FAQ: guides/test-protection-faq.md
-      - Simulation: guides/simulate.md
-      - Integrations: guides/integrations.md
-      - Maintainer Benchmarks: guides/benchmark-manifests.md
-      - Maintainer Evidence Records: guides/bug-evidence-records.md
+          - Safe Module Migrations: concepts/safe-migrations.md
+          - Base-to-Candidate Migration: guides/migration-workflow.md
+      - Custom Chaos Tests:
+          - Write a Custom Chaos Test: getting-started.md
+          - Writing Tests: guides/writing-tests.md
+          - Explorer: guides/explorer.md
+          - Configuration: guides/configuration.md
+      - Lower-Level Tools:
+          - Auto Testing: guides/auto.md
+          - Simulation: guides/simulate.md
+          - Integrations: guides/integrations.md
+  - Concepts:
+      - Philosophy: philosophy.md
+      - Core Concepts: core-concepts.md
+      - Chaos Testing: concepts/chaos-testing.md
+      - Coverage Guidance: concepts/coverage-guidance.md
+      - Property Assertions: concepts/property-assertions.md
+      - Fault Injection: concepts/fault-injection.md
+      - Shrinking: concepts/shrinking.md
+      - Product Direction: roadmap.md
   - Reference:
+      - Full CLI: guides/cli.md
       - API: reference/api.md
       - System Differential Reference: reference/system-differential.md
       - Revision Diff Schema: reference/revision-diff-schema.md
@@ -120,4 +120,8 @@ nav:
       - Durable Regression Schema: reference/durable-regression-schema.md
       - Divergence Evidence Schema: reference/divergence-evidence-schema.md
       - Test Protection Schema: reference/test-protection-schema.md
+      - Scan Finding Rules: guides/scan-finding-rules.md
+      - Bug Bundle: guides/bug-bundle.md
+      - Maintainer Benchmarks: guides/benchmark-manifests.md
+      - Maintainer Evidence Records: guides/bug-evidence-records.md
   - Troubleshooting: troubleshooting.md

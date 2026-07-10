@@ -24,7 +24,7 @@ the bug survives. **Same behavior does not mean correct behavior.**
 |---|---|
 | Audit the base | How well did the old tests actually protect the old code? |
 | Mine the candidate | What patterns does the new code appear to follow? These are clues, not rules. |
-| Diff both modules | Which sampled inputs, outputs, exceptions, or public functions changed? |
+| Diff both modules | Which sampled inputs, outputs, exceptions, names, or signatures changed? |
 | Classify changes | Which differences were planned and approved by a human? |
 | Save surprises | Can every unexpected difference be rerun as a regression? |
 | Mutate the tests | Do the new tests notice deliberate, realistic code breakage? |
@@ -50,8 +50,9 @@ pattern is labeled `mined_hypothesis`; it never silently becomes an invariant.
 ## Reading the final result
 
 `PROTECTIVE_WITHIN_MEASURED_SCOPE` means all required stages completed, no
-unexpected or inconclusive difference remains, explicit invariants were run,
-every measured mutant was caught, and the candidate-only scan passed.
+unexpected or inconclusive difference remains, every intended behavior change
+has an invariant or callable-attributed mutation protection, every measured
+mutant was caught, and a non-empty candidate-only scan passed.
 
 `INCOMPLETE` does not automatically mean the candidate is bad. It means the
 evidence is not strong enough yet. A stage may have failed, been blocked, or

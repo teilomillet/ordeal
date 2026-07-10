@@ -422,14 +422,67 @@ class TestCLI:
         with pytest.raises(SystemExit):
             main(["--help"])
         out = capsys.readouterr().out
-        assert "ordeal scan <module>" in out
-        assert "ordeal init [package]" in out
-        assert "ordeal skill" in out
-        assert "ordeal <command> --help" in out
+        assert "ordeal scan ." in out
+        assert "ordeal scan . --save" in out
+        assert "ordeal verify <id>" in out
+        assert "ordeal verify --ci" in out
         assert "ordeal catalog" in out
-        assert "ordeal catalog --detail" in out
-        assert "ordeal catalog --json" in out
-        assert "catalog()" in out
+        assert "init" not in out
+        assert "audit" not in out
+        assert "migrate" not in out
+        assert "mutate" not in out
+
+    def test_scan_target_autodetects_current_package(self, monkeypatch):
+        import ordeal.mutations as mutations
+
+        monkeypatch.setattr(mutations, "_detect_package", lambda: "demo_pkg")
+
+        assert cli._resolve_scan_target(None) == "demo_pkg"
+        assert cli._resolve_scan_target(".") == "demo_pkg"
+        assert cli._resolve_scan_target("demo.explicit") == "demo.explicit"
+
+    def test_scan_target_uses_single_configured_module(self, monkeypatch, tmp_path):
+        import ordeal.mutations as mutations
+
+        (tmp_path / "ordeal.toml").write_text(
+            '[[scan]]\nmodule = "configured.module"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mutations, "_detect_package", lambda: None)
+
+        assert cli._resolve_scan_target(None) == "configured.module"
+
+    def test_scan_target_error_tells_user_how_to_continue(self, monkeypatch, tmp_path):
+        import ordeal.mutations as mutations
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mutations, "_detect_package", lambda: None)
+
+        with pytest.raises(ValueError, match="ordeal scan myapp.scoring"):
+            cli._resolve_scan_target(None)
+
+    def test_scan_target_error_keeps_json_machine_readable(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        import ordeal.mutations as mutations
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mutations, "_detect_package", lambda: None)
+
+        assert main(["scan", "--json"]) == 2
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "blocked"
+        assert payload["suggested_commands"] == ["ordeal scan myapp.scoring"]
+
+    def test_scan_save_alias_preserves_save_artifacts(self):
+        parser = cli._build_parser()
+
+        assert parser.parse_args(["scan", ".", "--save"]).save_artifacts is True
+        assert parser.parse_args(["scan", ".", "--save-artifacts"]).save_artifacts is True
 
     def test_python_module_entrypoint_runs(self):
         proc = subprocess.run(
@@ -1071,7 +1124,7 @@ scan_max_examples = 12
     def test_catalog_lists_live_cli_commands(self, capsys):
         assert main(["catalog"]) == 0
         out = capsys.readouterr().out
-        assert "Run 'ordeal --help' for the full live CLI surface." in out
+        assert "Run 'ordeal --help' for the focused beginner workflow." in out
         assert "Run 'ordeal <command> --help' for command-specific options." in out
         assert (
             "Run 'ordeal catalog --detail' for applicability, inputs, outputs, "
@@ -1088,7 +1141,9 @@ scan_max_examples = 12
         subparsers = next(
             action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
         )
-        assert sorted(subparsers.choices) == [entry["name"] for entry in cli.command_catalog()]
+        entries = cli.command_catalog()
+        assert sorted(subparsers.choices) == [entry["name"] for entry in entries]
+        assert all(entry["doc"] for entry in entries)
 
     def test_all_subparsers_bind_a_handler(self):
         parser = cli._build_parser()
@@ -2858,21 +2913,19 @@ scan_max_examples = 12
         out = capsys.readouterr().out
         assert "--write-regression (tests/test_ordeal_regressions.py)" in out
 
-    def test_scan_help_mentions_shareable_report(self, capsys):
+    def test_scan_help_keeps_the_beginner_path_focused(self, capsys):
         with pytest.raises(SystemExit):
             main(["scan", "--help"])
         out = capsys.readouterr().out
-        assert "shareable Markdown bug report" in out
-        assert "runnable pytest regressions" in out
+        assert "ordeal scan ." in out
+        assert "ordeal scan . --save" in out
         assert "ordeal verify <finding-id> --allow-unsafe-artifacts" in out
+        assert "--save, --save-artifacts" in out
         assert "--save-artifacts" in out
-        assert ".ordeal/findings/mymod.md" in out
-        assert ".ordeal/findings/mymod.json" in out
-        assert "--report-file PATH" in out
-        assert "--write-regression" in out
-        assert "default: tests/test_ordeal_regressions.py" in out
-        assert "terminal source location" in out
-        assert "harness hook is resolvable" in out
+        assert "--list-targets" in out
+        assert "--min-contract-fit" not in out
+        assert "--property-override" not in out
+        assert "ordeal audit" not in out
         assert "https://docs.byordeal.com/guides/scan-quickstart/" in out
 
     def test_verify_help_mentions_finding_id(self, capsys):
@@ -2940,7 +2993,7 @@ scan_max_examples = 12
         assert "code binding: callable source sha256=" in captured.out
         assert "post-fix control: pending" in captured.out
         assert "gaps to close:" in captured.out
-        assert "--save-artifacts" in captured.out
+        assert "next: ordeal scan pkg.mod --save" in captured.out
 
     def test_scan_no_findings_returns_zero(self, monkeypatch, capsys):
         state = SimpleNamespace(

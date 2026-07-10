@@ -1,0 +1,26 @@
+[compose]
+file = "compose.yaml"
+project_name = "ordeal-compose-concurrency"
+base_url = "http://127.0.0.1:18082"
+health_path = "/health"
+steps = 3
+max_time = 45
+seed = 2
+fault_probability = 0.5
+faults = ["delay_response", "corrupt_response"]
+delay_seconds = 0.02
+request_timeout = 5
+startup_timeout = 30
+replay_attempts = 2
+workload_mutations = 4
+trace_dir = ".ordeal/traces"
+keep_running = false
+
+[[compose.requests]]
+name = "fanout"
+method = "GET"
+path = "/fanout"
+expect_status = 200
+expect_json = { "json.service" = "fanout-api", "json.unique" = 8, "json.max_concurrency" = 8 }
+capture = { observed_unique = "json.unique", observed_max_concurrency = "json.max_concurrency" }
+faultable = true

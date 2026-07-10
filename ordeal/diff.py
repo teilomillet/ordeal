@@ -9,8 +9,8 @@ artifact; sampled agreement remains bounded evidence, not equivalence.
 
 from __future__ import annotations
 
-import copy
 import hashlib
+import importlib
 import inspect
 import json
 import math
@@ -24,11 +24,20 @@ import hypothesis.strategies as st
 from hypothesis import given, settings
 from hypothesis.errors import FlakyFailure
 
+from ordeal._observation import (
+    CanonicalObservation,
+    ObservationError,
+    exact_replay_match,
+    isolated_deepcopy,
+    observations_equal,
+    observe,
+)
 from ordeal.auto import _infer_strategies
-from ordeal.finding_evidence import (
-    _build_divergence_evidence,
-    _json_ready,
-    _sha256_json,
+from ordeal.finding_evidence import _build_divergence_evidence
+from ordeal.regression_evidence import (
+    _decode_replay_value,
+    _encode_replay_value,
+    _register_python_regression,
 )
 from ordeal.system_diff import (
     FaultEvent,
@@ -103,6 +112,7 @@ class DiffWitness:
     replay_verified: bool = False
     artifact: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     artifact_path: str | None = None
+    replay_args_json: str | None = None
 
     def __str__(self) -> str:
         """Format a compact full-envelope divergence preview."""
@@ -152,6 +162,10 @@ class DiffResult:
     witness: DiffWitness | None = None
     reason: str | None = None
     proof_method: str | None = None
+    regression_path: str | None = None
+    manifest_path: str | None = None
+    finding_id: str | None = None
+    regression_error: str | None = None
 
     def __post_init__(self) -> None:
         """Derive the status for callers constructing legacy result objects."""
@@ -284,23 +298,37 @@ def _default_compare(
             return bool(np.array_equal(a, b, equal_nan=True))
         except (ImportError, TypeError, ValueError):
             pass
-    return bool(a == b)
+    return _state_equal(a, b)
 
 
 def _approx_equal(a: Any, b: Any, rtol: float, atol: float) -> bool:
     """Return recursive approximate equality for common numeric containers."""
-    if isinstance(a, float) and isinstance(b, float):
+    if type(a) is float and type(b) is float:
         if math.isnan(a) and math.isnan(b):
             return True
         if math.isinf(a) or math.isinf(b):
             return a == b
         return abs(a - b) <= atol + rtol * abs(b)
-    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+    if type(a) in {list, tuple} and type(b) in {list, tuple}:
         return len(a) == len(b) and all(
             _approx_equal(left, right, rtol, atol) for left, right in zip(a, b)
         )
-    if isinstance(a, dict) and isinstance(b, dict):
-        return a.keys() == b.keys() and all(_approx_equal(a[key], b[key], rtol, atol) for key in a)
+    if type(a) is dict and type(b) is dict:
+        if len(a) != len(b):
+            return False
+        unmatched = list(b.items())
+        for left_key, left_value in a.items():
+            left_key_observation = _observe_losslessly(left_key, label="mapping key")
+            for index, (right_key, right_value) in enumerate(unmatched):
+                right_key_observation = _observe_losslessly(right_key, label="mapping key")
+                if observations_equal(left_key_observation, right_key_observation):
+                    if not _approx_equal(left_value, right_value, rtol, atol):
+                        return False
+                    unmatched.pop(index)
+                    break
+            else:
+                return False
+        return not unmatched
     if hasattr(a, "shape") and hasattr(b, "shape"):
         try:
             import numpy as np
@@ -308,7 +336,7 @@ def _approx_equal(a: Any, b: Any, rtol: float, atol: float) -> bool:
             return bool(np.allclose(a, b, rtol=rtol, atol=atol))
         except (ImportError, TypeError, ValueError):
             pass
-    return bool(a == b)
+    return _state_equal(a, b)
 
 
 def _freeze(value: Any) -> Any:
@@ -333,12 +361,25 @@ def _freeze(value: Any) -> Any:
     return value
 
 
-def _clone_value(value: Any, *, label: str) -> Any:
+def _observe_losslessly(value: Any, *, label: str) -> CanonicalObservation:
+    """Return one canonical observation or classify the diff as inconclusive."""
+    try:
+        return observe(value, label=label)
+    except ObservationError as exc:
+        raise _ReconstructionInconclusive(str(exc)) from exc
+
+
+def _clone_value(
+    value: Any,
+    *,
+    label: str,
+    disjoint_from: tuple[Any, ...] = (),
+) -> Any:
     """Deep-copy one isolation boundary or classify the failure honestly."""
     try:
-        return copy.deepcopy(value)
-    except Exception as exc:
-        raise _ReconstructionInconclusive(f"could not reconstruct {label}: {exc}") from exc
+        return isolated_deepcopy(value, label=label, disjoint_from=disjoint_from)
+    except ObservationError as exc:
+        raise _ReconstructionInconclusive(str(exc)) from exc
 
 
 def _clone_inputs(
@@ -346,9 +387,68 @@ def _clone_inputs(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Preserve a witness and make independent arguments for both revisions."""
     witness = _clone_value(kwargs, label="the witness input")
-    kwargs_a = _clone_value(kwargs, label="revision a arguments")
-    kwargs_b = _clone_value(kwargs, label="revision b arguments")
+    kwargs_a = _clone_value(
+        kwargs,
+        label="revision a arguments",
+        disjoint_from=(witness,),
+    )
+    kwargs_b = _clone_value(
+        kwargs,
+        label="revision b arguments",
+        disjoint_from=(witness, kwargs_a),
+    )
     return witness, kwargs_a, kwargs_b
+
+
+def _bind_named_arguments(
+    fn: Callable[..., Any],
+    arguments: Mapping[str, Any],
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Convert named generated values into a signature-correct call."""
+    signature = inspect.signature(fn)
+    parameters = list(signature.parameters.values())
+    positional: list[Any] = []
+    keyword: dict[str, Any] = {}
+
+    positional_only = [
+        parameter
+        for parameter in parameters
+        if parameter.kind is inspect.Parameter.POSITIONAL_ONLY
+    ]
+    supplied_positions = [
+        index for index, parameter in enumerate(positional_only) if parameter.name in arguments
+    ]
+    if supplied_positions:
+        for parameter in positional_only[: max(supplied_positions) + 1]:
+            if parameter.name in arguments:
+                positional.append(arguments[parameter.name])
+            elif parameter.default is not inspect.Parameter.empty:
+                positional.append(parameter.default)
+            else:
+                raise TypeError(f"missing required positional-only argument: {parameter.name!r}")
+
+    for parameter in parameters:
+        if parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
+            continue
+        if parameter.kind is inspect.Parameter.VAR_POSITIONAL:
+            if parameter.name in arguments:
+                values = arguments[parameter.name]
+                if not isinstance(values, (list, tuple)):
+                    raise TypeError(f"fixture {parameter.name!r} must provide a list or tuple")
+                positional.extend(values)
+            continue
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            if parameter.name in arguments:
+                values = arguments[parameter.name]
+                if not isinstance(values, Mapping):
+                    raise TypeError(f"fixture {parameter.name!r} must provide a mapping")
+                keyword.update(values)
+            continue
+        if parameter.name in arguments:
+            keyword[parameter.name] = arguments[parameter.name]
+
+    signature.bind(*positional, **keyword)
+    return tuple(positional), keyword
 
 
 def _terminal_source_location(exc: Exception) -> dict[str, Any] | None:
@@ -470,10 +570,12 @@ def _execute_revision(
     location: dict[str, Any] | None = None
     try:
         try:
-            value = bound(**kwargs)
+            call_args, call_kwargs = _bind_named_arguments(bound, kwargs)
+            value = bound(*call_args, **call_kwargs)
         except Exception as exc:
             exception = exc
             location = _terminal_source_location(exc)
+            _observe_losslessly(exc, label="raised exception")
         else:
             value = _clone_value(value, label="return value")
         mutated = _clone_value(kwargs, label="mutated arguments")
@@ -492,32 +594,10 @@ def _execute_revision(
 
 
 def _state_equal(left: Any, right: Any) -> bool:
-    """Compare selected state directly without lossy serialization or hashing."""
-    if type(left) is not type(right):
-        return False
-    if isinstance(left, BaseException):
-        return _state_equal(left.args, right.args)
-    if isinstance(left, Mapping):
-        return left.keys() == right.keys() and all(
-            _state_equal(left[key], right[key]) for key in left
-        )
-    if isinstance(left, (list, tuple)):
-        return len(left) == len(right) and all(
-            _state_equal(a, b) for a, b in zip(left, right, strict=True)
-        )
-    if isinstance(left, (set, frozenset)):
-        return left == right
-    if hasattr(left, "shape") and hasattr(right, "shape"):
-        try:
-            import numpy as np
-
-            return bool(np.array_equal(left, right, equal_nan=True))
-        except (ImportError, TypeError, ValueError):
-            return False
-    try:
-        return bool(left == right)
-    except (TypeError, ValueError):
-        return False
+    """Compare values through the shared structural observation layer."""
+    left_observation = _observe_losslessly(left, label="left comparison value")
+    right_observation = _observe_losslessly(right, label="right comparison value")
+    return observations_equal(left_observation, right_observation)
 
 
 def _compare_outcomes(
@@ -545,6 +625,8 @@ def _compare_outcomes(
         normalizer = normalize or _identity
         normalized_a = normalizer(outcome_a.value)
         normalized_b = normalizer(outcome_b.value)
+        _observe_losslessly(normalized_a, label="normalized revision a return value")
+        _observe_losslessly(normalized_b, label="normalized revision b return value")
         matches = (
             compare(normalized_a, normalized_b)
             if compare is not None
@@ -611,6 +693,10 @@ def _run_pair(
 def _outcome_payload(outcome: _CallOutcome, normalized: Any) -> dict[str, Any]:
     """Return the canonical artifact observation for one revision."""
     if outcome.exception is not None:
+        exception_observation = _observe_losslessly(
+            outcome.exception,
+            label="raised exception",
+        )
         primary: dict[str, Any] = {
             "kind": "exception",
             "exception_type": (
@@ -618,18 +704,41 @@ def _outcome_payload(outcome: _CallOutcome, normalized: Any) -> dict[str, Any]:
             ),
             "message": str(outcome.exception),
             "terminal_source_location": outcome.terminal_source_location,
+            "canonical_exception": exception_observation.payload,
         }
     else:
+        value_observation = _observe_losslessly(outcome.value, label="return value")
+        normalized_observation = _observe_losslessly(
+            normalized,
+            label="normalized return value",
+        )
         primary = {
             "kind": "return",
-            "value": _json_ready(outcome.value),
-            "normalized_value": _json_ready(normalized),
+            "value": value_observation.json_value,
+            "normalized_value": normalized_observation.json_value,
+            "canonical_value": value_observation.payload,
+            "canonical_normalized_value": normalized_observation.payload,
         }
+    mutated_observation = _observe_losslessly(
+        outcome.mutated_arguments,
+        label="mutated arguments",
+    )
+    receiver_observation = _observe_losslessly(
+        outcome.receiver_state,
+        label="receiver state",
+    )
+    side_effect_observation = _observe_losslessly(
+        outcome.side_effects,
+        label="side effects",
+    )
     primary.update(
         {
-            "mutated_arguments": _json_ready(outcome.mutated_arguments),
-            "receiver_state": _json_ready(outcome.receiver_state),
-            "side_effects": _json_ready(outcome.side_effects),
+            "mutated_arguments": mutated_observation.json_value,
+            "receiver_state": receiver_observation.json_value,
+            "side_effects": side_effect_observation.json_value,
+            "canonical_mutated_arguments": mutated_observation.payload,
+            "canonical_receiver_state": receiver_observation.payload,
+            "canonical_side_effects": side_effect_observation.payload,
         }
     )
     return primary
@@ -643,44 +752,35 @@ def _candidate_observations(candidate: _Candidate) -> dict[str, Any]:
     }
 
 
-def _candidate_signature(candidate: _Candidate) -> str:
-    """Hash the paired observations and exact differing envelope channels."""
-    return _sha256_json(
+def _candidate_observation(candidate: _Candidate) -> CanonicalObservation:
+    """Return the comparison-governed paired outcome used by exact replay."""
+    replay_observations: dict[str, dict[str, Any]] = {}
+    for label, observation in _candidate_observations(candidate).items():
+        projected = dict(observation)
+        if projected.get("kind") == "return":
+            projected.pop("value", None)
+            projected.pop("canonical_value", None)
+        replay_observations[label] = projected
+    return _observe_losslessly(
         {
-            "observations": _candidate_observations(candidate),
+            "observations": replay_observations,
             "differences": candidate.differences,
-        }
+        },
+        label="paired differential replay projection",
     )
 
 
-def _outcome_replays(expected: _CallOutcome, observed: _CallOutcome) -> bool:
-    """Return whether one raw outcome exactly matches its minimized observation."""
-    if expected.exception is not None or observed.exception is not None:
-        if expected.exception is None or observed.exception is None:
-            return False
-        primary_matches = (
-            type(expected.exception) is type(observed.exception)
-            and str(expected.exception) == str(observed.exception)
-            and expected.terminal_source_location == observed.terminal_source_location
-        )
-    else:
-        primary_matches = _state_equal(expected.value, observed.value)
-    return (
-        primary_matches
-        and _state_equal(expected.mutated_arguments, observed.mutated_arguments)
-        and _state_equal(expected.receiver_state, observed.receiver_state)
-        and _state_equal(expected.side_effects, observed.side_effects)
-    )
-
-
-def _candidate_replays(expected: _Candidate, observed: _Candidate) -> bool:
+def _candidate_replays(
+    expected: CanonicalObservation,
+    observed: CanonicalObservation,
+    *,
+    expected_signature: str,
+) -> bool:
     """Return whether the same witness reproduced the complete paired envelope."""
-    return (
-        expected.differences == observed.differences
-        and _outcome_replays(expected.outcome_a, observed.outcome_a)
-        and _outcome_replays(expected.outcome_b, observed.outcome_b)
-        and _state_equal(expected.normalized_a, observed.normalized_a)
-        and _state_equal(expected.normalized_b, observed.normalized_b)
+    return exact_replay_match(
+        expected,
+        observed,
+        recorded_expected_signature=expected_signature,
     )
 
 
@@ -694,9 +794,9 @@ def _callable_name(fn: Callable[..., Any]) -> str:
 def _callable_binding(fn: Callable[..., Any]) -> dict[str, Any]:
     """Bind one callable identity to its inspectable source text and location."""
     target: Any = inspect.unwrap(fn)
-    if not (inspect.isfunction(target) or inspect.ismethod(target)) and hasattr(
-        target, "__call__"
-    ):
+    if not (
+        inspect.isfunction(target) or inspect.ismethod(target) or inspect.isclass(target)
+    ) and hasattr(target, "__call__"):
         target = inspect.unwrap(target.__call__)
     source_sha256: str | None = None
     source_location: dict[str, Any] | None = None
@@ -752,7 +852,8 @@ def _comparison_binding(
         "normalizer": normalizer,
         "exception_matching": "exact type and message across revisions",
         "replay_matching": (
-            "exact paired observations including terminal exception source locations"
+            "normalized return observations plus exact envelope channels and terminal "
+            "exception source locations"
         ),
     }
 
@@ -764,16 +865,33 @@ def _public_outcome(outcome: _CallOutcome, normalized: Any) -> DiffOutcome:
     if outcome.exception is not None:
         exception_type = type(outcome.exception)
         exception_message = str(outcome.exception)
+    value = _observe_losslessly(outcome.value, label="public return value").public_value
+    normalized_value = _observe_losslessly(
+        normalized,
+        label="public normalized value",
+    ).public_value
+    mutated = _observe_losslessly(
+        outcome.mutated_arguments,
+        label="public mutated arguments",
+    ).public_value
+    receiver = _observe_losslessly(
+        outcome.receiver_state,
+        label="public receiver state",
+    ).public_value
+    effects = _observe_losslessly(
+        outcome.side_effects,
+        label="public side effects",
+    ).public_value
     return DiffOutcome(
         returned=outcome.exception is None,
-        return_value=_freeze(outcome.value),
+        return_value=_freeze(value),
         exception_type=exception_type,
         exception_message=exception_message,
-        mutated_arguments=_freeze(outcome.mutated_arguments),
-        receiver_state=_freeze(outcome.receiver_state),
-        side_effects=_freeze(outcome.side_effects),
+        mutated_arguments=_freeze(mutated),
+        receiver_state=_freeze(receiver),
+        side_effects=_freeze(effects),
         terminal_source_location=_freeze(outcome.terminal_source_location),
-        normalized_value=_freeze(normalized),
+        normalized_value=_freeze(normalized_value),
     )
 
 
@@ -792,6 +910,403 @@ def _write_artifact(payload: dict[str, Any], artifact_dir: str | Path) -> str:
     return path.resolve().as_posix()
 
 
+def _system_event_payload(event: SystemEvent) -> dict[str, Any]:
+    """Return one portable ordered event for a system witness."""
+    if isinstance(event, Operation):
+        return {
+            "kind": "operation",
+            "name": event.name,
+            "args": _observe_losslessly(
+                event.args,
+                label="system operation arguments",
+            ).json_value,
+            "kwargs": _observe_losslessly(
+                dict(event.kwargs),
+                label="system operation keyword arguments",
+            ).json_value,
+        }
+    return {
+        "kind": "fault",
+        "name": event.name,
+        "action": event.action,
+        "parameters": _observe_losslessly(
+            dict(event.parameters),
+            label="system fault parameters",
+        ).json_value,
+    }
+
+
+def _system_mismatch_observations(mismatch: Any) -> dict[str, Any]:
+    """Return paired JSON-safe observations for one system mismatch."""
+    observation_a = _observe_losslessly(
+        mismatch.observed_a,
+        label="system baseline mismatch observation",
+    )
+    observation_b = _observe_losslessly(
+        mismatch.observed_b,
+        label="system candidate mismatch observation",
+    )
+    return {
+        "a": {
+            "kind": mismatch.kind,
+            "step": mismatch.step,
+            "value": observation_a.json_value,
+            "canonical_value": (
+                mismatch.observation_a.payload
+                if mismatch.observation_a is not None
+                else observation_a.payload
+            ),
+        },
+        "b": {
+            "kind": mismatch.kind,
+            "step": mismatch.step,
+            "value": observation_b.json_value,
+            "canonical_value": (
+                mismatch.observation_b.payload
+                if mismatch.observation_b is not None
+                else observation_b.payload
+            ),
+        },
+    }
+
+
+def _attach_system_artifact(
+    result: SystemDiffResult,
+    *,
+    factory_a: Callable[[], Any],
+    factory_b: Callable[[], Any],
+    compare: Callable[[Any, Any], bool] | None,
+    normalize: Callable[[Any], Any] | None,
+    rtol: float | None,
+    atol: float | None,
+    state: Callable[[Any], Any] | None,
+    side_effects: Callable[[Any], Any] | None,
+    apply_fault: Callable[[Any, FaultEvent], None] | None,
+    artifact_dir: str | Path | None,
+) -> SystemDiffResult:
+    """Attach the shared divergence card to a replay-supported system mismatch."""
+    if result.status != "divergent" or not result.mismatches:
+        return result
+    mismatch = result.mismatches[0]
+    original_mismatch = result.original_mismatch or mismatch
+    comparison = _comparison_binding(
+        compare=compare,
+        normalize=normalize,
+        rtol=rtol,
+        atol=atol,
+    )
+    comparison.update(
+        {
+            "mode": "system",
+            "state_probe": _callable_binding(state) if state is not None else None,
+            "side_effect_probe": (
+                _callable_binding(side_effects) if side_effects is not None else None
+            ),
+            "fault_adapter": (_callable_binding(apply_fault) if apply_fault is not None else None),
+        }
+    )
+    original_sequence = result.original_sequence or result.sequence
+    original_input_observation = _observe_losslessly(
+        original_sequence,
+        label="original system witness sequence",
+    )
+    minimized_input_observation = _observe_losslessly(
+        result.sequence,
+        label="system witness sequence",
+    )
+    minimization_method = (
+        "event deletion preserving the first canonical mismatch"
+        if result.minimization_performed
+        else "not_run"
+    )
+    minimization_boundary = (
+        "Only the supplied ordered operations and fault transitions were minimized."
+        if result.minimization_performed
+        else "No event reducer was run because minimize=False."
+    )
+    artifact = _build_divergence_evidence(
+        revisions={
+            "a": _callable_binding(factory_a),
+            "b": _callable_binding(factory_b),
+        },
+        comparison=comparison,
+        original_input={"sequence": [_system_event_payload(event) for event in original_sequence]},
+        minimized_input={"sequence": [_system_event_payload(event) for event in result.sequence]},
+        original_input_canonical=original_input_observation.payload,
+        minimized_input_canonical=minimized_input_observation.payload,
+        original_observations=_system_mismatch_observations(original_mismatch),
+        observations=_system_mismatch_observations(mismatch),
+        differences=[mismatch.kind],
+        replay_attempts=result.replay_attempts,
+        replay_matches=result.replay_matches,
+        expected_signature=str(result.expected_signature or ""),
+        observed_signatures=list(result.observed_signatures),
+        witness_source="ordered_system_sequence",
+        minimization_method=minimization_method,
+        minimization_boundary=minimization_boundary,
+    )
+    result.artifact = artifact
+    result.artifact_path = _write_artifact(artifact, artifact_dir) if artifact_dir else None
+    return result
+
+
+_DIFF_REGRESSION_TEST = "test_ordeal_diff_regression"
+
+
+def _callable_import_path(value: Callable[..., Any] | None, *, label: str) -> str | None:
+    """Return an exact import path or reject a process-local callback."""
+    if value is None:
+        return None
+    module_name = str(getattr(value, "__module__", ""))
+    qualname = str(getattr(value, "__qualname__", ""))
+    if not module_name or not qualname or "<locals>" in qualname or "<lambda>" in qualname:
+        raise TypeError(f"{label} must be an importable module-level callable")
+    resolved: Any = importlib.import_module(module_name)
+    for part in qualname.split("."):
+        resolved = getattr(resolved, part)
+    if resolved is not value:
+        raise TypeError(f"{label} import path does not resolve to the measured callable")
+    return f"{module_name}:{qualname}"
+
+
+def _resolve_replay_callable(path: object) -> Callable[..., Any] | None:
+    """Resolve a callable path written by :func:`_callable_import_path`."""
+    if path is None:
+        return None
+    module_name, separator, qualname = str(path).partition(":")
+    if not separator or not module_name or not qualname:
+        raise ValueError(f"invalid replay callable path: {path!r}")
+    resolved: Any = importlib.import_module(module_name)
+    for part in qualname.split("."):
+        resolved = getattr(resolved, part)
+    if not callable(resolved):
+        raise TypeError(f"replay target is not callable: {path}")
+    return resolved
+
+
+def _encode_system_replay_event(event: SystemEvent) -> dict[str, object]:
+    """Encode one system event without invoking target-defined repr methods."""
+    if isinstance(event, Operation):
+        return {
+            "kind": "operation",
+            "name": event.name,
+            "args": _encode_replay_value(event.args),
+            "kwargs": _encode_replay_value(event.kwargs),
+        }
+    return {
+        "kind": "fault",
+        "name": event.name,
+        "action": event.action,
+        "parameters": _encode_replay_value(event.parameters),
+    }
+
+
+def _decode_system_replay_event(payload: Mapping[str, object]) -> SystemEvent:
+    """Decode one exact system regression event."""
+    if payload.get("kind") == "operation":
+        args = _decode_replay_value(payload.get("args", ()))
+        kwargs = _decode_replay_value(payload.get("kwargs", {}))
+        if not isinstance(args, tuple) or not isinstance(kwargs, Mapping):
+            raise TypeError("system operation replay data has invalid args or kwargs")
+        return Operation(str(payload["name"]), args=args, kwargs=kwargs)
+    if payload.get("kind") == "fault":
+        parameters = _decode_replay_value(payload.get("parameters", {}))
+        if not isinstance(parameters, Mapping):
+            raise TypeError("system fault replay data has invalid parameters")
+        return FaultEvent(
+            str(payload["name"]),
+            str(payload.get("action", "activate")),
+            parameters,
+        )
+    raise ValueError(f"unknown system replay event kind: {payload.get('kind')!r}")
+
+
+def replay_diff_regression_case(case: Mapping[str, object]) -> None:
+    """Replay one saved function or system divergence until it stays fixed."""
+    fn_a = _resolve_replay_callable(case["callable_a"])
+    fn_b = _resolve_replay_callable(case["callable_b"])
+    assert fn_a is not None and fn_b is not None
+    compare = _resolve_replay_callable(case.get("compare"))
+    normalize = _resolve_replay_callable(case.get("normalize"))
+    options: dict[str, Any] = {
+        "compare": compare,
+        "normalize": normalize,
+        "rtol": case.get("rtol"),
+        "atol": case.get("atol"),
+        "replay_attempts": 1,
+    }
+    mode = str(case["mode"])
+    if mode == "function":
+        kwargs = _decode_replay_value(case["kwargs"])
+        if not isinstance(kwargs, Mapping) or not all(isinstance(key, str) for key in kwargs):
+            raise TypeError("function regression kwargs must be a string-keyed mapping")
+        result = diff(fn_a, fn_b, max_examples=1, **options, **dict(kwargs))
+    elif mode == "system":
+        encoded_sequence = case.get("sequence")
+        if not isinstance(encoded_sequence, list):
+            raise TypeError("system regression sequence must be a list")
+        sequence = [
+            _decode_system_replay_event(item)
+            for item in encoded_sequence
+            if isinstance(item, Mapping)
+        ]
+        if len(sequence) != len(encoded_sequence):
+            raise TypeError("system regression sequence contains an invalid event")
+        result = diff(
+            fn_a,
+            fn_b,
+            sequence=sequence,
+            state=_resolve_replay_callable(case.get("state")),
+            side_effects=_resolve_replay_callable(case.get("side_effects")),
+            apply_fault=_resolve_replay_callable(case.get("apply_fault")),
+            minimize=False,
+            **options,
+        )
+    else:
+        raise ValueError(f"unknown diff regression mode: {mode!r}")
+    if not result.no_divergence_found:
+        raise AssertionError(
+            f"saved {mode} divergence is not fixed: {result.status}"
+            + (f" ({result.reason})" if result.reason else "")
+        )
+
+
+def _render_diff_regression(case: Mapping[str, object]) -> str:
+    """Render one standalone, source-bindable diff regression."""
+    return "\n".join(
+        [
+            '"""Generated by `ordeal diff`.',
+            "",
+            f"Target ID: {case['id']}",
+            '"""',
+            "",
+            "from ordeal.diff import replay_diff_regression_case",
+            "",
+            f"CASE = {dict(case)!r}",
+            "",
+            "",
+            f"def {_DIFF_REGRESSION_TEST}() -> None:",
+            '    """Keep the minimized paired divergence fixed."""',
+            "    replay_diff_regression_case(CASE)",
+            "",
+        ]
+    )
+
+
+def _persist_diff_regression(
+    *,
+    mode: Literal["function", "system"],
+    fn_a: Callable[..., Any],
+    fn_b: Callable[..., Any],
+    artifact: Mapping[str, Any],
+    artifact_path: str | None,
+    regression_path: str | Path,
+    manifest_path: str | Path,
+    compare: Callable[[Any, Any], bool] | None,
+    normalize: Callable[[Any], Any] | None,
+    rtol: float | None,
+    atol: float | None,
+    kwargs: Mapping[str, Any] | None = None,
+    sequence: Sequence[SystemEvent] | None = None,
+    state: Callable[[Any], Any] | None = None,
+    side_effects: object = None,
+    apply_fault: Callable[[Any, FaultEvent], None] | None = None,
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """Persist one generated diff regression and register it for CI."""
+    try:
+        if artifact.get("status") != "supported":
+            raise ValueError(
+                "durable diff regressions require supported replay and minimization evidence"
+            )
+        if artifact_path is None:
+            raise ValueError("durable diff regressions require artifact_dir")
+        if mode == "function" and side_effects:
+            raise TypeError("function side-effect bindings are not yet persistable")
+        callable_a = _callable_import_path(fn_a, label="baseline")
+        callable_b = _callable_import_path(fn_b, label="candidate")
+        assert callable_a is not None and callable_b is not None
+        identity = hashlib.sha256(
+            f"{mode}\0{callable_a}\0{callable_b}".encode("utf-8")
+        ).hexdigest()[:16]
+        case: dict[str, object] = {
+            "id": f"{mode}:{identity}",
+            "mode": mode,
+            "callable_a": callable_a,
+            "callable_b": callable_b,
+            "compare": _callable_import_path(compare, label="compare"),
+            "normalize": _callable_import_path(normalize, label="normalize"),
+            "rtol": rtol,
+            "atol": atol,
+        }
+        if mode == "function":
+            case["kwargs"] = _encode_replay_value(dict(kwargs or {}))
+        else:
+            case.update(
+                {
+                    "sequence": [_encode_system_replay_event(event) for event in sequence or ()],
+                    "state": _callable_import_path(state, label="state probe"),
+                    "side_effects": _callable_import_path(
+                        side_effects if callable(side_effects) else None,
+                        label="side-effect probe",
+                    ),
+                    "apply_fault": _callable_import_path(
+                        apply_fault,
+                        label="fault adapter",
+                    ),
+                }
+            )
+        output_path = Path(regression_path)
+        if output_path.exists():
+            existing = output_path.read_text(encoding="utf-8")
+            if not existing.startswith('"""Generated by `ordeal diff`.'):
+                raise ValueError(f"refusing to overwrite non-generated regression: {output_path}")
+            if f"Target ID: {case['id']}" not in existing:
+                raise ValueError(f"regression path already belongs to another diff: {output_path}")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(_render_diff_regression(case), encoding="utf-8")
+        finding_id = f"fnd_diff_{identity}"
+        comparison_artifact = artifact.get("comparison", {})
+        revisions_artifact = artifact.get("revisions", {})
+        source_guards: list[dict[str, str]] = []
+
+        def guard(path: object, binding: object) -> None:
+            """Record one import path and measured source hash for CI."""
+            if path is None or not isinstance(binding, Mapping):
+                return
+            source_sha256 = str(binding.get("source_sha256") or "")
+            if source_sha256:
+                source_guards.append({"callable": str(path), "source_sha256": source_sha256})
+
+        guard(
+            callable_a,
+            revisions_artifact.get("a") if isinstance(revisions_artifact, Mapping) else None,
+        )
+        if isinstance(comparison_artifact, Mapping):
+            guard(case.get("compare"), comparison_artifact.get("comparator"))
+            guard(case.get("normalize"), comparison_artifact.get("normalizer"))
+            guard(case.get("state"), comparison_artifact.get("state_probe"))
+            guard(case.get("side_effects"), comparison_artifact.get("side_effect_probe"))
+            guard(case.get("apply_fault"), comparison_artifact.get("fault_adapter"))
+        registered, error = _register_python_regression(
+            manifest_path=Path(manifest_path),
+            finding_id=finding_id,
+            change_kind=mode,
+            target=f"{callable_a} -> {callable_b}",
+            test_path=output_path,
+            test_name=_DIFF_REGRESSION_TEST,
+            evidence_path=Path(artifact_path),
+            change_artifact_ids=[str(artifact.get("artifact_id"))],
+            test_basis="paired_minimized_witness",
+            extra={"source_guards": source_guards},
+        )
+        if error is not None:
+            return output_path.as_posix(), None, None, error
+        assert registered is not None
+        return output_path.as_posix(), registered.as_posix(), finding_id, None
+    except (AttributeError, ImportError, OSError, TypeError, ValueError) as exc:
+        return None, None, None, str(exc)
+
+
 def diff(
     fn_a: Callable[..., Any],
     fn_b: Callable[..., Any],
@@ -803,6 +1318,8 @@ def diff(
     normalize: Callable[[Any], Any] | None = None,
     replay_attempts: int = 2,
     artifact_dir: str | Path | None = None,
+    regression_path: str | Path | None = None,
+    manifest_path: str | Path | None = None,
     side_effects: Mapping[str, SideEffect] | Callable[[Any], Any] | None = None,
     equivalence_proof: Callable[[Callable[..., Any], Callable[..., Any]], bool] | None = None,
     sequence: Sequence[SystemEvent] | None = None,
@@ -851,6 +1368,10 @@ def diff(
     """
     if replay_attempts < 1:
         raise ValueError("replay_attempts must be >= 1")
+    if max_examples < 1:
+        raise ValueError("max_examples must be >= 1")
+    if (regression_path is None) != (manifest_path is None):
+        raise ValueError("regression_path and manifest_path must be provided together")
     if sequence is not None:
         if fixtures:
             raise TypeError("system diff does not accept function fixtures")
@@ -861,13 +1382,18 @@ def diff(
         normalizer = normalize or _identity
 
         def return_compare(a: Any, b: Any) -> bool:
-            normalized_a = normalizer(a)
-            normalized_b = normalizer(b)
-            if compare is not None:
-                return bool(compare(normalized_a, normalized_b))
-            return _default_compare(normalized_a, normalized_b, rtol, atol)
+            try:
+                normalized_a = normalizer(a)
+                normalized_b = normalizer(b)
+                _observe_losslessly(normalized_a, label="normalized system a return value")
+                _observe_losslessly(normalized_b, label="normalized system b return value")
+                if compare is not None:
+                    return bool(compare(normalized_a, normalized_b))
+                return _default_compare(normalized_a, normalized_b, rtol, atol)
+            except _ReconstructionInconclusive as exc:
+                raise ObservationError(str(exc)) from exc
 
-        return _diff_system(
+        system_result = _diff_system(
             fn_a,
             fn_b,
             sequence,
@@ -880,6 +1406,43 @@ def diff(
             minimize=minimize,
             replay_attempts=replay_attempts,
         )
+        system_result = _attach_system_artifact(
+            system_result,
+            factory_a=fn_a,
+            factory_b=fn_b,
+            compare=compare,
+            normalize=normalize,
+            rtol=rtol,
+            atol=atol,
+            state=state,
+            side_effects=side_effects,
+            apply_fault=apply_fault,
+            artifact_dir=artifact_dir,
+        )
+        if system_result.divergent and regression_path is not None and manifest_path is not None:
+            (
+                system_result.regression_path,
+                system_result.manifest_path,
+                system_result.finding_id,
+                system_result.regression_error,
+            ) = _persist_diff_regression(
+                mode="system",
+                fn_a=fn_a,
+                fn_b=fn_b,
+                artifact=system_result.artifact or {},
+                artifact_path=system_result.artifact_path,
+                regression_path=regression_path,
+                manifest_path=manifest_path,
+                compare=compare,
+                normalize=normalize,
+                rtol=rtol,
+                atol=atol,
+                sequence=system_result.sequence,
+                state=state,
+                side_effects=side_effects,
+                apply_fault=apply_fault,
+            )
+        return system_result
     if any(value is not None for value in (state, apply_fault, performance)):
         raise TypeError("system diff options require sequence=")
     if side_effects is not None and not isinstance(side_effects, Mapping):
@@ -895,13 +1458,23 @@ def diff(
             "function diff side_effects values must be SideEffect objects: "
             + ", ".join(repr(name) for name in invalid_effects)
         )
+    concrete_example: dict[str, Any] | None = None
+    if fixtures and all(not isinstance(value, st.SearchStrategy) for value in fixtures.values()):
+        try:
+            _bind_named_arguments(fn_a, dict(fixtures))
+        except TypeError:
+            pass
+        else:
+            concrete_example = dict(fixtures)
     normalized_strategies: dict[str, st.SearchStrategy[Any]] | None = None
     if fixtures:
         normalized_strategies = {
             name: value if isinstance(value, st.SearchStrategy) else st.just(value)
             for name, value in fixtures.items()
         }
-    strategies = _infer_strategies(fn_a, normalized_strategies)
+    strategies = (
+        {} if concrete_example is not None else _infer_strategies(fn_a, normalized_strategies)
+    )
     if strategies is None:
         raise ValueError(
             f"Cannot infer strategies for {getattr(fn_a, '__name__', fn_a)}. "
@@ -910,26 +1483,36 @@ def diff(
 
     minimized: _Candidate | None = None
     example_count = [0]
+
+    def evaluate(kwargs: dict[str, Any]) -> None:
+        """Evaluate one generated or zero-argument example."""
+        example_count[0] += 1
+        candidate = _run_pair(
+            fn_a,
+            fn_b,
+            kwargs,
+            compare=compare,
+            normalize=normalize,
+            rtol=rtol,
+            atol=atol,
+            side_effects=selected_side_effects,
+        )
+        if candidate.differences:
+            raise _DivergenceFound(candidate)
+
     try:
+        if concrete_example is not None:
+            evaluate(concrete_example)
+        elif strategies:
 
-        @given(**strategies)
-        @settings(max_examples=max_examples, database=None)
-        def test(**kwargs: Any) -> None:
-            example_count[0] += 1
-            candidate = _run_pair(
-                fn_a,
-                fn_b,
-                kwargs,
-                compare=compare,
-                normalize=normalize,
-                rtol=rtol,
-                atol=atol,
-                side_effects=selected_side_effects,
-            )
-            if candidate.differences:
-                raise _DivergenceFound(candidate)
+            @given(**strategies)
+            @settings(max_examples=max_examples, database=None)
+            def test(**kwargs: Any) -> None:
+                evaluate(kwargs)
 
-        test()
+            test()
+        else:
+            evaluate({})
     except _DivergenceFound as mismatch:
         minimized = mismatch.candidate
     except _ReconstructionInconclusive as exc:
@@ -963,7 +1546,8 @@ def diff(
             proof_method=proof_method,
         )
 
-    expected_signature = _candidate_signature(minimized)
+    expected_observation = _candidate_observation(minimized)
+    expected_signature = expected_observation.signature
     observed_signatures: list[str | None] = []
     replay_matches = 0
     for _ in range(replay_attempts):
@@ -981,9 +1565,13 @@ def diff(
         except _ReconstructionInconclusive:
             observed_signatures.append(None)
             continue
-        signature = _candidate_signature(replayed)
-        observed_signatures.append(signature)
-        if _candidate_replays(minimized, replayed):
+        replayed_observation = _candidate_observation(replayed)
+        observed_signatures.append(replayed_observation.signature)
+        if _candidate_replays(
+            expected_observation,
+            replayed_observation,
+            expected_signature=expected_signature,
+        ):
             replay_matches += 1
 
     if replay_matches != replay_attempts:
@@ -998,6 +1586,10 @@ def diff(
             ),
         )
 
+    input_observation = _observe_losslessly(
+        minimized.args,
+        label="differential witness input",
+    )
     artifact = _build_divergence_evidence(
         revisions={
             "a": _callable_binding(fn_a),
@@ -1009,8 +1601,10 @@ def diff(
             rtol=rtol,
             atol=atol,
         ),
-        original_input=minimized.args,
-        minimized_input=minimized.args,
+        original_input=input_observation.json_value,
+        minimized_input=input_observation.json_value,
+        original_input_canonical=input_observation.payload,
+        minimized_input_canonical=input_observation.payload,
         original_observations=_candidate_observations(minimized),
         observations=_candidate_observations(minimized),
         differences=minimized.differences,
@@ -1020,25 +1614,52 @@ def diff(
         observed_signatures=observed_signatures,
     )
     artifact_path = _write_artifact(artifact, artifact_dir) if artifact_dir else None
+    public_a = _public_outcome(minimized.outcome_a, minimized.normalized_a)
+    public_b = _public_outcome(minimized.outcome_b, minimized.normalized_b)
     mismatch = Mismatch(
-        args=copy.deepcopy(minimized.args),
-        output_a=minimized.outcome_a.recorded_value,
-        output_b=minimized.outcome_b.recorded_value,
+        args=_observe_losslessly(minimized.args, label="public witness input").json_value,
+        output_a=(
+            public_a.return_value
+            if public_a.returned
+            else {
+                "exception_type": public_a.exception_type,
+                "message": public_a.exception_message,
+                "terminal_source_location": public_a.terminal_source_location,
+            }
+        ),
+        output_b=(
+            public_b.return_value
+            if public_b.returned
+            else {
+                "exception_type": public_b.exception_type,
+                "message": public_b.exception_message,
+                "terminal_source_location": public_b.terminal_source_location,
+            }
+        ),
         artifact=artifact,
         artifact_path=artifact_path,
     )
+    try:
+        replay_args_json = json.dumps(
+            _encode_replay_value(minimized.args),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    except TypeError:
+        replay_args_json = None
     witness = DiffWitness(
         args=_freeze(minimized.args),
-        outcome_a=_public_outcome(minimized.outcome_a, minimized.normalized_a),
-        outcome_b=_public_outcome(minimized.outcome_b, minimized.normalized_b),
+        outcome_a=public_a,
+        outcome_b=public_b,
         differences=minimized.differences,
         replay_attempts=replay_attempts,
         replay_matches=replay_matches,
         replay_verified=True,
+        replay_args_json=replay_args_json,
         artifact=_freeze(artifact),
         artifact_path=artifact_path,
     )
-    return DiffResult(
+    result = DiffResult(
         function_a=_callable_name(fn_a),
         function_b=_callable_name(fn_b),
         total=example_count[0],
@@ -1046,3 +1667,25 @@ def diff(
         status="divergent",
         witness=witness,
     )
+    if regression_path is not None and manifest_path is not None:
+        (
+            result.regression_path,
+            result.manifest_path,
+            result.finding_id,
+            result.regression_error,
+        ) = _persist_diff_regression(
+            mode="function",
+            fn_a=fn_a,
+            fn_b=fn_b,
+            artifact=artifact,
+            artifact_path=artifact_path,
+            regression_path=regression_path,
+            manifest_path=manifest_path,
+            compare=compare,
+            normalize=normalize,
+            rtol=rtol,
+            atol=atol,
+            kwargs=minimized.args,
+            side_effects=selected_side_effects,
+        )
+    return result

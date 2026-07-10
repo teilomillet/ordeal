@@ -1601,6 +1601,8 @@ diff(
     normalize: Callable[[Any], Any] | None = None,
     replay_attempts: int = 2,
     artifact_dir: str | Path | None = None,
+    regression_path: str | Path | None = None,
+    manifest_path: str | Path | None = None,
     side_effects: Mapping[str, SideEffect] | Callable[[Any], Any] | None = None,
     equivalence_proof: Callable[[Callable, Callable], bool] | None = None,
     sequence: Sequence[Operation | FaultEvent] | None = None,
@@ -1631,6 +1633,11 @@ result = diff(fn_a, fn_b, compare=lambda a, b: a.status == b.status)
 
 # Source-bound evidence is always in memory; optionally persist canonical JSON
 result = diff(old, new, normalize=canonicalize, artifact_dir=".ordeal/divergences")
+
+# Persist the minimized paired witness and register it for verify --ci
+result = diff(old, new, artifact_dir=".ordeal/diff",
+              regression_path="tests/test_ordeal_diff.py",
+              manifest_path="tests/ordeal-regressions.json")
 
 # Explicit restorable effect
 effect = SideEffect(capture=lambda: list(events), restore=lambda old: events.__setitem__(slice(None), old))
@@ -1700,6 +1707,8 @@ performance measurement boundary.
 | `proof_method` | `str \| None` | Verifier behind `proven_equivalent` |
 | `artifacts` | `list[dict]` | Source-bound evidence for every returned divergence |
 | `artifact_paths` | `list[str]` | Canonical JSON paths written through `artifact_dir` |
+| `regression_path`, `manifest_path` | `str \| None` | Generated pytest and shared CI manifest |
+| `finding_id`, `regression_error` | `str \| None` | CI identity or exact persistence blocker |
 | `summary()` | `str` | Human-readable report |
 
 A finite sample can establish divergence but cannot establish equivalence.
@@ -1718,6 +1727,7 @@ the complete selected envelope and input domain.
 | `replay_verified` | `bool` | Always true for a returned divergent witness |
 | `artifact` | `Mapping` | Immutable `ordeal.divergence-evidence/v1` record |
 | `artifact_path` | `str \| None` | Persisted JSON path when requested |
+| `replay_args_json` | `str \| None` | Exact alias-aware replay literal used only when persisting the witness |
 
 `Mismatch` remains as a compact compatibility view; `DiffWitness` is the
 canonical full-envelope record and shrinking intermediates are not returned.
@@ -1769,21 +1779,25 @@ migrate(
     scan_options: Mapping[str, Any] | None = None,
     evidence_path: str | Path | None = None,
     regression_path: str | Path | None = None,
+    manifest_path: str | Path | None = None,
 ) -> MigrationResult
 ```
 
 Runs `audit base -> mine candidate -> diff -> classify -> save unexpected ->
-mutate resulting tests -> scan candidate`. Mined contracts are labeled
+mutate generated parity checks and explicit contracts -> scan candidate`.
+Migration mutation does not evaluate the candidate project's normal test suite. Mined contracts are labeled
 `mined_hypothesis`; only explicit `ContractCheck` invariants carry domain
 correctness intent.
 
 Unexpected divergences produce saved parity regressions and block mutation
 until the candidate passes them. Re-running after a fix resumes with the saved
 witnesses. `protected_within_measured_scope` requires an unblocked base audit,
-no unexpected or inconclusive diffs, at least one explicit invariant, a measured
-mutation run in which every tested mutant was killed, and a passing candidate-only
-scan. A lower `mutation_threshold` can describe a local policy stage but never
-upgrades the final protection verdict.
+no unexpected or inconclusive diffs, signature parity or explicit signature
+classification, at least one explicit invariant, callable-scoped protection for
+every intended behavior change, a measured mutation run in which every tested
+mutant was killed, and a non-empty passing candidate-only scan. Invariant kwargs
+are deep-cloned per invocation. A lower `mutation_threshold` can describe a local
+policy stage but never upgrades the final protection verdict.
 
 See [Base-to-Candidate Migration](../guides/migration-workflow.md).
 

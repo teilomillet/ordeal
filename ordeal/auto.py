@@ -5741,6 +5741,7 @@ def _get_public_functions(
     mod: ModuleType,
     *,
     include_private: bool = False,
+    preserve_wrappers: bool = False,
     object_factories: dict[str, Any] | None = None,
     object_setups: dict[str, Any] | None = None,
     object_scenarios: dict[str, Any] | None = None,
@@ -5763,7 +5764,9 @@ def _get_public_functions(
 
     Decorated functions (``@ray.remote``, ``@functools.wraps``, etc.)
     are auto-unwrapped so that ``mine()``, ``fuzz()``, and ``scan_module()``
-    can inspect signatures and call the real function.
+    can inspect signatures and call the real function. Set
+    ``preserve_wrappers=True`` when the wrapper itself is the behavior under
+    evaluation, as in a migration comparison.
     """
     merged_factories = dict(_REGISTERED_OBJECT_FACTORIES)
     if object_factories:
@@ -5823,7 +5826,7 @@ def _get_public_functions(
                 )
             ):
                 continue
-            target = _unwrap(obj)
+            target = obj if preserve_wrappers else _unwrap(obj)
             if inspect.iscoroutinefunction(target):
                 results.append(
                     (
@@ -8936,7 +8939,7 @@ def _evaluate_contract_checks(
         env_param=env_param,
     )
     for check in resolved_checks:
-        kwargs = dict(check.kwargs)
+        kwargs = copy.deepcopy(check.kwargs)
         contract_fit, realism, sink_signal, rationale = _score_contract_fit(kwargs, profile)
         lifecycle_probe = _lifecycle_contract_probe(func, check)
         call_context: Mapping[str, Any] | None = None

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import runpy
 import time
 from typing import Any
+
+import pytest
 
 import ordeal
 from ordeal.diff import FaultEvent, Operation, PerformanceBudget, diff
@@ -20,6 +24,19 @@ class CounterA:
 
 class CounterB(CounterA):
     pass
+
+
+_DURABLE_SYSTEM_FIXED = False
+
+
+class DurableSystemBaseline:
+    def read(self) -> str:
+        return "ready"
+
+
+class DurableSystemCandidate:
+    def read(self) -> str:
+        return "ready" if _DURABLE_SYSTEM_FIXED else "stale"
 
 
 def test_system_diff_types_are_public_exports() -> None:
@@ -41,6 +58,58 @@ def test_system_diff_compares_operation_outcomes_and_public_state() -> None:
     assert not result.side_effects_checked
     assert [step.outcome_match for step in result.steps] == [True, True]
     assert result.original_length == result.minimized_length == 2
+
+
+def test_system_diff_replay_signature_captures_custom_object_state() -> None:
+    calls = 0
+
+    class Observation:
+        def __init__(self, value: int) -> None:
+            self.value = value
+
+        def __eq__(self, other: object) -> bool:
+            return isinstance(other, Observation) and self.value == other.value
+
+        def __repr__(self) -> str:
+            return "Observation(constant)"
+
+    class SystemA:
+        def read(self) -> Observation:
+            nonlocal calls
+            calls += 1
+            return Observation(calls)
+
+    class SystemB:
+        def read(self) -> Observation:
+            nonlocal calls
+            calls += 1
+            return Observation(-calls)
+
+    result = diff(
+        SystemA,
+        SystemB,
+        sequence=[Operation("read")],
+        replay_attempts=3,
+    )
+
+    assert result.status == "inconclusive"
+    assert result.replay_matches == 0
+
+
+def test_system_diff_matching_missing_operation_is_a_harness_error() -> None:
+    class StoreA:
+        def read(self) -> str:
+            return "a"
+
+    class StoreB:
+        def read(self) -> str:
+            return "b"
+
+    result = diff(StoreA, StoreB, sequence=[Operation("raed")])
+
+    assert result.status == "inconclusive"
+    assert result.harness_errors
+    assert "raed" in result.harness_errors[0]
 
 
 def test_system_diff_reports_public_export_and_signature_changes() -> None:
@@ -103,6 +172,10 @@ def test_system_diff_compares_exceptions_and_declared_side_effects() -> None:
     assert result.steps[0].outcome_match
     assert not result.steps[0].side_effects_match
     assert result.mismatches[0].kind == "side_effects"
+    assert result.artifact is not None
+    assert result.artifact["status"] == "exploratory"
+    assert result.artifact["minimization"]["status"] == "not_run"
+    assert result.artifact["minimization"]["method"] == "not_run"
 
 
 class RecoveringStore:
@@ -129,7 +202,9 @@ def apply_timeout(store: RecoveringStore, event: FaultEvent) -> None:
         store.timeout = False
 
 
-def test_system_diff_replays_and_minimizes_one_fault_schedule_for_both_versions() -> None:
+def test_system_diff_replays_and_minimizes_one_fault_schedule_for_both_versions(
+    tmp_path,
+) -> None:
     activate = FaultEvent("timeout", "activate", {"after_ms": 10})
     deactivate = FaultEvent("timeout", "deactivate")
     sequence = [
@@ -146,6 +221,7 @@ def test_system_diff_replays_and_minimizes_one_fault_schedule_for_both_versions(
         sequence=sequence,
         apply_fault=apply_timeout,
         state=lambda _service: {},
+        artifact_dir=tmp_path / "system-evidence",
     )
 
     assert result.divergent
@@ -157,6 +233,16 @@ def test_system_diff_replays_and_minimizes_one_fault_schedule_for_both_versions(
     assert result.replay_attempts == 2
     assert result.replay_matches == 2
     assert result.replay_verified is True
+    assert len(result.artifacts) == 1
+    artifact = result.artifacts[0]
+    assert artifact["schema"] == "ordeal.divergence-evidence/v1"
+    assert artifact["status"] == "supported"
+    assert artifact["comparison"]["mode"] == "system"
+    assert artifact["witness"]["input"]["sequence"][-1]["name"] == "read"
+    assert artifact["replay"]["exact_matches"] == 2
+    assert result.artifact_path is not None
+    with open(result.artifact_path, encoding="utf-8") as stream:
+        assert json.load(stream) == artifact
 
 
 def test_system_diff_reports_matching_recovery_behavior() -> None:
@@ -328,3 +414,38 @@ def test_system_factories_must_be_zero_argument_callables() -> None:
         assert "zero-argument factory" in str(exc)
     else:
         raise AssertionError("invalid system factory should fail closed")
+
+
+def test_system_diff_generates_a_source_bound_ci_regression(tmp_path) -> None:
+    global _DURABLE_SYSTEM_FIXED
+
+    _DURABLE_SYSTEM_FIXED = False
+    regression_path = tmp_path / "tests" / "test_system_diff_regression.py"
+    manifest_path = tmp_path / "tests" / "ordeal-regressions.json"
+    result = diff(
+        DurableSystemBaseline,
+        DurableSystemCandidate,
+        sequence=[Operation("read")],
+        artifact_dir=tmp_path / ".ordeal" / "findings",
+        regression_path=regression_path,
+        manifest_path=manifest_path,
+    )
+
+    assert result.divergent
+    assert result.regression_error is None
+    assert result.regression_path == regression_path.as_posix()
+    generated_test = runpy.run_path(str(regression_path))["test_ordeal_diff_regression"]
+    with pytest.raises(AssertionError, match="not fixed"):
+        generated_test()
+
+    _DURABLE_SYSTEM_FIXED = True
+    try:
+        generated_test()
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        record = manifest["regressions"][0]
+        assert record["change_kind"] == "system"
+        assert record["test_basis"] == "paired_minimized_witness"
+        assert record["change_artifact_ids"] == [result.artifact["artifact_id"]]
+        assert record["test_file"] == "tests/test_system_diff_regression.py"
+    finally:
+        _DURABLE_SYSTEM_FIXED = False

@@ -6,23 +6,23 @@ user_invocable: true
 
 # ordeal
 
-Use this file as a capability map, not a prescribed workflow.
+Start every general bug-finding request with one workflow:
 
-High-signal entrypoints:
-- `ordeal scan <target>`
-- `ordeal audit <target>`
-- `ordeal mutate <target>`
-- `ordeal init [target]`
-- `ordeal verify <finding-id> --allow-unsafe-artifacts`
-- `ordeal verify --ci`
-- `ordeal explore --runner compose`
-- `ordeal diff <target> --base-ref origin/main --candidate-ref HEAD`
-- `ordeal migrate <base-module> <candidate-module> -c ordeal.toml`
+1. `ordeal scan .` — auto-detect and assess without writing project artifacts.
+2. Explain supported findings and the exact tested boundary.
+3. `ordeal scan . --save` — only when a useful finding should become durable.
+4. Prove the generated regression fails, fix the product code, then run the
+   printed `ordeal verify <finding-id> --allow-unsafe-artifacts` command.
+5. Run `ordeal verify --ci` for the repository guard.
 
-Read-first CLI:
-- `ordeal scan <target>`: unified bug discovery; `--save-artifacts` writes report, JSON bundle, regressions, and index entries
+Do not ask the user to choose among mining, auditing, mutation testing,
+exploration, or differential testing first. Use the specialized commands below
+only when the user states that goal or the initial scan identifies that need.
+
+Specialized CLI:
 - `ordeal mine <target>`: discover suspicious properties
-- `ordeal audit <target>`: measure gaps in existing tests
+- `ordeal audit <target>`: measure gaps in generated/migrated checks
+- `ordeal mutate <target>`: judge selected existing tests directly
 - `ordeal verify <finding-id> --allow-unsafe-artifacts`: re-run one bound regression after a fix and record the result
 - `ordeal verify --ci`: read-only guard for every regression in `tests/ordeal-regressions.json`
 - `ordeal explore -c ordeal.toml`: deeper coverage-guided exploration

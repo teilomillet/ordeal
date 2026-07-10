@@ -28,6 +28,18 @@ def test_revision_diff_audiences_have_short_dedicated_pages() -> None:
         assert 40 <= len(lines) <= 130, f"{path.name} should stay focused: {len(lines)} lines"
 
 
+def test_exact_schemas_name_canonical_and_replay_witness_fields() -> None:
+    revision_schema = PAGES["schema"].read_text(encoding="utf-8")
+    divergence_schema = (ROOT / "docs/reference/divergence-evidence-schema.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "`canonical_args`" in revision_schema
+    assert "`replay_args`" in revision_schema
+    assert "`original_canonical_input`" in divergence_schema
+    assert "`canonical_input`" in divergence_schema
+
+
 def test_revision_diff_pages_are_in_navigation_and_have_valid_links() -> None:
     nav = (ROOT / "mkdocs.yml").read_text(encoding="utf-8")
     for page in PAGES.values():
@@ -67,6 +79,10 @@ def test_quickstart_is_layman_first_and_keeps_claims_bounded() -> None:
     assert "useful evidence, not proof of equivalence" in text
     assert "does not decide which version is correct" in text
     assert "`head` means committed files only" in lowered
+    assert "positional-only" in lowered
+    assert "resolved wrapper itself" in lowered
+    assert "canonicalizes observations before candidate code is imported" in lowered
+    assert "one runtime witness" in lowered
     for status in ("DIVERGENT", "NO DIVERGENCE OBSERVED", "INCONCLUSIVE"):
         assert status in text
 

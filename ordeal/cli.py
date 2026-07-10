@@ -189,6 +189,47 @@ _DEFAULT_FINDINGS_DIR = ".ordeal/findings"
 _PACKAGE_ROOT_SCAN_LIMIT = 8
 CLI_CATALOG_SCHEMA_VERSION = 1
 
+_ADVANCED_SCAN_HELP_DESTS = frozenset(
+    {
+        "scan_targets",
+        "seed",
+        "mode",
+        "security_focus",
+        "seed_from_tests",
+        "min_contract_fit",
+        "min_reachability",
+        "min_realism",
+        "workers",
+        "ignore_properties",
+        "ignore_relations",
+        "cli_property_overrides",
+        "cli_relation_overrides",
+        "report_file",
+        "write_regression",
+        "include_private",
+    }
+)
+
+
+class _ScanHelpFormatter(argparse.RawDescriptionHelpFormatter):
+    """Show the beginner scan path without removing expert options."""
+
+    def _format_actions_usage(
+        self,
+        actions: Sequence[argparse.Action],
+        groups: Sequence[Any],
+    ) -> str:
+        visible = [action for action in actions if action.dest not in _ADVANCED_SCAN_HELP_DESTS]
+        visible_groups = [
+            group for group in groups if any(action in visible for action in group._group_actions)
+        ]
+        return super()._format_actions_usage(visible, visible_groups)
+
+    def add_argument(self, action: argparse.Action) -> None:
+        if action.dest in _ADVANCED_SCAN_HELP_DESTS:
+            return
+        super().add_argument(action)
+
 
 @dataclass(frozen=True)
 class ArgumentSpec:
@@ -209,6 +250,7 @@ class CommandSpec:
     description: str | Callable[[], str] | None = None
     formatter_class: type[argparse.HelpFormatter] | None = None
     defaults: dict[str, Any] = field(default_factory=dict)
+    show_in_help: bool = False
 
 
 @dataclass(frozen=True)
@@ -286,6 +328,32 @@ def _load_fixture_registry_warnings(
 def _scan_base_module(target: str) -> str:
     """Return the module component for a scan target."""
     return _normalize_module_target(target).split(":", 1)[0]
+
+
+def _resolve_scan_target(target: str | None) -> str:
+    """Return an explicit target or infer the current project's package."""
+    cleaned = str(target or "").strip()
+    if cleaned and cleaned not in {".", "./"}:
+        return cleaned
+
+    config_path = Path("ordeal.toml")
+    if config_path.exists():
+        with contextlib.suppress(FileNotFoundError, ConfigError):
+            config = load_config(config_path)
+            if len(config.scan) == 1:
+                configured = str(config.scan[0].module).strip()
+                if configured:
+                    return configured
+
+    from ordeal.mutations import _detect_package
+
+    detected = _detect_package()
+    if detected:
+        return detected
+    raise ValueError(
+        "could not detect a Python package in the current directory; "
+        "pass a module, package, or Python file (for example: ordeal scan myapp.scoring)"
+    )
 
 
 def _target_module_name(target: str) -> str:
@@ -2996,7 +3064,7 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
             outputs = ", ".join(str(item) for item in entry.get("outputs", [])[:2])
             suffix = f" | outputs: {outputs}" if outputs else ""
             print(f"  {entry['name']:<10} {entry.get('capability', entry.get('doc', ''))}{suffix}")
-    print("\nRun 'ordeal --help' for the full live CLI surface.")
+    print("\nRun 'ordeal --help' for the focused beginner workflow.")
     print("Run 'ordeal <command> --help' for command-specific options.")
     print("Run 'ordeal catalog --detail' for applicability, inputs, outputs, and examples.")
     print("Run 'ordeal catalog --json' for the machine-readable capability map.")
@@ -4617,7 +4685,23 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     """Run unified exploratory analysis over one module or explicit callable target."""
     from ordeal.state import explore
 
-    scan_target = args.target
+    try:
+        scan_target = _resolve_scan_target(args.target)
+    except ValueError as exc:
+        if args.json:
+            print(
+                _build_blocked_agent_envelope(
+                    tool="scan",
+                    target=str(args.target or "."),
+                    summary="scan target could not be detected",
+                    blocking_reason=str(exc),
+                    suggested_commands=("ordeal scan myapp.scoring",),
+                    raw_details={"requested_target": args.target},
+                ).to_json()
+            )
+            return 2
+        _stderr(f"Cannot start scan: {exc}.\n")
+        return 2
     module_name = _scan_base_module(scan_target)
     allow_config_override = args.max_examples == 50
     runtime_defaults = _resolve_scan_runtime_defaults(
@@ -4778,7 +4862,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             details=(),
         )
         groups = [{"module": module_name, "targets": scan_target_rows}]
-        if args.json:
+        if getattr(args, "json", False):
             print(
                 _build_target_listing_envelope(
                     tool="scan",
@@ -4923,10 +5007,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             and not getattr(args, "report_file", None)
             and not getattr(args, "write_regression", None)
         ):
-            print(
-                "  tip: add --save-artifacts or use --report-file / --write-regression"
-                f" ({_DEFAULT_REGRESSION_PATH})"
-            )
+            print(f"  next: ordeal scan {scan_target} --save")
 
     save_artifacts = getattr(args, "save_artifacts", False)
     report_path = args.report_file
@@ -4998,7 +5079,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                 index_path=index_path,
             )
 
-    if args.json:
+    if getattr(args, "json", False):
         print(
             _build_scan_agent_envelope(
                 state,
@@ -5015,6 +5096,35 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         )
 
     return 1 if state.findings else 0
+
+
+def _compose_run_payload(result: Any) -> dict[str, Any]:
+    """Return complete JSON evidence for one normal Compose CLI run."""
+    trace_payload = result.trace.to_dict()
+    return {
+        "schema": "ordeal.compose-run/v1",
+        "status": "failed" if result.trace.failure is not None else "clean",
+        "trace_file": _display_path(result.trace_path),
+        "trace_sha256": _sha256_json(trace_payload),
+        "trace": trace_payload,
+        "reliability_coverage": result.coverage,
+        "workload_protection": result.protection,
+        "requests": result.requests,
+        "faults": result.faults,
+        "duration_seconds": result.duration,
+        "replay": result.replay.to_dict() if result.replay is not None else None,
+    }
+
+
+def _save_compose_run_payload(result: Any) -> Path:
+    """Persist the complete normal-CLI Compose run beside its exact trace."""
+    path = result.trace_path.with_suffix(".evidence.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(_compose_run_payload(result), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
 
 
 def _cmd_explore_compose(args: argparse.Namespace, cfg: OrdealConfig) -> int:
@@ -5075,7 +5185,11 @@ def _cmd_explore_compose(args: argparse.Namespace, cfg: OrdealConfig) -> int:
         _stderr("  No failure recorded; replay not attempted.\n")
         _stderr(f"  Boundary: {REPLAY_BOUNDARY}\n")
         if args.save_artifacts:
+            evidence_path = _save_compose_run_payload(result)
+            _stderr(f"  Complete run evidence: {evidence_path}\n")
             _stderr("  No durable regression saved because no failure was recorded.\n")
+        if args.json:
+            print(json.dumps(_compose_run_payload(result), indent=2))
         return 0
 
     failure = result.trace.failure
@@ -5090,6 +5204,8 @@ def _cmd_explore_compose(args: argparse.Namespace, cfg: OrdealConfig) -> int:
         for label, value in _evidence_card_fields(result.evidence):
             _stderr(f"    {label}: {value}\n")
     if args.save_artifacts:
+        evidence_path = _save_compose_run_payload(result)
+        _stderr(f"  Complete run evidence: {evidence_path}\n")
         try:
             artifacts = save_compose_regression(result)
         except (OSError, ValueError) as exc:
@@ -5125,6 +5241,8 @@ def _cmd_explore_compose(args: argparse.Namespace, cfg: OrdealConfig) -> int:
             _stderr(f"  Verify fix: {verify_command}\n")
             _stderr(f"  CI guard: {_shell_command('uv', 'run', 'ordeal', 'verify', '--ci')}\n")
     _stderr(f"  Boundary: {result.replay.boundary}\n")
+    if args.json:
+        print(json.dumps(_compose_run_payload(result), indent=2))
     return 1
 
 
@@ -6118,6 +6236,7 @@ def _cmd_migrate(args: argparse.Namespace) -> int:
             mutation_threshold=args.threshold,
             evidence_path=args.evidence_path,
             regression_path=args.regression_path,
+            manifest_path=args.manifest,
         )
     except (ImportError, AttributeError, TypeError, ValueError) as exc:
         if getattr(args, "json", False):
@@ -6184,6 +6303,13 @@ def _write_diff_artifacts(result: Any, artifact_dir: Path) -> tuple[Path, Path]:
         rerun.extend(("--rtol", str(result.rtol)))
     if result.atol is not None:
         rerun.extend(("--atol", str(result.atol)))
+    if result.mode == "system":
+        sequence_path = json_path.with_name(f"{json_path.stem}.sequence.json")
+        sequence_path.write_text(
+            json.dumps(list(result.system_sequence), indent=2) + "\n",
+            encoding="utf-8",
+        )
+        rerun.extend(("--sequence-file", sequence_path.as_posix()))
     payload["commands"] = {"rerun": _shell_command(*rerun)}
     json_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     markdown = (
@@ -6265,6 +6391,8 @@ def _cmd_diff(args: argparse.Namespace) -> int:
             diff_cfg.save_artifacts if diff_cfg else False,
         )
     )
+    if args.write_regression is not None:
+        save_artifacts = True
     configured_registries = diff_cfg.fixture_registries if diff_cfg else []
     shared_registries = cfg.fixtures.registries if cfg is not None else []
     fixture_registries = list(
@@ -6276,6 +6404,20 @@ def _cmd_diff(args: argparse.Namespace) -> int:
             ]
         )
     )
+
+    system_sequence: list[Mapping[str, Any]] | None = None
+    if args.sequence_file is not None:
+        try:
+            sequence_payload = json.loads(Path(args.sequence_file).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            _stderr(f"Cannot read system sequence: {exc}\n")
+            return 2
+        if not isinstance(sequence_payload, list) or not all(
+            isinstance(item, Mapping) for item in sequence_payload
+        ):
+            _stderr("System sequence must be a JSON list of event objects.\n")
+            return 2
+        system_sequence = [dict(item) for item in sequence_payload]
 
     artifact_dir: Path | None = None
     if save_artifacts:
@@ -6305,6 +6447,7 @@ def _cmd_diff(args: argparse.Namespace) -> int:
             include_private=include_private,
             fixture_registries=fixture_registries,
             replay_attempts=replay_attempts,
+            sequence=system_sequence,
         )
     except (RevisionDiffError, ValueError) as exc:
         if getattr(args, "json", False):
@@ -6327,6 +6470,34 @@ def _cmd_diff(args: argparse.Namespace) -> int:
     if artifact_dir is not None:
         written_paths = _write_diff_artifacts(result, artifact_dir)
 
+    written_regression: Path | None = None
+    regression_finding_id: str | None = None
+    if args.write_regression is not None:
+        from ordeal._revision_diff import persist_revision_regression
+
+        assert written_paths is not None
+        try:
+            regression_output = _workspace_output_path(
+                str(args.write_regression),
+                label="diff.write_regression",
+            )
+            manifest_output = _workspace_output_path(
+                str(args.manifest),
+                label="diff.manifest",
+            )
+        except ValueError as exc:
+            _stderr(f"Invalid diff regression path: {exc}\n")
+            return 2
+        written_regression, regression_finding_id, regression_error = persist_revision_regression(
+            result,
+            evidence_path=written_paths[0],
+            regression_path=regression_output,
+            manifest_path=manifest_output,
+        )
+        if regression_error is not None:
+            _stderr(f"Diff regression unavailable: {regression_error}\n")
+            return 2
+
     if getattr(args, "json", False):
         payload = result.to_dict()
         if written_paths is not None:
@@ -6334,11 +6505,22 @@ def _cmd_diff(args: argparse.Namespace) -> int:
                 "json": _display_path(written_paths[0]),
                 "markdown": _display_path(written_paths[1]),
             }
+        if written_regression is not None:
+            payload["saved_regression"] = {
+                "path": _display_path(written_regression),
+                "manifest": _display_path(Path(args.manifest)),
+                "finding_id": regression_finding_id,
+            }
         print(json.dumps(payload, indent=2))
     else:
         print(result.summary())
         if written_paths is not None:
             _stderr(f"Diff artifacts saved: {written_paths[0]}, {written_paths[1]}\n")
+        if written_regression is not None:
+            _stderr(
+                f"Diff regression saved: {written_regression}; "
+                f"CI guard: ordeal verify --ci --manifest {args.manifest}\n"
+            )
 
     if result.status == "no_divergence_observed":
         return 0
@@ -11824,6 +12006,12 @@ def _path_is_within(path: Path, root: Path) -> bool:
     return True
 
 
+def _sha256_json(value: object) -> str:
+    """Hash one JSON-safe value with the repository's canonical encoding."""
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def _replay_compose_manifest_record(
     record: Mapping[str, Any],
     *,
@@ -11882,6 +12070,181 @@ def _compose_replay_is_clean(report: Any) -> tuple[bool, int]:
     """Return whether every Compose replay attempt completed without failure."""
     clean_replays = sum(signature is None for signature in report.observed_signatures)
     return clean_replays == report.attempted, clean_replays
+
+
+def _compose_fixed_state_control(
+    record: Mapping[str, Any],
+    *,
+    workspace: Path,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Run the recorded Compose workload against the fixed service state."""
+    from dataclasses import replace
+
+    from ordeal.compose import ComposeTrace, _config_from_payload, run_compose_exploration
+
+    finding_id = str(record.get("finding_id") or "?")
+    trace_file = str(record.get("trace_file") or "").strip()
+    trace_path = _resolve_artifact_path(trace_file, workspace=str(workspace))
+    if trace_path is None or not _path_is_within(trace_path, workspace):
+        return None, f"Compose trace outside workspace for {finding_id}"
+    try:
+        source = ComposeTrace.load(trace_path)
+        config = _config_from_payload(source.compose)
+    except (json.JSONDecodeError, KeyError, OSError, TypeError, ValueError) as exc:
+        return None, f"could not load Compose fixed-state control for {finding_id}: {exc}"
+
+    compose_file = Path(config.file)
+    if not compose_file.is_absolute():
+        compose_file = workspace / compose_file
+    if not _path_is_within(compose_file, workspace):
+        return None, f"Compose file outside workspace for {finding_id}"
+    trace_dir = Path(config.trace_dir)
+    if not trace_dir.is_absolute():
+        trace_dir = workspace / trace_dir
+    if not _path_is_within(trace_dir, workspace):
+        return None, f"Compose trace directory outside workspace for {finding_id}"
+
+    effective = replace(
+        config,
+        file=str(compose_file.resolve()),
+        trace_dir=str(trace_dir.resolve()),
+        seed=source.seed,
+        keep_running=False,
+    )
+    try:
+        fixed = run_compose_exploration(effective)
+    except (OSError, TypeError, ValueError) as exc:
+        return None, f"could not run Compose fixed-state control for {finding_id}: {exc}"
+
+    summary = fixed.coverage.get("summary", {})
+    coverage_complete = bool(
+        isinstance(summary, Mapping)
+        and int(summary.get("fail", 0)) == 0
+        and int(summary.get("not_exercised", 0)) == 0
+    )
+    workload_status = str(fixed.protection.get("status") or "inconclusive")
+    complete = bool(
+        fixed.trace.failure is None
+        and coverage_complete
+        and (
+            effective.workload_mutations == 0
+            or workload_status == "protective_within_measured_scope"
+        )
+    )
+    try:
+        trace_display = fixed.trace_path.resolve().relative_to(workspace).as_posix()
+    except ValueError:
+        trace_display = fixed.trace_path.as_posix()
+    return (
+        {
+            "status": "complete" if complete else "incomplete",
+            "trace": trace_display,
+            "failure": fixed.trace.to_dict().get("failure"),
+            "reliability_coverage": fixed.coverage,
+            "workload_protection": fixed.protection,
+            "workload_mutation_budget": effective.workload_mutations,
+        },
+        None,
+    )
+
+
+def _persist_compose_post_fix_control(
+    manifest_path: Path,
+    *,
+    finding_id: str,
+    workspace: Path,
+    replay_report: Any,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Persist clean replay plus fixed-state coverage in one manifest record."""
+    payload = _read_json_file(manifest_path)
+    records = payload.get("regressions")
+    if not isinstance(records, list):
+        return None, "regression manifest has no regressions list"
+    record = next(
+        (
+            item
+            for item in records
+            if isinstance(item, dict)
+            and item.get("runner") == "compose"
+            and item.get("finding_id") == finding_id
+        ),
+        None,
+    )
+    if record is None:
+        return None, f"Compose record disappeared for {finding_id}"
+    fixed_state, error = _compose_fixed_state_control(record, workspace=workspace)
+    if error is not None:
+        return None, error
+    assert fixed_state is not None
+
+    checked_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    clean_replays = sum(signature is None for signature in replay_report.observed_signatures)
+    fixed_state_complete = fixed_state.get("status") == "complete"
+    control_status = "passed" if fixed_state_complete else "failed"
+    evidence = record.get("evidence")
+    copied_evidence = dict(evidence) if isinstance(evidence, Mapping) else {}
+    copied_evidence["post_fix_control"] = {
+        "status": control_status,
+        "checked_at": checked_at,
+        "method": "same_trace_then_fixed_state_rescan",
+        "acceptance": (
+            "Every exact trace replay is clean; the fixed-state rescan records coverage "
+            "and configured workload-strength evidence."
+        ),
+        "exact_replay": {
+            "attempted": replay_report.attempted,
+            "clean": clean_replays,
+            "observed_signatures": list(replay_report.observed_signatures),
+        },
+        "fixed_state": fixed_state,
+        "fixed_state_sha256": _sha256_json(fixed_state),
+    }
+    workflow = copied_evidence.get("workflow")
+    if isinstance(workflow, Mapping):
+        copied_evidence["workflow"] = {
+            **dict(workflow),
+            "verify_fix": control_status,
+        }
+    record["evidence"] = copied_evidence
+    record["verification"] = {
+        "status": "verified" if fixed_state_complete else "failed",
+        "checked_at": checked_at,
+        "clean_replays": clean_replays,
+        "attempted_replays": replay_report.attempted,
+        "fixed_state_status": fixed_state["status"],
+    }
+    _write_json_file(manifest_path, payload)
+    return copied_evidence["post_fix_control"], None
+
+
+def _compose_persisted_control_error(record: Mapping[str, Any]) -> str | None:
+    """Return why committed fixed-state Compose evidence is not CI-ready."""
+    evidence = record.get("evidence")
+    if not isinstance(evidence, Mapping):
+        return "has no evidence card"
+    control = evidence.get("post_fix_control")
+    if not isinstance(control, Mapping) or control.get("status") != "passed":
+        return "post-fix control is not passed"
+    fixed_state = control.get("fixed_state")
+    if not isinstance(fixed_state, Mapping) or fixed_state.get("status") != "complete":
+        return "fixed-state evidence is not complete"
+    expected_digest = str(control.get("fixed_state_sha256") or "")
+    if not expected_digest or expected_digest != _sha256_json(fixed_state):
+        return "fixed-state evidence binding does not match"
+    coverage = fixed_state.get("reliability_coverage")
+    summary = coverage.get("summary") if isinstance(coverage, Mapping) else None
+    if not isinstance(summary, Mapping):
+        return "fixed-state reliability coverage is missing"
+    if int(summary.get("fail", 0)) or int(summary.get("not_exercised", 0)):
+        return "fixed-state reliability coverage is incomplete"
+    budget = int(fixed_state.get("workload_mutation_budget", 0))
+    protection = fixed_state.get("workload_protection")
+    if budget > 0 and (
+        not isinstance(protection, Mapping)
+        or protection.get("status") != "protective_within_measured_scope"
+    ):
+        return "fixed-state workload protection is incomplete"
+    return None
 
 
 def _locate_compose_manifest_record(
@@ -11968,6 +12331,15 @@ def _cmd_verify_ci(args: argparse.Namespace) -> int:
             assert report is not None
             clean, clean_replays = _compose_replay_is_clean(report)
             if clean:
+                control_error = _compose_persisted_control_error(record)
+                if control_error is not None:
+                    errors += 1
+                    _stderr(
+                        f"CI guard Compose evidence is incomplete for {finding_id}: "
+                        f"{control_error}. Run `ordeal verify {finding_id} "
+                        "--allow-unsafe-artifacts` after the fix.\n"
+                    )
+                    continue
                 passed += 1
                 print(
                     f"  passed: {finding_id} "
@@ -12001,6 +12373,11 @@ def _cmd_verify_ci(args: argparse.Namespace) -> int:
             _stderr(f"CI guard binding failed for {finding_id}.\n")
             errors += 1
             continue
+        evidence_error = _python_change_evidence_error(record, workspace=workspace)
+        if evidence_error is not None:
+            _stderr(f"CI guard evidence failed for {finding_id}: {evidence_error}.\n")
+            errors += 1
+            continue
         nodeid = f"{test_file}::{test_name}"
         run_args = [sys.executable, "-m", "pytest", nodeid, "-q"]
         display_command = _shell_command("uv", "run", "pytest", nodeid, "-q")
@@ -12028,6 +12405,91 @@ def _cmd_verify_ci(args: argparse.Namespace) -> int:
     if errors:
         return 2
     return 1 if failed else 0
+
+
+def _python_change_evidence_error(
+    record: Mapping[str, Any],
+    *,
+    workspace: Path,
+) -> str | None:
+    """Validate shared change-artifact IDs and immutable source guards."""
+    expected_ids = {str(value) for value in record.get("change_artifact_ids", []) if value}
+    if expected_ids:
+        evidence_file = str(record.get("evidence_file") or "").strip()
+        evidence_path = _resolve_artifact_path(evidence_file, workspace=str(workspace))
+        if (
+            not evidence_file
+            or evidence_path is None
+            or not _path_is_within(evidence_path, workspace)
+            or not evidence_path.is_file()
+        ):
+            return "source-bound evidence file is missing or outside the workspace"
+        try:
+            payload = _read_json_file(evidence_path)
+        except json.JSONDecodeError as exc:
+            return f"source-bound evidence is invalid JSON: {exc}"
+        artifacts: list[Mapping[str, Any]] = []
+        if payload.get("schema") == "ordeal.divergence-evidence/v1":
+            artifacts.append(payload)
+        for key in ("artifacts", "change_evidence"):
+            values = payload.get(key, [])
+            if isinstance(values, list):
+                artifacts.extend(item for item in values if isinstance(item, Mapping))
+        by_id = {
+            str(artifact.get("artifact_id")): artifact
+            for artifact in artifacts
+            if artifact.get("artifact_id")
+        }
+        if not expected_ids <= by_id.keys():
+            missing = ", ".join(sorted(expected_ids - by_id.keys()))
+            return f"change artifact ID(s) missing: {missing}"
+        from ordeal.finding_evidence import _sha256_json
+
+        for artifact_id in sorted(expected_ids):
+            artifact = by_id[artifact_id]
+            if artifact.get("schema") != "ordeal.divergence-evidence/v1":
+                return f"change artifact schema is invalid: {artifact_id}"
+            unhashed = dict(artifact)
+            unhashed.pop("artifact_id", None)
+            computed_id = f"div_{_sha256_json(unhashed)[:16]}"
+            if artifact_id != computed_id:
+                return f"change artifact self-hash is invalid: {artifact_id}"
+            source_binding = artifact.get("source_binding")
+            if (
+                not isinstance(source_binding, Mapping)
+                or source_binding.get("status") != "complete"
+            ):
+                return f"change artifact source binding is incomplete: {artifact_id}"
+            replay = artifact.get("replay")
+            if not isinstance(replay, Mapping) or replay.get("status") != "verified":
+                return f"change artifact replay is not verified: {artifact_id}"
+            minimization = artifact.get("minimization")
+            if not isinstance(minimization, Mapping) or minimization.get("status") != "verified":
+                return f"change artifact minimization is not verified: {artifact_id}"
+            if artifact.get("status") != "supported":
+                return f"change artifact is not supported: {artifact_id}"
+
+    guards = record.get("source_guards", [])
+    if not isinstance(guards, list):
+        return "source_guards must be a list"
+    if guards:
+        from ordeal.diff import _callable_binding, _resolve_replay_callable
+
+        for guard in guards:
+            if not isinstance(guard, Mapping):
+                return "source guard is not an object"
+            path = str(guard.get("callable") or "")
+            expected_sha256 = str(guard.get("source_sha256") or "")
+            try:
+                target = _resolve_replay_callable(path)
+            except (AttributeError, ImportError, TypeError, ValueError) as exc:
+                return f"could not resolve guarded callable {path}: {exc}"
+            if target is None:
+                return f"guarded callable is missing: {path}"
+            observed_binding = _callable_binding(target)
+            if observed_binding.get("source_sha256") != expected_sha256:
+                return f"guarded callable source changed: {path}"
+    return None
 
 
 def _record_post_fix_control(
@@ -12120,10 +12582,35 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         assert report is not None
         clean, clean_replays = _compose_replay_is_clean(report)
         if clean:
+            control, control_error = _persist_compose_post_fix_control(
+                Path(args.manifest),
+                finding_id=args.finding_id,
+                workspace=workspace,
+                replay_report=report,
+            )
+            if control_error is not None:
+                _stderr(f"Compose post-fix evidence error: {control_error}.\n")
+                return 2
+            assert control is not None
             print(
                 f"verified: {args.finding_id} "
                 f"(Compose clean replays {clean_replays}/{report.attempted})"
             )
+            fixed_state = control.get("fixed_state", {})
+            if isinstance(fixed_state, Mapping):
+                print(
+                    "  fixed-state evidence: "
+                    f"{fixed_state.get('status', 'incomplete')} "
+                    f"(workload protection: "
+                    f"{fixed_state.get('workload_protection', {}).get('status', 'inconclusive')})"
+                )
+            print(f"  manifest: {_display_path(Path(args.manifest))}")
+            if control.get("status") != "passed":
+                _stderr(
+                    f"fixed-state evidence incomplete for {args.finding_id}; "
+                    "coverage and configured workload protection must both complete.\n"
+                )
+                return 1
             return 0
         _stderr(
             f"reproduced: {args.finding_id} (Compose clean replays "
@@ -12348,40 +12835,22 @@ def _write_json_report(
 
 def _scan_command_description() -> str:
     """Return the long-form `ordeal scan` help description."""
-    from ordeal.state import explore as _explore_fn
-
-    scan_desc = (_explore_fn.__doc__ or "").strip().split("\n\n")[0]
     return (
-        f"{scan_desc}\n\n"
-        "Scan is exploratory first: prioritize replayable, semantically plausible findings.\n"
-        "For stronger signals on a mature codebase, prefer `ordeal audit` and `ordeal mutate`.\n"
-        "Use `--mode evidence` to surface a broad evidence set and `--mode candidate`\n"
-        " for stricter ranking; the older `coverage_gap` and `real_bug` names still work.\n"
-        "Use `--security-focus` to bias scan toward trust-boundary sinks such as import,\n"
-        " deserialization, filesystem writes, and checkpoint/IPC handling.\n"
-        "Use `--list-targets` to inspect how ordeal sees functions, methods, async callables,\n"
-        " and whether object factories are configured.\n"
-        "Use `--target` to limit module scans to specific callable selectors or globs such as\n"
-        " `mutate`, `Env.*`, or `pkg.mod:Env.run`.\n"
-        "Use `--ignore-property`, `--ignore-relation`, `--property-override`, and\n"
-        " `--relation-override` to suppress noisy mined signals without changing code.\n"
-        "Use explicit targets like `pkg.mod:Env.build_env_vars`, shared `[[objects]]`,\n"
-        " and `[[contracts]]` in ordeal.toml for stateful OO code and shell/path/env checks.\n"
-        "A supported crash replay matches exception type, message, and terminal source location.\n"
-        "Bound-method regressions are written only when every harness hook is resolvable.\n"
-        "Use --save-artifacts to save the dossier, machine-readable bundle, review-only\n"
-        f" config/support sidecars ({_default_scan_report_path('mymod')},"
-        f" {_default_scan_bundle_path('mymod')},"
-        f" {_default_scan_review_config_path('mymod')},"
-        f" {_default_scan_support_bundle_path('mymod')}) +"
-        f" {_DEFAULT_REGRESSION_PATH}, then update {_default_artifact_index_path()}.\n"
-        "When one finding is saved, the workflow prints an exact"
-        " `ordeal verify <finding-id> --allow-unsafe-artifacts` follow-up command.\n"
-        "Verify checks the saved test AST and target-import hashes before running pytest.\n"
-        "Use --report-file report.md to save a shareable Markdown bug report.\n"
-        f"Use --write-regression or --write-regression PATH to save runnable pytest"
-        f" regressions (default: {_DEFAULT_REGRESSION_PATH}).\n"
-        "Docs: https://docs.byordeal.com/guides/scan-quickstart/"
+        "Find replayable failures in a Python package, module, file, or callable.\n\n"
+        "Start with `ordeal scan .`; Ordeal auto-detects the current package. A normal\n"
+        "scan executes target code but does not write project artifacts. If it finds a\n"
+        "useful failure, run the same command with `--save` to create the evidence bundle\n"
+        "and durable pytest regression, then follow the printed `ordeal verify` command.\n\n"
+        "Use `--list-targets` only when Ordeal cannot construct a method or you need to\n"
+        "inspect what will run. Advanced ranking, fixture, security, and report controls\n"
+        "remain compatible and are documented in the full CLI reference.\n\n"
+        "Core loop:\n"
+        "  ordeal scan .\n"
+        "  ordeal scan . --save\n"
+        "  ordeal verify <finding-id> --allow-unsafe-artifacts\n"
+        "  ordeal verify --ci\n\n"
+        "Docs: https://docs.byordeal.com/guides/scan-quickstart/\n"
+        "Advanced reference: https://docs.byordeal.com/guides/cli/"
     )
 
 
@@ -12553,14 +13022,17 @@ def _command_specs() -> tuple[CommandSpec, ...]:
         CommandSpec(
             name="scan",
             handler=_cmd_scan,
-            help="Explore a module and optionally write reports or pytest regressions",
+            help="Find replayable failures and show the next action",
             description=_scan_command_description,
-            formatter_class=argparse.RawDescriptionHelpFormatter,
+            formatter_class=_ScanHelpFormatter,
+            show_in_help=True,
             arguments=(
                 _arg(
                     "target",
+                    nargs="?",
+                    default=None,
                     help=(
-                        "Module or explicit callable target (e.g. myapp.scoring or myapp:Env.run)"
+                        "Package, module, Python file, or callable; omit or use '.' to auto-detect"
                     ),
                 ),
                 _arg(
@@ -12674,18 +13146,11 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                 ),
                 _arg("--json", action="store_true", help="Output JSON instead of text"),
                 _arg(
+                    "--save",
                     "--save-artifacts",
+                    dest="save_artifacts",
                     action="store_true",
-                    help=(
-                        "When findings exist, write the default Markdown dossier, JSON bundle,"
-                        " review scaffolds, and regression file "
-                        f"({_default_scan_report_path('mymod')},"
-                        f" {_default_scan_bundle_path('mymod')},"
-                        f" {_default_scan_review_config_path('mymod')},"
-                        f" {_default_scan_support_bundle_path('mymod')},"
-                        f" {_DEFAULT_REGRESSION_PATH}) and update"
-                        f" {_default_artifact_index_path()}"
-                    ),
+                    help=("Save a replayable finding as an evidence bundle and pytest regression"),
                 ),
                 _arg(
                     "--report-file",
@@ -12727,6 +13192,7 @@ def _command_specs() -> tuple[CommandSpec, ...]:
             help="Verify one saved fix or guard every bound regression in CI",
             description=_verify_command_description,
             formatter_class=argparse.RawDescriptionHelpFormatter,
+            show_in_help=True,
             arguments=(
                 _arg(
                     "finding_id",
@@ -12848,6 +13314,11 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                         "Save exploration state on completion "
                         "(trusted-only pickle, e.g. .ordeal/state.pkl)"
                     ),
+                ),
+                _arg(
+                    "--json",
+                    action="store_true",
+                    help="Print complete Compose run evidence as JSON",
                 ),
             ),
         ),
@@ -13100,6 +13571,15 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     help="Immediate same-input replays per mismatch (default: 2)",
                 ),
                 _arg(
+                    "--sequence-file",
+                    default=None,
+                    metavar="PATH",
+                    help=(
+                        "Replay a JSON operation/fault sequence against TARGET as a "
+                        "zero-argument system factory"
+                    ),
+                ),
+                _arg(
                     "--save-artifacts",
                     action=argparse.BooleanOptionalAction,
                     default=None,
@@ -13110,6 +13590,22 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     default=None,
                     metavar="PATH",
                     help="Artifact directory (default: .ordeal/diff)",
+                ),
+                _arg(
+                    "--write-regression",
+                    nargs="?",
+                    const="tests/test_ordeal_diff_regression.py",
+                    default=None,
+                    metavar="PATH",
+                    help=("Write a pinned base-to-current pytest regression and register it"),
+                ),
+                _arg(
+                    "--manifest",
+                    default=_DEFAULT_REGRESSION_MANIFEST,
+                    metavar="PATH",
+                    help=(
+                        f"Shared verify --ci manifest (default: {_DEFAULT_REGRESSION_MANIFEST})"
+                    ),
                 ),
                 _arg("--json", action="store_true", help="Output machine-readable JSON"),
             ),
@@ -13188,6 +13684,14 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     help=(
                         "Generated pytest path "
                         "(default: tests/test_ordeal_migration_<candidate>.py)"
+                    ),
+                ),
+                _arg(
+                    "--manifest",
+                    default=_DEFAULT_REGRESSION_MANIFEST,
+                    metavar="PATH",
+                    help=(
+                        f"Shared verify --ci manifest (default: {_DEFAULT_REGRESSION_MANIFEST})"
                     ),
                 ),
                 _arg("--json", action="store_true", help="Output machine-readable JSON"),
@@ -13566,26 +14070,23 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ordeal",
         description=(
-            "Ordeal — discovers what's true about your code.\n\n"
-            "Common CLI entrypoints:\n"
-            "  ordeal scan <module>          exploratory module analysis\n"
-            "  ordeal init [package]         starter tests + ordeal.toml\n"
-            "  ordeal audit <module>         test-quality comparison\n"
-            "  ordeal migrate <base> <new>   ordered migration evidence workflow\n"
-            "  ordeal mutate <target>        mutation testing\n"
-            "  ordeal skill                  install the bundled local agent guide\n\n"
-            "Run `ordeal <command> --help` for command-specific options.\n"
-            "Use `ordeal catalog` for grouped discovery, `ordeal catalog --detail` for\n"
-            "applicability plus input/output metadata, `ordeal catalog --json` for the\n"
-            "machine-readable capability map, or `from ordeal import catalog; catalog()`\n"
-            "for the same data inside Python."
+            "Ordeal finds replayable failures and helps keep them fixed.\n\n"
+            "Start here:\n"
+            "  ordeal scan .              find failures; write nothing\n"
+            "  ordeal scan . --save       save evidence and a regression\n"
+            "  ordeal verify <id>         verify the fix against the same witness\n"
+            "  ordeal verify --ci         guard every saved regression\n\n"
+            "If auto-detection fails, pass a package, module, Python file, or callable.\n"
+            "Expert workflows remain available; run `ordeal catalog` to discover them."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    sub = parser.add_subparsers(dest="command")
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     for spec in _command_specs():
-        add_parser_kwargs: dict[str, Any] = {"help": spec.help}
+        add_parser_kwargs: dict[str, Any] = {}
+        if spec.show_in_help:
+            add_parser_kwargs["help"] = spec.help
         description = _resolve_command_description(spec)
         if description is not None:
             add_parser_kwargs["description"] = description
@@ -13814,6 +14315,7 @@ def _cli_catalog_examples(name: str, usage: str) -> list[str]:
 def command_catalog() -> list[dict[str, Any]]:
     """Return a structured catalog of CLI commands derived from argparse."""
     parser = _build_parser()
+    registered_help = {spec.name: spec.help for spec in _command_specs()}
     for action in parser._actions:
         if not isinstance(action, argparse._SubParsersAction):
             continue
@@ -13829,13 +14331,14 @@ def command_catalog() -> list[dict[str, Any]]:
             if usage.startswith("usage: "):
                 usage = usage.removeprefix("usage: ")
             description = subparser.description or ""
-            capability = _catalog_text_first_line(description) or choice_help.get(name, "")
+            help_text = registered_help.get(name) or choice_help.get(name, "")
+            capability = _catalog_text_first_line(description) or help_text
             entries.append(
                 {
                     "name": name,
                     "schema_version": CLI_CATALOG_SCHEMA_VERSION,
                     "qualname": f"ordeal.cli.{name}",
-                    "doc": choice_help.get(name, ""),
+                    "doc": help_text,
                     "usage": usage,
                     "description": description,
                     "arguments": arguments,

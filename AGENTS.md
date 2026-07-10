@@ -6,17 +6,20 @@ When a user asks you to run ordeal on their code — not to develop ordeal itsel
 
 **What ordeal does:** Finds bugs your tests miss by exploring thousands of scenarios with realistic failures (timeouts, corrupted data, crashes). When something breaks, it shows the shortest sequence that reproduces the failure.
 
-**Read-only first signal:**
+**Start every new project request with one read-only scan:**
 
 ```bash
-ordeal scan mypackage                    # assess code without writing files
-ordeal scan mypackage --save-artifacts   # save report + JSON bundle + regressions
+ordeal scan .                            # auto-detect; assess without writing files
 ```
+
+Do not ask the user to choose between mining, auditing, mutation testing, or
+exploration first. Run `scan`, explain the bounded result, and choose a
+specialized workflow only when the result or the user's stated goal requires it.
 
 **Turn a finding into a durable regression:**
 
 ```bash
-ordeal scan mypackage --save-artifacts   # discover, reproduce, minimize, save
+ordeal scan . --save                     # discover, reproduce, minimize, save
 # fix the production code; keep the witness stable
 ordeal verify <finding-id> --allow-unsafe-artifacts  # verify the same witness
 ordeal verify --ci                       # read-only guard for every saved binding
@@ -42,7 +45,7 @@ ordeal init mypackage --close-gaps      # opt in to appending mutation-gap stubs
 
 By default, `init` writes starter tests and `ordeal.toml`, validates them, and prints a lightweight read-only scan summary. It does not install the bundled skill or append gap-closing stubs unless you ask for those extra writes.
 
-**Other commands:**
+**Specialized commands — use only for a stated specialized goal:**
 
 ```bash
 ordeal diff mymodule --base-ref origin/main --candidate-ref HEAD  # isolated refactor check

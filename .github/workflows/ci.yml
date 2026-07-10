@@ -257,6 +257,12 @@ jobs:
           uv run python scripts/verify_compose_evidence_loop.py \
             --output .artifacts/compose-evidence-loop.json
 
+      - name: Validate three materially different service systems
+        run: |
+          uv run python scripts/verify_compose_service_matrix.py \
+            --recovery-report .artifacts/compose-evidence-loop.json \
+            --output .artifacts/compose-service-matrix.json
+
       - name: Show Compose diagnostics
         if: failure()
         continue-on-error: true
@@ -284,9 +290,12 @@ jobs:
           name: compose-evidence-loop
           path: |
             .artifacts/compose-evidence-loop.json
+            .artifacts/compose-service-matrix.json
             tests/fixtures/compose_e2e/.ordeal/
             tests/fixtures/compose_e2e/tests/ordeal-regressions.json
             tests/fixtures/compose_e2e/tests/ordeal-compose-regressions/
+            tests/fixtures/compose_persistence/.ordeal/
+            tests/fixtures/compose_concurrency/.ordeal/
           if-no-files-found: warn
           retention-days: 14
 

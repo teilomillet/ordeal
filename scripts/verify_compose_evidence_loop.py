@@ -8,12 +8,10 @@ import os
 import shutil
 import subprocess
 import sys
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from ordeal.compose import ComposeTrace, run_compose_exploration
-from ordeal.config import load_config
+from ordeal.compose import ComposeTrace
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "compose_e2e"
@@ -97,13 +95,6 @@ def run_loop(output: Path) -> dict[str, Any]:
         expected=1,
     )
     _require("clean replays 0/3" in buggy_guard.stderr, "buggy CI guard did not fail 0/3")
-    fixed_guard = _run_cli(
-        ["verify", "--ci", "--manifest", "tests/ordeal-regressions.json"],
-        variant="fixed",
-        expected=0,
-    )
-    _require("Compose clean replays 3/3" in fixed_guard.stdout, "fixed CI guard did not pass 3/3")
-
     shutil.rmtree(FIXTURE / ".ordeal", ignore_errors=True)
     discovery = _run_cli(
         ["explore", "--runner", "compose", "-c", "ordeal.toml", "--save-artifacts"],
@@ -168,38 +159,48 @@ def run_loop(output: Path) -> dict[str, Any]:
         "recovery defect is absent from the property report",
     )
 
-    previous_variant = os.environ.get("ORDEAL_SERVICE_VARIANT")
-    os.environ["ORDEAL_SERVICE_VARIANT"] = "fixed"
-    try:
-        config = load_config(FIXTURE / "ordeal.toml").compose
-        assert config is not None
-        fixed = run_compose_exploration(
-            replace(
-                config,
-                workload_mutations=4,
-                trace_dir=str(FIXTURE / ".ordeal" / "fixed-control-traces"),
-            )
-        )
-    finally:
-        if previous_variant is None:
-            os.environ.pop("ORDEAL_SERVICE_VARIANT", None)
-        else:
-            os.environ["ORDEAL_SERVICE_VARIANT"] = previous_variant
-
-    _require(fixed.trace.failure is None, "fixed control still fails the recovery trace")
+    fixed_control = _run_cli(
+        [
+            "verify",
+            str(record["finding_id"]),
+            "--manifest",
+            "tests/ordeal-regressions.json",
+            "--allow-unsafe-artifacts",
+        ],
+        variant="fixed",
+        expected=0,
+    )
     _require(
-        fixed.coverage.get("summary") == {"pass": 9, "not_exercised": 0, "fail": 0, "total": 9},
+        "fixed-state evidence: complete" in fixed_control.stdout,
+        "normal verify did not persist complete fixed-state evidence",
+    )
+    persisted = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    persisted_record = persisted["regressions"][0]
+    control = persisted_record["evidence"]["post_fix_control"]
+    _require(control.get("status") == "passed", "post-fix control was not persisted as passed")
+    fixed_state = control.get("fixed_state", {})
+    _require(fixed_state.get("failure") is None, "fixed control still fails the recovery trace")
+    _require(
+        fixed_state.get("reliability_coverage", {}).get("summary")
+        == {"pass": 9, "not_exercised": 0, "fail": 0, "total": 9},
         "fixed control did not cover every configured operation/fault/property cell",
     )
+    protection = fixed_state.get("workload_protection", {})
     _require(
-        fixed.protection.get("status") == "protective_within_measured_scope",
+        protection.get("status") == "protective_within_measured_scope",
         "fixed workload did not kill every measured response-oracle mutation",
     )
-    _require(fixed.protection.get("mutation_score") == "4/4 (100%)", "unexpected mutation score")
+    _require(protection.get("mutation_score") == "4/4 (100%)", "unexpected mutation score")
     _require(
-        {row["fault"] for row in fixed.protection.get("mutations", [])} == {"none", "kill"},
+        {row["fault"] for row in protection.get("mutations", [])} == {"none", "kill"},
         "workload mutations did not control both baseline and kill/restart paths",
     )
+    fixed_guard = _run_cli(
+        ["verify", "--ci", "--manifest", "tests/ordeal-regressions.json"],
+        variant="fixed",
+        expected=0,
+    )
+    _require("Compose clean replays 3/3" in fixed_guard.stdout, "fixed CI guard did not pass 3/3")
 
     report = {
         "schema": "ordeal.service-evidence-loop/v1",
@@ -213,8 +214,8 @@ def run_loop(output: Path) -> dict[str, Any]:
         "fixed": {
             "verify_ci_exit": fixed_guard.returncode,
             "clean_replays": "3/3",
-            "coverage": fixed.coverage,
-            "workload_protection": fixed.protection,
+            "coverage": fixed_state["reliability_coverage"],
+            "workload_protection": protection,
         },
         "portable_regression": {
             "manifest": MANIFEST.relative_to(ROOT).as_posix(),

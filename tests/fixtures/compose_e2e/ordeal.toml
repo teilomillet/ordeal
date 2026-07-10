@@ -12,7 +12,7 @@ faults = ["kill"]
 request_timeout = 2
 startup_timeout = 30
 replay_attempts = 3
-workload_mutations = 0
+workload_mutations = 4
 trace_dir = ".ordeal/traces"
 keep_running = false
 

@@ -1,0 +1,26 @@
+[compose]
+file = "compose.yaml"
+project_name = "ordeal-compose-persistence"
+base_url = "http://127.0.0.1:18081"
+health_path = "/health"
+services = ["api"]
+steps = 2
+max_time = 30
+seed = 0
+fault_probability = 0.5
+faults = ["restart"]
+request_timeout = 3
+startup_timeout = 30
+replay_attempts = 2
+workload_mutations = 4
+trace_dir = ".ordeal/traces"
+keep_running = false
+
+[[compose.requests]]
+name = "read_persisted"
+method = "GET"
+path = "/item"
+expect_status = 200
+expect_json = { "json.id" = "item-1", "json.value" = "committed", "json.backend" = "store", "json.service" = "api" }
+capture = { persisted_id = "json.id", persisted_value = "json.value" }
+faultable = true

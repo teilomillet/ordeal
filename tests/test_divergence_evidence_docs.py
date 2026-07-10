@@ -88,6 +88,13 @@ def test_schema_names_every_required_divergence_field() -> None:
     assert "supported" in schema and "exploratory" in schema
 
 
+def test_api_documents_exact_witness_replay_literal() -> None:
+    api = (ROOT / "docs/reference/api.md").read_text(encoding="utf-8")
+
+    assert "`replay_args_json`" in api
+    assert "Exact alias-aware replay literal" in api
+
+
 def test_runtime_catalog_routes_people_to_the_artifact_learning_path() -> None:
     discovered = catalog()
     diff_entry = next(entry for entry in discovered["diff"] if entry["name"] == "diff")

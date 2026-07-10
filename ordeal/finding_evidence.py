@@ -289,6 +289,8 @@ def _build_divergence_evidence(
     replay_matches: int,
     expected_signature: str,
     observed_signatures: Sequence[str | None],
+    original_input_canonical: Mapping[str, Any] | None = None,
+    minimized_input_canonical: Mapping[str, Any] | None = None,
     witness_source: str = "hypothesis_shrunk_counterexample",
     minimization_method: str = "hypothesis shrinking",
     minimization_boundary: str = (
@@ -300,6 +302,14 @@ def _build_divergence_evidence(
     ready_comparison = _json_ready(comparison)
     ready_original_input = _json_ready(original_input)
     ready_minimized_input = _json_ready(minimized_input)
+    ready_original_input_canonical = _json_ready(
+        original_input_canonical if original_input_canonical is not None else ready_original_input
+    )
+    ready_minimized_input_canonical = _json_ready(
+        minimized_input_canonical
+        if minimized_input_canonical is not None
+        else ready_minimized_input
+    )
     ready_original_observations = _json_ready(original_observations)
     ready_observations = _json_ready(observations)
     attempts = _integer(replay_attempts)
@@ -316,14 +326,19 @@ def _build_divergence_evidence(
         if not binding.get("source_sha256"):
             missing_bindings.append(role)
     binding_status = "complete" if not missing_bindings else "partial"
-    supported = replay_status == "verified" and binding_status == "complete"
+    minimization_verified = minimization_method.strip() not in {"", "not_run"}
+    supported = (
+        replay_status == "verified" and binding_status == "complete" and minimization_verified
+    )
 
     witness = {
         "available": True,
         "original_input": ready_original_input,
-        "original_sha256": _sha256_json(ready_original_input),
+        "original_canonical_input": ready_original_input_canonical,
+        "original_sha256": _sha256_json(ready_original_input_canonical),
         "input": ready_minimized_input,
-        "sha256": _sha256_json(ready_minimized_input),
+        "canonical_input": ready_minimized_input_canonical,
+        "sha256": _sha256_json(ready_minimized_input_canonical),
         "source": witness_source,
     }
     changed = witness["original_sha256"] != witness["sha256"]
@@ -334,16 +349,23 @@ def _build_divergence_evidence(
         if replay_status == "verified"
         else "performed"
     )
-    establishes = (
-        "The recorded minimized input produced the same paired observations and "
-        f"full-envelope divergence in {matches}/{attempts} exact immediate replays "
-        "under the recorded comparator and normalizer."
-        if replay_status == "verified"
-        else (
+    if replay_status == "verified" and minimization_verified:
+        establishes = (
+            "The recorded minimized input produced the same paired observations and "
+            f"full-envelope divergence in {matches}/{attempts} exact immediate replays "
+            "under the recorded comparator and normalizer."
+        )
+    elif replay_status == "verified":
+        establishes = (
+            "The recorded input produced the same paired observations and full-envelope "
+            f"divergence in {matches}/{attempts} exact immediate replays, but witness "
+            "minimization was not established."
+        )
+    else:
+        establishes = (
             "A full-envelope divergence was observed for the recorded input, but only "
             f"{matches}/{attempts} immediate replays matched its paired observations."
         )
-    )
     if missing_bindings:
         establishes += " Source binding is incomplete for: " + ", ".join(missing_bindings) + "."
 

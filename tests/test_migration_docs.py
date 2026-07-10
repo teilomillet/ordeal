@@ -72,13 +72,14 @@ def test_workflow_is_copyable_and_states_the_exact_gate() -> None:
     for required in (
         "ordeal migrate oldpkg.scoring newpkg.scoring -c ordeal.toml",
         "ContractCheck",
-        "BLOCKED mutate resulting tests",
+        "BLOCKED mutate generated checks",
         "RESULT  INCOMPLETE",
         "PROTECTIVE_WITHIN_MEASURED_SCOPE",
         ".ordeal/migrations/",
         "tests/test_ordeal_migration_",
         "candidate-only scan",
         "evidence-only",
+        "not the candidate's normal test suite",
     ):
         assert required in text
 

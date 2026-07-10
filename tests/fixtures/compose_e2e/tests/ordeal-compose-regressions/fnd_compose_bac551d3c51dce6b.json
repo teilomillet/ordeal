@@ -8,7 +8,7 @@
       "result": {
         "owned_cleanup": true
       },
-      "timestamp_offset": 1.9291008356958628e-05
+      "timestamp_offset": 2.3957996745593846e-05
     },
     {
       "index": 1,
@@ -22,7 +22,7 @@
         "attempts": 1,
         "status": 200
       },
-      "timestamp_offset": 0.9720464160054689
+      "timestamp_offset": 0.18939891700574663
     },
     {
       "index": 2,
@@ -49,12 +49,12 @@
       "result": {
         "body_sha256": "ee56f9e7221811b29c4b8139933bd106dfb086aabbd48ca6d86e8ce05184ff8a",
         "captured_state": {},
-        "elapsed_seconds": 0.0012279170041438192,
+        "elapsed_seconds": 0.0011439999943831936,
         "expected_fault_window": false,
         "headers": {
           "Content-Length": "57",
           "Content-Type": "application/json",
-          "Date": "Fri, 10 Jul 2026 09:40:08 GMT",
+          "Date": "Fri, 10 Jul 2026 13:33:11 GMT",
           "Server": "BaseHTTP/0.6 Python/3.12.13"
         },
         "original_body_sha256": "ee56f9e7221811b29c4b8139933bd106dfb086aabbd48ca6d86e8ce05184ff8a",
@@ -83,7 +83,7 @@
         "response_fault": null,
         "status": 200
       },
-      "timestamp_offset": 1.1749172910058405
+      "timestamp_offset": 0.35184483299963176
     },
     {
       "index": 3,
@@ -96,7 +96,7 @@
         "service": "api",
         "signal": "SIGKILL"
       },
-      "timestamp_offset": 1.1764000830007717
+      "timestamp_offset": 0.35323433300072793
     },
     {
       "index": 4,
@@ -124,7 +124,7 @@
         "expected_fault_window": true,
         "request_error": "<urlopen error [Errno 61] Connection refused>"
       },
-      "timestamp_offset": 1.4213950000121258
+      "timestamp_offset": 0.5119618750031805
     },
     {
       "index": 5,
@@ -137,7 +137,7 @@
         "service": "api",
         "started": true
       },
-      "timestamp_offset": 1.4217136660008691
+      "timestamp_offset": 0.5122647920070449
     },
     {
       "index": 6,
@@ -160,7 +160,7 @@
         ],
         "status": 200
       },
-      "timestamp_offset": 1.8661237910127966
+      "timestamp_offset": 0.6368504999991274
     },
     {
       "index": 7,
@@ -186,14 +186,14 @@
       },
       "result": {
         "body_sha256": "434bb98ff2cf2151b4b6e4f85241caa8eebd0c980cb60fc15d2d6d33af41c703",
-        "elapsed_seconds": 0.0019344169995747507,
+        "elapsed_seconds": 0.0012580000038724393,
         "error": "GET http://127.0.0.1:18080/state response differed at 'json.status'",
         "expected_fault_window": false,
         "failure_kind": "unexpected_json",
         "headers": {
           "Content-Length": "63",
           "Content-Type": "application/json",
-          "Date": "Fri, 10 Jul 2026 09:40:08 GMT",
+          "Date": "Fri, 10 Jul 2026 13:33:12 GMT",
           "Server": "BaseHTTP/0.6 Python/3.12.13"
         },
         "original_body_sha256": "434bb98ff2cf2151b4b6e4f85241caa8eebd0c980cb60fc15d2d6d33af41c703",
@@ -217,7 +217,7 @@
         "response_fault": null,
         "status": 200
       },
-      "timestamp_offset": 1.9026355410023825
+      "timestamp_offset": 0.6716007920040283
     }
   ],
   "compose": {
@@ -261,9 +261,9 @@
     "startup_timeout": 30.0,
     "steps": 2,
     "trace_dir": ".ordeal/traces",
-    "workload_mutations": 0
+    "workload_mutations": 4
   },
-  "duration": 2.475807333001285,
+  "duration": 0.8021589999989374,
   "failure": {
     "action_index": 7,
     "action_name": "probe",

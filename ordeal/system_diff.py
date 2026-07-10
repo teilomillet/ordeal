@@ -8,7 +8,6 @@ the mental model and ``docs/guides/system-differential.md`` for a complete run.
 
 from __future__ import annotations
 
-import copy
 import inspect
 import math
 import statistics
@@ -17,6 +16,15 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import ModuleType
 from typing import Any, Literal
+
+from ordeal._observation import (
+    CanonicalObservation,
+    ObservationError,
+    exact_replay_match,
+    isolated_deepcopy,
+    observations_equal,
+    observe,
+)
 
 
 @dataclass(frozen=True)
@@ -124,6 +132,21 @@ class SystemMismatch:
     event: SystemEvent
     observed_a: Any
     observed_b: Any
+    replay_observation: CanonicalObservation | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    observation_a: CanonicalObservation | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    observation_b: CanonicalObservation | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
 
 @dataclass(frozen=True)
@@ -188,13 +211,30 @@ class SystemDiffResult:
     recovery_parity: bool | None
     replay_attempts: int
     replay_matches: int
+    minimization_performed: bool = False
     performance: PerformanceResult | None = None
+    expected_signature: str | None = None
+    observed_signatures: tuple[str | None, ...] = ()
+    reason: str | None = None
+    harness_errors: tuple[str, ...] = ()
+    original_sequence: tuple[SystemEvent, ...] = ()
+    original_mismatch: SystemMismatch | None = field(default=None, repr=False)
+    artifact: dict[str, Any] | None = None
+    artifact_path: str | None = None
+    regression_path: str | None = None
+    manifest_path: str | None = None
+    finding_id: str | None = None
+    regression_error: str | None = None
 
     @property
     def status(self) -> Literal["divergent", "no_divergence_observed", "inconclusive"]:
         """Return the evidence-scoped semantic status."""
+        if self.reason is not None:
+            return "inconclusive"
         if not self.interface.matches:
             return "divergent"
+        if self.harness_errors:
+            return "inconclusive"
         if not self.mismatches:
             return "no_divergence_observed"
         if self.replay_matches == self.replay_attempts:
@@ -233,6 +273,11 @@ class SystemDiffResult:
             return None
         return self.replay_matches == self.replay_attempts
 
+    @property
+    def artifacts(self) -> tuple[dict[str, Any], ...]:
+        """Return the shared source-bound change artifact when one exists."""
+        return (self.artifact,) if self.artifact is not None else ()
+
     def summary(self) -> str:
         """Return a compact report with behavior and performance kept separate."""
         behavior = {
@@ -257,10 +302,14 @@ class SystemDiffResult:
                 f"missing_from_b={self.interface.missing_from_b}, "
                 f"signatures={self.interface.signature_mismatches}"
             )
+        if self.harness_errors:
+            lines.append("  harness: " + "; ".join(self.harness_errors))
         if self.mismatches:
             lines.append(
                 f"  replay: attempted {self.replay_attempts} / reproduced {self.replay_matches}"
             )
+        if self.reason:
+            lines.append(f"  reason: {self.reason}")
         if self.performance is None:
             lines.append("  performance: NOT MEASURED")
         else:
@@ -281,11 +330,32 @@ class _Outcome:
 
     value: Any = None
     exception: Exception | None = None
+    value_observation: CanonicalObservation | None = None
+    replay_observation: CanonicalObservation | None = None
 
     @property
     def public_value(self) -> Any:
         """Return the value exposed in reports."""
-        return self.exception if self.exception is not None else self.value
+        if self.exception is not None:
+            if self.replay_observation is None:
+                return None
+            return self.replay_observation.json_value
+        if self.value_observation is None:
+            return None
+        return self.value_observation.public_value
+
+
+@dataclass(frozen=True)
+class _ObservedValue:
+    """One detached probe value and its structural observation."""
+
+    value: Any
+    observation: CanonicalObservation
+
+    @property
+    def public_value(self) -> Any:
+        """Return the report-facing view without target-defined repr."""
+        return self.observation.public_value
 
 
 _RECOVERY_ACTIONS = frozenset({"clear", "deactivate", "recover", "restart"})
@@ -329,6 +399,45 @@ def _construct(factory: Callable[[], Any]) -> Any:
             f"{_factory_name(factory)} must be a zero-argument factory for system diff"
         ) from exc
     return factory()
+
+
+def _operation_validation_error(system: Any, event: Operation) -> str | None:
+    """Return why one operation cannot be invoked, without executing it."""
+    try:
+        target = getattr(system, event.name)
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+    if not callable(target):
+        return f"{event.name!r} is not callable"
+    try:
+        signature = inspect.signature(target)
+    except (TypeError, ValueError):
+        return None
+    try:
+        signature.bind(*event.args, **dict(event.kwargs))
+    except TypeError as exc:
+        return f"TypeError: {exc}"
+    return None
+
+
+def _validate_operations(
+    system_a: Any,
+    system_b: Any,
+    sequence: Sequence[SystemEvent],
+) -> tuple[str, ...]:
+    """Return workload operations that are invalid against both revisions."""
+    errors: list[str] = []
+    for index, event in enumerate(sequence):
+        if not isinstance(event, Operation):
+            continue
+        error_a = _operation_validation_error(system_a, event)
+        error_b = _operation_validation_error(system_b, event)
+        if error_a is not None and error_b is not None:
+            errors.append(
+                f"operation {event.name!r} at step {index} is invalid for both revisions: "
+                f"a={error_a}; b={error_b}"
+            )
+    return tuple(errors)
 
 
 def _public_exports(system: Any) -> dict[str, str]:
@@ -393,51 +502,69 @@ def _outcomes_match(
     return return_compare(outcome_a.value, outcome_b.value)
 
 
+def _terminal_source_location(exc: Exception) -> dict[str, Any] | None:
+    """Return the terminal traceback frame used by exact replay identity."""
+    frame = exc.__traceback__
+    if frame is None:
+        return None
+    while frame.tb_next is not None:
+        frame = frame.tb_next
+    return {
+        "path": inspect.getabsfile(frame.tb_frame.f_code),
+        "line": frame.tb_lineno,
+        "function": frame.tb_frame.f_code.co_name,
+    }
+
+
 def _capture(call: Callable[[], Any]) -> _Outcome:
-    """Capture an ordinary exception without hiding process-level exits."""
+    """Capture a structurally representable return or ordinary exception."""
     try:
         value = call()
     except Exception as exc:
-        return _Outcome(exception=exc)
-    try:
-        return _Outcome(value=copy.deepcopy(value))
-    except Exception as exc:
-        raise TypeError("system operation return values must support deepcopy") from exc
-
-
-def _observation_signature(value: Any) -> tuple[str, str, str]:
-    """Return a stable-enough exact replay signature for one observation."""
-    if isinstance(value, Exception):
-        kind = f"{type(value).__module__}.{type(value).__qualname__}"
-        return ("exception", kind, str(value))
-    kind = f"{type(value).__module__}.{type(value).__qualname__}"
-    return ("value", kind, repr(value))
-
-
-def _mismatch_signature(mismatch: SystemMismatch) -> tuple[Any, ...]:
-    """Bind minimization and replay to one concrete divergence."""
-    event = mismatch.event
-    event_identity = (
-        type(event).__name__,
-        event.name,
-        event.action if isinstance(event, FaultEvent) else None,
-        repr(event.parameters) if isinstance(event, FaultEvent) else repr(event.args),
-        None if isinstance(event, FaultEvent) else repr(dict(event.kwargs)),
-    )
-    return (
-        mismatch.kind,
-        event_identity,
-        _observation_signature(mismatch.observed_a),
-        _observation_signature(mismatch.observed_b),
+        exception_payload = {
+            "kind": "exception",
+            "type": f"{type(exc).__module__}.{type(exc).__qualname__}",
+            "message": str(exc),
+            "terminal_source_location": _terminal_source_location(exc),
+            "structural_exception": observe(exc, label="system exception").payload,
+        }
+        return _Outcome(
+            exception=exc,
+            replay_observation=observe(
+                exception_payload,
+                label="system exception outcome",
+            ),
+        )
+    detached = isolated_deepcopy(value, label="system operation return value")
+    value_observation = observe(detached, label="system operation return value")
+    return _Outcome(
+        value=detached,
+        value_observation=value_observation,
+        replay_observation=observe(
+            {"kind": "return", "value": value_observation.payload},
+            label="system return outcome",
+        ),
     )
 
 
-def _clone_event(event: SystemEvent) -> SystemEvent:
+def _mismatch_signature(mismatch: SystemMismatch) -> CanonicalObservation:
+    """Return the canonical divergence observation used by minimize and replay."""
+    if mismatch.replay_observation is None:
+        raise ObservationError("system mismatch has no lossless replay observation")
+    return mismatch.replay_observation
+
+
+def _clone_event(
+    event: SystemEvent,
+    *,
+    disjoint_from: tuple[Any, ...] = (),
+) -> SystemEvent:
     """Return an isolated event copy or explain why replay is unsafe."""
-    try:
-        return copy.deepcopy(event)
-    except Exception as exc:
-        raise TypeError("system diff events and arguments must support deepcopy") from exc
+    return isolated_deepcopy(
+        event,
+        label="system diff event",
+        disjoint_from=disjoint_from,
+    )
 
 
 def _invoke(
@@ -446,17 +573,16 @@ def _invoke(
     apply_fault: Callable[[Any, FaultEvent], None] | None,
 ) -> _Outcome:
     """Invoke one isolated operation or fault transition."""
-    isolated = _clone_event(event)
-    if isinstance(isolated, Operation):
-        return _capture(lambda: getattr(system, isolated.name)(*isolated.args, **isolated.kwargs))
+    if isinstance(event, Operation):
+        return _capture(lambda: getattr(system, event.name)(*event.args, **event.kwargs))
     if apply_fault is not None:
-        return _capture(lambda: apply_fault(system, isolated))
+        return _capture(lambda: apply_fault(system, event))
     handler = getattr(system, "apply_fault", None)
     if not callable(handler):
         raise ValueError(
             "fault events require apply_fault= or an apply_fault(event) system method"
         )
-    return _capture(lambda: handler(isolated))
+    return _capture(lambda: handler(event))
 
 
 def _public_state(system: Any) -> Any:
@@ -470,10 +596,7 @@ def _public_state(system: Any) -> Any:
         for name, value in values.items()
         if not name.startswith("_") and not callable(value)
     }
-    try:
-        return copy.deepcopy(public)
-    except Exception as exc:
-        raise TypeError("system public state must support deepcopy") from exc
+    return public
 
 
 def _observe(
@@ -481,18 +604,56 @@ def _observe(
     probe: Callable[[Any], Any] | None,
     *,
     automatic_state: bool,
-) -> Any:
+) -> _ObservedValue | object:
     """Capture a stable state or side-effect observation."""
     if probe is None:
-        return _public_state(system) if automatic_state else _UNMEASURED
-    try:
-        observed = probe(system)
-    except Exception as exc:
-        raise RuntimeError("system diff probe failed") from exc
-    try:
-        return copy.deepcopy(observed)
-    except Exception as exc:
-        raise TypeError("system diff probes must return deepcopy-compatible values") from exc
+        if not automatic_state:
+            return _UNMEASURED
+        observed = _public_state(system)
+        if observed is _UNMEASURED:
+            return _UNMEASURED
+    else:
+        try:
+            observed = probe(system)
+        except Exception as exc:
+            raise RuntimeError("system diff probe failed") from exc
+    detached = isolated_deepcopy(observed, label="system probe observation")
+    return _ObservedValue(
+        value=detached,
+        observation=observe(detached, label="system probe observation"),
+    )
+
+
+def _build_mismatch(
+    kind: Literal["outcome", "state", "side_effects", "fault_schedule"],
+    index: int,
+    event: SystemEvent,
+    observed_a: Any,
+    observed_b: Any,
+    observation_a: CanonicalObservation,
+    observation_b: CanonicalObservation,
+) -> SystemMismatch:
+    """Create one report mismatch bound to a canonical replay observation."""
+    event_observation = observe(event, label="system diff event")
+    replay_observation = observe(
+        {
+            "kind": kind,
+            "event": event_observation.payload,
+            "observed_a": observation_a.payload,
+            "observed_b": observation_b.payload,
+        },
+        label="system mismatch",
+    )
+    return SystemMismatch(
+        kind=kind,
+        step=index,
+        event=event,
+        observed_a=observed_a,
+        observed_b=observed_b,
+        replay_observation=replay_observation,
+        observation_a=observation_a,
+        observation_b=observation_b,
+    )
 
 
 def _run_pair(
@@ -517,19 +678,29 @@ def _run_pair(
     for index, event in enumerate(sequence):
         if isinstance(event, FaultEvent):
             recovering = event.action.lower() in _RECOVERY_ACTIONS
-        outcome_a = _invoke(system_a, event, apply_fault)
-        outcome_b = _invoke(system_b, event, apply_fault)
+        event_a = _clone_event(event)
+        event_b = _clone_event(event, disjoint_from=(event_a,))
+        outcome_a = _invoke(system_a, event_a, apply_fault)
+        outcome_b = _invoke(system_b, event_b, apply_fault)
         outcome_match = _outcomes_match(outcome_a, outcome_b, return_compare)
 
         state_a = _observe(system_a, state, automatic_state=True)
         state_b = _observe(system_b, state, automatic_state=True)
         state_measured = state_a is not _UNMEASURED and state_b is not _UNMEASURED
-        state_match = state_compare(state_a, state_b) if state_measured else None
+        state_match = (
+            observations_equal(state_a.observation, state_b.observation)
+            if state_measured
+            else None
+        )
 
         effects_a = _observe(system_a, side_effects, automatic_state=False)
         effects_b = _observe(system_b, side_effects, automatic_state=False)
         effects_measured = effects_a is not _UNMEASURED and effects_b is not _UNMEASURED
-        effects_match = state_compare(effects_a, effects_b) if effects_measured else None
+        effects_match = (
+            observations_equal(effects_a.observation, effects_b.observation)
+            if effects_measured
+            else None
+        )
 
         recovery_phase = recovering and isinstance(event, Operation)
         step = StepComparison(
@@ -538,11 +709,11 @@ def _run_pair(
             outcome_a=outcome_a.public_value,
             outcome_b=outcome_b.public_value,
             outcome_match=outcome_match,
-            state_a=None if state_a is _UNMEASURED else state_a,
-            state_b=None if state_b is _UNMEASURED else state_b,
+            state_a=None if state_a is _UNMEASURED else state_a.public_value,
+            state_b=None if state_b is _UNMEASURED else state_b.public_value,
             state_match=state_match,
-            side_effects_a=None if effects_a is _UNMEASURED else effects_a,
-            side_effects_b=None if effects_b is _UNMEASURED else effects_b,
+            side_effects_a=None if effects_a is _UNMEASURED else effects_a.public_value,
+            side_effects_b=None if effects_b is _UNMEASURED else effects_b.public_value,
             side_effects_match=effects_match,
             recovery_phase=recovery_phase,
         )
@@ -550,15 +721,43 @@ def _run_pair(
         if recovery_phase:
             recovery_steps.append(step)
         if not outcome_match:
+            if outcome_a.replay_observation is None or outcome_b.replay_observation is None:
+                raise ObservationError("system outcome has no lossless replay observation")
             mismatches.append(
-                SystemMismatch(
-                    "outcome", index, event, outcome_a.public_value, outcome_b.public_value
+                _build_mismatch(
+                    "outcome",
+                    index,
+                    event,
+                    outcome_a.public_value,
+                    outcome_b.public_value,
+                    outcome_a.replay_observation,
+                    outcome_b.replay_observation,
                 )
             )
         if state_match is False:
-            mismatches.append(SystemMismatch("state", index, event, state_a, state_b))
+            mismatches.append(
+                _build_mismatch(
+                    "state",
+                    index,
+                    event,
+                    state_a.public_value,
+                    state_b.public_value,
+                    state_a.observation,
+                    state_b.observation,
+                )
+            )
         if effects_match is False:
-            mismatches.append(SystemMismatch("side_effects", index, event, effects_a, effects_b))
+            mismatches.append(
+                _build_mismatch(
+                    "side_effects",
+                    index,
+                    event,
+                    effects_a.public_value,
+                    effects_b.public_value,
+                    effects_a.observation,
+                    effects_b.observation,
+                )
+            )
 
     state_checked = any(step.state_match is not None for step in steps)
     effects_checked = any(step.side_effects_match is not None for step in steps)
@@ -571,7 +770,7 @@ def _minimize(
     factory_b: Callable[[], Any],
     sequence: tuple[SystemEvent, ...],
     *,
-    mismatch_signature: tuple[Any, ...],
+    mismatch_signature: CanonicalObservation,
     return_compare: Callable[[Any, Any], bool],
     state_compare: Callable[[Any, Any], bool],
     state: Callable[[Any], Any] | None,
@@ -595,7 +794,10 @@ def _minimize(
                 side_effects=side_effects,
                 apply_fault=apply_fault,
             )
-            if mismatches and _mismatch_signature(mismatches[0]) == mismatch_signature:
+            if mismatches and observations_equal(
+                _mismatch_signature(mismatches[0]),
+                mismatch_signature,
+            ):
                 minimized = candidate
                 changed = True
                 break
@@ -661,7 +863,7 @@ def _measure_performance(
     )
 
 
-def _diff_system(
+def _diff_system_checked(
     factory_a: Callable[[], Any],
     factory_b: Callable[[], Any],
     sequence: Sequence[SystemEvent],
@@ -677,7 +879,29 @@ def _diff_system(
 ) -> SystemDiffResult:
     """Build a system refactor report from one shared deterministic sequence."""
     original = tuple(_clone_event(event) for event in sequence)
-    interface = _compare_interfaces(_construct(factory_a), _construct(factory_b))
+    preflight_a = _construct(factory_a)
+    preflight_b = _construct(factory_b)
+    interface = _compare_interfaces(preflight_a, preflight_b)
+    harness_errors = _validate_operations(preflight_a, preflight_b, original)
+    if harness_errors:
+        return SystemDiffResult(
+            system_a=_factory_name(factory_a),
+            system_b=_factory_name(factory_b),
+            interface=interface,
+            sequence=original,
+            steps=[],
+            mismatches=[],
+            original_length=len(original),
+            state_checked=False,
+            side_effects_checked=False,
+            fault_schedule_replayed=False,
+            recovery_parity=None,
+            replay_attempts=replay_attempts,
+            replay_matches=0,
+            minimization_performed=minimize,
+            harness_errors=harness_errors,
+            original_sequence=original,
+        )
     steps, mismatches, state_checked, effects_checked, recovery_parity = _run_pair(
         factory_a,
         factory_b,
@@ -688,9 +912,16 @@ def _diff_system(
         side_effects=side_effects,
         apply_fault=apply_fault,
     )
+    original_mismatch = mismatches[0] if mismatches else None
     minimized = original
-    if minimize and mismatches:
-        mismatch_signature = _mismatch_signature(mismatches[0])
+    observation_error: str | None = None
+    mismatch_signature: CanonicalObservation | None = None
+    if mismatches:
+        try:
+            mismatch_signature = _mismatch_signature(mismatches[0])
+        except ObservationError as exc:
+            observation_error = str(exc)
+    if minimize and mismatches and mismatch_signature is not None:
         candidate_sequence = _minimize(
             factory_a,
             factory_b,
@@ -720,9 +951,9 @@ def _diff_system(
                 candidate_effects,
                 candidate_recovery,
             ) = candidate_result
-            if (
-                candidate_mismatches
-                and _mismatch_signature(candidate_mismatches[0]) == mismatch_signature
+            if candidate_mismatches and observations_equal(
+                _mismatch_signature(candidate_mismatches[0]),
+                mismatch_signature,
             ):
                 minimized = candidate_sequence
                 steps = candidate_steps
@@ -732,8 +963,10 @@ def _diff_system(
                 recovery_parity = candidate_recovery
 
     replay_matches = 0
-    if mismatches:
-        expected_signature = _mismatch_signature(mismatches[0])
+    expected_signature: str | None = None
+    observed_signatures: list[str | None] = []
+    if mismatches and mismatch_signature is not None:
+        expected_signature = mismatch_signature.signature
         for _ in range(replay_attempts):
             _, replayed, _, _, _ = _run_pair(
                 factory_a,
@@ -745,8 +978,22 @@ def _diff_system(
                 side_effects=side_effects,
                 apply_fault=apply_fault,
             )
-            if replayed and _mismatch_signature(replayed[0]) == expected_signature:
-                replay_matches += 1
+            if replayed:
+                try:
+                    replay_signature = _mismatch_signature(replayed[0])
+                except ObservationError as exc:
+                    observation_error = str(exc)
+                    observed_signatures.append(None)
+                    continue
+                observed_signatures.append(replay_signature.signature)
+                if exact_replay_match(
+                    mismatch_signature,
+                    replay_signature,
+                    recorded_expected_signature=expected_signature,
+                ):
+                    replay_matches += 1
+            else:
+                observed_signatures.append(None)
 
     performance_result = (
         _measure_performance(factory_a, factory_b, original, apply_fault, performance)
@@ -767,5 +1014,65 @@ def _diff_system(
         recovery_parity=recovery_parity,
         replay_attempts=replay_attempts,
         replay_matches=replay_matches,
+        minimization_performed=minimize,
         performance=performance_result,
+        expected_signature=expected_signature,
+        observed_signatures=tuple(observed_signatures),
+        reason=observation_error,
+        original_sequence=original,
+        original_mismatch=original_mismatch,
     )
+
+
+def _diff_system(
+    factory_a: Callable[[], Any],
+    factory_b: Callable[[], Any],
+    sequence: Sequence[SystemEvent],
+    *,
+    return_compare: Callable[[Any, Any], bool],
+    state_compare: Callable[[Any, Any], bool],
+    state: Callable[[Any], Any] | None,
+    side_effects: Callable[[Any], Any] | None,
+    apply_fault: Callable[[Any, FaultEvent], None] | None,
+    performance: PerformanceBudget | None,
+    minimize: bool,
+    replay_attempts: int,
+) -> SystemDiffResult:
+    """Return inconclusive when any selected observation is not lossless."""
+    try:
+        return _diff_system_checked(
+            factory_a,
+            factory_b,
+            sequence,
+            return_compare=return_compare,
+            state_compare=state_compare,
+            state=state,
+            side_effects=side_effects,
+            apply_fault=apply_fault,
+            performance=performance,
+            minimize=minimize,
+            replay_attempts=replay_attempts,
+        )
+    except ObservationError as exc:
+        return SystemDiffResult(
+            system_a=_factory_name(factory_a),
+            system_b=_factory_name(factory_b),
+            interface=InterfaceReport(
+                exports_a={},
+                exports_b={},
+                missing_from_a=(),
+                missing_from_b=(),
+                signature_mismatches=(),
+            ),
+            sequence=(),
+            steps=[],
+            mismatches=[],
+            original_length=len(sequence),
+            state_checked=False,
+            side_effects_checked=False,
+            fault_schedule_replayed=False,
+            recovery_parity=None,
+            replay_attempts=replay_attempts,
+            replay_matches=0,
+            reason=str(exc),
+        )

@@ -55,8 +55,8 @@ print(result.summary())
 The workflow first asks Ordeal to audit the base, then evaluates the candidate
 through the remaining evidence stages. The seven lines always appear in this order:
 
-Mined properties remain hypotheses until an explicit invariant supports them.
-If a saved parity regression already fails, mutation is marked `BLOCKED`; Ordeal
+Mutation evaluates generated parity checks and explicit contracts, not the candidate's normal test suite.
+If a saved parity regression fails, mutation is `BLOCKED`; Ordeal
 still goes on to scan the candidate independently for unrelated findings.
 
 ```text
@@ -65,7 +65,7 @@ PASSED  mine candidate contracts: ...
 PASSED  diff base/candidate: ...
 PASSED  classify intended changes: 0 intended, 1 unexpected
 PASSED  save unexpected divergences: 1 replayable case
-BLOCKED mutate resulting tests: resulting test baseline fails
+BLOCKED mutate generated checks: generated parity baseline fails
 PASSED  scan candidate: ...
 RESULT  INCOMPLETE
 ```
@@ -80,7 +80,8 @@ visible.
 
 If the difference is a bug, fix the candidate and rerun the same command.
 
-If it is planned, record that decision and add an invariant for the new rule:
+If it is planned, record that decision and protect the changed callable with
+an invariant for the new rule:
 
 ```bash
 ordeal migrate oldpkg.scoring newpkg.scoring -c ordeal.toml \
@@ -88,8 +89,10 @@ ordeal migrate oldpkg.scoring newpkg.scoring -c ordeal.toml \
   --intended-change added:score_batch
 ```
 
-Selectors can be a function name or `behavior:`, `added:`, or `removed:` plus
-the function name. Anything unlisted remains unexpected.
+Selectors can be a function name or `behavior:`, `signature:`, `added:`, or
+`removed:` plus the function name. Anything unlisted remains unexpected. An
+unrelated invariant cannot protect an intended behavior change; the changed
+callable needs its own invariant or fully killed, callable-attributed mutants.
 
 ## Know when you are done
 
@@ -98,8 +101,9 @@ the function name. Anything unlisted remains unexpected.
 - the base audit was not blocked
 - no unexpected, inconclusive, or evidence-only divergence remains
 - at least one explicit invariant ran
+- every intended behavior change has callable-scoped protection
 - every measured mutant was killed
-- the candidate-only scan passed
+- the candidate-only scan exercised at least one callable and passed
 
 This is strong, scoped evidence—not a proof that every possible input,
 side effect, race, or performance condition is correct.

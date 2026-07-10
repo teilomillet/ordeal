@@ -75,9 +75,9 @@ The identifier is `ordeal.compose-regression-binding/v1`.
 | `failure_signature` | Discovery failure kind/message/action identity hash |
 | `action_count` | Bound lifecycle, fault, and request action count |
 
-Compose promotion requires at least one exact discovery replay. The post-fix
-control then runs the same bound trace and accepts only attempts with no failure;
-a different failure is not a pass.
+Compose promotion requires an exact discovery replay. Single-finding verify then
+runs the bound trace plus a fixed-state rescan, persisting coverage, workload
+strength, and `fixed_state_sha256`; a different failure or incomplete cell is not a pass.
 
 ## Portable CI manifest
 
@@ -112,7 +112,7 @@ manifest. `verify --ci` reads but never mutates either form.
 |---|---|---|
 | Python test passed | same-witness control is green | `0` |
 | Python test failed | original defect still reproduces | `1` |
-| all Compose attempts clean | bound service control is green | `0` |
+| Compose clean plus bound fixed-state evidence complete | service control is green | `0` |
 | any Compose attempt fails | original or another failure remains | `1` |
 | binding/path/execution error | control is invalid or unavailable | `2` |
 

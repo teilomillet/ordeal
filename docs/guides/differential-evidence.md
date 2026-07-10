@@ -48,6 +48,13 @@ Ordeal then re-executes the minimized input against independently reconstructed
 sides. Replay compares the paired return/exception observations, mutated
 arguments, receiver states, selected effects, and differing channel names.
 
+Exact observations use one typed structural graph across function, system, and
+Git revision diff. Domain objects are read from instance attributes and slots;
+their `__eq__` and `repr` are not evidence. A clone that still reaches mutable
+source state, or a value that cannot be represented losslessly, makes the run
+`inconclusive`. A replay counts only when the recorded expected signature, the
+computed expected signature, and the observed signature are identical.
+
 ## Save the JSON evidence
 
 Every supported divergence has an in-memory artifact:
@@ -68,6 +75,11 @@ the minimized input, both observations, exact replay counts, and claim limits.
 The artifact says that the versions differ for this witness. It does not say
 which version is correct, explain the root cause, validate untested inputs, or
 observe side effects you did not select.
+
+To keep the witness fixed, also pass `regression_path=` and `manifest_path=`.
+Ordeal writes a source-bound pytest that compares the same importable pair on
+the minimized literal input. It fails before the fix, passes when the measured
+divergence disappears, and runs through `ordeal verify --ci`.
 
 ## `proven_equivalent` is deliberately rare
 

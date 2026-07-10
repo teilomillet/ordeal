@@ -78,9 +78,11 @@ ordeal = ["py.typed", "SKILL.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+norecursedirs = [".*", "build", "dist", "CVS", "_darcs", "{arch}", "*.egg", "venv", "fixtures"]
 addopts = "-n auto"
 markers = [
     "slow: long-running ablation/integration tests (> 10s)",
+    "release_eval: counterexample corpus that must pass before publication",
 ]
 filterwarnings = [
     "ignore::hypothesis.errors.NonInteractiveExampleWarning",

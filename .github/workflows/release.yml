@@ -14,10 +14,36 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.28"
+
+      - name: Install release evaluation dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Run release counterexample corpus
+        run: |
+          uv run pytest -q -n 0 \
+            tests/test_release_evaluation_corpus.py \
+            tests/test_diff_observation.py
+
+      - name: Validate pinned real repository changes
+        run: |
+          mkdir -p .artifacts
+          uv run python scripts/verify_revision_change_corpus.py \
+            --output .artifacts/revision-change-corpus.json
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: revision-change-corpus
+          path: .artifacts/revision-change-corpus.json
 
       - name: Install build tools
         run: pip install build

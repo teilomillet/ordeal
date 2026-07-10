@@ -11,16 +11,18 @@ the domain assertions used by mutation testing and the candidate-only scan.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib
+import inspect
 import json
-import math
 import re
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from ordeal._observation import observe
 from ordeal.audit import ModuleAudit
 from ordeal.audit import audit as _audit
 from ordeal.auto import (
@@ -33,8 +35,15 @@ from ordeal.auto import (
 from ordeal.auto import (
     scan_module as _scan_module,
 )
-from ordeal.diff import DiffResult, DiffWitness, Mismatch, _approx_equal
+from ordeal.diff import (
+    DiffResult,
+    DiffWitness,
+    Mismatch,
+    _approx_equal,
+    _bind_named_arguments,
+)
 from ordeal.diff import diff as _diff
+from ordeal.finding_evidence import _json_ready
 from ordeal.mine import (
     STRUCTURAL_LIMITATIONS,
     MineModuleResult,
@@ -44,9 +53,10 @@ from ordeal.mine import (
 )
 from ordeal.mutations import MutationResult
 from ordeal.mutations import mutate as _mutate
+from ordeal.regression_evidence import _decode_replay_value, _encode_replay_value
 
 StageStatus = Literal["passed", "failed", "blocked"]
-ChangeKind = Literal["behavior", "added", "removed"]
+ChangeKind = Literal["behavior", "signature", "added", "removed"]
 ChangeClassification = Literal["intended", "unexpected"]
 ChangeClassifier = Callable[
     ["MigrationChange"],
@@ -87,6 +97,8 @@ class MigrationChange:
     kind: ChangeKind
     mismatch: Mismatch | None = None
     witness: DiffWitness | None = None
+    base_signature: str | None = None
+    candidate_signature: str | None = None
     regression_options: dict[str, object] = field(default_factory=dict)
     classification: ChangeClassification = "unexpected"
     reason: str = "not declared as intended"
@@ -117,6 +129,9 @@ class MigrationChange:
                 "artifact_id": self.witness.artifact.get("artifact_id"),
                 "artifact_path": self.witness.artifact_path,
             }
+        if self.kind == "signature":
+            record["base_signature"] = self.base_signature
+            record["candidate_signature"] = self.candidate_signature
         if self.regression_options:
             record["regression_options"] = dict(self.regression_options)
         return record
@@ -131,6 +146,8 @@ class RegressionArtifacts:
     regression_cases: tuple[dict[str, object], ...] = ()
     unsupported_change_ids: tuple[str, ...] = ()
     error: str | None = None
+    manifest_path: Path | None = None
+    finding_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -159,6 +176,7 @@ class MigrationResult:
     candidate_scan: ScanResult
     diff_errors: dict[str, str] = field(default_factory=dict)
     explicit_invariant_count: int = 0
+    explicit_invariant_functions: tuple[str, ...] = ()
     mining_limitations: list[str] = field(default_factory=lambda: list(STRUCTURAL_LIMITATIONS))
 
     @property
@@ -170,6 +188,35 @@ class MigrationResult:
     def intended_changes(self) -> list[MigrationChange]:
         """Return divergences explicitly classified as intended."""
         return [change for change in self.changes if change.classification == "intended"]
+
+    @property
+    def measured_regression_callables(self) -> tuple[str, ...]:
+        """Return callables whose measured mutants were all killed by resulting tests."""
+        mutation_result = self.mutation.result
+        if mutation_result is None:
+            return ()
+        by_callable: dict[str, list[bool]] = {}
+        for mutant in mutation_result.mutants:
+            if mutant.qualname:
+                by_callable.setdefault(mutant.qualname, []).append(mutant.killed)
+        return tuple(
+            sorted(
+                function
+                for function, outcomes in by_callable.items()
+                if outcomes and all(outcomes)
+            )
+        )
+
+    @property
+    def unprotected_changed_callables(self) -> tuple[str, ...]:
+        """Return intended behavior changes lacking callable-scoped protection."""
+        intended_behavior = {
+            change.function for change in self.intended_changes if change.kind == "behavior"
+        }
+        protected = set(self.explicit_invariant_functions) | set(
+            self.measured_regression_callables
+        )
+        return tuple(sorted(intended_behavior - protected))
 
     @property
     def protected_within_measured_scope(self) -> bool:
@@ -188,8 +235,10 @@ class MigrationResult:
             and not self.artifacts.unsupported_change_ids
             and self.artifacts.error is None
             and self.explicit_invariant_count > 0
+            and not self.unprotected_changed_callables
             and self.mutation.status == "passed"
             and mutation_fully_killed
+            and self.candidate_scan.total > 0
             and self.candidate_scan.passed
         )
 
@@ -215,6 +264,11 @@ class MigrationResult:
             "  NOTE    mined properties are hypotheses; explicit invariants, mutation, "
             "and candidate scan carry correctness/protection evidence"
         )
+        if self.unprotected_changed_callables:
+            lines.append(
+                "  NOTE    intended behavior lacks callable-scoped protection: "
+                + ", ".join(self.unprotected_changed_callables)
+            )
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, object]:
@@ -243,23 +297,37 @@ class MigrationResult:
             "changes": [change.to_dict() for change in self.changes],
             "diff_errors": dict(self.diff_errors),
             "explicit_invariant_count": self.explicit_invariant_count,
+            "explicit_invariant_functions": list(self.explicit_invariant_functions),
+            "measured_regression_callables": list(self.measured_regression_callables),
+            "unprotected_changed_callables": list(self.unprotected_changed_callables),
             "artifacts": {
                 "evidence_path": self.artifacts.evidence_path.as_posix(),
                 "regression_path": self.artifacts.regression_path.as_posix(),
                 "regression_cases": len(self.artifacts.regression_cases),
                 "unsupported_change_ids": list(self.artifacts.unsupported_change_ids),
                 "error": self.artifacts.error,
+                "manifest_path": (
+                    self.artifacts.manifest_path.as_posix()
+                    if self.artifacts.manifest_path is not None
+                    else None
+                ),
+                "finding_id": self.artifacts.finding_id,
             },
             "mutation": {
                 "status": self.mutation.status,
                 "threshold": self.mutation.threshold,
                 "reason": self.mutation.reason,
+                "test_basis": (
+                    mutation_result.contract_context.get("test_basis")
+                    if mutation_result is not None
+                    else None
+                ),
                 "killed": mutation_result.killed if mutation_result is not None else None,
                 "total": mutation_result.total if mutation_result is not None else None,
                 "score": mutation_result.score if mutation_result is not None else None,
             },
             "candidate_scan": {
-                "passed": self.candidate_scan.passed,
+                "passed": self.candidate_scan.total > 0 and self.candidate_scan.passed,
                 "total": self.candidate_scan.total,
                 "failed": self.candidate_scan.failed,
                 "verdict_counts": self.candidate_scan.verdict_counts,
@@ -300,75 +368,17 @@ def _display_value(value: object) -> dict[str, object]:
 
 def _encode_value(value: object) -> object:
     """Encode common witness values into JSON-safe, exactly replayable data."""
-    if value is None or isinstance(value, (bool, int, str)):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            return {"__ordeal_type__": "float", "value": repr(value)}
-        return value
-    if isinstance(value, bytes):
-        return {"__ordeal_type__": "bytes", "hex": value.hex()}
-    if isinstance(value, Path):
-        return {"__ordeal_type__": "path", "value": value.as_posix()}
-    if isinstance(value, list):
-        return [_encode_value(item) for item in value]
-    if isinstance(value, tuple):
-        return {"__ordeal_type__": "tuple", "items": [_encode_value(item) for item in value]}
-    if isinstance(value, set):
-        return {"__ordeal_type__": "set", "items": [_encode_value(item) for item in value]}
-    if isinstance(value, frozenset):
-        return {
-            "__ordeal_type__": "frozenset",
-            "items": [_encode_value(item) for item in value],
-        }
-    if isinstance(value, Mapping):
-        return {
-            "__ordeal_type__": "dict",
-            "items": [[_encode_value(key), _encode_value(item)] for key, item in value.items()],
-        }
-    raise TypeError(
-        f"{type(value).__module__}.{type(value).__qualname__} is not a replayable literal"
-    )
+    return _encode_replay_value(value)
 
 
 def _decode_value(value: object) -> object:
     """Decode data written by :func:`_encode_value`."""
-    if isinstance(value, list):
-        return [_decode_value(item) for item in value]
-    if not isinstance(value, dict) or "__ordeal_type__" not in value:
-        return value
-    kind = value["__ordeal_type__"]
-    if kind == "bytes":
-        return bytes.fromhex(str(value["hex"]))
-    if kind == "path":
-        return Path(str(value["value"]))
-    if kind == "float":
-        return float(str(value["value"]))
-    items = list(value.get("items", []))
-    if kind == "tuple":
-        return tuple(_decode_value(item) for item in items)
-    if kind == "set":
-        return {_decode_value(item) for item in items}
-    if kind == "frozenset":
-        return frozenset(_decode_value(item) for item in items)
-    if kind == "dict":
-        return {
-            _decode_value(pair[0]): _decode_value(pair[1])
-            for pair in items
-            if isinstance(pair, list) and len(pair) == 2
-        }
-    raise ValueError(f"unknown ordeal migration value type: {kind!r}")
+    return _decode_replay_value(value)
 
 
 def _canonical_state(value: object) -> object:
     """Canonicalize replay state the same way immutable diff witnesses do."""
-    if isinstance(value, Mapping):
-        return {str(key): _canonical_state(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return tuple(_canonical_state(item) for item in value)
-    if isinstance(value, (set, frozenset)):
-        return frozenset(_canonical_state(item) for item in value)
-    return value
+    return observe(value, label="migration replay state").payload
 
 
 def replay_migration_case(case: Mapping[str, object]) -> None:
@@ -386,6 +396,21 @@ def replay_migration_case(case: Mapping[str, object]) -> None:
         if not hasattr(module, function):
             raise AssertionError(f"expected public callable is still missing: {function}")
         return
+    if kind == "signature":
+        func = getattr(module, function)
+        expected_signature = str(case["expected_signature"])
+        try:
+            observed_signature = str(inspect.signature(func))
+        except (TypeError, ValueError) as exc:
+            raise AssertionError(
+                f"candidate public signature is not inspectable: {function}"
+            ) from exc
+        if observed_signature != expected_signature:
+            raise AssertionError(
+                f"candidate public signature for {function} is {observed_signature}; "
+                f"expected {expected_signature}"
+            )
+        return
     if kind != "behavior":
         raise ValueError(f"unknown migration regression kind: {kind!r}")
 
@@ -400,11 +425,13 @@ def replay_migration_case(case: Mapping[str, object]) -> None:
     observed_error: BaseException | None = None
     actual: object = None
     try:
-        actual = _call_sync(func, **kwargs_value)
+        call_args, call_kwargs = _bind_named_arguments(func, kwargs_value)
+        actual = _call_sync(func, *call_args, **call_kwargs)
     except BaseException as exc:
         observed_error = exc
 
-    if expected.get("kind") == "exception":
+    expected_kind = expected.get("kind")
+    if expected_kind == "exception":
         expected_type = f"{expected['type_module']}.{expected['type_qualname']}"
         if observed_error is None:
             raise AssertionError(f"candidate did not raise {expected_type}: {expected['message']}")
@@ -414,7 +441,21 @@ def replay_migration_case(case: Mapping[str, object]) -> None:
                 "candidate raised a different exception: "
                 f"{type(observed_error).__name__}: {observed_error}"
             ) from observed_error
-    else:
+    elif expected_kind == "canonical_return":
+        if observed_error is not None:
+            raise observed_error
+        expected_observation = expected.get("observation")
+        if not isinstance(expected_observation, Mapping):
+            raise TypeError("canonical migration outcome must contain an observation graph")
+        actual_observation = observe(
+            actual,
+            label="migration candidate return value",
+        ).payload
+        if actual_observation != expected_observation:
+            raise AssertionError(
+                "candidate returned a structurally different value from the preserved base outcome"
+            )
+    elif expected_kind == "return":
         if observed_error is not None:
             raise observed_error
         expected_value = _decode_value(expected["value"])
@@ -441,8 +482,23 @@ def replay_migration_case(case: Mapping[str, object]) -> None:
                 f"candidate returned {actual!r}; expected preserved base outcome "
                 f"{expected_value!r}"
             )
+    else:
+        raise ValueError(f"unknown migration expected outcome kind: {expected_kind!r}")
 
-    if "expected_mutated_arguments" in case:
+    if "expected_mutated_arguments_observation" in case:
+        expected_arguments_observation = case["expected_mutated_arguments_observation"]
+        if not isinstance(expected_arguments_observation, Mapping):
+            raise TypeError("canonical migration argument state must contain an observation graph")
+        actual_arguments_observation = observe(
+            kwargs_value,
+            label="migration candidate mutated arguments",
+        ).payload
+        if actual_arguments_observation != expected_arguments_observation:
+            raise AssertionError(
+                "candidate arguments have structurally different state from the preserved "
+                "base outcome"
+            )
+    elif "expected_mutated_arguments" in case:
         expected_arguments = _decode_value(case["expected_mutated_arguments"])
         if _canonical_state(kwargs_value) != _canonical_state(expected_arguments):
             raise AssertionError(
@@ -474,10 +530,34 @@ def _case_for_change(
             raise TypeError("cannot persist a custom diff comparator")
         if change.regression_options.get("custom_normalize"):
             raise TypeError("cannot persist a custom diff normalizer")
-        payload["kwargs"] = _encode_value(change.mismatch.args)
-        payload["expected_mutated_arguments"] = _encode_value(
-            change.witness.outcome_a.mutated_arguments
+        artifact_observations = change.witness.artifact.get("observations", {})
+        baseline_observation = (
+            artifact_observations.get("a", {})
+            if isinstance(artifact_observations, Mapping)
+            else {}
         )
+        if change.witness.replay_args_json is not None:
+            replay_args = json.loads(change.witness.replay_args_json)
+            if not isinstance(replay_args, Mapping):
+                raise TypeError("behavior witness arguments are not a replayable mapping")
+            payload["kwargs"] = replay_args
+        elif change.witness.artifact.get("schema") == "ordeal.divergence-evidence/v1":
+            raise TypeError("behavior witness arguments are not exactly replayable")
+        else:
+            payload["kwargs"] = _encode_value(change.mismatch.args)
+        canonical_mutated_arguments = (
+            baseline_observation.get("canonical_mutated_arguments")
+            if isinstance(baseline_observation, Mapping)
+            else None
+        )
+        if isinstance(canonical_mutated_arguments, Mapping):
+            payload["expected_mutated_arguments_observation"] = _json_ready(
+                canonical_mutated_arguments
+            )
+        else:
+            payload["expected_mutated_arguments"] = _encode_value(
+                change.witness.outcome_a.mutated_arguments
+            )
         comparison = {
             key: change.regression_options[key]
             for key in ("rtol", "atol")
@@ -485,19 +565,36 @@ def _case_for_change(
         }
         if comparison:
             payload["comparison"] = comparison
-        base_outcome = change.mismatch.output_a
-        if isinstance(base_outcome, BaseException):
+        base_outcome = change.witness.outcome_a
+        if not base_outcome.returned:
+            if base_outcome.exception_type is None:
+                raise TypeError("baseline exception witness has no exception type")
             payload["expected"] = {
                 "kind": "exception",
-                "type_module": type(base_outcome).__module__,
-                "type_qualname": type(base_outcome).__qualname__,
-                "message": str(base_outcome),
+                "type_module": base_outcome.exception_type.__module__,
+                "type_qualname": base_outcome.exception_type.__qualname__,
+                "message": str(base_outcome.exception_message or ""),
             }
         else:
-            payload["expected"] = {
-                "kind": "return",
-                "value": _encode_value(base_outcome),
-            }
+            canonical_value = (
+                baseline_observation.get("canonical_value")
+                if isinstance(baseline_observation, Mapping)
+                else None
+            )
+            if isinstance(canonical_value, Mapping) and not comparison:
+                payload["expected"] = {
+                    "kind": "canonical_return",
+                    "observation": _json_ready(canonical_value),
+                }
+            else:
+                payload["expected"] = {
+                    "kind": "return",
+                    "value": _encode_value(base_outcome.return_value),
+                }
+    elif change.kind == "signature":
+        if change.base_signature is None:
+            raise TypeError("signature change has no base signature")
+        payload["expected_signature"] = change.base_signature
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:12]
@@ -628,9 +725,11 @@ def _run_explicit_invariants(
         for part in function.split("."):
             func = getattr(func, part)
         for check in checks:
+            invocation_kwargs = copy.deepcopy(check.kwargs)
             error: BaseException | None = None
             try:
-                value = _call_sync(func, **dict(check.kwargs))
+                call_args, call_kwargs = _bind_named_arguments(func, invocation_kwargs)
+                value = _call_sync(func, *call_args, **call_kwargs)
             except BaseException as exc:
                 error = exc
                 value = None
@@ -639,7 +738,7 @@ def _run_explicit_invariants(
                 value,
                 func=func,
                 call_context=getattr(func, "__ordeal_last_call_context__", None),
-                kwargs=check.kwargs,
+                kwargs=invocation_kwargs,
                 error=error,
             )
             if not passed:
@@ -694,6 +793,12 @@ def _save_artifacts(
             "base": base,
             "candidate": candidate,
             "changes": [change.to_dict() for change in changes],
+            "change_evidence": [
+                _json_ready(change.witness.artifact)
+                for change in changes
+                if change.witness is not None
+                and change.witness.artifact.get("schema") == "ordeal.divergence-evidence/v1"
+            ],
             "regression_cases": cases,
             "unsupported_change_ids": unsupported,
             "mining_limitations": list(STRUCTURAL_LIMITATIONS),
@@ -729,6 +834,82 @@ def _save_artifacts(
         )
 
 
+def _persist_final_result(result: MigrationResult) -> str | None:
+    """Append mutation, scan, and the final verdict to the migration artifact."""
+    path = result.artifacts.evidence_path
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("migration evidence must contain a JSON object")
+        final = result.to_dict()
+        payload.update(
+            {
+                "protected_within_measured_scope": final["protected_within_measured_scope"],
+                "stages": final["stages"],
+                "candidate_contracts": final["candidate_contracts"],
+                "diff_errors": final["diff_errors"],
+                "explicit_invariant_count": final["explicit_invariant_count"],
+                "explicit_invariant_functions": final["explicit_invariant_functions"],
+                "measured_regression_callables": final["measured_regression_callables"],
+                "unprotected_changed_callables": final["unprotected_changed_callables"],
+                "mutation": final["mutation"],
+                "candidate_scan": final["candidate_scan"],
+                "final_verdict": (
+                    "protective_within_measured_scope"
+                    if result.protected_within_measured_scope
+                    else "incomplete"
+                ),
+            }
+        )
+        path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return str(exc)
+    return None
+
+
+def _register_migration_regression(
+    *,
+    base: str,
+    candidate: str,
+    artifacts: RegressionArtifacts,
+    manifest_path: Path,
+) -> tuple[Path | None, str | None, str | None]:
+    """Register the generated parity regression in the shared CI manifest."""
+    from ordeal.regression_evidence import _register_python_regression
+
+    finding_id = (
+        "fnd_migration_" + hashlib.sha256(f"{base}\0{candidate}".encode("utf-8")).hexdigest()[:16]
+    )
+    try:
+        evidence_payload = json.loads(artifacts.evidence_path.read_text(encoding="utf-8"))
+        change_evidence = evidence_payload.get("change_evidence", [])
+        artifact_ids = [
+            str(item.get("artifact_id"))
+            for item in change_evidence
+            if isinstance(item, Mapping) and item.get("artifact_id")
+        ]
+        registered, error = _register_python_regression(
+            manifest_path=manifest_path,
+            finding_id=finding_id,
+            change_kind="migration",
+            target=f"{base} -> {candidate}",
+            test_path=artifacts.regression_path,
+            test_name="test_ordeal_migration_regression",
+            evidence_path=artifacts.evidence_path,
+            change_artifact_ids=artifact_ids,
+            test_basis="generated_parity_and_explicit_contracts",
+            active=bool(artifacts.regression_cases),
+        )
+        if error is not None:
+            return None, None, error
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return None, None, str(exc)
+    return registered, finding_id if artifacts.regression_cases else None, None
+
+
 def migrate(
     base: str,
     candidate: str,
@@ -749,6 +930,7 @@ def migrate(
     scan_options: Mapping[str, Any] | None = None,
     evidence_path: str | Path | None = None,
     regression_path: str | Path | None = None,
+    manifest_path: str | Path | None = None,
 ) -> MigrationResult:
     """Run the ordered evidence workflow from *base* to *candidate*.
 
@@ -759,8 +941,10 @@ def migrate(
     fixing the candidate, or classify the change as intended.
 
     ``invariants`` are explicit candidate contracts keyed by public callable
-    name. They are executed directly during mutation and passed to the final
-    candidate-only scan. Mined properties are returned as hypotheses only.
+    name. Each intended behavior change needs an invariant for that callable
+    or fully killed mutants attributed to it. Invariant inputs are cloned for
+    every mutation invocation. The final candidate scan must exercise at least
+    one callable. Mined properties are returned as hypotheses only.
 
     Args:
         base: Importable base module path.
@@ -835,11 +1019,30 @@ def migrate(
 
     base_module = importlib.import_module(base)
     candidate_module = importlib.import_module(candidate)
-    base_functions = dict(_get_public_functions(base_module))
-    candidate_functions = dict(_get_public_functions(candidate_module))
+    base_functions = dict(_get_public_functions(base_module, preserve_wrappers=True))
+    candidate_functions = dict(_get_public_functions(candidate_module, preserve_wrappers=True))
     changes: list[MigrationChange] = []
     diff_errors: dict[str, str] = {}
-    for function in sorted(base_functions.keys() & candidate_functions.keys()):
+    shared_functions = base_functions.keys() & candidate_functions.keys()
+    if not shared_functions:
+        diff_errors["<migration>"] = "no shared public callables were differentially evaluated"
+    for function in sorted(shared_functions):
+        try:
+            base_signature = str(inspect.signature(base_functions[function]))
+            candidate_signature = str(inspect.signature(candidate_functions[function]))
+        except (TypeError, ValueError) as exc:
+            diff_errors[function] = f"public signature comparison failed: {exc}"
+            continue
+        if base_signature != candidate_signature:
+            changes.append(
+                MigrationChange(
+                    id=f"signature:{function}",
+                    function=function,
+                    kind="signature",
+                    base_signature=base_signature,
+                    candidate_signature=candidate_signature,
+                )
+            )
         options = dict((diff_options or {}).get(function, {}))
         options.pop("max_examples", None)
         try:
@@ -851,6 +1054,9 @@ def migrate(
             )
         except (TypeError, ValueError) as exc:
             diff_errors[function] = str(exc)
+            continue
+        if result.total < 1:
+            diff_errors[function] = "differential comparison executed zero examples"
             continue
         if result.divergent:
             if result.witness is None or len(result.mismatches) != 1:
@@ -966,6 +1172,7 @@ def migrate(
             workers=mutation_workers,
             contract_context={
                 "source": "migration",
+                "test_basis": "generated_parity_and_explicit_contracts",
                 "explicit_invariants": {
                     name: [check.name for check in checks]
                     for name, checks in explicit_invariants.items()
@@ -1009,15 +1216,21 @@ def migrate(
         contract_checks=explicit_invariants,
         **effective_scan_options,
     )
+    candidate_scan_passed = candidate_scan.total > 0 and candidate_scan.passed
+    candidate_scan_summary = (
+        f"{candidate_scan.total} callable(s), {candidate_scan.failed} promoted finding(s)"
+        if candidate_scan.total > 0
+        else "no callables produced executable scan evidence"
+    )
     stages.append(
         MigrationStage(
             "scan candidate",
-            "passed" if candidate_scan.passed else "failed",
-            f"{candidate_scan.total} callable(s), {candidate_scan.failed} promoted finding(s)",
+            "passed" if candidate_scan_passed else "failed",
+            candidate_scan_summary,
         )
     )
 
-    return MigrationResult(
+    result = MigrationResult(
         base=base,
         candidate=candidate,
         stages=stages,
@@ -1030,4 +1243,36 @@ def migrate(
         candidate_scan=candidate_scan,
         diff_errors=diff_errors,
         explicit_invariant_count=explicit_invariant_count,
+        explicit_invariant_functions=tuple(
+            sorted(name for name, checks in explicit_invariants.items() if checks)
+        ),
     )
+    if result.artifacts.error is None and manifest_path is not None:
+        registered_path, finding_id, registration_error = _register_migration_regression(
+            base=base,
+            candidate=candidate,
+            artifacts=result.artifacts,
+            manifest_path=Path(manifest_path),
+        )
+        result.artifacts = RegressionArtifacts(
+            evidence_path=result.artifacts.evidence_path,
+            regression_path=result.artifacts.regression_path,
+            regression_cases=result.artifacts.regression_cases,
+            unsupported_change_ids=result.artifacts.unsupported_change_ids,
+            error=registration_error,
+            manifest_path=registered_path,
+            finding_id=finding_id,
+        )
+    if result.artifacts.error is None:
+        finalization_error = _persist_final_result(result)
+        if finalization_error is not None:
+            result.artifacts = RegressionArtifacts(
+                evidence_path=result.artifacts.evidence_path,
+                regression_path=result.artifacts.regression_path,
+                regression_cases=result.artifacts.regression_cases,
+                unsupported_change_ids=result.artifacts.unsupported_change_ids,
+                error=finalization_error,
+                manifest_path=result.artifacts.manifest_path,
+                finding_id=result.artifacts.finding_id,
+            )
+    return result

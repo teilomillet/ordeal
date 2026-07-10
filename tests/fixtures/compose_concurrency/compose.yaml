@@ -1,0 +1,44 @@
+services:
+  worker:
+    image: python:3.12-alpine
+    command: ["python", "-u", "/app/service.py"]
+    environment:
+      ORDEAL_ROLE: worker
+    init: true
+    volumes:
+      - ./service.py:/app/service.py:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=1)
+      interval: 1s
+      timeout: 2s
+      retries: 20
+  api:
+    image: python:3.12-alpine
+    command: ["python", "-u", "/app/service.py"]
+    environment:
+      ORDEAL_ROLE: api
+    init: true
+    volumes:
+      - ./service.py:/app/service.py:ro
+    depends_on:
+      worker:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:18082:8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=1)
+      interval: 1s
+      timeout: 2s
+      retries: 20

@@ -397,6 +397,13 @@ class TestCLI:
             return ModuleAudit(module=str(module))
 
         monkeypatch.setattr(audit_mod, "audit", fake_audit)
+        monkeypatch.setattr(
+            cli,
+            "_canonical_surface_groups_for_targets",
+            lambda *args, **kwargs: pytest.fail(
+                "ordinary audit rendering must consume ModuleAudit.surface"
+            ),
+        )
 
         rc = main(["audit", str(module_path), "--json"])
 

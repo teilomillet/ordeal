@@ -7,7 +7,8 @@ import pytest
 from hypothesis import settings
 from hypothesis.stateful import invariant, rule
 
-from ordeal.chaos import ChaosTest, RuleTimeoutError, chaos_test
+from ordeal import chaos as chaos_module
+from ordeal.chaos import ChaosTest, RuleTimeoutError, chaos_test, rule_timeout_context
 from ordeal.faults import LambdaFault
 
 _has_sigalrm = hasattr(signal, "SIGALRM")
@@ -169,6 +170,25 @@ def test_rule_timeout_interrupts_hanging_rule():
     TestCase.settings = settings(max_examples=1, stateful_step_count=3)
     with pytest.raises(RuleTimeoutError, match="timed out after"):
         TestCase().runTest()
+
+
+@pytest.mark.skipif(not _has_sigalrm, reason="SIGALRM not available on Windows")
+def test_rule_timeout_context_installs_one_handler_for_multiple_rules(monkeypatch):
+    """Explorer's context moves handler swaps out of the per-rule hot path."""
+    wrapped = chaos_module._wrap_rule_with_timeout(lambda: None, 1.0)
+    original_signal = signal.signal
+    calls = []
+
+    def counting_signal(signum, handler):
+        calls.append((signum, handler))
+        return original_signal(signum, handler)
+
+    monkeypatch.setattr(chaos_module.signal, "signal", counting_signal)
+    with rule_timeout_context():
+        wrapped()
+        wrapped()
+
+    assert len(calls) == 2  # one install and one restoration for the whole context
 
 
 class FastChaos(ChaosTest):

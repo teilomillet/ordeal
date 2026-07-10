@@ -140,6 +140,22 @@ class TestFitUSL:
         assert sigma == pytest.approx(0.0, abs=1e-6)
         assert kappa == pytest.approx(0.0, abs=1e-6)
 
+    def test_refits_sigma_when_kappa_hits_non_negative_boundary(self):
+        """A negative unconstrained kappa must trigger a kappa=0 refit."""
+        data = [
+            (1, 1.0),
+            (2, 1.8639328984156571),
+            (4, 3.4158838599487624),
+            (8, 6.808510638297872),
+        ]
+
+        sigma, kappa = fit_usl(data)
+
+        assert sigma == pytest.approx(0.0306949153)
+        assert kappa == 0.0
+        assert usl(8, sigma, kappa) / 8 == pytest.approx(0.8231368)
+        assert data[-1][1] / 8 == pytest.approx(0.8510638)
+
     def test_too_few_points_raises(self):
         with pytest.raises(ValueError, match="at least 3"):
             fit_usl([(1, 1.0), (2, 1.8)])
@@ -182,7 +198,47 @@ class TestAnalyze:
         text = result.summary()
         assert "sigma" in text
         assert "kappa" in text
-        assert "Predicted scaling" in text
+        assert "R^2 (throughput)" in text
+        assert "sigma 95% CI" in text
+        assert "Observed vs fitted scaling" in text
+        assert "observed" in text
+        assert "fitted" in text
+
+    def test_analysis_reports_residuals_and_confidence_intervals(self):
+        data = [(n, usl(n, 0.05, 0.002)) for n in [1, 2, 4, 8, 16]]
+
+        result = analyze(data)
+
+        assert result.fit_status == "conclusive"
+        assert result.r_squared == pytest.approx(1.0)
+        assert result.rmse == pytest.approx(0.0, abs=1e-12)
+        assert result.max_relative_error == pytest.approx(0.0, abs=1e-12)
+        assert result.sigma_ci is not None
+        assert result.kappa_ci is not None
+        assert [n for n, _residual in result.residuals] == [float(n) for n, _c in data]
+        assert [residual for _n, residual in result.residuals] == pytest.approx(
+            [0.0] * len(data), abs=1e-12
+        )
+
+    def test_poor_fit_is_inconclusive(self):
+        data = [(1, 1.0), (2, 1.9), (4, 1.1), (8, 7.0), (16, 1.2)]
+
+        result = analyze(data)
+
+        assert result.fit_status == "inconclusive"
+        assert result.regime == "inconclusive"
+        assert result.fit_reason is not None
+        assert "Fit is inconclusive" in result.summary()
+
+    def test_too_few_points_for_fit_quality_is_inconclusive(self):
+        data = [(n, usl(n, 0.05, 0.002)) for n in [1, 2, 4]]
+
+        result = analyze(data)
+
+        assert result.fit_status == "inconclusive"
+        assert result.sigma_ci is None
+        assert result.kappa_ci is None
+        assert "three informative worker counts" in (result.fit_reason or "")
 
     def test_efficiency(self):
         data = [(n, usl(n, 0.1, 0.001)) for n in [1, 2, 4, 8, 16]]

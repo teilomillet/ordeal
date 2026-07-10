@@ -50,7 +50,7 @@ result = explorer.run(max_time=60)
 print(result.summary())
 ```
 
-`result` is an `ExplorationResult` with fields: `total_runs`, `total_steps`, `unique_edges`, `checkpoints_saved`, `failures`, `duration_seconds`, `traces`.
+`result` is an `ExplorationResult` with fields: `total_runs`, `total_steps`, `unique_edges`, `checkpoints_saved`, `failures`, `duration_seconds`, `traces`, and coordination metadata when parallelism is active.
 
 ### CLI
 
@@ -217,6 +217,21 @@ Maximum number of checkpoints in the corpus. When the corpus is full, the lowest
 - Each checkpoint stores a snapshot of your ChaosTest instance's state dict (skipping heavy Fault objects). If your test class holds large user state (big data structures, many objects), each checkpoint consumes that much memory. Monitor memory usage if you increase this significantly.
 - Increase to 512-1024 for systems with many distinct interesting states. If you see the edge count still climbing when the checkpoint corpus is already full, you may benefit from keeping more checkpoints alive.
 - Decrease to 64-128 for memory-constrained environments or when each checkpoint is large.
+
+### Fast checkpoint protocol
+
+For a checkpoint-heavy state machine, override both methods below. `clone_checkpoint_state()` must return state that is already independent from the live machine; `restore_checkpoint_state()` must not retain mutable references into that snapshot. Explorer then skips its redundant restore deepcopy. Existing `checkpoint_snapshot_filter()` and restore hooks keep the conservative copy path.
+
+```python
+def clone_checkpoint_state(self):
+    return {"phase": self.phase, "queue": tuple(self.queue)}
+
+def restore_checkpoint_state(self, snapshot):
+    self.phase = snapshot["phase"]
+    self.queue = list(snapshot["queue"])
+```
+
+When restores are a large share of runtime and a rolling checkpoint window finds no new edges, Explorer temporarily reduces checkpoint starts. A productive checkpoint gradually restores the configured probability.
 
 ### `seed`
 
@@ -782,7 +797,7 @@ Workers collaborate through two mechanisms, both enabled by default:
 
 **Shared edge bitmap** (`share_edges=True`): a 64KB shared-memory buffer where each byte marks a discovered edge hash. When worker 3 finds edge `0xAB12`, workers 1-8 see it immediately and skip it. Single-byte writes are atomic -- zero locks needed. This prevents workers from wasting time rediscovering edges another worker already found.
 
-**Shared checkpoint pool** (`share_checkpoints=True`): when a worker discovers a significant new state (2+ new edges), it publishes the machine state as a pickle file to a shared temporary directory. Other workers poll this directory every 2 seconds and load new checkpoints into their local corpus with initial energy equal to the discovery reward. This means one worker can branch from a state another worker discovered -- the difference between "8 independent explorers" and "8 explorers collaborating on the same search."
+**Shared checkpoint pool** (`share_checkpoints=True`): when a worker discovers a significant new state (2+ new edges), it publishes the machine state to a shared-memory ring. Other workers import that checkpoint into their local corpus with initial energy equal to the discovery reward. This means one worker can branch from a state another worker discovered -- the difference between "8 independent explorers" and "8 explorers collaborating on the same search."
 
 Either mechanism can be disabled independently:
 
@@ -822,6 +837,21 @@ max_time = 300
 workers = 0       # auto (default)
 ```
 
+When shared-memory coordination is unavailable, Explorer keeps process
+parallelism whenever it can:
+
+```text
+shared edges + checkpoints
+-> shared edges only
+-> independent multiprocess workers
+-> sequential (only when the worker pool fails)
+```
+
+`result.summary()` reports the active coordination mode and any degradation
+reason. Independent workers still aggregate final edges and failures, but do
+not exchange checkpoints or deduplicate discoveries during exploration; compare
+bugs and edges found alongside throughput before choosing that mode.
+
 ### Measuring scaling with `ordeal benchmark`
 
 The `ordeal benchmark` CLI measures your actual sigma (contention) and kappa (coherence) by running exploration at N=1, 2, 4, 8... workers and fitting the Universal Scaling Law:
@@ -837,15 +867,18 @@ Example output:
 
 ```
 Scaling Analysis (Universal Scaling Law)
-  sigma (contention):  0.080755
-  kappa (coherence):   0.005578
-  Regime:              usl
-  Optimal workers:     13.4
-  Peak throughput:     7.64x
+  sigma (contention):  0.030695
+  kappa (coherence):   0.000000
+  Regime:              amdahl
+  Fit status:          CONCLUSIVE
+  Approx. sigma 95% CI: [0.000000, 0.789053]
+  Approx. kappa 95% CI: [0.000000, 0.101648]
+  R^2 (throughput):    0.9909
+  RMSE (throughput):   0.1972x
+  Max rel. residual:   7.2%
 
-  Diagnosis:
-    Contention (sigma): 8.1% serialized fraction.
-    Coherence (kappa):  0.005578 cross-worker sync cost.
+  Observed vs fitted scaling:
+    N=  8: observed 6.81x (85.1% efficient), fitted 6.59x (82.3% efficient)
 ```
 
 **Reading the results:**
@@ -853,6 +886,8 @@ Scaling Analysis (Universal Scaling Law)
 - **kappa** is the cross-worker coordination cost (edge bitmap sync). Zero means fully independent.
 - **Optimal workers** is where adding more starts hurting. Beyond this, kappa's quadratic cost outweighs throughput.
 - **Regime**: `linear` (perfect), `amdahl` (bounded by sigma), or `usl` (bounded by both).
+- **Fit status** becomes `INCONCLUSIVE` when there are too few informative worker counts, R² is below 0.90, or any relative residual exceeds 20%. Use the observed measurements instead of USL projections in that case.
+- **Confidence intervals** are approximate regression intervals. Wide intervals mean the coefficients are not well identified even when the curve fit is conclusive.
 
 If `n_optimal` is low (< 4), your test has high contention. If it's high (> 16), you're scaling well.
 

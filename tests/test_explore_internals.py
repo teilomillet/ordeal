@@ -514,7 +514,7 @@ class TestParallelHardeningHelpers:
         assert reason is not None
         assert "0 edges discovered" in reason
 
-    def test_run_parallel_reruns_sequential_on_suspicious_result(self, monkeypatch):
+    def test_run_parallel_reports_suspicious_result_without_going_sequential(self, monkeypatch):
         crash = explore_mod._serialize_failure_payload(
             RuntimeError("boom"),
             worker_id=0,
@@ -556,13 +556,6 @@ class TestParallelHardeningHelpers:
 
         monkeypatch.setattr(explore_mod.mp, "get_context", lambda _: _DummyContext())
 
-        def _fake_rerun(self, **kwargs):
-            result = ExplorationResult(total_runs=1, total_steps=1, unique_edges=1)
-            result.parallel_fallback_reason = kwargs["reason"]
-            return result
-
-        monkeypatch.setattr(explore_mod.Explorer, "_rerun_sequential_after_parallel", _fake_rerun)
-
         explorer = explore_mod.Explorer(
             _CounterChaos,
             target_modules=["tests"],
@@ -580,27 +573,50 @@ class TestParallelHardeningHelpers:
             progress=None,
         )
 
-        assert "0 edges discovered" in result.parallel_fallback_reason
+        assert result.coordination_mode == "independent_workers"
+        assert "0 edges discovered" in result.parallel_result_warning
+        assert result.parallel_fallback_reason == ""
 
-    def test_shared_memory_failure_falls_back_in_parent(self, monkeypatch):
+    def test_shared_memory_failure_keeps_independent_workers(self, monkeypatch):
         def unavailable(*args, **kwargs):
             raise PermissionError("shared memory denied")
 
         monkeypatch.setattr("multiprocessing.shared_memory.SharedMemory", unavailable)
+        captured_args = []
+        worker_results = [
+            {
+                "worker_id": i,
+                "worker_error": None,
+                "failures": [],
+                "total_runs": 1,
+                "total_steps": 1,
+                "checkpoints_saved": 0,
+                "duration_seconds": 0.1,
+                "edge_log": [],
+                "edges": [i],
+                "traces": [],
+            }
+            for i in range(2)
+        ]
+
+        class _DummyPool:
+            def map(self, fn, args):
+                captured_args.extend(args)
+                return worker_results
+
+        class _DummyContext:
+            def Pool(self, worker_count):
+                assert worker_count == 2
+                return _DummyPool()
+
+        monkeypatch.setattr(explore_mod.mp, "get_context", lambda _: _DummyContext())
         explorer = explore_mod.Explorer(
             _CounterChaos,
             target_modules=["tests"],
             workers=2,
             share_edges=True,
-            share_checkpoints=False,
+            share_checkpoints=True,
         )
-
-        def fake_rerun(**kwargs):
-            result = ExplorationResult(total_runs=1, total_steps=1, unique_edges=1)
-            result.parallel_fallback_reason = kwargs["reason"]
-            return result
-
-        monkeypatch.setattr(explorer, "_rerun_sequential_after_parallel", fake_rerun)
         result = explorer._run_parallel(
             max_time=0.1,
             max_runs=2,
@@ -611,8 +627,106 @@ class TestParallelHardeningHelpers:
             progress=None,
         )
 
-        assert "shared memory unavailable" in result.parallel_fallback_reason
-        assert "PermissionError" in result.parallel_fallback_reason
+        assert result.coordination_mode == "independent_workers"
+        assert "shared edge/state memory unavailable" in result.coordination_degraded_reason
+        assert "PermissionError" in result.coordination_degraded_reason
+        assert result.parallel_fallback_reason == ""
+        assert all(arg["shared_edges_name"] is None for arg in captured_args)
+        assert all(arg["shared_state_name"] is None for arg in captured_args)
+        assert all(arg["ring_shm_name"] is None for arg in captured_args)
+
+    def test_checkpoint_memory_failure_keeps_shared_edges(self, monkeypatch):
+        regions = []
+        fail_checkpoint_memory = False
+
+        class _Region:
+            def __init__(self, *, create, size):
+                assert create is True
+                if fail_checkpoint_memory and size == explore_mod._POOL_RING_SIZE:
+                    raise PermissionError("checkpoint memory denied")
+                self.name = f"region-{len(regions)}"
+                self.buf = bytearray(size)
+                self.closed = False
+                self.unlinked = False
+                regions.append(self)
+
+            def close(self):
+                self.closed = True
+
+            def unlink(self):
+                self.unlinked = True
+
+        monkeypatch.setattr("multiprocessing.shared_memory.SharedMemory", _Region)
+        captured_args = []
+        worker_results = [
+            {
+                "worker_id": i,
+                "worker_error": None,
+                "failures": [],
+                "total_runs": 1,
+                "total_steps": 1,
+                "checkpoints_saved": 0,
+                "duration_seconds": 0.1,
+                "edge_log": [],
+                "edges": [i],
+                "traces": [],
+            }
+            for i in range(2)
+        ]
+
+        class _DummyPool:
+            def map(self, fn, args):
+                captured_args.extend(args)
+                return worker_results
+
+        class _DummyContext:
+            def Pool(self, worker_count):
+                assert worker_count == 2
+                return _DummyPool()
+
+        monkeypatch.setattr(explore_mod.mp, "get_context", lambda _: _DummyContext())
+        explorer = explore_mod.Explorer(
+            _CounterChaos,
+            target_modules=["tests"],
+            workers=2,
+            share_edges=True,
+            share_checkpoints=True,
+        )
+
+        fully_shared = explorer._run_parallel(
+            max_time=0.1,
+            max_runs=2,
+            steps_per_run=1,
+            shrink=False,
+            max_shrink_time=0.1,
+            patience=0,
+            progress=None,
+        )
+
+        assert fully_shared.coordination_mode == "shared_edges_and_checkpoints"
+        assert all(arg["shared_edges_name"] for arg in captured_args)
+        assert all(arg["shared_state_name"] for arg in captured_args)
+        assert all(arg["ring_shm_name"] for arg in captured_args)
+
+        captured_args.clear()
+        fail_checkpoint_memory = True
+        result = explorer._run_parallel(
+            max_time=0.1,
+            max_runs=2,
+            steps_per_run=1,
+            shrink=False,
+            max_shrink_time=0.1,
+            patience=0,
+            progress=None,
+        )
+
+        assert result.coordination_mode == "shared_edges"
+        assert "shared checkpoint memory unavailable" in result.coordination_degraded_reason
+        assert "PermissionError" in result.coordination_degraded_reason
+        assert all(arg["shared_edges_name"] for arg in captured_args)
+        assert all(arg["shared_state_name"] for arg in captured_args)
+        assert all(arg["ring_shm_name"] is None for arg in captured_args)
+        assert all(region.closed and region.unlinked for region in regions)
 
     def test_worker_pool_hang_times_out_and_falls_back_in_parent(self, monkeypatch):
         lifecycle = {"terminated": False, "joined": False}
@@ -663,7 +777,56 @@ class TestParallelHardeningHelpers:
         )
 
         assert lifecycle == {"terminated": True, "joined": True}
+        assert result.coordination_mode == "sequential"
         assert "worker pool exceeded parent timeout" in result.parallel_fallback_reason
+
+    def test_worker_pool_error_falls_back_to_sequential(self, monkeypatch):
+        class BrokenPool:
+            def map(self, fn, args):
+                raise ValueError("pool IPC failed")
+
+            def terminate(self):
+                pass
+
+            def join(self):
+                pass
+
+        class BrokenContext:
+            def Pool(self, worker_count):
+                assert worker_count == 2
+                return BrokenPool()
+
+        monkeypatch.setattr(explore_mod.mp, "get_context", lambda _: BrokenContext())
+        explorer = explore_mod.Explorer(
+            _CounterChaos,
+            target_modules=["tests"],
+            workers=2,
+            share_edges=False,
+            share_checkpoints=False,
+        )
+
+        def fake_rerun(**kwargs):
+            result = ExplorationResult(total_runs=1, total_steps=1, unique_edges=1)
+            result.coordination_mode = "sequential"
+            result.parallel_fallback_reason = kwargs["reason"]
+            return result
+
+        monkeypatch.setattr(explorer, "_rerun_sequential_after_parallel", fake_rerun)
+        result = explorer._run_parallel(
+            max_time=0.1,
+            max_runs=2,
+            steps_per_run=1,
+            shrink=False,
+            max_shrink_time=0.1,
+            patience=0,
+            progress=None,
+        )
+
+        assert result.coordination_mode == "sequential"
+        assert (
+            "worker pool unavailable: ValueError: pool IPC failed"
+            in result.parallel_fallback_reason
+        )
 
 
 class TestProgressSnapshot:

@@ -341,6 +341,8 @@ Use `--list-targets` to inspect the callable surface that audit can see, includi
 
 `--validation-mode fast` replays mined inputs against each mutant and is the default because it is much faster. `--validation-mode deep` keeps that replay check and then re-runs `mine()` on each mutant, which is slower but keeps the broader exploratory search.
 
+Audit validation uses one worker by default. `--workers N` uses isolated processes with deterministic per-target seeds and parent-ordered evidence merging. Treat it as an isolation control: ordeal does not claim that more audit workers are faster.
+
 `audit` now reads `[audit]` from `ordeal.toml` too. That means module lists, direct-test gates, fixture-completeness thresholds, validation depth, and gap-writing defaults can live in config and be reused by both humans and agents. Shared `[[objects]]` entries are expanded automatically, and `[[audit.targets]]` lets you override a factory, state factory, teardown, harness, or limit audit to selected methods.
 
 `audit` also emits ready-to-paste config suggestions now. The text report includes a `Suggested ordeal.toml:` block with `[audit]` defaults and any mined `[[objects]]` harness entries for uncovered or exploratory methods. Those harness entries are ranked from observed evidence in nearby tests, support files, and docs, and the same payload is available to agents under `raw_details.config_suggestions`.
@@ -438,16 +440,25 @@ ordeal benchmark --mutate myapp.scoring.compute --repeat 5 --workers 2
 
 ```
 Scaling Analysis (Universal Scaling Law)
-  sigma (contention):  0.080755
-  kappa (coherence):   0.005578
-  Regime:              usl
-  Optimal workers:     13.4
-  Peak throughput:     7.64x
+  sigma (contention):  0.030695
+  kappa (coherence):   0.000000
+  Regime:              amdahl
+  Fit status:          CONCLUSIVE
+  Approx. sigma 95% CI: [0.000000, 0.789053]
+  Approx. kappa 95% CI: [0.000000, 0.101648]
+  R^2 (throughput):    0.9909
+  RMSE (throughput):   0.1972x
+  Max rel. residual:   7.2%
 
-  Diagnosis:
-    Contention (sigma): 8.1% serialized fraction.
-    Coherence (kappa):  0.005578 cross-worker sync cost.
+  Observed vs fitted scaling:
+    N=  8: observed 6.81x (85.1% efficient), fitted 6.59x (82.3% efficient)
 ```
+
+The fitter enforces non-negative coefficients and refits on a constraint
+boundary. The report includes residuals, throughput R², approximate 95%
+coefficient intervals, and observed efficiency beside fitted efficiency. A fit
+with fewer than three informative worker counts, R² below 0.90, or a relative
+residual above 20% is `INCONCLUSIVE`; do not use its optimal-worker projection.
 
 For checked-in benchmark contracts, `--perf-contract` enforces both latency and audit-quality drift in CI. Add `--output-json perf.json` when an agent or CI job needs machine-readable results:
 

@@ -74,7 +74,7 @@ build-backend = "setuptools.build_meta"
 include = ["ordeal*"]
 
 [tool.setuptools.package-data]
-ordeal = ["py.typed", "SKILL.md"]
+ordeal = ["py.typed", "SKILL.md", "**/*.pyi"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

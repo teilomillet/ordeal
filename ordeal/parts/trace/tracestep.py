@@ -1,0 +1,458 @@
+from __future__ import annotations
+# ruff: noqa
+import base64
+import functools
+import json
+import time as _time
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable
+if TYPE_CHECKING:
+    from ordeal.chaos import ChaosTest
+# ============================================================================
+# Trace data structures
+# ============================================================================
+
+
+@dataclass
+class TraceStep:
+    """A single step in an exploration trace.
+
+    ``active_faults`` is populated on ``fault_toggle`` steps (the
+    snapshot after the toggle).  On ``rule`` steps it defaults to
+    ``[]`` — the active set is derivable from the preceding
+    ``fault_toggle`` steps in the trace.
+    """
+
+    kind: str  # "rule" | "fault_toggle" | "api_call" | "rule_swarm"
+    name: str  # rule name, "+fault_name"/"-fault_name", or "GET /items"
+    params: dict[str, Any] = field(default_factory=dict)
+    active_faults: list[str] = field(default_factory=list)
+    edge_count: int = 0
+    timestamp_offset: float = 0.0
+    properties_observed: list[str] = field(default_factory=list)
+    native_boundary: dict[str, Any] | None = None
+    # Populated only for kind="api_call":
+    status_code: int | None = None
+    endpoint: str | None = None
+@dataclass
+class TraceFailure:
+    """Serializable failure info (no live Exception reference)."""
+
+    error_type: str
+    error_message: str
+    step: int
+    native_boundary: dict[str, Any] | None = None
+@dataclass
+class Trace:
+    """Complete trace of one exploration run."""
+
+    run_id: int
+    seed: int
+    test_class: str  # "module.path:ClassName"
+    from_checkpoint: int | None  # checkpoint run_id, or None
+    steps: list[TraceStep] = field(default_factory=list)
+    failure: TraceFailure | None = None
+    edges_discovered: int = 0
+    duration: float = 0.0
+
+    # -- Serialization ------------------------------------------------------
+
+    def content_hash(self) -> str:
+        """Stable SHA256 hash of trace content for dedup-safe filenames."""
+        import hashlib
+
+        canonical = json.dumps(self.to_dict(), sort_keys=True, default=str)
+        return hashlib.sha256(canonical.encode()).hexdigest()[:12]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to a JSON-serializable dict."""
+        return _sanitize(asdict(self))
+
+    def save(self, path: str | Path) -> None:
+        """Write trace to a JSON file.
+
+        If *path* ends with ``.gz`` (e.g. ``trace.json.gz``), the
+        output is gzip-compressed — typically 5-10x smaller than
+        plain JSON, useful for long exploration runs.
+        """
+        import gzip as _gzip
+
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        data = json.dumps(asdict(self), cls=_TraceEncoder, indent=2)
+        if p.suffix == ".gz":
+            with _gzip.open(p, "wt", encoding="utf-8") as f:
+                f.write(data)
+        else:
+            with open(p, "w") as f:
+                f.write(data)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Trace:
+        """Reconstruct a Trace from a dict (loaded from JSON)."""
+        steps = [TraceStep(**s) for s in data.get("steps", [])]
+        fail_data = data.get("failure")
+        failure = TraceFailure(**fail_data) if fail_data else None
+        return cls(
+            run_id=data["run_id"],
+            seed=data["seed"],
+            test_class=data["test_class"],
+            from_checkpoint=data.get("from_checkpoint"),
+            steps=steps,
+            failure=failure,
+            edges_discovered=data.get("edges_discovered", 0),
+            duration=data.get("duration", 0.0),
+        )
+
+    @classmethod
+    def load(cls, path: str | Path) -> Trace:
+        """Load a trace from a JSON file.
+
+        Automatically detects gzip-compressed files (``.gz`` suffix).
+        """
+        import gzip as _gzip
+
+        p = Path(path)
+        if p.suffix == ".gz":
+            with _gzip.open(p, "rt", encoding="utf-8") as f:
+                data = json.load(f, cls=_TraceDecoder)
+        else:
+            with open(p) as f:
+                data = json.load(f, cls=_TraceDecoder)
+        return cls.from_dict(data)
+# ============================================================================
+# Direct dict sanitization (avoids JSON round-trip in to_dict)
+# ============================================================================
+
+
+def _sanitize(obj: Any) -> Any:
+    """Recursively convert non-JSON-native types to serializable equivalents.
+
+    Applies the same conversions as ``_TraceEncoder`` (bytes → base64,
+    sets → sorted lists, exceptions → dicts) but builds the result dict
+    directly instead of round-tripping through ``json.dumps``/``json.loads``.
+    """
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(v) for v in obj]
+    if isinstance(obj, bytes):
+        return {"__bytes__": base64.b64encode(obj).decode()}
+    if isinstance(obj, (set, frozenset)):
+        try:
+            return {"__set__": sorted(obj)}
+        except TypeError:
+            return {"__set__": list(obj)}
+    if isinstance(obj, Exception):
+        return {"__error__": str(obj), "__type__": type(obj).__name__}
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    return {"__repr__": repr(obj)}
+# ============================================================================
+# JSON encoder/decoder for non-standard types (used by save/load)
+# ============================================================================
+
+
+def _encode_bytes(obj: Any) -> dict:
+    return {"__bytes__": base64.b64encode(obj).decode()}
+def _encode_set(obj: Any) -> dict:
+    try:
+        return {"__set__": sorted(obj)}
+    except TypeError:
+        return {"__set__": list(obj)}
+# Dispatch table: one dict lookup instead of cascading isinstance.
+# Exception subclasses are handled by a fallback isinstance check
+# since they can't all be registered here.
+_ENCODE_DISPATCH: dict[type, Callable[[Any], dict]] = {
+    bytes: _encode_bytes,
+    bytearray: _encode_bytes,
+    set: _encode_set,
+    frozenset: _encode_set,
+}
+class _TraceEncoder(json.JSONEncoder):
+    def default(self, obj: Any) -> Any:
+        handler = _ENCODE_DISPATCH.get(type(obj))
+        if handler is not None:
+            return handler(obj)
+        if isinstance(obj, Exception):
+            return {"__error__": str(obj), "__type__": type(obj).__name__}
+        return {"__repr__": repr(obj)}
+class _TraceDecoder(json.JSONDecoder):
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(object_hook=self._decode, **kwargs)
+
+    @staticmethod
+    def _decode(obj: dict) -> Any:
+        if "__bytes__" in obj:
+            return base64.b64decode(obj["__bytes__"])
+        if "__set__" in obj:
+            return set(obj["__set__"])
+        return obj
+# ============================================================================
+# Replay
+# ============================================================================
+
+
+def replay(
+    trace: Trace,
+    test_class: type | None = None,
+) -> Exception | None:
+    """Replay a trace, returning the exception if it reproduces.
+
+    Args:
+        trace: The trace to replay.
+        test_class: Override the class (default: import from trace metadata).
+
+    Returns:
+        The exception if the failure reproduces, or ``None``.
+    """
+    if test_class is None:
+        test_class = _import_class(trace.test_class)
+
+    return _replay_steps(trace.steps, test_class)
+def _replay_steps(
+    steps: list[TraceStep],
+    test_class: type,
+) -> Exception | None:
+    """Replay a step sequence on a fresh machine. Returns exception or None."""
+    machine = test_class()
+    invariant_methods = _get_invariant_methods(type(machine))
+    fault_index = {f.name: f for f in machine._faults}
+    try:
+        for step in steps:
+            if step.kind == "fault_toggle":
+                _replay_fault_toggle(fault_index, step.name)
+            elif step.kind == "rule":
+                _replay_rule(machine, step.name, step.params)
+            elif step.kind == "rule_swarm":
+                continue  # metadata — replay uses the rule steps that follow
+            # Check invariants after every step
+            for method in invariant_methods:
+                method(machine)
+    except Exception as e:
+        return e
+    finally:
+        machine.teardown()
+    return None
+def _replay_fault_toggle(fault_index: dict[str, Any], name: str) -> None:
+    """Toggle a fault by its signed name ('+fault' or '-fault').
+
+    Uses a pre-built ``{name: fault}`` dict for O(1) lookup instead
+    of scanning the fault list on every toggle.
+    """
+    if name.startswith("+"):
+        f = fault_index.get(name[1:])
+        if f is not None:
+            f.activate()
+    elif name.startswith("-"):
+        f = fault_index.get(name[1:])
+        if f is not None:
+            f.deactivate()
+def _replay_rule(machine: ChaosTest, name: str, params: dict[str, Any]) -> None:
+    """Call a rule method with recorded parameters."""
+    method = getattr(machine, name)
+    # Filter out non-serializable proxy params
+    clean_params = {k: v for k, v in params.items() if k != "data"}
+    if "data" in params:
+        from ordeal.explore import _DataProxy
+
+        clean_params["data"] = _DataProxy()
+    try:
+        method(**clean_params)
+    except TypeError:
+        method()  # fallback: call with no args
+@functools.lru_cache(maxsize=32)
+def _get_invariant_methods(cls: type) -> tuple[Callable, ...]:
+    """Return unbound invariant methods for *cls*, cached per class.
+
+    Avoids walking ``dir()`` on every step during replay and shrinking.
+    The tuple of unbound methods is built once per class and reused
+    across all subsequent replays of that class.
+    """
+    methods: list[Callable] = []
+    for name in dir(cls):
+        attr = getattr(cls, name, None)
+        if attr is not None and hasattr(attr, "hypothesis_stateful_invariant"):
+            methods.append(attr)
+    return tuple(methods)
+def _import_class(class_path: str) -> type:
+    """Import 'module.path:ClassName'.
+
+    Raises ``ValueError`` if the format is invalid (no ``:`` separator).
+    """
+    import importlib
+
+    if ":" not in class_path:
+        raise ValueError(f"Invalid class path: {class_path!r} — expected 'module.path:ClassName'")
+    module_path, class_name = class_path.rsplit(":", 1)
+    module = importlib.import_module(module_path)
+    return getattr(module, class_name)
+# ============================================================================
+# Shrinking
+# ============================================================================
+
+
+def shrink(
+    trace: Trace,
+    test_class: type | None = None,
+    *,
+    max_time: float = 30.0,
+) -> Trace:
+    """Shrink a failing trace to the minimal reproducing sequence.
+
+    Three phases, applied iteratively until fixpoint:
+
+    1. **Delta debugging**: remove large chunks (halves, quarters, ...)
+    2. **Single-step elimination**: try removing each step individually
+    3. **Fault simplification**: remove unnecessary fault toggle pairs
+
+    Args:
+        trace: A trace whose failure should reproduce.
+        test_class: Override the class (default: import from trace metadata).
+        max_time: Wall-clock time limit for shrinking.
+
+    Returns:
+        A new Trace with the minimal step sequence.
+    """
+    if test_class is None:
+        test_class = _import_class(trace.test_class)
+
+    steps = list(trace.steps)
+    start = _time.monotonic()
+    prev_len = len(steps) + 1
+
+    while len(steps) < prev_len:
+        if _time.monotonic() - start > max_time:
+            break
+        prev_len = len(steps)
+        steps = _shrink_ddmin(steps, test_class)
+        steps = _shrink_one_by_one(steps, test_class)
+        steps = _shrink_faults(steps, test_class)
+
+    shrunk = Trace(
+        run_id=trace.run_id,
+        seed=trace.seed,
+        test_class=trace.test_class,
+        from_checkpoint=None,
+        steps=steps,
+        failure=trace.failure,
+        edges_discovered=trace.edges_discovered,
+        duration=trace.duration,
+    )
+    return shrunk
+def _shrink_ddmin(steps: list[TraceStep], test_class: type) -> list[TraceStep]:
+    """Delta debugging: remove the largest possible chunks."""
+    granularity = 2
+    while granularity <= len(steps):
+        chunk_size = max(1, len(steps) // granularity)
+        i = 0
+        removed_any = False
+        while i < len(steps):
+            candidate = steps[:i] + steps[i + chunk_size :]
+            if _replay_steps(candidate, test_class) is not None:
+                steps = candidate
+                removed_any = True
+            else:
+                i += chunk_size
+        if removed_any:
+            granularity = 2
+        else:
+            granularity *= 2
+    return steps
+def _shrink_one_by_one(steps: list[TraceStep], test_class: type) -> list[TraceStep]:
+    """Try removing each step individually."""
+    i = 0
+    while i < len(steps):
+        candidate = steps[:i] + steps[i + 1 :]
+        if _replay_steps(candidate, test_class) is not None:
+            steps = candidate
+        else:
+            i += 1
+    return steps
+def _shrink_faults(steps: list[TraceStep], test_class: type) -> list[TraceStep]:
+    """Remove all toggles for each fault and check if failure still reproduces."""
+    fault_names = {s.name.lstrip("+-") for s in steps if s.kind == "fault_toggle"}
+    for fname in fault_names:
+        candidate = [
+            s for s in steps if not (s.kind == "fault_toggle" and s.name.lstrip("+-") == fname)
+        ]
+        if _replay_steps(candidate, test_class) is not None:
+            steps = candidate
+    return steps
+# ============================================================================
+# Fault ablation
+# ============================================================================
+
+
+def ablate_faults(
+    trace: Trace,
+    test_class: type | None = None,
+) -> dict[str, bool]:
+    """Determine which faults are individually necessary for a failure.
+
+    **Phase 1 — individual ablation**: for each fault in the trace,
+    replays without that fault's toggles (all other faults remain).
+    If the failure disappears, the fault is *individually necessary*.
+
+    **Phase 2 — pairwise ablation**: if multiple faults appear
+    individually unnecessary (removing either one still fails because
+    the other compensates), tests removing them in pairs.  A pair
+    where the failure disappears means those faults are *jointly
+    necessary* — neither alone is sufficient, but together they are.
+
+    This answers the Antithesis root-cause question: *"Is it possible
+    to find the bug without fiddling with the clock?"*
+
+    **Epistemic note**: this finds faults that are necessary *for this
+    specific trace*.  A different execution path might reproduce the
+    same bug with a different fault set.
+
+    Args:
+        trace: A failing trace (typically already shrunk).
+        test_class: Override the class (default: import from trace metadata).
+
+    Returns:
+        ``{fault_name: True}`` if the fault is necessary (removing it
+        prevents reproduction), ``{fault_name: False}`` if it is not
+        (failure still reproduces without it).  Empty dict if the trace
+        has no fault toggles.
+    """
+    if test_class is None:
+        test_class = _import_class(trace.test_class)
+
+    fault_names = {s.name.lstrip("+-") for s in trace.steps if s.kind == "fault_toggle"}
+    if not fault_names:
+        return {}
+
+    # Phase 1: individual ablation
+    result: dict[str, bool] = {}
+    for fname in sorted(fault_names):
+        without = [
+            s
+            for s in trace.steps
+            if not (s.kind == "fault_toggle" and s.name.lstrip("+-") == fname)
+        ]
+        error = _replay_steps(without, test_class)
+        result[fname] = error is None
+
+    # Phase 2: pairwise ablation for faults that appear individually unnecessary.
+    # If removing A alone still fails (B compensates) and removing B alone still
+    # fails (A compensates), but removing both A+B fixes it — both are jointly
+    # necessary.  Promote them to necessary=True.
+    unnecessary = [f for f, necessary in result.items() if not necessary]
+    if len(unnecessary) >= 2:
+        for i, fa in enumerate(unnecessary):
+            for fb in unnecessary[i + 1 :]:
+                without_pair = [
+                    s
+                    for s in trace.steps
+                    if not (s.kind == "fault_toggle" and s.name.lstrip("+-") in (fa, fb))
+                ]
+                error = _replay_steps(without_pair, test_class)
+                if error is None:
+                    # Removing both fixes it — both are jointly necessary
+                    result[fa] = True
+                    result[fb] = True
+
+    return result

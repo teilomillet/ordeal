@@ -61,6 +61,8 @@ Base class for stateful chaos tests. Extends Hypothesis's `RuleBasedStateMachine
 | Method | Returns | Description |
 |---|---|---|
 | `active_faults` | `list[Fault]` | Property: currently active faults |
+| `clone_checkpoint_state()` | `dict[str, Any]` | Optional fast, isolated state snapshot for Explorer checkpoints |
+| `restore_checkpoint_state(snapshot)` | `None` | Restore a fast checkpoint without retaining mutable snapshot references |
 | `teardown()` | `None` | Deactivate all faults, clean up |
 
 ```python
@@ -610,9 +612,11 @@ explorer.run(
 ```
 
 The parent process bounds parallel collection beyond the exploration and shrink
-budgets. Shared-memory allocation errors or a worker-pool timeout terminate the
-pool and rerun the same configuration sequentially; the reason is exposed as
-`ExplorationResult.parallel_fallback_reason`.
+budgets. Coordination degrades from shared edges plus checkpoints, to shared
+edges only, to independent multiprocess workers. Only worker-pool creation,
+execution, or timeout failures rerun sequentially. Inspect
+`ExplorationResult.coordination_mode`, `coordination_degraded_reason`, and
+`parallel_fallback_reason` for the exact mode and reason.
 
 | Method | Returns | Description |
 |---|---|---|
@@ -646,6 +650,9 @@ result = explorer.run(
 | `checkpoints_saved` | `int` | Checkpoints in corpus |
 | `failures` | `list[Failure]` | Failures found |
 | `duration_seconds` | `float` | Wall-clock time |
+| `coordination_mode` | `str` | `sequential`, `shared_edges_and_checkpoints`, `shared_edges`, `shared_checkpoints`, or `independent_workers` |
+| `coordination_degraded_reason` | `str` | Why a lower coordination tier was selected, if any |
+| `parallel_fallback_reason` | `str` | Why a worker-pool failure required a sequential rerun, if any |
 | `edge_log` | `list[tuple[int, int]]` | `(run_id, cumulative_edges)` |
 | `traces` | `list[Trace]` | Recorded traces (if `record_traces=True`) |
 | `summary()` | `str` | Human-readable report |
@@ -1472,12 +1479,14 @@ audit(
     *,
     test_dir: str = "tests",       # directory containing existing tests
     max_examples: int = 20,        # Hypothesis examples per function
-    workers: int = 1,              # parallel mutation-validation workers
+    workers: int = 1,              # isolated validation processes; serial by default
     validation_mode: Literal["fast", "deep"] = "fast",
 ) -> ModuleAudit
 ```
 
 Audit a single module: measure existing test coverage vs ordeal-migrated tests. Every number in the result is either `[verified]` or `FAILED: reason` — the audit never silently returns 0%. `validation_mode="fast"` replays mined inputs against mutants. `validation_mode="deep"` keeps that replay check and then re-mines each mutant.
+
+Mutation validation stays serial by default. `workers > 1` isolates targets in clean processes, assigns deterministic target seeds, and merges immutable evidence in target order. This is an evidence-stability control, not a speedup guarantee.
 
 Coverage is measured via coverage.py JSON reports (stable schema), not terminal parsing. Results are cross-checked for consistency. Generated test files are saved to `.ordeal/test_<module>_migrated.py`.
 
@@ -1836,7 +1845,10 @@ peak_throughput(sigma: float, kappa: float) -> float
 fit_usl(measurements: list[tuple[int | float, float]]) -> tuple[float, float]
 ```
 
-Fit sigma and kappa from `(N, throughput)` pairs via least squares. Requires >= 3 data points.
+Fit sigma and kappa from `(N, throughput)` pairs with constrained least squares
+(`0 <= sigma <= 1`, `kappa >= 0`). If the unconstrained solution leaves that
+region, the boundary coefficient is fixed and the other coefficient is
+refitted. Requires >= 3 data points.
 
 ### analyze
 
@@ -1844,7 +1856,12 @@ Fit sigma and kappa from `(N, throughput)` pairs via least squares. Requires >= 
 analyze(measurements: list[tuple[int | float, float]]) -> ScalingAnalysis
 ```
 
-Fit USL and return full analysis with diagnosis.
+Fit USL and return full analysis with diagnosis. Fit quality is conclusive only
+with at least three informative worker counts, throughput R² >= 0.90, and a
+maximum relative residual <= 20%. Otherwise the regime and projections are
+marked inconclusive. Approximate 95% coefficient confidence intervals use the
+linearized regression residuals and are unavailable without residual degrees
+of freedom.
 
 ### benchmark
 
@@ -1942,7 +1959,7 @@ Decorator: assert that a function scales linearly with concurrency. Runs the fun
 | `n_range` | `tuple[int, int]` | `(1, 8)` | `(min_workers, max_workers)` to test |
 | `max_kappa` | `float` | `0.01` | Fail if coherence exceeds this (quadratic overhead) |
 | `max_sigma` | `float` | `0.3` | Fail if contention exceeds this (serial bottleneck) |
-| `samples` | `int` | `3` | Number of worker counts to test between min and max |
+| `samples` | `int` | `4` | Number of worker counts to test between min and max |
 | `time_per_sample` | `float` | `2.0` | Seconds to run at each worker count |
 
 Raises `AssertionError` with diagnostics when thresholds are exceeded. Works as a bare decorator (`@scales_linearly`) or with parameters (`@scales_linearly(max_kappa=0.005)`).
@@ -1955,7 +1972,15 @@ Raises `AssertionError` with diagnostics when thresholds are exceeded. Works as 
 | `kappa` | `float` | Coherence coefficient |
 | `n_optimal` | `float` | Worker count at peak throughput |
 | `peak` | `float` | Maximum achievable throughput multiplier |
-| `regime` | `str` | `"linear"`, `"amdahl"`, or `"usl"` |
+| `regime` | `str` | `"linear"`, `"amdahl"`, `"usl"`, or `"inconclusive"` |
+| `fit_status` | `str` | `"conclusive"` or `"inconclusive"` |
+| `fit_reason` | `str \| None` | Why fit quality was inconclusive |
+| `residuals` | `list[tuple[float, float]]` | Observed minus fitted throughput at each measured worker count |
+| `r_squared` | `float` | R² on observed throughput for worker counts above one |
+| `rmse` | `float` | Root-mean-square throughput residual |
+| `max_relative_error` | `float` | Largest absolute residual relative to observed throughput |
+| `sigma_ci` | `tuple[float, float] \| None` | Approximate 95% confidence interval |
+| `kappa_ci` | `tuple[float, float] \| None` | Approximate 95% confidence interval |
 | `efficiency(n)` | `float` | Parallel efficiency C(N)/N at N workers |
 | `throughput(n)` | `float` | Predicted relative throughput at N workers |
 | `summary()` | `str` | Human-readable report with diagnosis |

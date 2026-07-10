@@ -28,6 +28,10 @@ use the prefix `property:`.
 Each property-strength row has `name`, `holds`, `total`, `mutants_killed`,
 `mutants_tested`, and `status`.
 
+`MutationResult.epistemic_view()` also records
+`validation_sample_matrix_sha256`, the SHA-256 digest of the deterministic
+sample matrix replayed against every mutant.
+
 ## ModuleAudit.test_protection_view
 
 ```python
@@ -58,6 +62,11 @@ validation.
 
 The Python mutation view returns property names in its two convenience lists;
 the module audit view returns full rows because it aggregates multiple targets.
+
+Each row in `ModuleAudit.mutation_targets` also carries `validation_seed`,
+`mutant_ids`, and `killed_mutant_ids`. Mutant IDs are stable hashes of the
+target and mutation site, so runs with different audit worker counts can be
+compared without relying on completion order.
 
 ## CLI JSON path
 

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import copy
 import pickle
-from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
@@ -216,6 +215,52 @@ class TestCheckpointHooks:
         assert restored.counter == 3
         assert restored.client == "recreated"
         assert restored.rebuilt is True
+
+
+class _FastCheckpointChaos(ChaosTest):
+    """Uses the opt-in clone/restore protocol without Explorer deep copies."""
+
+    faults: ClassVar[list[Fault]] = []
+
+    def __init__(self):
+        super().__init__()
+        self.values = [1, 2]
+        self.restore_input: dict[str, object] | None = None
+
+    def clone_checkpoint_state(self) -> dict[str, object]:
+        return {"values": list(self.values)}
+
+    def restore_checkpoint_state(self, snapshot: dict[str, object]) -> None:
+        self.restore_input = snapshot
+        self.values = list(snapshot["values"])
+
+
+class TestFastCheckpointProtocol:
+    def test_protocol_bypasses_explorer_copy_but_keeps_restored_state_isolated(self):
+        explorer = Explorer(_FastCheckpointChaos, workers=1)
+        machine = _FastCheckpointChaos()
+        snapshot = explorer._snapshot_machine(machine)
+
+        restored = explorer._restore_machine(snapshot)
+
+        assert restored.restore_input is snapshot.state_dict
+        restored.values.append(3)
+        assert snapshot.state_dict["values"] == [1, 2]
+
+    def test_expensive_unproductive_restores_reduce_checkpoint_probability(self):
+        explorer = Explorer(_FastCheckpointChaos, checkpoint_prob=0.8)
+        for _ in range(16):
+            explorer._record_checkpoint_feedback(0.03, 0.07, 0)
+
+        assert explorer._checkpoint_restore_share == pytest.approx(0.3)
+        assert explorer._checkpoint_start_probability() < 0.8
+
+    def test_cheap_unproductive_restores_keep_configured_probability(self):
+        explorer = Explorer(_FastCheckpointChaos, checkpoint_prob=0.8)
+        for _ in range(16):
+            explorer._record_checkpoint_feedback(0.005, 0.095, 0)
+
+        assert explorer._checkpoint_start_probability() == 0.8
 
 
 # ============================================================================
@@ -694,7 +739,7 @@ class TestParallelAggregation:
         assert result.failures[0].trace is not None
         assert result.failures[0].error_traceback == "Traceback: boom"
 
-    def test_parallel_zero_edge_result_falls_back_to_sequential(self, monkeypatch):
+    def test_parallel_zero_edge_result_is_reported_without_sequential_rerun(self, monkeypatch):
         captured_args = []
         worker_results = [
             {
@@ -716,27 +761,6 @@ class TestParallelAggregation:
             lambda method: _FakeContext(worker_results, captured_args),
         )
 
-        reason_box = {}
-
-        def _fake_rerun(**kwargs):
-            reason_box["reason"] = kwargs["reason"]
-            return SimpleNamespace(
-                total_runs=1,
-                total_steps=1,
-                checkpoints_saved=0,
-                unique_edges=2,
-                failures=[],
-                edge_log=[],
-                traces=[],
-                duration_seconds=0.1,
-                ngram=2,
-                seed_replays=[],
-                coverage_gaps=[],
-                lines_covered=0,
-                lines_total=0,
-                parallel_fallback_reason=kwargs["reason"],
-            )
-
         explorer = Explorer(
             DeepServiceChaos,
             target_modules=["tests._deep_target"],
@@ -745,8 +769,6 @@ class TestParallelAggregation:
             share_edges=False,
             share_checkpoints=False,
         )
-        monkeypatch.setattr(explorer, "_rerun_sequential_after_parallel", _fake_rerun)
-
         result = explorer._run_parallel(
             max_time=1.0,
             max_runs=4,
@@ -757,8 +779,9 @@ class TestParallelAggregation:
             progress=None,
         )
 
-        assert result.parallel_fallback_reason == "0 edges discovered"
-        assert reason_box["reason"] == "0 edges discovered"
+        assert result.coordination_mode == "independent_workers"
+        assert result.parallel_result_warning == "0 edges discovered"
+        assert result.parallel_fallback_reason == ""
 
 
 @pytest.mark.slow

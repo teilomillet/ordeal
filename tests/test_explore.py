@@ -9,7 +9,13 @@ from hypothesis.stateful import invariant, rule
 
 from ordeal.assertions import sometimes, tracker
 from ordeal.chaos import ChaosTest
-from ordeal.explore import Checkpoint, CoverageCollector, Explorer, _DataProxy
+from ordeal.explore import (
+    Checkpoint,
+    CoverageCollector,
+    ExplorationResult,
+    Explorer,
+    _DataProxy,
+)
 from ordeal.faults import LambdaFault
 from tests._explore_target import BranchyService
 from tests._hard_target import HardService
@@ -243,6 +249,18 @@ class TestExplorerResult:
         summary = result.summary()
         assert "Exploration:" in summary
         assert "Coverage:" in summary
+        assert "Coordination: sequential" in summary
+
+    def test_summary_reports_degraded_parallel_coordination(self):
+        result = ExplorationResult(
+            coordination_mode="independent_workers",
+            coordination_degraded_reason="shared edge/state memory unavailable: PermissionError",
+        )
+
+        summary = result.summary()
+
+        assert "Coordination: independent multiprocess workers" in summary
+        assert "Coordination degraded: shared edge/state memory unavailable" in summary
 
     def test_edge_log_grows(self):
         explorer = Explorer(

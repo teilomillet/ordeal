@@ -36,7 +36,7 @@ from ordeal.audit import (
     wilson_lower,
 )
 from ordeal.auto import ContractCheck
-from ordeal.mine import MinedProperty
+from ordeal.mine import MinedProperty, mine
 
 # ============================================================================
 # Wilson score interval
@@ -344,6 +344,42 @@ class TestCoverageBackendSelection:
             audit_mod,
             "_measure_coverage",
             lambda *args: pytest.fail("shared audit coverage runner should be used"),
+        )
+
+        result = audit_mod._measure_audit_coverages(
+            [Path("tests/test_demo.py")],
+            [generated],
+            "ordeal.demo",
+        )
+
+        assert result == (current, migrated)
+
+    def test_audit_coverages_reuse_complete_verified_pair(
+        self,
+        monkeypatch,
+        tmp_path: Path,
+    ):
+        current = CoverageMeasurement(
+            Status.VERIFIED,
+            CoverageResult(100.0, 1, 0, frozenset(), "cached"),
+        )
+        migrated = CoverageMeasurement(
+            Status.VERIFIED,
+            CoverageResult(100.0, 1, 0, frozenset(), "cached"),
+        )
+        generated = tmp_path / ".ordeal" / "test_demo_migrated.py"
+        generated.parent.mkdir()
+        generated.write_text("def test_generated() -> None:\n    assert True\n", encoding="utf-8")
+
+        monkeypatch.setattr(
+            audit_mod,
+            "_load_audit_coverage_evidence",
+            lambda *args: (current, migrated),
+        )
+        monkeypatch.setattr(
+            audit_mod,
+            "_measure_coverage",
+            lambda *args: pytest.fail("complete cached evidence must skip coverage execution"),
         )
 
         result = audit_mod._measure_audit_coverages(
@@ -822,6 +858,69 @@ class TestPytestNodeidCollection:
             current_coverage=current,
             test_file_evidence=evidence,
         )
+
+    def test_exact_pytest_nodeids_select_static_functions_and_methods(self, tmp_path: Path):
+        test_file = tmp_path / "test_target.py"
+        test_file.write_text(
+            "def test_top_level():\n    assert True\n\n"
+            "class TestGrouped:\n"
+            "    def test_method(self):\n"
+            "        assert True\n",
+            encoding="utf-8",
+        )
+
+        assert audit_mod._exact_pytest_nodeids([test_file]) == [
+            f"{test_file}::test_top_level",
+            f"{test_file}::TestGrouped::test_method",
+        ]
+
+    def test_exact_pytest_nodeids_keeps_dynamic_hook_file_scoped(self, tmp_path: Path):
+        test_file = tmp_path / "test_target.py"
+        test_file.write_text(
+            "def pytest_generate_tests(metafunc):\n    pass\n\n"
+            "def test_top_level():\n    assert True\n",
+            encoding="utf-8",
+        )
+
+        assert audit_mod._exact_pytest_nodeids([test_file]) == [str(test_file)]
+
+    def test_exact_pytest_nodeids_uses_one_importing_node_for_import_facade(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        test_file = tmp_path / "test_target.py"
+        test_file.write_text(
+            "from demo.target import run\n\n"
+            "def test_first():\n    assert run\n\n"
+            "def test_second():\n    assert run\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(audit_mod, "_is_import_facade", lambda module: module == "demo.target")
+
+        assert audit_mod._exact_pytest_nodeids([test_file], module_name="demo.target") == [
+            f"{test_file}::test_first"
+        ]
+
+    def test_exact_pytest_nodeids_keeps_local_facade_imports_in_scope(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        test_file = tmp_path / "test_target.py"
+        test_file.write_text(
+            "def test_first():\n    assert True\n\n"
+            "def test_second():\n"
+            "    from demo.target import run\n"
+            "    assert run\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(audit_mod, "_is_import_facade", lambda module: module == "demo.target")
+
+        assert audit_mod._exact_pytest_nodeids([test_file], module_name="demo.target") == [
+            f"{test_file}::test_first",
+            f"{test_file}::test_second",
+        ]
 
 
 # ============================================================================
@@ -1478,6 +1577,95 @@ class TestAuditReportWorkers:
         ]
 
 
+class TestAuditWorkerEvidenceStability:
+    def test_single_worker_does_not_serialize_mined_inputs(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        mine_result = MineResult(
+            function="tests._audit_worker_target.transform_0",
+            examples=5,
+            properties=[MinedProperty("universal", holds=5, total=5)],
+            collected_inputs=[{"value": lambda: None}],
+        )
+        seen: list[MineResult] = []
+
+        def fake_validate(
+            target_path: str,
+            received: MineResult,
+            contract_context: dict[str, object],
+            **kwargs: object,
+        ) -> audit_mod._AuditValidationEvidence:
+            seen.append(received)
+            return audit_mod._AuditValidationEvidence(
+                target_path=target_path,
+                seed=int(kwargs["seed"]),
+                killed=0,
+                total=0,
+                view_json="{}",
+                mutants=(),
+                stub="",
+            )
+
+        monkeypatch.setattr(audit_mod, "_run_audit_validation", fake_validate)
+        warnings: list[str] = []
+        evidence = audit_mod._validate_audit_targets(
+            [(mine_result.function, mine_result, {})],
+            max_examples=5,
+            workers=1,
+            validation_mode="fast",
+            warnings=warnings,
+        )
+
+        assert warnings == []
+        assert len(evidence) == 1
+        assert seen == [mine_result]
+
+    def test_mutant_ids_kills_and_scores_match_for_1_2_4_8_workers(self):
+        from tests import _audit_worker_target
+
+        targets: list[tuple[str, MineResult, dict[str, object]]] = []
+        for index in range(8):
+            name = f"transform_{index}"
+            target_path = f"tests._audit_worker_target.{name}"
+            mine_result = mine(getattr(_audit_worker_target, name), max_examples=5)
+            assert audit_mod._should_validate_mined_properties(mine_result)
+            targets.append((target_path, mine_result, {}))
+
+        snapshots: dict[int, tuple[object, ...]] = {}
+        for workers in (1, 2, 4, 8):
+            warnings: list[str] = []
+            evidence = audit_mod._validate_audit_targets(
+                targets,
+                max_examples=5,
+                workers=workers,
+                validation_mode="fast",
+                warnings=warnings,
+            )
+
+            assert warnings == []
+            mutant_rows = tuple(
+                (
+                    item.target_path,
+                    item.seed,
+                    tuple(
+                        (mutant.mutant_id, mutant.killed, mutant.killers)
+                        for mutant in item.mutants
+                    ),
+                )
+                for item in evidence
+            )
+            score = (
+                sum(item.killed for item in evidence),
+                sum(item.total for item in evidence),
+            )
+            snapshots[workers] = (mutant_rows, score)
+
+        baseline = snapshots[1]
+        assert baseline[1][1] > 0
+        assert snapshots == {workers: baseline for workers in (1, 2, 4, 8)}
+
+
 class TestMutationValidationSelection:
     def test_skips_validation_without_confident_universal_properties(self):
         mine_result = MineResult(
@@ -1658,6 +1846,24 @@ class TestAuditCache:
 
         assert fast_hash != deep_hash
 
+    def test_module_audit_cache_preserves_resolved_surface(self):
+        result = ModuleAudit(
+            module="demo.module",
+            surface=[
+                {
+                    "module": "demo.module",
+                    "name": "normalize",
+                    "target": "demo.module.normalize",
+                    "kind": "function",
+                    "runnable": True,
+                }
+            ],
+        )
+
+        restored = audit_mod._module_audit_from_dict(audit_mod._module_audit_to_dict(result))
+
+        assert restored.surface == result.surface
+
     def test_audit_uses_cache_and_rewrites_generated_test(
         self,
         tmp_path: Path,
@@ -1671,6 +1877,13 @@ class TestAuditCache:
 
         monkeypatch.setattr(audit_mod, "_audit_state_hash", lambda *args, **kwargs: "hash123")
         monkeypatch.setattr(audit_mod, "_load_audit_cache", lambda module, state_hash: cached)
+        monkeypatch.setattr(
+            audit_mod,
+            "_collect_audit_functions",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("cache hit should skip callable-surface discovery")
+            ),
+        )
         monkeypatch.setattr(
             audit_mod,
             "_measure_coverage",

@@ -98,6 +98,25 @@ class TestPropertyTracker:
         assert len(t.failures) == 1
         assert t.failures[0].name == "bad"
 
+    def test_counter_delta_reports_only_properties_changed_since_mark(self):
+        t = PropertyTracker()
+        t.active = True
+        t.record("already seen", "always", True)
+        before = t.counter_snapshot()
+
+        t.record("already seen", "always", False)
+        t.record_hit("new path", "reachable")
+
+        changes = {event["name"]: event for event in t.counter_delta(before)}
+        assert changes["already seen"] == {
+            "name": "already seen",
+            "type": "always",
+            "delta_hits": 1,
+            "delta_passes": 0,
+            "delta_failures": 1,
+        }
+        assert changes["new path"]["delta_hits"] == 1
+
 
 class TestAlways:
     def setup_method(self):

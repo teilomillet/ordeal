@@ -397,6 +397,91 @@ class TestResumeInvariant:
         assert calls["test_fn"] == 1
         assert result.target == "tests._mutation_target.add"
 
+    def test_validate_mined_properties_reuses_one_sample_matrix(self, monkeypatch):
+        """Every mutant replay should share one plan without sharing mutable state."""
+        import ordeal.mutations as mutations_mod
+
+        fake_prop = SimpleNamespace(name="deterministic", universal=True)
+        fake_mine_result = SimpleNamespace(
+            universal=[fake_prop],
+            collected_inputs=[],
+        )
+        calls = {"plans": 0, "tests": 0}
+
+        def fake_plan(func, n):
+            calls["plans"] += 1
+            return mutations_mod._EquivalenceSamplePlan(samples=((1, 2),))
+
+        def fake_mutate(target, test_fn, operators):
+            test_fn()
+            test_fn()
+            calls["tests"] += 2
+            return MutationResult(target=target, operators_used=operators)
+
+        monkeypatch.setattr(mutations_mod, "_equivalence_sample_plan", fake_plan)
+        monkeypatch.setattr(mutations_mod, "mutate_function_and_test", fake_mutate)
+
+        result = validate_mined_properties(
+            "tests._mutation_target.add",
+            operators=["arithmetic"],
+            mine_result=fake_mine_result,
+        )
+
+        assert calls == {"plans": 1, "tests": 2}
+        assert len(result.validation_sample_matrix_sha256 or "") == 64
+        assert (
+            result.epistemic_view()["validation_sample_matrix_sha256"]
+            == result.validation_sample_matrix_sha256
+        )
+
+    def test_validation_sample_matrix_clones_mutable_values(self, monkeypatch):
+        """Replaying one mutant must not mutate another mutant's sample template."""
+        import ordeal.mutations as mutations_mod
+
+        original = SimpleNamespace(collected_inputs=[{"items": [1, 2]}])
+        monkeypatch.setattr(mutations_mod, "_equivalence_sample_plan", lambda func, n: None)
+
+        first = mutations_mod._validation_sample_matrix(list, original, 20)
+        second = mutations_mod._validation_sample_matrix(list, original, 20)
+        first_replay = first.replay()
+        first_replay[0]["items"].append(3)
+
+        assert first.replay() == [{"items": [1, 2]}]
+        assert second.replay() == [{"items": [1, 2]}]
+        assert first.sha256 == second.sha256
+
+    def test_compiled_property_evaluator_is_cached_by_property_set(self):
+        """Identical property sets should reuse the compiled evaluator."""
+        import ordeal.mutations as mutations_mod
+
+        mutations_mod._compile_mined_property_evaluator.cache_clear()
+        first = mutations_mod._compile_mined_property_evaluator(("deterministic",))
+        second = mutations_mod._compile_mined_property_evaluator(("deterministic",))
+
+        assert first is second
+        assert mutations_mod._compile_mined_property_evaluator.cache_info().hits == 1
+
+    def test_validation_sample_matrix_hash_is_reproducible_across_threads(self):
+        """Parallel validation setup should identify the same replay matrix."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        import ordeal.mutations as mutations_mod
+        from tests._mutation_target import add
+
+        original = SimpleNamespace(
+            collected_inputs=[{"a": value, "b": -value} for value in range(20)]
+        )
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            matrices = list(
+                executor.map(
+                    lambda _: mutations_mod._validation_sample_matrix(add, original, 20),
+                    range(8),
+                )
+            )
+
+        assert len({matrix.sha256 for matrix in matrices}) == 1
+        assert all(matrix.replay() == matrices[0].replay() for matrix in matrices)
+
     def test_validate_mined_properties_deep_mode_remines_mutants(self, monkeypatch):
         """Deep validation should re-run mine() on the mutant path."""
         import ordeal.mine as mine_mod

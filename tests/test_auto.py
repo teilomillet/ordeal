@@ -1775,9 +1775,13 @@ class TestScanModule:
         )
         test_file = tests_dir / "test_envs.py"
         test_file.write_text(
+            f"from {package_name}.envs import Env\n"
+            "\n"
             "def test_render(env, cached_state):\n"
             "    prompt = 'hello'\n"
-            "    assert env.render(cached_state, prompt) == 'demo:cached:hello'\n",
+            "    assert env.render(cached_state, prompt) == 'demo:cached:hello'\n"
+            "\n"
+            "Env('direct').render({'seed': 'direct'}, 'world')\n",
             encoding="utf-8",
         )
         monkeypatch.chdir(tmp_path)
@@ -1798,8 +1802,109 @@ class TestScanModule:
             [test_file],
             source="test",
         )
+        evidence_index = auto_mod.ProjectEvidenceIndex(
+            f"{package_name}.envs",
+            test_files=[test_file],
+            project_files=[],
+        )
+        indexed_examples = evidence_index.call_seed_examples(
+            funcs["Env.render"],
+            [test_file],
+            source="test",
+        )
 
         assert any(example.kwargs == {"prompt": "hello"} for example in examples)
+        assert indexed_examples == examples
+
+    def test_project_evidence_index_parses_once_and_invalidates_explicitly(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        package_name = "evidence_index_invalidation"
+        pkg = tmp_path / package_name
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "ops.py").write_text(
+            "def compute(value: int) -> int:\n    return value + 1\n",
+            encoding="utf-8",
+        )
+        test_file = tmp_path / "test_ops.py"
+        test_file.write_text(
+            f"from {package_name}.ops import compute\n\ncompute(1)\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        import importlib
+
+        module = importlib.import_module(f"{package_name}.ops")
+        original_parse = auto_mod.ast.parse
+        parse_count = 0
+
+        def counting_parse(*args, **kwargs):
+            nonlocal parse_count
+            parse_count += 1
+            return original_parse(*args, **kwargs)
+
+        monkeypatch.setattr(auto_mod.ast, "parse", counting_parse)
+        evidence_index = auto_mod.ProjectEvidenceIndex(
+            module.__name__,
+            test_files=[test_file],
+            project_files=[test_file],
+        )
+        first = evidence_index.call_seed_examples(module.compute, [test_file], source="test")
+        repeated = evidence_index.call_seed_examples(module.compute, [test_file], source="test")
+
+        assert parse_count == 1
+        assert repeated == first
+        assert first[0].kwargs == {"value": 1}
+
+        test_file.write_text(
+            f"from {package_name}.ops import compute\n\ncompute(2)\n",
+            encoding="utf-8",
+        )
+        evidence_index.invalidate(test_file)
+        refreshed = evidence_index.call_seed_examples(module.compute, [test_file], source="test")
+
+        assert parse_count == 2
+        assert refreshed[0].kwargs == {"value": 2}
+
+    def test_scan_reuses_one_contract_profile_per_callable(self, tmp_path, monkeypatch):
+        (tmp_path / "profile_reuse_target.py").write_text(
+            "def compute(value: int) -> int:\n    return value + 1\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        original_profile = auto_mod._likely_contract_profile
+        profile_calls = 0
+
+        def counting_profile(*args, **kwargs):
+            nonlocal profile_calls
+            profile_calls += 1
+            return original_profile(*args, **kwargs)
+
+        monkeypatch.setattr(auto_mod, "_likely_contract_profile", counting_profile)
+        result = scan_module(
+            "profile_reuse_target",
+            targets=["compute"],
+            max_examples=1,
+            mode="candidate",
+            contract_checks={
+                "compute": [
+                    ContractCheck(
+                        name="positive",
+                        predicate=lambda value: value > 0,
+                        kwargs={"value": 1},
+                    )
+                ]
+            },
+        )
+
+        assert result.passed
+        assert profile_calls == 1
 
     def test_harness_hints_detect_yield_fixtures_and_file_symbol_paths(
         self,

@@ -53,7 +53,10 @@ def test_scan_examples_use_the_real_selector_flag() -> None:
     assert "--target " in documented
     assert "--targets" not in documented
 
-    implementation = (ROOT / "ordeal/auto.py").read_text(encoding="utf-8")
+    implementation = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((ROOT / "ordeal/parts/auto").glob("*.py"))
+    )
     assert 'f"--target {explicit_target} -n 1"' in implementation
 
 

@@ -31,9 +31,9 @@ source the Python runtime exposes:
    transition is logged.  The exploration is a Markov chain that can be
    replayed, forked from any point, and analyzed for unexplored transitions.
 
-This is ordeal's answer to Antithesis's deterministic hypervisor —
-scoped to what a Python library can control (no OS scheduling, no VM),
-but sufficient for reproducible exploration.
+The ``DeterministicSupervisor`` controls Python-visible entropy sources and
+process interactions. Its scope is intentionally the Python runtime: it does
+not control OS scheduling or provide VM-level determinism.
 
 Usage::
 

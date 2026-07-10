@@ -6,6 +6,7 @@ import ast
 import importlib
 import os
 import sys
+import types
 from pathlib import Path
 
 import ordeal.mutations as mutations
@@ -44,6 +45,25 @@ def test_resolve_mutation_target_handles_class_methods(tmp_path: Path, monkeypat
         assert spec.leaf_name == "render"
         assert spec.qualname_parts == ("First",)
         assert not spec.is_module
+    finally:
+        _clear_module_family("pkg")
+
+
+def test_resolve_mutation_target_replaces_stale_parent_module(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """A synthetic cached parent must not hide the current sys.path package."""
+    _write_method_target_module(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    stale = types.ModuleType("pkg")
+    monkeypatch.setitem(sys.modules, "pkg", stale)
+
+    try:
+        spec = mutations._resolve_mutation_target("pkg.mod.First.render")
+
+        assert spec.module_name == "pkg.mod"
+        assert sys.modules["pkg"] is not stale
     finally:
         _clear_module_family("pkg")
 

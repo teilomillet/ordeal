@@ -259,6 +259,19 @@ def _purge_module_family(module_name: str) -> None:
 def _import_module_current(module_name: str) -> types.ModuleType:
     """Import a module, refreshing stale local modules shadowed on ``sys.path``."""
     importlib.invalidate_caches()
+    parts = [part for part in module_name.split(".") if part]
+    for index in range(1, len(parts) + 1):
+        prefix = ".".join(parts[:index])
+        cached_prefix = sys.modules.get(prefix)
+        if cached_prefix is None:
+            continue
+        desired_prefix = _find_spec_from_sys_path(prefix)
+        desired_origin = _normalized_module_origin(getattr(desired_prefix, "origin", None))
+        cached_origin = _normalized_module_origin(getattr(cached_prefix, "__file__", None))
+        if desired_origin is not None and cached_origin != desired_origin:
+            _purge_module_family(module_name)
+            break
+
     cached = sys.modules.get(module_name)
     spec = _find_spec_from_sys_path(module_name)
     desired_origin = _normalized_module_origin(getattr(spec, "origin", None))

@@ -6026,6 +6026,77 @@ def _cmd_mine_pair(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_migrate(args: argparse.Namespace) -> int:
+    """Run the ordered base-to-candidate correctness and protection workflow."""
+    from ordeal.migration import migrate
+
+    try:
+        cfg = _load_optional_config(getattr(args, "config", None))
+    except FileNotFoundError:
+        _stderr(f"Config not found: {args.config}\n")
+        return 2
+    except ConfigError as exc:
+        _stderr(f"Config error: {exc}\n")
+        return 2
+
+    invariants: dict[str, list[Any]] = {}
+    if cfg is not None:
+        try:
+            invariants = _config_contract_checks_for_module(cfg, args.candidate)
+        except Exception as exc:
+            _stderr(f"Cannot resolve candidate contracts: {exc}\n")
+            return 2
+
+    try:
+        result = migrate(
+            args.base,
+            args.candidate,
+            intended_changes=args.intended_changes or [],
+            invariants=invariants,
+            test_dir=args.test_dir,
+            audit_max_examples=args.audit_examples,
+            mine_max_examples=args.mine_examples,
+            diff_max_examples=args.diff_examples,
+            scan_max_examples=args.scan_examples,
+            mutation_preset=args.preset,
+            mutation_workers=args.workers,
+            mutation_threshold=args.threshold,
+            evidence_path=args.evidence_path,
+            regression_path=args.regression_path,
+        )
+    except (ImportError, AttributeError, TypeError, ValueError) as exc:
+        if getattr(args, "json", False):
+            print(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "tool": "ordeal migrate",
+                        "base": args.base,
+                        "candidate": args.candidate,
+                        "status": "inconclusive",
+                        "reason": str(exc),
+                    }
+                )
+            )
+        else:
+            _stderr(f"Migration workflow unavailable: {exc}\n")
+        return 2
+
+    if getattr(args, "json", False):
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        print(result.summary())
+        if not invariants:
+            _stderr(
+                "No explicit candidate invariants were configured; add matching "
+                "[[contracts]] entries in ordeal.toml before claiming correctness.\n"
+            )
+        _stderr(f"Evidence: {result.artifacts.evidence_path}\n")
+        if result.artifacts.regression_cases:
+            _stderr(f"Regressions: {result.artifacts.regression_path}\n")
+    return 0 if result.protected_within_measured_scope else 1
+
+
 def _diff_artifact_paths(artifact_dir: Path, target: str) -> tuple[Path, Path]:
     """Return stable JSON and Markdown paths for one revision diff target."""
     slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", target.replace(":", ".")).strip(".-")
@@ -12185,6 +12256,24 @@ def _diff_command_description() -> str:
     )
 
 
+def _migrate_command_description() -> str:
+    """Return the long-form ``ordeal migrate`` help description."""
+    return (
+        "Replace one importable module without confusing 'same as before' with "
+        "'correct and protected.' A perfect parity match can preserve an old bug.\n\n"
+        "The fixed order is: audit base, mine candidate contracts, diff shared callables, "
+        "classify intended changes, save unexpected divergences, mutate the resulting "
+        "tests, then scan only the candidate. Declare intended changes with "
+        "--intended-change and define explicit candidate invariants with matching "
+        "[[contracts]] entries in ordeal.toml. Mined properties remain hypotheses.\n\n"
+        "Unexpected divergences create failing parity regressions. Mutation is therefore "
+        "blocked until the candidate is fixed or the change is explicitly reclassified; "
+        "rerun the same command to resume from the saved witnesses.\n\n"
+        "Start: https://docs.byordeal.com/concepts/safe-migrations/\n"
+        "Guide: https://docs.byordeal.com/guides/migration-workflow/"
+    )
+
+
 def _init_command_description() -> str:
     """Return the long-form `ordeal init` help description."""
     return (
@@ -12800,6 +12889,85 @@ def _command_specs() -> tuple[CommandSpec, ...]:
             ),
         ),
         CommandSpec(
+            name="migrate",
+            handler=_cmd_migrate,
+            help="Replace a module without copying old or new bugs",
+            description=_migrate_command_description,
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            arguments=(
+                _arg("base", help="Old importable module used as the behavioral reference"),
+                _arg("candidate", help="Replacement importable module to validate"),
+                _arg(
+                    "--config",
+                    "-c",
+                    default=None,
+                    help="Config file containing explicit domain rules in [[contracts]]",
+                ),
+                _arg(
+                    "--intended-change",
+                    dest="intended_changes",
+                    action="append",
+                    default=None,
+                    metavar="SELECTOR",
+                    help="Function or kind:function explicitly intended to change (repeatable)",
+                ),
+                _arg("--test-dir", default="tests", help="Base test directory (default: tests)"),
+                _arg(
+                    "--audit-examples",
+                    type=int,
+                    default=20,
+                    help="Examples per callable during base audit (default: 20)",
+                ),
+                _arg(
+                    "--mine-examples",
+                    type=int,
+                    default=200,
+                    help="Examples per callable during candidate mining (default: 200)",
+                ),
+                _arg(
+                    "--diff-examples",
+                    type=int,
+                    default=100,
+                    help="Examples per shared callable diff (default: 100)",
+                ),
+                _arg(
+                    "--scan-examples",
+                    type=int,
+                    default=50,
+                    help="Examples per callable in the candidate-only scan (default: 50)",
+                ),
+                _arg(
+                    "--preset",
+                    choices=["essential", "standard", "thorough"],
+                    default="standard",
+                    help="Mutation operator preset (default: standard)",
+                ),
+                _arg("--workers", type=int, default=1, help="Mutation workers (default: 1)"),
+                _arg(
+                    "--threshold",
+                    type=float,
+                    default=1.0,
+                    help="Required mutation score from 0 to 1 (default: 1.0)",
+                ),
+                _arg(
+                    "--evidence-path",
+                    default=None,
+                    metavar="PATH",
+                    help="Migration JSON path (default: .ordeal/migrations/<pair>.json)",
+                ),
+                _arg(
+                    "--regression-path",
+                    default=None,
+                    metavar="PATH",
+                    help=(
+                        "Generated pytest path "
+                        "(default: tests/test_ordeal_migration_<candidate>.py)"
+                    ),
+                ),
+                _arg("--json", action="store_true", help="Output machine-readable JSON"),
+            ),
+        ),
+        CommandSpec(
             name="mine-pair",
             handler=_cmd_mine_pair,
             help="Discover relational properties between two functions",
@@ -13177,6 +13345,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "  ordeal scan <module>          exploratory module analysis\n"
             "  ordeal init [package]         starter tests + ordeal.toml\n"
             "  ordeal audit <module>         test-quality comparison\n"
+            "  ordeal migrate <base> <new>   ordered migration evidence workflow\n"
             "  ordeal mutate <target>        mutation testing\n"
             "  ordeal skill                  install the bundled local agent guide\n\n"
             "Run `ordeal <command> --help` for command-specific options.\n"
@@ -13386,6 +13555,14 @@ def _cli_catalog_learn_more(name: str) -> list[str]:
             "docs/reference/divergence-evidence-schema.md",
             "ordeal catalog --json",
         ]
+    if name == "migrate":
+        return [
+            "ordeal migrate --help",
+            "docs/concepts/safe-migrations.md",
+            "docs/guides/migration-workflow.md",
+            "docs/reference/api.md#migration-workflow",
+            "ordeal catalog --json",
+        ]
     return [f"ordeal {name} --help", "ordeal catalog --json"]
 
 
@@ -13396,6 +13573,14 @@ def _cli_catalog_examples(name: str, usage: str) -> list[str]:
             "ordeal diff mypkg.scoring --base-ref origin/main --candidate-ref HEAD",
             "ordeal diff mypkg.scoring --base-ref origin/main --save-artifacts",
             "ordeal diff --json  # uses [diff] from ordeal.toml",
+        ]
+    if name == "migrate":
+        return [
+            "ordeal migrate oldpkg.scoring newpkg.scoring -c ordeal.toml",
+            (
+                "ordeal migrate oldpkg.scoring newpkg.scoring -c ordeal.toml "
+                "--intended-change behavior:normalize"
+            ),
         ]
     return [usage] if usage else []
 

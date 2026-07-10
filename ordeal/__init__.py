@@ -76,6 +76,9 @@ __all__ = [
     "NoTestsFoundError",
     "generate_starter_tests",
     "init_project",
+    # Migration workflow
+    "migrate",
+    "MigrationResult",
     # Evidence
     "verify_bug_evidence",
     "BugEvidenceVerification",
@@ -97,6 +100,8 @@ _LAZY_SUBMODULES = (
     "ordeal.auto",
     "ordeal.metamorphic",
     "ordeal.diff",
+    "ordeal.system_diff",
+    "ordeal.migration",
     "ordeal.scaling",
     "ordeal.evidence",
     "ordeal.state",
@@ -417,9 +422,48 @@ def _catalog_learn_more(section: str, entry: dict[str, object]) -> list[str]:
     """Return generic adjacent discovery surfaces for one entry."""
     if section == "cli":
         name = str(entry.get("name", "")).strip()
+        if name == "diff":
+            return [
+                "ordeal diff --help",
+                "docs/guides/revision-diff.md",
+                "docs/guides/revision-diff-troubleshooting.md",
+                "docs/reference/revision-diff-schema.md",
+                "docs/concepts/differential-testing.md",
+                "docs/concepts/divergence-evidence.md",
+                "docs/guides/divergence-evidence.md",
+                "docs/guides/divergence-evidence-troubleshooting.md",
+                "docs/reference/divergence-evidence-schema.md",
+                "ordeal catalog --json",
+            ]
         return [f"ordeal {name} --help", "ordeal catalog --json"] if name else ["ordeal --help"]
     if section == "skill":
         return ["ordeal skill", "ordeal catalog --detail"]
+    if section == "diff":
+        return [
+            "docs/concepts/differential-testing.md",
+            "docs/concepts/system-differential.md",
+            "docs/guides/differential-quickstart.md",
+            "docs/guides/differential-state-and-effects.md",
+            "docs/guides/differential-evidence.md",
+            "docs/concepts/divergence-evidence.md",
+            "docs/guides/divergence-evidence.md",
+            "docs/guides/divergence-evidence-troubleshooting.md",
+            "docs/reference/divergence-evidence-schema.md",
+            "docs/guides/revision-diff.md",
+            "docs/guides/revision-diff-troubleshooting.md",
+            "docs/reference/revision-diff-schema.md",
+            "docs/guides/system-differential.md",
+            "docs/guides/system-differential-recipes.md",
+            "docs/guides/system-differential-troubleshooting.md",
+            "docs/reference/system-differential.md",
+        ]
+    if section == "migration":
+        return [
+            "docs/concepts/safe-migrations.md",
+            "docs/guides/migration-workflow.md",
+            "docs/reference/api.md#migration-workflow",
+            "ordeal migrate --help",
+        ]
     qualname = str(entry.get("qualname", "")).strip()
     module_name, _, _ = qualname.rpartition(".")
     hints = ["from ordeal import catalog; catalog()", "ordeal catalog --detail"]
@@ -527,6 +571,34 @@ def _annotate_catalog_entry(
         )
         if str(item).strip()
     ]
+    if section == "diff" and attr_name == "diff":
+        examples = [
+            (
+                "from ordeal import diff\n"
+                "result = diff(old_fn, new_fn)\n"
+                "print(result.status, result.witness)"
+            ),
+            (
+                "from ordeal import Operation, diff\n"
+                "result = diff(OldSystem, NewSystem, "
+                "sequence=[Operation('read')])"
+            ),
+        ]
+    if section == "migration" and attr_name == "migrate":
+        examples = [
+            (
+                "from ordeal import ContractCheck, migrate\n"
+                "rule = ContractCheck(\n"
+                "    'score stays between 0 and 1',\n"
+                "    predicate=lambda value: 0 <= value <= 1,\n"
+                "    kwargs={'features': [0.2, 0.4]},\n"
+                ")\n"
+                "result = migrate(\n"
+                "    'oldpkg.scoring', 'newpkg.scoring',\n"
+                "    invariants={'score': [rule]},\n"
+                ")"
+            )
+        ]
 
     if capability:
         annotated["capability"] = capability
@@ -570,7 +642,8 @@ def catalog() -> dict[str, list]:
     dicts describing the available items.  Keys: ``cli``, ``chaos``, ``faults``,
     ``invariants``, ``assertions``, ``strategies``, ``mutations``,
     ``integrations``, ``mining``, ``audit``, ``auto``, ``metamorphic``,
-    ``diff``, ``scaling``, ``evidence``, ``exploration``, ``trace``, ``supervisor``,
+    ``diff``, ``migration``, ``scaling``, ``evidence``, ``exploration``, ``trace``,
+    ``supervisor``,
     ``mutagen``, ``cmplog``, ``concolic``, ``grammar``, ``equivalence``.
 
     Everything is derived from live runtime structures — source introspection
@@ -625,6 +698,32 @@ def catalog() -> dict[str, list]:
         ),
         "diff": _introspect_module(
             __import__("ordeal.diff", fromlist=["diff"]),
+        )
+        + _introspect_module(
+            __import__("ordeal.system_diff", fromlist=["Operation"]),
+            include={
+                "FaultEvent",
+                "InterfaceReport",
+                "Operation",
+                "PerformanceBudget",
+                "PerformanceResult",
+                "StepComparison",
+                "SystemDiffResult",
+                "SystemMismatch",
+            },
+        ),
+        "migration": _introspect_module(
+            __import__("ordeal.migration", fromlist=["migrate"]),
+            include={
+                "CandidateContract",
+                "MigrationChange",
+                "MigrationResult",
+                "MigrationStage",
+                "MutationGate",
+                "RegressionArtifacts",
+                "migrate",
+                "replay_migration_case",
+            },
         ),
         "scaling": _introspect_module(
             __import__("ordeal.scaling", fromlist=["scaling"]),

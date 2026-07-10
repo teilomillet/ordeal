@@ -54,6 +54,7 @@ nav:
       - Chaos Testing: concepts/chaos-testing.md
       - Coverage Guidance: concepts/coverage-guidance.md
       - Meaningful Tests: concepts/test-meaningfulness.md
+      - Safe Module Migrations: concepts/safe-migrations.md
       - Durable Regressions: concepts/durable-regressions.md
       - Reliability Coverage: concepts/reliability-coverage.md
       - Property Assertions: concepts/property-assertions.md
@@ -83,6 +84,7 @@ nav:
           - CI and Operations: guides/compose-operations.md
           - Troubleshooting: guides/compose-troubleshooting.md
       - Auto Testing: guides/auto.md
+      - Base-to-Candidate Migration: guides/migration-workflow.md
       - Configuration: guides/configuration.md
       - CLI: guides/cli.md
       - Mutations: guides/mutations.md

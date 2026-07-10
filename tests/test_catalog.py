@@ -28,6 +28,7 @@ class TestTopLevelCatalog:
             "auto",
             "metamorphic",
             "diff",
+            "migration",
             "scaling",
             "evidence",
             "exploration",

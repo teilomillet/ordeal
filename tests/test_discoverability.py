@@ -83,6 +83,17 @@ _TOP_LEVEL_IMPORTS = [
     "discover_relations",
     # Differential
     "diff",
+    "DiffOutcome",
+    "DiffResult",
+    "DiffWitness",
+    "SideEffect",
+    "Operation",
+    "FaultEvent",
+    "PerformanceBudget",
+    "SystemDiffResult",
+    # Evidence-first migration
+    "migrate",
+    "MigrationResult",
     # Scaling
     "fit_usl",
     "scales_linearly",
@@ -234,6 +245,7 @@ _EXPECTED_CATALOG_SECTIONS = [
     "auto",
     "metamorphic",
     "diff",
+    "migration",
     "scaling",
     "evidence",
     "exploration",
@@ -289,6 +301,19 @@ def test_catalog_docs_are_not_empty():
     assert not undocumented, "Undocumented items in catalog (add a docstring):\n" + "\n".join(
         f"  {u}" for u in undocumented
     )
+
+
+def test_diff_catalog_exposes_function_and_system_modes():
+    """Catalog users must discover both differential-testing modes."""
+    names = {item["name"] for item in ordeal.catalog()["diff"]}
+    required = {"diff", "SideEffect", "Operation", "FaultEvent", "PerformanceBudget"}
+    assert required <= names
+
+
+def test_migration_catalog_exposes_workflow_and_result():
+    """The evidence-first migration workflow must be runtime-discoverable."""
+    names = {item["name"] for item in ordeal.catalog()["migration"]}
+    assert {"migrate", "MigrationResult", "MigrationStage"} <= names
 
 
 def test_benchmark_help_exposes_output_json():

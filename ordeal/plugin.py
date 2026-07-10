@@ -13,6 +13,11 @@ configuration needed — pytest discovers it on import.
    always returning ``False``.
 3. ``@pytest.mark.chaos`` tests — collected instead of skipped.
 
+**Reliability coverage:** assertions with ``operation`` and ``fault`` record an
+operation × fault × property matrix.  The terminal summary prints PASS,
+NOT EXERCISED, and FAIL rows.  Under pytest-xdist, workers publish raw counters
+and the controller merges them before deriving final statuses.
+
 **What works WITHOUT ``--chaos``:**
 
 - ``ChaosTest.TestCase`` — Hypothesis drives rule/nemesis exploration.
@@ -280,6 +285,26 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     """Deactivate assertions and buggify on session teardown."""
     assertions.tracker.active = False
     _buggify_deactivate()
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Publish reliability rows from an xdist worker to its controller."""
+    workeroutput = getattr(session.config, "workeroutput", None)
+    if isinstance(workeroutput, dict):
+        workeroutput["ordeal_reliability_coverage"] = [
+            cell.as_dict() for cell in assertions.tracker.reliability_results
+        ]
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node: Any, error: object | None) -> None:
+    """Merge one completed xdist worker's reliability evidence."""
+    workeroutput = getattr(node, "workeroutput", None)
+    if not isinstance(workeroutput, dict):
+        return
+    rows = workeroutput.get("ordeal_reliability_coverage", [])
+    if isinstance(rows, list):
+        assertions.tracker.merge_reliability(rows)
 
 
 def pytest_collection_modifyitems(
@@ -581,32 +606,57 @@ def pytest_terminal_summary(
             terminalreporter.line("")
         _mutation_results.clear()
 
-    # Show property report when --chaos is active or when there are results
+    # Show property and reliability reports when the tracker captured evidence.
     results = assertions.tracker.results
-    if not results:
+    reliability = assertions.tracker.reliability_results
+    if not results and not reliability:
         return
 
-    terminalreporter.section("Ordeal Property Results")
+    if results:
+        terminalreporter.section("Ordeal Property Results")
 
-    passed = [p for p in results if p.passed]
-    failed = [p for p in results if not p.passed]
+        passed = [p for p in results if p.passed]
+        failed = [p for p in results if not p.passed]
 
-    for p in passed:
-        terminalreporter.line(f"  PASS  {p.summary}", green=True)
-    for p in failed:
-        terminalreporter.line(f"  FAIL  {p.summary}", red=True)
+        for p in passed:
+            terminalreporter.line(f"  PASS  {p.summary}", green=True)
+        for p in failed:
+            terminalreporter.line(f"  FAIL  {p.summary}", red=True)
 
-    total = len(results)
-    if failed:
-        terminalreporter.line(f"\n  {len(failed)}/{total} properties FAILED", red=True)
-    else:
-        terminalreporter.line(f"\n  {total}/{total} properties passed", green=True)
+        total = len(results)
+        if failed:
+            terminalreporter.line(f"\n  {len(failed)}/{total} properties FAILED", red=True)
+        else:
+            terminalreporter.line(f"\n  {total}/{total} properties passed", green=True)
 
-    # Structured metadata — no hardcoded advice, just facts.
-    seed = config.getoption("chaos_seed", default=None)
-    kinds = {p.type for p in results if isinstance(getattr(p, "type", None), str)}
-    terminalreporter.line("")
-    terminalreporter.line(
-        f"  Config: seed={'none' if seed is None else seed}, "
-        f"assertion types used: {', '.join(sorted(kinds)) or 'none'}",
-    )
+        # Structured metadata — no hardcoded advice, just facts.
+        seed = config.getoption("chaos_seed", default=None)
+        kinds = {p.type for p in results if isinstance(getattr(p, "type", None), str)}
+        terminalreporter.line("")
+        terminalreporter.line(
+            f"  Config: seed={'none' if seed is None else seed}, "
+            f"assertion types used: {', '.join(sorted(kinds)) or 'none'}",
+        )
+
+    if reliability:
+        terminalreporter.section("Ordeal Reliability Coverage")
+        terminalreporter.line("  operation × fault × property")
+        labels = [f"{cell.operation} × {cell.fault} × {cell.property}" for cell in reliability]
+        width = max(len(label) for label in labels)
+        for cell, label in zip(reliability, labels, strict=True):
+            markup = {
+                "PASS": {"green": True},
+                "FAIL": {"red": True},
+                "NOT EXERCISED": {"yellow": True},
+            }[cell.status]
+            terminalreporter.line(f"  {label:<{width}}  {cell.status}", **markup)
+
+        counts = {
+            status: sum(cell.status == status for cell in reliability)
+            for status in ("PASS", "NOT EXERCISED", "FAIL")
+        }
+        terminalreporter.line("")
+        terminalreporter.line(
+            f"  {counts['PASS']} PASS, {counts['NOT EXERCISED']} NOT EXERCISED, "
+            f"{counts['FAIL']} FAIL"
+        )

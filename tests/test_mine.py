@@ -6,6 +6,7 @@ from hypothesis import settings as hsettings
 from ordeal import ChaosTest, always, invariant, rule
 from ordeal.assertions import tracker
 from ordeal.mine import (
+    MinedProperty,
     _check_associative,
     _check_bijective,
     _check_commutative,
@@ -13,6 +14,7 @@ from ordeal.mine import (
     _check_length_relationship,
     _check_monotonic,
     _check_observed_bounds,
+    _minimize_and_replay_property,
     mine,
     mine_module,
     mine_pair,
@@ -27,6 +29,37 @@ def clamp(x: float) -> float:
 
 def identity(x: int) -> int:
     return x
+
+
+def short_non_idempotent_staircase(x: int) -> int:
+    """Fail idempotence only on a small, shrinkable interval."""
+    return x + 1 if 7 <= x < 9 else x
+
+
+def test_property_witness_is_minimized_and_replayed_before_handoff() -> None:
+    prop = MinedProperty(
+        "idempotent",
+        holds=9,
+        total=10,
+        counterexample={"input": {"x": 8}},
+    )
+
+    _minimize_and_replay_property(
+        short_non_idempotent_staircase,
+        prop,
+        {"x": st.integers(min_value=0, max_value=20)},
+        max_examples=30,
+    )
+
+    assert prop.counterexample is not None
+    assert prop.counterexample["input"] == {"x": 7}
+    assert prop.replayable is True
+    assert prop.replay_attempts == 2
+    assert prop.replay_matches == 2
+    assert prop.replay_match_basis == "same inferred property violated on the same input"
+    assert prop.minimization is not None
+    assert prop.minimization["status"] == "verified"
+    assert prop.minimization["method"] == "hypothesis.find"
 
 
 def sometimes_none(x: int) -> int | None:

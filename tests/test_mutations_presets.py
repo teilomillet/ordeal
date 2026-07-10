@@ -972,6 +972,22 @@ def test_runtime_equivalent_isolates_mutable_inputs(monkeypatch):
     assert result is False
 
 
+def test_equivalence_sample_plan_is_reproducible() -> None:
+    """Clearing the cache must not change generated equivalence inputs."""
+
+    def target(x: int, label: str) -> tuple[int, str]:
+        return x, label
+
+    mutations._equivalence_sample_plan.cache_clear()
+    first = mutations._equivalence_sample_plan(target, 10)
+    mutations._equivalence_sample_plan.cache_clear()
+    second = mutations._equivalence_sample_plan(target, 10)
+
+    assert first is not None
+    assert second is not None
+    assert first.samples == second.samples
+
+
 # ============================================================================
 # MutationResult diagnostics
 # ============================================================================

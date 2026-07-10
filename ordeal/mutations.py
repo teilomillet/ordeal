@@ -957,6 +957,7 @@ class MutationResult:
     preset_used: str | None = None
     concern: str | None = None
     contract_context: dict[str, Any] = field(default_factory=dict)
+    property_observations: list[dict[str, int | str]] = field(default_factory=list)
     timings: dict[str, float] = field(default_factory=dict)
     promote_clusters_only: bool = True
     cluster_min_size: int = 2
@@ -999,8 +1000,14 @@ class MutationResult:
         """
         groups: dict[str, list[Mutant]] = {}
         for m in self.mutants:
-            if m.killed and m.killed_by:
-                groups.setdefault(m.killed_by, []).append(m)
+            if not m.killed:
+                continue
+            property_killers = [
+                f"property:{name}" for name in m.metadata.get("killed_by_properties", [])
+            ]
+            killers = property_killers or ([m.killed_by] if m.killed_by else [])
+            for killer in killers:
+                groups.setdefault(killer, []).append(m)
         return groups
 
     @property
@@ -1095,6 +1102,91 @@ class MutationResult:
             return ranked
         return ranked[:limit]
 
+    def property_strength(self) -> list[dict[str, Any]]:
+        """Measure whether exercised mined properties discriminate real mutations.
+
+        A property is ``discriminating`` only when it kills at least one tested
+        mutant. An exercised property that kills none is reported as
+        ``tautological_or_weak``: mutation testing proves that it added no signal
+        for this mutant set, but does not claim a formal logical tautology.
+        """
+        rows: list[dict[str, Any]] = []
+        for observation in self.property_observations:
+            name = str(observation.get("name", ""))
+            holds = int(observation.get("holds", 0))
+            total = int(observation.get("total", 0))
+            killed_mutants = [
+                mutant
+                for mutant in self.mutants
+                if name in mutant.metadata.get("killed_by_properties", [])
+            ]
+            if total <= 0:
+                status = "unexercised"
+            elif self.total <= 0:
+                status = "not_measured"
+            elif killed_mutants:
+                status = "discriminating"
+            else:
+                status = "tautological_or_weak"
+            rows.append(
+                {
+                    "name": name,
+                    "holds": holds,
+                    "total": total,
+                    "mutants_killed": len(killed_mutants),
+                    "mutants_tested": self.total,
+                    "status": status,
+                }
+            )
+        return rows
+
+    def test_protection_view(self) -> dict[str, Any]:
+        """Answer whether the tests protect the target within measured scope.
+
+        Returns a JSON-compatible dict containing the scoped verdict, exact
+        mutation score, survivors, kill attribution, property-strength rows,
+        and convenience lists for weak or unexercised properties.
+
+        ``weak`` means a mutant survived or a declared property was not
+        exercised. ``inconclusive`` means no non-equivalent mutant was tested.
+        ``protective_within_measured_scope`` means every tested mutant was
+        killed; it is not a universal correctness guarantee.
+        """
+        properties = self.property_strength()
+        unexercised = [item for item in properties if item["status"] == "unexercised"]
+        if self.survived:
+            status = "weak"
+            protects: bool | None = False
+            summary = (
+                f"{len(self.survived)}/{self.total} mutation(s) survived; "
+                "the tests do not protect those behaviors"
+            )
+        elif unexercised:
+            status = "weak"
+            protects = False
+            summary = f"{len(unexercised)} declared property/properties were not exercised"
+        elif self.total <= 0:
+            status = "inconclusive"
+            protects = None
+            summary = "no non-equivalent mutants were tested"
+        else:
+            status = "protective_within_measured_scope"
+            protects = True
+            summary = f"all {self.total} tested mutation(s) were killed"
+        return {
+            "status": status,
+            "protects": protects,
+            "summary": summary,
+            "mutation_score": self.score_text or None,
+            "surviving_mutants": len(self.survived),
+            "kill_attribution": self.weakest_killers(),
+            "property_strength": properties,
+            "tautological_or_weak_properties": [
+                item["name"] for item in properties if item["status"] == "tautological_or_weak"
+            ],
+            "unexercised_properties": [item["name"] for item in unexercised],
+        }
+
     def epistemic_view(self) -> dict[str, Any]:
         """Return a tight mutation-evidence payload for reports and audit aggregation."""
         contract_note = _contract_context_summary(self.contract_context)
@@ -1151,6 +1243,8 @@ class MutationResult:
                 for cluster in promoted_clusters
             ],
             "weakest_killers": self.weakest_killers(limit=3),
+            "property_strength": self.property_strength(),
+            "test_protection": self.test_protection_view(),
         }
 
     def filter_report(self) -> str:
@@ -1734,6 +1828,7 @@ def _save_cache(target: str, result: MutationResult, module_hash: str, config_ha
         "operators_used": result.operators_used,
         "concern": result.concern,
         "contract_context": result.contract_context,
+        "property_observations": result.property_observations,
         "mutants": [_mutant_to_dict(m) for m in result.mutants],
         "timings": result.timings,
         "diagnostics": result.diagnostics,
@@ -1784,6 +1879,7 @@ def _load_cache(
         preset_used=data.get("preset_used"),
         concern=data.get("concern"),
         contract_context=dict(data.get("contract_context", {})),
+        property_observations=[dict(item) for item in data.get("property_observations", [])],
     )
     result.mutants = [_mutant_from_dict(m) for m in data.get("mutants", [])]
     result.timings = data.get("timings", {})
@@ -3982,20 +4078,27 @@ def _is_algebraic_identity(node: ast.BinOp) -> bool:
     return False
 
 
-def _bytecode_equal(a: types.CodeType, b: types.CodeType) -> bool:
-    """Recursively compare bytecode of two code objects.
+def _code_fingerprint(code: types.CodeType) -> tuple[Any, ...]:
+    """Return a location-independent semantic fingerprint for *code*."""
+    constants = tuple(
+        ("code", _code_fingerprint(value))
+        if isinstance(value, types.CodeType)
+        else (type(value).__qualname__, repr(value))
+        for value in code.co_consts
+    )
+    return (
+        code.co_code,
+        code.co_names,
+        code.co_varnames,
+        code.co_freevars,
+        code.co_cellvars,
+        constants,
+    )
 
-    The top-level module code just defines functions, so we must also
-    compare the bytecode of nested code objects (the actual functions).
-    """
-    if a.co_code != b.co_code:
-        return False
-    # Compare nested code objects (functions, classes, comprehensions)
-    a_inner = [c for c in a.co_consts if isinstance(c, types.CodeType)]
-    b_inner = [c for c in b.co_consts if isinstance(c, types.CodeType)]
-    if len(a_inner) != len(b_inner):
-        return False
-    return all(_bytecode_equal(ai, bi) for ai, bi in zip(a_inner, b_inner))
+
+def _bytecode_equal(a: types.CodeType, b: types.CodeType) -> bool:
+    """Compare instructions, referenced names, and constants recursively."""
+    return _code_fingerprint(a) == _code_fingerprint(b)
 
 
 def _is_equivalent_mutant(
@@ -4178,23 +4281,21 @@ def _dedup_into(
     existing: list[tuple[Mutant, ast.Module]],
     new: list[tuple[Mutant, ast.Module]],
 ) -> None:
-    """Append *new* mutants to *existing*, skipping bytecode duplicates."""
-    existing_codes: list[bytes] = []
+    """Append *new* mutants to *existing*, skipping semantic-code duplicates."""
+    existing_codes: set[tuple[Any, ...]] = set()
     for _, etree in existing:
         try:
             code = compile(etree, "<existing>", "exec")
-            inner = [c for c in code.co_consts if isinstance(c, types.CodeType)]
-            existing_codes.append(inner[0].co_code if inner else code.co_code)
+            existing_codes.add(_code_fingerprint(code))
         except Exception:
             pass
     for mutant, mtree in new:
         try:
             mcode = compile(mtree, "<new>", "exec")
-            inner = [c for c in mcode.co_consts if isinstance(c, types.CodeType)]
-            key = inner[0].co_code if inner else mcode.co_code
+            key = _code_fingerprint(mcode)
             if key not in existing_codes:
                 existing.append((mutant, mtree))
-                existing_codes.append(key)
+                existing_codes.add(key)
         except Exception:
             pass
 
@@ -4252,7 +4353,7 @@ def _validate_extra_mutants(
     original_stripped = _strip_python_comments(source)
 
     results: list[tuple[Mutant, ast.Module]] = []
-    seen_bytecodes: list[bytes] = []
+    seen_fingerprints: set[tuple[Any, ...]] = set()
 
     for item in extra_mutants:
         if isinstance(item, tuple):
@@ -4283,11 +4384,10 @@ def _validate_extra_mutants(
             continue
 
         # 5. Deduplicate against other extra mutants
-        inner = [c for c in mutant_code.co_consts if isinstance(c, types.CodeType)]
-        bytecode_key = inner[0].co_code if inner else mutant_code.co_code
-        if bytecode_key in seen_bytecodes:
+        fingerprint = _code_fingerprint(mutant_code)
+        if fingerprint in seen_fingerprints:
             continue
-        seen_bytecodes.append(bytecode_key)
+        seen_fingerprints.add(fingerprint)
 
         # Find the mutation line by diffing source lines
         orig_lines = source.splitlines()
@@ -5763,6 +5863,15 @@ def mutate_and_test(
 # ============================================================================
 
 
+class _MinedPropertyFailure(AssertionError):
+    """Internal failure carrying every mined property that rejected a mutant."""
+
+    def __init__(self, property_names: list[str]) -> None:
+        self.property_names = property_names
+        joined = ", ".join(repr(name) for name in property_names)
+        super().__init__(f"Mined properties no longer hold on mutant: {joined}")
+
+
 def validate_mined_properties(
     target: str,
     max_examples: int = 100,
@@ -5908,10 +6017,13 @@ def validate_mined_properties(
         return [prop for prop in all_props if prop.total > 0]
 
     def _assert_original_properties_hold(props: list["MinedProperty"]) -> None:
+        failed: list[str] = []
         for original_prop in universal:
             match = next((p for p in props if p.name == original_prop.name), None)
             if match is None or not match.universal:
-                raise AssertionError(f"Property {original_prop.name!r} no longer holds on mutant")
+                failed.append(str(original_prop.name))
+        if failed:
+            raise _MinedPropertyFailure(failed)
 
     # Build a test function from the mined properties
     def mined_test() -> None:
@@ -5941,12 +6053,21 @@ def validate_mined_properties(
     mutate_kwargs: dict[str, Any] = {}
     if contract_context:
         mutate_kwargs["contract_context"] = dict(contract_context)
-    return mutate_function_and_test(
+    result = mutate_function_and_test(
         target,
         mined_test,
         operators,
         **mutate_kwargs,
     )
+    result.property_observations = [
+        {
+            "name": str(prop.name),
+            "holds": int(getattr(prop, "holds", 0)),
+            "total": int(getattr(prop, "total", 0)),
+        }
+        for prop in universal
+    ]
+    return result
 
 
 _BOUNDARY_VALUES: dict[type, list] = {
@@ -6004,6 +6125,9 @@ def _equivalence_sample_plan(
     """Prepare deterministic sample inputs for runtime-equivalence checks."""
     import warnings
 
+    from hypothesis import HealthCheck, given, settings
+    from hypothesis import strategies as st
+
     try:
         sig = inspect.signature(original)
     except (ValueError, TypeError):
@@ -6045,9 +6169,28 @@ def _equivalence_sample_plan(
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
+            generated: list[tuple[object, ...]] = []
+
+            @given(st.tuples(*strategies))
+            @settings(
+                max_examples=max(1, n_samples),
+                database=None,
+                derandomize=True,
+                deadline=None,
+                suppress_health_check=list(HealthCheck),
+            )
+            def collect(sample: tuple[object, ...]) -> None:
+                generated.append(tuple(sample))
+
+            collect()
             defaults: list[object] = []
             for i, values in enumerate(boundary_lists):
-                defaults.append(values[0] if values else strategies[i].example())
+                if values:
+                    defaults.append(values[0])
+                elif generated:
+                    defaults.append(generated[0][i])
+                else:
+                    return None
 
             for i, values in enumerate(boundary_lists):
                 for value in values:
@@ -6055,8 +6198,7 @@ def _equivalence_sample_plan(
                     args[i] = value
                     samples.append(tuple(args))
 
-            for _ in range(n_samples):
-                samples.append(tuple(strategy.example() for strategy in strategies))
+            samples.extend(generated[:n_samples])
     except Exception:
         return None
 
@@ -6360,7 +6502,13 @@ def mutate_function_and_test(
                     except Exception as e:
                         mutant.killed = True
                         mutant.error = str(e)[:200]
-                        mutant.killed_by = fn_name
+                        property_names = getattr(e, "property_names", None)
+                        if property_names:
+                            names = [str(name) for name in property_names]
+                            mutant.metadata["killed_by_properties"] = names
+                            mutant.killed_by = f"property:{names[0]}"
+                        else:
+                            mutant.killed_by = fn_name
                     finally:
                         fault.deactivate()
 

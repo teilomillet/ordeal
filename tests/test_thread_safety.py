@@ -110,6 +110,30 @@ class TestPropertyTrackerThreadSafety:
             assert p.hits == ITERS
             assert p.passes == ITERS
 
+    def test_concurrent_reliability_cell_counts_are_exact(self):
+        """Dimensional observations use the same atomic tracker update."""
+        tracker = PropertyTracker()
+        tracker.active = True
+
+        def work(tid):
+            condition = tid % 2 == 0
+            for _ in range(ITERS):
+                tracker.record(
+                    "balance_conserved",
+                    "always",
+                    condition,
+                    operation="refund",
+                    fault="stale_response",
+                )
+
+        _run_concurrent(work)
+
+        cell = tracker.reliability_results[0]
+        assert cell.hits == THREADS * ITERS
+        assert cell.passes == (THREADS // 2) * ITERS
+        assert cell.failures == (THREADS - THREADS // 2) * ITERS
+        assert cell.status == "FAIL"
+
     def test_concurrent_record_hit(self):
         """record_hit from N threads -> hits == N*M."""
         tracker = PropertyTracker()

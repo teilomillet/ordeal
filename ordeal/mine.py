@@ -27,7 +27,7 @@ from types import ModuleType
 from typing import Any, get_args, get_origin
 
 import hypothesis.strategies as st
-from hypothesis import given, settings
+from hypothesis import find, given, settings
 
 from ordeal.auto import _call_sync, _get_public_functions, _infer_strategies
 from ordeal.introspection import safe_get_annotations
@@ -166,6 +166,11 @@ class MinedProperty:
     holds: int
     total: int
     counterexample: dict[str, Any] | None = None
+    replayable: bool | None = None
+    replay_attempts: int = 0
+    replay_matches: int = 0
+    replay_match_basis: str | None = None
+    minimization: dict[str, Any] | None = None
 
     @property
     def confidence(self) -> float:
@@ -181,6 +186,230 @@ class MinedProperty:
         pct = f"{self.confidence:.0%}"
         status = "ALWAYS" if self.universal else pct
         return f"  {status:>6}  {self.name} ({self.holds}/{self.total})"
+
+
+_DURABLE_PROPERTY_NAMES = {
+    "never None",
+    "no NaN",
+    "deterministic",
+    "idempotent",
+    "involution",
+    "commutative",
+    "associative",
+    "bijective",
+}
+
+
+def _contains_nan(value: Any) -> bool:
+    """Return whether a scalar or array-like value contains NaN."""
+    if isinstance(value, float):
+        return math.isnan(value)
+    if isinstance(value, (list, tuple)):
+        return any(_contains_nan(item) for item in value)
+    if hasattr(value, "shape"):
+        try:
+            import numpy as np
+
+            return bool(np.isnan(np.asarray(value)).any())
+        except (ImportError, TypeError, ValueError):
+            return False
+    return False
+
+
+def _property_counterexample(
+    fn: Callable[..., Any],
+    name: str,
+    kwargs: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Re-evaluate one inferred property on an exact input witness."""
+    try:
+        if name == "bijective":
+            first_args = kwargs.get("__first__")
+            second_args = kwargs.get("__second__")
+            if not isinstance(first_args, dict) or not isinstance(second_args, dict):
+                return None
+            if first_args == second_args:
+                return None
+            first_output = _call_sync(fn, **first_args)
+            second_output = _call_sync(fn, **second_args)
+            if _approx_equal(first_output, second_output):
+                return {
+                    "output": first_output,
+                    "colliding_inputs": [
+                        tuple(sorted(first_args.items())),
+                        tuple(sorted(second_args.items())),
+                    ],
+                }
+            return None
+        if name == "never None":
+            output = _call_sync(fn, **kwargs)
+            return {"input": kwargs, "output": output} if output is None else None
+        if name == "no NaN":
+            output = _call_sync(fn, **kwargs)
+            return {"input": kwargs, "value": output} if _contains_nan(output) else None
+        if name == "deterministic":
+            first = _call_sync(fn, **kwargs)
+            second = _call_sync(fn, **kwargs)
+            if not _approx_equal(first, second):
+                return {"input": kwargs, "first": first, "second": second}
+            return None
+
+        params = [
+            param for param in inspect.signature(fn).parameters if param not in ("self", "cls")
+        ]
+        if not params:
+            return None
+        first_param = params[0]
+        if name in {"idempotent", "involution"}:
+            first = _call_sync(fn, **kwargs)
+            replay_args = dict(kwargs)
+            replay_args[first_param] = first
+            second = _call_sync(fn, **replay_args)
+            expected = first if name == "idempotent" else kwargs[first_param]
+            if not _approx_equal(second, expected):
+                return {"input": kwargs, "output": first, "replayed": second}
+            return None
+        if name == "commutative" and len(params) == 2:
+            left_name, right_name = params
+            swapped = {
+                left_name: kwargs[right_name],
+                right_name: kwargs[left_name],
+            }
+            left = _call_sync(fn, **kwargs)
+            right = _call_sync(fn, **swapped)
+            if not _approx_equal(left, right):
+                return {
+                    "input": kwargs,
+                    "output": left,
+                    "swapped_input": swapped,
+                    "swapped_output": right,
+                }
+        if name == "associative" and len(params) == 2 and "third" in kwargs:
+            left_name, right_name = params
+            first_value = kwargs[left_name]
+            second_value = kwargs[right_name]
+            third_value = kwargs["third"]
+            middle_right = _call_sync(
+                fn,
+                **{left_name: second_value, right_name: third_value},
+            )
+            left = _call_sync(
+                fn,
+                **{left_name: first_value, right_name: middle_right},
+            )
+            middle_left = _call_sync(
+                fn,
+                **{left_name: first_value, right_name: second_value},
+            )
+            right = _call_sync(
+                fn,
+                **{left_name: middle_left, right_name: third_value},
+            )
+            if not _approx_equal(left, right):
+                return {"input": kwargs, "left": left, "right": right}
+    except Exception:
+        return None
+    return None
+
+
+def _witness_complexity(value: Any) -> int:
+    """Return a stable, transparent size proxy for witness comparison."""
+    import json
+
+    return len(json.dumps(value, sort_keys=True, default=repr, separators=(",", ":")))
+
+
+def _minimize_and_replay_property(
+    fn: Callable[..., Any],
+    prop: MinedProperty,
+    strategies: dict[str, st.SearchStrategy[Any]],
+    *,
+    max_examples: int,
+) -> None:
+    """Shrink and immediately replay a concrete inferred-property witness.
+
+    Hypothesis minimizes within the declared input strategies. This is not a
+    proof that the witness is globally smallest, so that boundary is carried
+    in the evidence metadata.
+    """
+    if prop.name not in _DURABLE_PROPERTY_NAMES or not prop.counterexample:
+        return
+    original_input = prop.counterexample.get("input")
+    case_strategy: st.SearchStrategy[Any] = st.fixed_dictionaries(strategies)
+    if prop.name == "associative":
+        params = [
+            param for param in inspect.signature(fn).parameters if param not in ("self", "cls")
+        ]
+        if len(params) != 2 or not isinstance(original_input, dict):
+            return
+        first_param = params[0]
+        case_strategy = st.tuples(case_strategy, strategies[first_param]).map(
+            lambda pair: {**pair[0], "third": pair[1]}
+        )
+    elif prop.name == "bijective":
+        colliding = prop.counterexample.get("colliding_inputs")
+        if not isinstance(colliding, (list, tuple)) or len(colliding) < 2:
+            return
+        try:
+            original_input = {
+                "__first__": dict(colliding[0]),
+                "__second__": dict(colliding[1]),
+            }
+        except (TypeError, ValueError):
+            return
+        base_strategy = case_strategy
+        case_strategy = st.tuples(base_strategy, base_strategy).map(
+            lambda pair: {"__first__": pair[0], "__second__": pair[1]}
+        )
+    if not isinstance(original_input, dict):
+        return
+
+    minimized_input = dict(original_input)
+    status = "not_run"
+    try:
+        minimized_input = find(
+            case_strategy,
+            lambda kwargs: _property_counterexample(fn, prop.name, dict(kwargs)) is not None,
+            settings=settings(
+                max_examples=max(50, min(500, max_examples * 4)),
+                database=None,
+                derandomize=True,
+                deadline=None,
+            ),
+        )
+        status = "performed"
+    except Exception:
+        # The originally observed witness remains useful evidence. A failed
+        # minimization attempt must not be mislabeled as a minimized witness.
+        minimized_input = dict(original_input)
+
+    observed = _property_counterexample(fn, prop.name, dict(minimized_input))
+    if observed is not None:
+        prop.counterexample = observed
+
+    attempts = 2
+    matches = sum(
+        _property_counterexample(fn, prop.name, dict(minimized_input)) is not None
+        for _ in range(attempts)
+    )
+    prop.replayable = matches == attempts
+    prop.replay_attempts = attempts
+    prop.replay_matches = matches
+    prop.replay_match_basis = "same inferred property violated on the same input"
+    prop.minimization = {
+        "status": "verified" if status == "performed" and prop.replayable else status,
+        "method": "hypothesis.find" if status == "performed" else None,
+        "original_complexity": _witness_complexity(original_input),
+        "minimized_complexity": _witness_complexity(minimized_input),
+        "replay_attempts": attempts,
+        "replay_matches": matches,
+        "boundary": (
+            "Shrunk within the declared Hypothesis strategies; this does not prove "
+            "global minimality."
+            if status == "performed"
+            else "No smaller witness was established; the observed witness was replayed as-is."
+        ),
+    }
 
 
 @dataclass
@@ -417,13 +646,13 @@ def _check_no_nan(outputs: list[Any]) -> MinedProperty:
     total = 0
     holds = 0
     ce = None
-    for o in outputs:
+    for index, o in enumerate(outputs):
         if isinstance(o, float):
             total += 1
             if not math.isnan(o):
                 holds += 1
             elif ce is None:
-                ce = {"value": o}
+                ce = {"index": index, "value": o}
         elif hasattr(o, "shape"):
             total += 1
             try:
@@ -432,7 +661,7 @@ def _check_no_nan(outputs: list[Any]) -> MinedProperty:
                 if not np.any(np.isnan(o)):
                     holds += 1
                 elif ce is None:
-                    ce = {"value": o}
+                    ce = {"index": index, "value": o}
             except (ImportError, TypeError):
                 holds += 1
     if total == 0:
@@ -1096,6 +1325,7 @@ def mine(
     *,
     max_examples: int = 500,
     ignore_properties: list[str] | tuple[str, ...] = (),
+    minimize_findings: bool = False,
     **fixtures: st.SearchStrategy[Any] | Any,
 ) -> MineResult:
     """Discover likely properties of a function by running it many times.
@@ -1114,6 +1344,7 @@ def mine(
         fn: The function to mine properties from.
         max_examples: Number of random inputs to try.
         ignore_properties: Property names to suppress from the result.
+        minimize_findings: Shrink and replay suspicious witnesses for durable handoff.
         **fixtures: Strategy overrides or plain values.
     """
     # Unwrap decorated functions (@ray.remote, @functools.wraps, etc.)
@@ -1294,6 +1525,15 @@ def mine(
                 p.counterexample["input"] = inputs[idx]
             if 0 <= idx < len(outputs):
                 p.counterexample["output"] = outputs[idx]
+
+    for prop in props:
+        if minimize_findings and _is_suspicious_property(prop):
+            _minimize_and_replay_property(
+                fn,
+                prop,
+                strategies,
+                max_examples=max_examples,
+            )
 
     # Coverage saturation: if the last 50%+ of examples found no new edges,
     # more compute won't help — the input space is saturated for this function.

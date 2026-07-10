@@ -601,6 +601,10 @@ class ModuleAudit:
         lines.append(f"    mutation view: {mutation['summary']}")
         combined = views["combined_view"]
         lines.append(f"    combined view: {combined['label']}: {combined['summary']}")
+        protection = views["test_protection"]
+        lines.append(
+            f"    protection: {str(protection['status']).upper()}: {protection['summary']}"
+        )
 
         if self.mined_properties:
             grouped = _group_mined_properties(self.mined_properties)
@@ -734,6 +738,96 @@ class ModuleAudit:
             "weakest_killers": list(self.weakest_tests),
         }
 
+    def test_protection_view(self) -> dict[str, object]:
+        """Decide whether the resulting checks protect the measured module behavior.
+
+        Mutation survival is decisive even at 100% line coverage. Coverage and
+        property evidence expose what was not exercised or did not discriminate,
+        while failed measurements remain inconclusive instead of becoming zeroes.
+
+        This module-level view describes the generated/migrated checks: their
+        verified line coverage plus aggregated mined-property mutation results.
+        Use ``mutate()`` and ``MutationResult.test_protection_view()`` to judge
+        the selected existing test suite directly.
+        """
+        counts = self.mutation_score_counts
+        killed, total = counts if counts is not None else (0, 0)
+        survivors = max(total - killed, 0)
+        coverage = self.migrated_coverage
+        coverage_verified = coverage.status == Status.VERIFIED
+        line_percent = coverage.percent if coverage_verified else None
+        missing_lines = sorted(coverage.missing_lines) if coverage_verified else []
+        missing_count = (
+            coverage.result.missing_count
+            if coverage_verified and coverage.result is not None
+            else 0
+        )
+
+        property_strength: list[dict[str, object]] = []
+        for target in self.mutation_targets:
+            target_name = str(target.get("target", ""))
+            for item in target.get("property_strength", []):
+                row = dict(item)
+                row["target"] = target_name
+                property_strength.append(row)
+
+        tautological_or_weak = [
+            item for item in property_strength if item.get("status") == "tautological_or_weak"
+        ]
+        unexercised = [item for item in property_strength if item.get("status") == "unexercised"]
+
+        if survivors > 0:
+            status = "weak"
+            protects: bool | None = False
+            if line_percent == 100.0:
+                summary = f"100% line coverage but {survivors}/{total} mutation(s) survived"
+            else:
+                summary = f"{survivors}/{total} mutation(s) survived"
+        elif unexercised:
+            status = "weak"
+            protects = False
+            summary = f"{len(unexercised)} declared property/properties were not exercised"
+        elif coverage_verified and (missing_count > 0 or line_percent != 100.0):
+            status = "weak"
+            protects = False
+            summary = (
+                f"{missing_count} executable line(s) were not covered"
+                if missing_count > 0
+                else f"line coverage was {line_percent:.0f}%"
+            )
+        elif total <= 0:
+            status = "inconclusive"
+            protects = None
+            summary = "mutation strength was not measured"
+        elif not coverage_verified:
+            status = "inconclusive"
+            protects = None
+            summary = f"mutation score was {killed}/{total}, but line coverage was not verified"
+        else:
+            status = "protective_within_measured_scope"
+            protects = True
+            summary = (
+                f"all {total} tested mutation(s) were killed and all executable lines were covered"
+            )
+
+        return {
+            "label": "resulting test protection",
+            "status": status,
+            "protects": protects,
+            "summary": summary,
+            "mutation_score": self.mutation_score or None,
+            "killed_mutants": killed,
+            "tested_mutants": total,
+            "surviving_mutants": survivors,
+            "kill_attribution": list(self.weakest_tests),
+            "line_coverage_percent": line_percent,
+            "coverage_gaps": missing_lines,
+            "coverage_gap_count": missing_count,
+            "property_strength": property_strength,
+            "tautological_or_weak_properties": tautological_or_weak,
+            "unexercised_properties": unexercised,
+        }
+
     def evidence_views(self) -> dict[str, dict[str, object]]:
         """Return normalized current/generated/combined audit evidence views."""
         current = {
@@ -791,6 +885,7 @@ class ModuleAudit:
             "generated_suite": generated,
             "mutation_validation": mutation,
             "combined_view": combined,
+            "test_protection": self.test_protection_view(),
         }
 
     @staticmethod

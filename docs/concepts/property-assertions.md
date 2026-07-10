@@ -182,7 +182,9 @@ The tracker has two states:
 
 **Active** -- records everything. Assertions behave as described above. Activated by the `--chaos` flag or by calling `auto_configure()` in your `conftest.py`.
 
-**Inactive** -- all four assertion functions are no-ops with negligible overhead. No recording, no checking. This is the default state, and it's why you can leave `always`/`sometimes`/`reachable`/`unreachable` calls in your production code safely. They're dormant until you turn chaos mode on.
+**Inactive** -- the tracker records nothing. `always()` and `unreachable()`
+still raise immediately on violations; `sometimes()` and `reachable()` do not
+accumulate deferred evidence. This is the default state.
 
 ```python
 # conftest.py -- option A: use the CLI flag
@@ -206,6 +208,41 @@ At the end of the test session, the pytest plugin prints a Property Results sect
 ```
 
 One line per property. Type, hit count, and verdict. The `FAIL` line tells you that despite running hundreds of scenarios with faults active, your error recovery path never actually executed. That's a real finding -- either the fault isn't triggering the right condition, or there's a code path issue.
+
+## Add operation and fault context
+
+A property name alone answers “did this promise hold?” Add `operation` and
+`fault` when you also need to know what the system was doing and which failure
+was present:
+
+```python
+always(
+    charge_count == 1,
+    "no_duplicate_charge",
+    operation="create_order",
+    fault="timeout",
+)
+```
+
+Declare expected cells so missing observations stay visible:
+
+```python
+declare(
+    "eventual_commit",
+    "sometimes",
+    operation="create_order",
+    fault="worker_restart",
+)
+```
+
+This produces a separate reliability matrix. It does not replace the aggregate
+property report. The same property can pass for one fault and fail for another.
+A declared zero-hit cell is `NOT EXERCISED`, not a pass and not a witnessed
+failure.
+
+The labels describe evidence; they do not inject a fault. See
+[Reliability Coverage](reliability-coverage.md) for the concepts and
+[Add Reliability Coverage](../guides/reliability-coverage.md) for patterns.
 
 
 ## Naming matters
@@ -332,7 +369,7 @@ Ordeal brings this model to Python's testing ecosystem. Instead of simulating fo
 
 
 !!! quote "You're ready"
-    You now have four assertion types in your toolkit: `always` for safety guarantees, `sometimes` for liveness checks, `reachable` for dead code detection, and `unreachable` for silent-failure guards. You know when to use each one. See them in action in the [Writing Tests guide](../guides/writing-tests.md), or explore the full API in the [reference](../reference/api.md).
+    You now have four assertion types in your toolkit: `always` for safety guarantees, `sometimes` for liveness checks, `reachable` for dead code detection, and `unreachable` for silent-failure guards. You know when to use each one. See them in action in the [Writing Tests guide](../guides/writing-tests.md), validate their discrimination with [Test Protection](../guides/test-protection.md), or explore the full API in the [reference](../reference/api.md).
 
 ## Next
 

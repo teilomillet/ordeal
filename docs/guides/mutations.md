@@ -37,13 +37,17 @@ The test runs the function — coverage says 100%. But swap `+` to `-` and the t
 
 ### Where it fits in the ordeal standard
 
-Ordeal's goal is certification: when ordeal passes, the code works. But that only holds if the tests themselves are trustworthy. Mutation testing is the meta-test — it validates the validators:
+Ordeal's goal is evidence-backed confidence. That evidence is only useful if the
+tests themselves can notice wrong behavior. Mutation testing is the meta-test —
+it validates the validators:
 
 ```
 Code ← tested by → Chaos tests ← validated by → Mutation testing
 ```
 
-If your chaos tests have a 95%+ mutation score, you can trust them. If not, the surviving mutants tell you exactly where to add assertions.
+A high score is strong evidence within the selected operators and target. It is
+not a universal correctness certificate. Survivors tell you exactly where to
+inspect or add assertions; equivalent mutants still require review.
 
 ## Quick start
 
@@ -71,7 +75,7 @@ Each SURVIVED line is a specific test gap. Line 42 had a `+` swapped to `-` and 
 !!! quote "In plain English"
     Each operator is a different way of breaking your code on purpose. Swapping `+` to `-` tests whether you check math results. Replacing a return value with `None` tests whether you check what functions give back. Together, they cover the most common categories of real bugs. The operators live in `ordeal/mutations.py`.
 
-ordeal ships seven mutation operators. Each targets a different class of bugs.
+ordeal ships fourteen mutation operators. Each targets a different class of bugs.
 
 | Operator | What it does | Example |
 |---|---|---|
@@ -81,7 +85,14 @@ ordeal ships seven mutation operators. Each targets a different class of bugs.
 | `return_none` | Replace return value with None | `return x` becomes `return None` |
 | `boundary` | Shift integer constants by one | `n` becomes `n + 1` |
 | `constant` | Replace numeric constants with 0, 1, or -1 | `100` becomes `0` |
-| `delete` | Replace statements with `pass` | `total += x` becomes `pass` |
+| `logical` | Swap Boolean conjunction/disjunction | `a and b` becomes `a or b` |
+| `delete_statement` | Replace statements with `pass` | `total += x` becomes `pass` |
+| `exception_swallow` | Remove or weaken an exception path | `raise` becomes `pass` |
+| `argument_swap` | Swap positional arguments | `write(path, data)` becomes `write(data, path)` |
+| `break_continue_swap` | Swap loop exit and continuation | `break` becomes `continue` |
+| `remove_not` | Remove Boolean negation | `not ready` becomes `ready` |
+| `swap_if_else` | Exchange conditional branches | `if` and `else` bodies swap |
+| `unary_negate` | Add or remove numeric negation | `value` becomes `-value` |
 
 ### What each operator catches
 
@@ -97,7 +108,11 @@ ordeal ships seven mutation operators. Each targets a different class of bugs.
 
 **constant** -- Finds hardcoded magic numbers that are untested. If replacing `100` with `0` survives, the constant might as well be anything. Tests should verify that the specific value matters.
 
-**delete** -- Finds unnecessary or untested statements. If deleting an assignment and replacing it with `pass` survives, either the statement has no observable effect or the tests do not observe it. This catches dead code and undertested side effects.
+**delete_statement** -- Finds unnecessary or untested statements. If deleting an assignment and replacing it with `pass` survives, either the statement has no observable effect or the tests do not observe it. This catches dead code and undertested side effects.
+
+The remaining operators probe Boolean composition, exception handling, argument
+order, loop control, negation, and branch ownership. Use the `thorough` preset
+when those distinctions matter to the release decision.
 
 ## Performance and parallelism
 
@@ -178,7 +193,9 @@ Use this when:
 
 The mutation score is the percentage of mutants your tests killed. Here is how to read it.
 
-**100% score**: Every mutant was caught. Your tests are strong for this function. No change to the code can slip past unnoticed (within the scope of the operators tested).
+**100% score**: Every tested, non-equivalent mutant was caught. This is strong
+evidence within the selected target and operators, not proof that every possible
+change or bug would be detected.
 
 **80-99% score**: Most mutants caught, but some gaps remain. Look at the SURVIVED lines to find them. These are usually boundary conditions, specific branches, or return values that are not asserted.
 
@@ -285,7 +302,10 @@ This is powerful: instead of testing mutants one at a time, the Explorer combine
 ## Workflow
 
 !!! quote "Think of it this way"
-    Chaos tests find bugs in your code. Mutation testing finds bugs in your tests. The workflow is a loop: write tests, mutate, fix the gaps the survivors reveal, mutate again. Each cycle makes your test suite stronger. When you hit 95%+ mutation score, you can trust your tests to catch real regressions.
+    Chaos tests find bugs in your code. Mutation testing finds bugs in your
+    tests. The workflow is a loop: write tests, mutate, fix the gaps the
+    survivors reveal, mutate again. Each cycle increases measured protection;
+    the result remains scoped to the target, operators, inputs, and environment.
 
 Mutation testing fits into a validation loop:
 
@@ -297,3 +317,7 @@ Mutation testing fits into a validation loop:
 6. **Repeat** -- until the mutation score meets your threshold.
 
 This loop is the difference between "we have tests" and "we have tests that work." The chaos tests find bugs in your code. Mutation testing finds bugs in your tests.
+
+For the combined coverage, property-strength, attribution, and verdict workflow,
+continue to the [Test Protection Guide](test-protection.md). For interpretation
+boundaries and common edge cases, see the [Test Protection FAQ](test-protection-faq.md).

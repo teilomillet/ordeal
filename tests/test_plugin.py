@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -410,3 +412,130 @@ class TestPytestTerminalSummary:
                 assert tr.line.call_count >= 3
             finally:
                 _seed_replay_results[:] = prior_seed_results
+
+    def test_prints_operation_fault_property_matrix(self):
+        cfg = _make_config(chaos=True)
+        tr = MagicMock()
+        previous = assertions.tracker.snapshot()
+        assertions.tracker.active = True
+        assertions.tracker.reset()
+        try:
+            assertions.declare(
+                "eventual_commit",
+                "always",
+                operation="create_order",
+                fault="worker_restart",
+            )
+            assertions.always(
+                True,
+                "no_duplicate_charge",
+                operation="create_order",
+                fault="timeout",
+            )
+            assertions.always(
+                False,
+                "balance_conserved",
+                mute=True,
+                operation="refund",
+                fault="stale_response",
+            )
+
+            pytest_terminal_summary(tr, 0, cfg)
+
+            sections = [call.args[0] for call in tr.section.call_args_list]
+            lines = [call.args[0] for call in tr.line.call_args_list]
+            assert sections == ["Ordeal Property Results", "Ordeal Reliability Coverage"]
+            assert "  operation × fault × property" in lines
+            assert any(
+                "create_order × timeout × no_duplicate_charge" in line and line.endswith("PASS")
+                for line in lines
+            )
+            assert any(
+                "create_order × worker_restart × eventual_commit" in line
+                and line.endswith("NOT EXERCISED")
+                for line in lines
+            )
+            assert any(
+                "refund × stale_response × balance_conserved" in line and line.endswith("FAIL")
+                for line in lines
+            )
+            assert "  1 PASS, 1 NOT EXERCISED, 1 FAIL" in lines
+        finally:
+            assertions.tracker.restore(previous)
+
+    def test_prints_declared_matrix_without_global_property_results(self):
+        cfg = _make_config(chaos=True)
+        tr = MagicMock()
+        previous = assertions.tracker.snapshot()
+        assertions.tracker.active = True
+        assertions.tracker.reset()
+        try:
+            assertions.declare(
+                "eventual_commit",
+                "always",
+                operation="create_order",
+                fault="worker_restart",
+            )
+
+            pytest_terminal_summary(tr, 0, cfg)
+
+            tr.section.assert_called_once_with("Ordeal Reliability Coverage")
+        finally:
+            assertions.tracker.restore(previous)
+
+    def test_xdist_workers_merge_reliability_matrix(self, tmp_path):
+        test_file = tmp_path / "test_reliability.py"
+        test_file.write_text(
+            """
+from ordeal import always, declare
+
+
+def test_pass():
+    always(True, "no_duplicate_charge", operation="create_order", fault="timeout")
+
+
+def test_not_exercised():
+    declare(
+        "eventual_commit",
+        "always",
+        operation="create_order",
+        fault="worker_restart",
+    )
+
+
+def test_fail():
+    always(
+        False,
+        "balance_conserved",
+        mute=True,
+        operation="refund",
+        fault="stale_response",
+    )
+""",
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-n",
+                "2",
+                "--chaos",
+                "-q",
+                str(test_file),
+            ],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "Ordeal Reliability Coverage" in result.stdout
+        assert "create_order × timeout × no_duplicate_charge" in result.stdout
+        assert "create_order × worker_restart × eventual_commit" in result.stdout
+        assert "refund × stale_response × balance_conserved" in result.stdout
+        assert "1 PASS, 1 NOT EXERCISED, 1 FAIL" in result.stdout

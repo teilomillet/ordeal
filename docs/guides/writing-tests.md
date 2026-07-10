@@ -299,6 +299,27 @@ def scores_valid(self):
 
 Ordeal provides four assertion types, inspired by [Antithesis](https://antithesis.com), plus a `declare()` helper for deferred expectations. Each serves a different purpose.
 
+### Record the operation and fault
+
+For fault-specific evidence, keep the same assertion and add both dimensions:
+
+```python
+always(
+    self.account.balance >= 0,
+    "balance_nonnegative",
+    operation="withdraw",
+    fault="gateway_timeout",
+)
+```
+
+This records `withdraw × gateway_timeout × balance_nonnegative`. The labels do
+not activate the fault; only use them when the harness really created that
+scenario. Declare expected cells from a session fixture so an unvisited cell
+appears as `NOT EXERCISED` instead of disappearing.
+
+See [Add Reliability Coverage](reliability-coverage.md) for complete patterns
+and [Reliability Coverage in CI](reliability-coverage-ci.md) for JSON and gates.
+
 ### `always` -- safety properties
 
 "This must be true every time this line executes." Raises immediately on violation, which triggers Hypothesis shrinking.
@@ -864,3 +885,17 @@ ordeal explore --config ordeal.toml
 ```
 
 Start with a short `max_time` (30-60 seconds) and increase it as your test suite matures. The Explorer's coverage guidance means even short runs find interesting states that random testing misses.
+
+## Validate the tests themselves
+
+Passing chaos tests still need a strong oracle. Run mutation testing to check
+whether deliberate wrong changes trigger your assertions:
+
+```bash
+ordeal mutate myapp.payments --preset standard
+ordeal audit myapp.payments
+```
+
+Coverage shows which code ran; mutation survival shows whether the tests noticed
+wrong behavior. Continue with [Are your tests meaningful?](../concepts/test-meaningfulness.md)
+or the practical [Test Protection Guide](test-protection.md).

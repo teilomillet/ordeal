@@ -1,5 +1,7 @@
 """Tests for ordeal.assertions — Antithesis-style property assertions."""
 
+import json
+
 import pytest
 
 from ordeal.assertions import (
@@ -198,6 +200,189 @@ class TestReport:
         r = report()
         assert r["failed"][0]["name"] == "timeout handler runs"
         assert r["failed"][0]["type"] == "reachable"
+        assert r["failed"][0]["evidence_status"] == "unexercised"
+
+
+class TestReliabilityCoverage:
+    """Operation × fault × property coverage is evidence-based and serializable."""
+
+    def setup_method(self):
+        tracker.active = True
+        tracker.reset()
+
+    def teardown_method(self):
+        tracker.reset()
+        tracker.active = False
+
+    def test_reports_pass_not_exercised_and_fail(self):
+        from ordeal.assertions import report
+
+        declare(
+            "eventual_commit",
+            "always",
+            operation="create_order",
+            fault="worker_restart",
+        )
+        always(
+            True,
+            "no_duplicate_charge",
+            operation="create_order",
+            fault="timeout",
+        )
+        always(
+            False,
+            "balance_conserved",
+            mute=True,
+            operation="refund",
+            fault="stale_response",
+        )
+
+        coverage = report()["reliability_coverage"]
+        rows = {(row["operation"], row["fault"], row["property"]): row for row in coverage["rows"]}
+
+        assert coverage["dimensions"] == ["operation", "fault", "property"]
+        assert rows[("create_order", "timeout", "no_duplicate_charge")]["status"] == "PASS"
+        assert (
+            rows[("create_order", "worker_restart", "eventual_commit")]["status"]
+            == "NOT EXERCISED"
+        )
+        assert rows[("refund", "stale_response", "balance_conserved")]["status"] == "FAIL"
+        assert coverage["summary"] == {
+            "pass": 1,
+            "not_exercised": 1,
+            "fail": 1,
+            "total": 3,
+        }
+
+    def test_contextual_declaration_does_not_become_global_failure(self):
+        declare(
+            "eventual_commit",
+            "always",
+            operation="create_order",
+            fault="worker_restart",
+        )
+
+        assert tracker.results == []
+        assert tracker.reliability_results[0].status == "NOT EXERCISED"
+
+    def test_report_is_json_serializable(self):
+        from ordeal.assertions import report
+
+        always(True, "durable", operation="write", fault="process_crash")
+
+        payload = json.loads(json.dumps(report()))
+        row = payload["reliability_coverage"]["rows"][0]
+        assert row == {
+            "operation": "write",
+            "fault": "process_crash",
+            "property": "durable",
+            "type": "always",
+            "status": "PASS",
+            "hits": 1,
+            "passes": 1,
+            "failures": 0,
+        }
+
+    def test_operation_and_fault_are_required_together(self):
+        with pytest.raises(ValueError, match="provided together"):
+            always(True, "durable", operation="write")
+        with pytest.raises(ValueError, match="provided together"):
+            declare("durable", "always", fault="process_crash")
+
+    def test_same_property_is_independent_across_faults(self):
+        always(True, "balance_conserved", operation="refund", fault="timeout")
+        always(
+            False,
+            "balance_conserved",
+            mute=True,
+            operation="refund",
+            fault="stale_response",
+        )
+
+        statuses = {cell.fault: cell.status for cell in tracker.reliability_results}
+        assert statuses == {"stale_response": "FAIL", "timeout": "PASS"}
+
+    def test_assertion_types_keep_their_existing_semantics(self):
+        sometimes(False, "eventual", operation="write", fault="delay")
+        assert tracker.reliability_results[0].status == "FAIL"
+        sometimes(True, "eventual", operation="write", fault="delay")
+        assert tracker.reliability_results[0].status == "PASS"
+
+        reachable("recovery_path", operation="write", fault="process_crash")
+        unreachable(
+            "data_loss",
+            mute=True,
+            operation="write",
+            fault="disk_full",
+        )
+        statuses = {cell.property: cell.status for cell in tracker.reliability_results}
+        assert statuses["recovery_path"] == "PASS"
+        assert statuses["data_loss"] == "FAIL"
+
+    def test_immediate_sometimes_failure_records_fail(self):
+        with pytest.raises(AssertionError, match="never true"):
+            sometimes(
+                lambda: False,
+                "eventual_commit",
+                attempts=2,
+                operation="create_order",
+                fault="worker_restart",
+            )
+
+        cell = tracker.reliability_results[0]
+        assert cell.hits == 1
+        assert cell.status == "FAIL"
+
+    def test_reset_and_restore_include_reliability_cells(self):
+        always(True, "durable", operation="write", fault="process_crash")
+        snapshot = tracker.snapshot()
+        tracker.reset()
+        assert tracker.reliability_results == []
+
+        tracker.restore(snapshot)
+        assert tracker.reliability_results[0].status == "PASS"
+
+    def test_worker_rows_merge_without_losing_declarations(self):
+        tracker.merge_reliability(
+            [
+                {
+                    "operation": "create_order",
+                    "fault": "timeout",
+                    "property": "no_duplicate_charge",
+                    "type": "always",
+                    "hits": 2,
+                    "passes": 2,
+                    "failures": 0,
+                },
+                {
+                    "operation": "create_order",
+                    "fault": "worker_restart",
+                    "property": "eventual_commit",
+                    "type": "always",
+                    "hits": 0,
+                    "passes": 0,
+                    "failures": 0,
+                },
+            ]
+        )
+        tracker.merge_reliability(
+            [
+                {
+                    "operation": "create_order",
+                    "fault": "timeout",
+                    "property": "no_duplicate_charge",
+                    "type": "always",
+                    "hits": 3,
+                    "passes": 2,
+                    "failures": 1,
+                }
+            ]
+        )
+
+        cells = {cell.fault: cell for cell in tracker.reliability_results}
+        assert cells["timeout"].hits == 5
+        assert cells["timeout"].status == "FAIL"
+        assert cells["worker_restart"].status == "NOT EXERCISED"
 
 
 class TestReachable:

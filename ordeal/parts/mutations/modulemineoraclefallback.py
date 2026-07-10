@@ -140,8 +140,8 @@ def mutate_and_test(
         llm_equivalence: If ``True`` and *llm* is provided, use the LLM
             to filter surviving mutants for semantic equivalence.
         test_filter: Pytest ``-k`` expression to narrow which tests run
-            against each mutant.  When ``None`` (default), derives a filter
-            from the target module name.
+            against each mutant. When ``None`` (default), ranks likely killer
+            tests and retains a broad fallback for surviving mutants.
         mutant_timeout: Maximum seconds for the mutant generation step.
             When exceeded, returns whatever mutants have been generated so
             far.  Prevents hanging on complex AST expressions (numpy, cv2).
@@ -202,11 +202,7 @@ def mutate_and_test(
     if use_batch and mutant_pairs:
         selection = _mutation_test_selection(target, test_filter=test_filter)
         profile = _load_mutation_execution_profile(target)
-        selected_test_count = (
-            profile.collected_tests
-            if profile is not None and profile.collected_tests > 0
-            else max(1, len(selection.ast_scores), len(selection.paths))
-        )
+        selected_test_count = _selected_mutation_test_count(selection, profile)
         effective_workers = _resolve_mutation_worker_count(
             workers,
             mutant_count=len(mutant_pairs),
@@ -214,25 +210,56 @@ def mutate_and_test(
             profile=profile,
             disk_mutation=disk_mutation,
         )
-        stats["workers_selected"] = effective_workers
         with _timed_phase(timings, "test_execution_seconds"):
-            if effective_workers > 1 and len(mutant_pairs) > 1:
-                batch_results = _parallel_module_test(
-                    target,
-                    mutant_pairs,
-                    effective_workers,
-                    test_filter=test_filter,
-                    disk_mutation=disk_mutation,
-                    timings=timings,
-                )
-            else:
+            batch_results = []
+            remaining_pairs = mutant_pairs
+            if _needs_mutation_worker_preflight(
+                workers,
+                preliminary_workers=effective_workers,
+                profile=profile,
+                disk_mutation=disk_mutation,
+            ):
                 batch_results = _batch_module_test(
                     target,
-                    mutant_pairs,
+                    mutant_pairs[:1],
                     test_filter=test_filter,
                     disk_mutation=disk_mutation,
                     stats=stats,
                     timings=timings,
+                )
+                remaining_pairs = mutant_pairs[1:]
+                profile = _load_mutation_execution_profile(target)
+                selection = _mutation_test_selection(target, test_filter=test_filter)
+                selected_test_count = _selected_mutation_test_count(selection, profile)
+                effective_workers = _resolve_mutation_worker_count(
+                    workers,
+                    mutant_count=len(mutant_pairs),
+                    selected_test_count=selected_test_count,
+                    profile=profile,
+                    disk_mutation=disk_mutation,
+                )
+            stats["workers_selected"] = effective_workers
+            if effective_workers > 1 and len(remaining_pairs) > 1:
+                batch_results.extend(
+                    _parallel_module_test(
+                        target,
+                        remaining_pairs,
+                        effective_workers,
+                        test_filter=test_filter,
+                        disk_mutation=disk_mutation,
+                        timings=timings,
+                    )
+                )
+            elif remaining_pairs:
+                batch_results.extend(
+                    _batch_module_test(
+                        target,
+                        remaining_pairs,
+                        test_filter=test_filter,
+                        disk_mutation=disk_mutation,
+                        stats=stats,
+                        timings=timings,
+                    )
                 )
         for item in batch_results:
             mutant, killed, error = item[0], item[1], item[2]

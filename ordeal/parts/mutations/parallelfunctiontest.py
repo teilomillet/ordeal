@@ -137,8 +137,8 @@ def mutate(
         llm_equivalence: If ``True`` and *llm* is provided, use the LLM
             to filter surviving mutants for semantic equivalence.
         test_filter: Pytest ``-k`` expression to narrow which tests run
-            against each mutant.  When ``None`` (default), derives a filter
-            from the target module name.
+            against each mutant. When ``None`` (default), ranks likely killer
+            tests and retains a broad fallback for surviving mutants.
         mutant_timeout: Maximum seconds for the mutant generation step.
             Prevents hanging on complex AST expressions (numpy, cv2).
         disk_mutation: Write the mutated source to disk so subprocesses

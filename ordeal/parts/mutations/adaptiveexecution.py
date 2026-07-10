@@ -25,6 +25,8 @@ class _MutationExecutionProfile:
     kill_counts: dict[str, int] = field(default_factory=dict)
     mutant_killers: dict[str, str] = field(default_factory=dict)
     coverage_hits: tuple[str, ...] = ()
+    coverage_calibrated: bool = False
+    baseline_fingerprint: str = ""
     collected_tests: int = 0
     mutant_count: int = 0
     pytest_seconds: float = 0.0
@@ -67,6 +69,8 @@ def _load_mutation_execution_profile(target: str) -> _MutationExecutionProfile |
                 for key, nodeid in dict(payload.get("mutant_killers", {})).items()
             },
             coverage_hits=tuple(str(item) for item in payload.get("coverage_hits", [])),
+            coverage_calibrated=bool(payload.get("coverage_calibrated", False)),
+            baseline_fingerprint=str(payload.get("baseline_fingerprint", "")),
             collected_tests=max(0, int(payload.get("collected_tests", 0))),
             mutant_count=max(0, int(payload.get("mutant_count", 0))),
             pytest_seconds=max(0.0, float(payload.get("pytest_seconds", 0.0))),
@@ -89,6 +93,8 @@ def _save_mutation_execution_profile(
         "kill_counts": profile.kill_counts,
         "mutant_killers": profile.mutant_killers,
         "coverage_hits": list(profile.coverage_hits),
+        "coverage_calibrated": profile.coverage_calibrated,
+        "baseline_fingerprint": profile.baseline_fingerprint,
         "collected_tests": profile.collected_tests,
         "mutant_count": profile.mutant_count,
         "pytest_seconds": profile.pytest_seconds,
@@ -128,8 +134,15 @@ def _resolve_mutation_worker_count(
     tests = max(1, selected_test_count)
     if profile is not None and profile.mutant_count > 0 and profile.pytest_seconds > 0:
         comparable_size = 0.5 <= mutant_count / profile.mutant_count <= 2.0
-        if comparable_size:
+        short_calibration = (
+            profile.workers == 1
+            and profile.mutant_count <= 3
+            and profile.mutant_count < mutant_count
+        )
+        if comparable_size or short_calibration:
             estimated_serial = profile.pytest_seconds * max(1, profile.workers)
+            if short_calibration:
+                estimated_serial *= mutant_count / profile.mutant_count
             if estimated_serial < 0.12 or (tests <= 2 and estimated_serial < 0.25):
                 return 1
             if estimated_serial >= 0.35 and mutant_count >= 28:
@@ -187,11 +200,119 @@ def _order_mutation_test_items(
     return sorted(items, key=_score)
 
 
+@functools.lru_cache(maxsize=128)
+def _broad_mutation_test_selection(
+    target: str,
+    selection: _MutationTestSelection,
+) -> _MutationTestSelection | None:
+    """Return an attributed fallback, using the full suite only when uncertain."""
+    module_name, func_name = _split_mutation_target(target)
+    fallback_paths = _attributed_mutation_test_candidates(module_name)
+    attribution_available = bool(fallback_paths)
+    if not fallback_paths:
+        fallback_paths = _all_test_files()
+    if not fallback_paths:
+        return None
+
+    fallback_args: tuple[str, ...]
+    if not attribution_available:
+        fallback_args = fallback_paths
+    else:
+        related_modules = set(_attributed_mutation_modules(module_name))
+        node_args: list[str] = []
+        for path in fallback_paths:
+            scored_nodes = _score_mutation_test_nodes(
+                path,
+                module_name=module_name,
+                func_name=func_name,
+                related_modules=related_modules,
+            )
+            node_args.extend(nodeid for nodeid, _score in scored_nodes)
+            if not scored_nodes:
+                node_args.extend(_mutation_test_node_paths(path))
+        fallback_args = tuple(node_args)
+
+    selected_files = {
+        str(Path(path.split("::", 1)[0]).resolve()) for path in selection.paths
+    }
+    seen: set[str] = set()
+    ordered: list[str] = []
+    added_fallback = False
+    for path in fallback_args:
+        base, separator, node = path.partition("::")
+        base_resolved = str(Path(base).resolve())
+        if base_resolved in selected_files:
+            continue
+        key = f"{base_resolved}::{node}" if separator else base_resolved
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(path)
+        added_fallback = True
+    if not added_fallback and selection.k_filter is None:
+        return None
+    return _MutationTestSelection(
+        paths=tuple(ordered), k_filter=None, ast_scores=selection.ast_scores
+    )
+
+
+def _surviving_mutant_pairs(
+    mutant_pairs: Sequence[tuple[Mutant, ast.Module]],
+    results: Sequence[tuple[Mutant, bool, str | None, str | None]],
+) -> list[tuple[Mutant, ast.Module]]:
+    """Return original mutant pairs whose narrow test result survived."""
+    surviving = {
+        _mutant_profile_key(mutant) for mutant, killed, _error, _killer in results if not killed
+    }
+    return [
+        (mutant, tree) for mutant, tree in mutant_pairs if _mutant_profile_key(mutant) in surviving
+    ]
+
+
+def _merge_mutation_batch_results(
+    narrow: Sequence[tuple[Mutant, bool, str | None, str | None]],
+    fallback: Sequence[tuple[Mutant, bool, str | None, str | None]],
+) -> list[tuple[Mutant, bool, str | None, str | None]]:
+    """Replace narrow survivors with their stronger broad-fallback result."""
+    fallback_by_key = {_mutant_profile_key(result[0]): result for result in fallback}
+    return [
+        fallback_by_key.get(_mutant_profile_key(result[0]), result) if not result[1] else result
+        for result in narrow
+    ]
+
+
+def _needs_mutation_worker_preflight(
+    requested: int,
+    *,
+    preliminary_workers: int,
+    profile: _MutationExecutionProfile | None,
+    disk_mutation: bool,
+) -> bool:
+    """Return whether an auto-parallel run first needs current collection evidence."""
+    return (
+        requested == 0
+        and preliminary_workers > 1
+        and not disk_mutation
+        and (profile is None or not profile.coverage_calibrated)
+    )
+
+
+def _selected_mutation_test_count(
+    selection: _MutationTestSelection,
+    profile: _MutationExecutionProfile | None,
+) -> int:
+    """Prefer current collected-test evidence over static selection hints."""
+    if profile is not None and profile.collected_tests > 0:
+        return profile.collected_tests
+    return max(1, len(selection.ast_scores), len(selection.paths))
+
+
 def _score_mutation_test_nodes(
     path: str,
     *,
     module_name: str,
     func_name: str | None,
+    related_modules: set[str] | None = None,
 ) -> tuple[tuple[str, int], ...]:
     """Return direct-call AST scores for individual pytest test nodes."""
     try:
@@ -202,15 +323,26 @@ def _score_mutation_test_nodes(
 
     aliases: set[str] = set()
     direct_names: set[str] = set()
+    related_aliases: set[str] = set()
+    related_direct_names: set[str] = set()
+    related = related_modules or set()
     for node in tree.body:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name == module_name:
                     aliases.add(alias.asname or alias.name.split(".")[-1])
+                if alias.name in related:
+                    related_aliases.add(alias.asname or alias.name.split(".")[-1])
         elif isinstance(node, ast.ImportFrom) and node.module == module_name:
             for alias in node.names:
                 if alias.name == "*" or func_name is None or alias.name == func_name:
                     direct_names.add(alias.asname or alias.name)
+                if alias.name != "*" and module_name in related:
+                    related_direct_names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.module in related:
+            related_direct_names.update(
+                alias.asname or alias.name for alias in node.names if alias.name != "*"
+            )
 
     try:
         display_path = str(Path(path).resolve().relative_to(Path.cwd().resolve()))
@@ -239,13 +371,23 @@ def _score_mutation_test_nodes(
             call = current.func
             if isinstance(call, ast.Name) and call.id in direct_names:
                 score += 12 if func_name is not None else 4
+            elif isinstance(call, ast.Name) and call.id in related_direct_names:
+                score += 1
             elif (
                 isinstance(call, ast.Attribute)
                 and isinstance(call.value, ast.Name)
                 and call.value.id in aliases
-                and (func_name is None or call.attr == func_name)
             ):
-                score += 10 if func_name is not None else 4
+                if func_name is None or call.attr == func_name:
+                    score += 10 if func_name is not None else 4
+                else:
+                    score += 1
+            elif (
+                isinstance(call, ast.Attribute)
+                and isinstance(call.value, ast.Name)
+                and call.value.id in related_aliases
+            ):
+                score += 1
         if score:
             scored.append((f"{display_path}::{node_name}", score))
     return tuple(scored)
@@ -297,8 +439,21 @@ def _calibrate_mutation_test_coverage(session: Any, target: str) -> set[str]:
             sys.setprofile(previous_profiler)
         if entered:
             hits.add(str(item.nodeid))
+    session._ordeal_mutation_baseline_failed = session.testsfailed > failures_before
     session.testsfailed = failures_before
     return hits
+
+
+def _mutation_test_baseline_fails(session: Any) -> bool:
+    """Run every selected original test once and restore pytest failure state."""
+    failures_before = session.testsfailed
+    items = list(session.items)
+    for index, item in enumerate(items):
+        next_item = items[index + 1] if index + 1 < len(items) else None
+        item.config.hook.pytest_runtest_protocol(item=item, nextitem=next_item)
+    failed = session.testsfailed > failures_before
+    session.testsfailed = failures_before
+    return failed
 
 
 def _record_mutation_execution_profile(
@@ -306,10 +461,12 @@ def _record_mutation_execution_profile(
     results: Sequence[tuple[Mutant, bool, str | None, str | None]],
     *,
     coverage_hits: set[str],
+    coverage_calibrated: bool,
     collected_tests: int,
     mutant_count: int,
     pytest_seconds: float,
     workers: int,
+    baseline_fingerprint: str = "",
 ) -> None:
     """Merge observed killers and calibration into the local profile."""
     profile = _load_mutation_execution_profile(target) or _MutationExecutionProfile()
@@ -318,8 +475,11 @@ def _record_mutation_execution_profile(
             continue
         profile.kill_counts[killer] = min(1_000_000, profile.kill_counts.get(killer, 0) + 1)
         profile.mutant_killers[_mutant_profile_key(mutant)] = killer
-    if coverage_hits:
+    if coverage_calibrated:
         profile.coverage_hits = tuple(sorted(coverage_hits))
+        profile.coverage_calibrated = True
+    if baseline_fingerprint:
+        profile.baseline_fingerprint = baseline_fingerprint
     if collected_tests > 0:
         profile.collected_tests = collected_tests
     profile.mutant_count = max(0, mutant_count)

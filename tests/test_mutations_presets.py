@@ -304,6 +304,116 @@ def test_auto_discovered_function_mutation_uses_parallel_batch_path(monkeypatch)
     assert result.killed == 1
 
 
+def test_explicit_parallel_rejects_failing_baseline_before_workers(monkeypatch):
+    mutant_pairs = [
+        (
+            Mutant(operator="arithmetic", description=f"mutant-{index}", line=1, col=index),
+            ast.parse("def _add(a: int, b: int) -> int:\n    return a - b\n"),
+        )
+        for index in range(2)
+    ]
+    monkeypatch.setattr(
+        mutations,
+        "_auto_test_fn",
+        lambda target, test_filter=None: lambda: None,
+    )
+    monkeypatch.setattr(mutations, "generate_mutants", lambda *args, **kwargs: mutant_pairs)
+    monkeypatch.setattr(
+        mutations,
+        "_filter_function_mutant_pairs",
+        lambda func, module, func_name, pairs, **kwargs: pairs,
+    )
+    def fake_parallel(*args, baseline_validated=False, **kwargs):
+        assert baseline_validated is False
+        raise RuntimeError("tests fail before mutation")
+
+    monkeypatch.setattr(mutations, "_parallel_function_batch_test", fake_parallel)
+
+    with pytest.raises(RuntimeError, match="fail before mutation"):
+        mutate_function_and_test(
+            f"{__name__}._add",
+            preset="essential",
+            workers=2,
+            filter_equivalent=False,
+        )
+
+
+def test_auto_workers_preflight_current_collection_before_parallel(monkeypatch):
+    mutant_pairs = [
+        (
+            Mutant(
+                operator="arithmetic",
+                description=f"mutant-{index}",
+                line=index + 1,
+                col=0,
+            ),
+            ast.parse("def _add(a: int, b: int) -> int:\n    return a - b\n"),
+        )
+        for index in range(30)
+    ]
+    profile: mutations._MutationExecutionProfile | None = None
+    events: list[tuple[str, int, int | None]] = []
+
+    monkeypatch.setattr(mutations.os, "cpu_count", lambda: 12)
+    monkeypatch.setattr(
+        mutations,
+        "_auto_test_fn",
+        lambda target, test_filter=None: lambda: None,
+    )
+    monkeypatch.setattr(mutations, "generate_mutants", lambda *args, **kwargs: mutant_pairs)
+    monkeypatch.setattr(
+        mutations,
+        "_filter_function_mutant_pairs",
+        lambda func, module, func_name, pairs, **kwargs: pairs,
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_mutation_test_selection",
+        lambda target, test_filter=None: mutations._MutationTestSelection(
+            paths=("tests/test_current.py",),
+            k_filter=test_filter,
+            ast_scores=tuple((f"test-{index}", 1) for index in range(22)),
+        ),
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_load_mutation_execution_profile",
+        lambda target: profile,
+    )
+
+    def fake_batch(target, pairs, **kwargs):
+        nonlocal profile
+        events.append(("preflight", len(pairs), None))
+        profile = mutations._MutationExecutionProfile(
+            coverage_calibrated=True,
+            collected_tests=22,
+            mutant_count=1,
+            pytest_seconds=0.05,
+            workers=1,
+        )
+        mutant = pairs[0][0]
+        return [(mutant, True, "killed", "tests/test_current.py::test_target")]
+
+    def fake_parallel(target, pairs, workers, **kwargs):
+        assert "baseline_validated" not in kwargs
+        events.append(("parallel", len(pairs), workers))
+        return [(mutant, False, None, None) for mutant, _tree in pairs]
+
+    monkeypatch.setattr(mutations, "_batch_function_test", fake_batch)
+    monkeypatch.setattr(mutations, "_parallel_function_batch_test", fake_parallel)
+
+    result = mutate_function_and_test(
+        f"{__name__}._add",
+        preset="essential",
+        workers=0,
+        filter_equivalent=False,
+    )
+
+    assert events == [("preflight", 1, None), ("parallel", 29, 4)]
+    assert result.diagnostics["workers_selected"] == 4
+    assert result.total == 30
+
+
 def test_custom_test_disk_mutation_avoids_parallel_patch_only_path(monkeypatch):
     mutant = Mutant(operator="arithmetic", description="+ -> -", line=2, col=11)
     mutated_tree = ast.parse("def _add(a: int, b: int) -> int:\n    return a - b\n")
@@ -508,6 +618,60 @@ def test_mutation_test_selection_matches_private_module_names(monkeypatch, tmp_p
     selection = _mutation_test_selection("pkg._mod.compute")
 
     assert selection.paths == (str(target_test),)
+    assert selection.k_filter is None
+
+
+def test_mutation_test_selection_keeps_named_file_broad_without_ast_evidence(
+    monkeypatch,
+    tmp_path: Path,
+):
+    pkg = tmp_path / "broadpkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "mod.py").write_text("def compute(x: int) -> int:\n    return x + 1\n")
+
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    named_test = tests_dir / "test_mod.py"
+    named_test.write_text("def test_indirect_contract():\n    assert True\n")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    mutations._all_test_files.cache_clear()
+    mutations._named_mutation_test_candidates.cache_clear()
+    mutations._split_mutation_target.cache_clear()
+    _mutation_test_selection.cache_clear()
+
+    selection = _mutation_test_selection("broadpkg.mod.compute")
+
+    assert selection.paths == (str(named_test),)
+    assert selection.k_filter is None
+
+
+def test_mutation_test_selection_uses_all_tests_when_no_narrow_evidence(
+    monkeypatch,
+    tmp_path: Path,
+):
+    pkg = tmp_path / "fallbackpkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "unmatched.py").write_text("def compute(x: int) -> int:\n    return x + 1\n")
+
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    unrelated = tests_dir / "test_contract.py"
+    unrelated.write_text("def test_indirect_contract():\n    assert True\n")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    mutations._all_test_files.cache_clear()
+    mutations._named_mutation_test_candidates.cache_clear()
+    mutations._split_mutation_target.cache_clear()
+    _mutation_test_selection.cache_clear()
+
+    selection = _mutation_test_selection("fallbackpkg.unmatched.compute")
+
+    assert selection.paths == (str(unrelated),)
     assert selection.k_filter is None
 
 

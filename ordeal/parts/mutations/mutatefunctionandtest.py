@@ -35,14 +35,6 @@ def mutate_function_and_test(
         result = mutate_function_and_test("myapp.scoring.compute", preset="standard")
         print(result.summary())
 
-    Example — only run relevant tests (fast)::
-
-        result = mutate_function_and_test(
-            "myapp.scoring.compute",
-            preset="standard",
-            test_filter="test_compute",
-        )
-
     Example — AI assistant writes extra mutants directly::
 
         result = mutate_function_and_test(
@@ -52,14 +44,6 @@ def mutate_function_and_test(
                 ("off-by-one", "def compute(a, b):\\n    if a <= 0: ..."),
                 ("wrong var", "def compute(a, b):\\n    if b < 0: ..."),
             ],
-        )
-
-    Example — custom operators + parallel::
-
-        result = mutate_function_and_test(
-            "myapp.scoring.compute",
-            operators=["arithmetic", "comparison", "boundary"],
-            workers=4,
         )
 
     Args:
@@ -97,9 +81,8 @@ def mutate_function_and_test(
         llm_equivalence: If ``True`` and *llm* is provided, use the LLM
             to filter surviving mutants that are semantically equivalent.
         test_filter: Pytest ``-k`` expression to narrow which tests run
-            against each mutant.  When ``None`` (default), derives a filter
-            from the target module name.  Set this to avoid running the
-            entire test suite per mutant (e.g. ``"test_compute"``).
+            against each mutant. When ``None`` (default), ranks likely killer
+            tests and retains a broad fallback for surviving mutants.
         mutant_timeout: Maximum seconds for the mutant generation step.
             When exceeded, returns whatever mutants have been generated so
             far.  Prevents hanging on complex AST expressions (numpy, cv2).
@@ -164,11 +147,7 @@ def mutate_function_and_test(
             return result
         selection = _mutation_test_selection(target, test_filter=test_filter)
         profile = _load_mutation_execution_profile(target)
-        selected_test_count = (
-            profile.collected_tests
-            if profile is not None and profile.collected_tests > 0
-            else max(1, len(selection.ast_scores), len(selection.paths))
-        )
+        selected_test_count = _selected_mutation_test_count(selection, profile)
         effective_workers = _resolve_mutation_worker_count(
             workers,
             mutant_count=len(mutant_pairs),
@@ -176,27 +155,58 @@ def mutate_function_and_test(
             profile=profile,
             disk_mutation=disk_mutation,
         )
-        stats["workers_selected"] = effective_workers
         try:
             with _timed_phase(timings, "test_execution_seconds"):
-                if effective_workers > 1 and len(mutant_pairs) > 1:
-                    batch_results = _parallel_function_batch_test(
+                batch_results = []
+                remaining_pairs = mutant_pairs
+                if _needs_mutation_worker_preflight(
+                    workers,
+                    preliminary_workers=effective_workers,
+                    profile=profile,
+                    disk_mutation=disk_mutation,
+                ):
+                    batch_results = _batch_function_test(
                         target,
-                        mutant_pairs,
-                        effective_workers,
+                        mutant_pairs[:1],
                         test_filter=test_filter,
                         disk_mutation=disk_mutation,
                         stats=stats,
                         timings=timings,
                     )
-                else:
-                    batch_results = _batch_function_test(
-                        target,
-                        mutant_pairs,
-                        test_filter=test_filter,
+                    remaining_pairs = mutant_pairs[1:]
+                    profile = _load_mutation_execution_profile(target)
+                    selection = _mutation_test_selection(target, test_filter=test_filter)
+                    selected_test_count = _selected_mutation_test_count(selection, profile)
+                    effective_workers = _resolve_mutation_worker_count(
+                        workers,
+                        mutant_count=len(mutant_pairs),
+                        selected_test_count=selected_test_count,
+                        profile=profile,
                         disk_mutation=disk_mutation,
-                        stats=stats,
-                        timings=timings,
+                    )
+                stats["workers_selected"] = effective_workers
+                if effective_workers > 1 and len(remaining_pairs) > 1:
+                    batch_results.extend(
+                        _parallel_function_batch_test(
+                            target,
+                            remaining_pairs,
+                            effective_workers,
+                            test_filter=test_filter,
+                            disk_mutation=disk_mutation,
+                            stats=stats,
+                            timings=timings,
+                        )
+                    )
+                elif remaining_pairs:
+                    batch_results.extend(
+                        _batch_function_test(
+                            target,
+                            remaining_pairs,
+                            test_filter=test_filter,
+                            disk_mutation=disk_mutation,
+                            stats=stats,
+                            timings=timings,
+                        )
                     )
         except NoTestsFoundError:
             with _timed_phase(timings, "mine_fallback_seconds"):

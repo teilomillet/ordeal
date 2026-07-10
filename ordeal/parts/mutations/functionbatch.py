@@ -47,6 +47,9 @@ def _batch_function_test(
     stats: dict[str, int] | None = None,
     timings: dict[str, float] | None = None,
     persist_profile: bool = True,
+    selection_override: _MutationTestSelection | None = None,
+    allow_broad_fallback: bool = True,
+    baseline_validated: bool = False,
 ) -> list[tuple[Mutant, bool, str | None, str | None]]:
     """Run function mutants in a single pytest session.
 
@@ -64,8 +67,15 @@ def _batch_function_test(
         raise ValueError(f"Function-level mutation target expected, got module {target!r}")
     phase_timings = timings if timings is not None else {}
     with _timed_phase(phase_timings, "test_selection_seconds"):
-        selection = _mutation_test_selection(target, test_filter=test_filter)
+        selection = selection_override or _mutation_test_selection(
+            target,
+            test_filter=test_filter,
+        )
     profile = _load_mutation_execution_profile(target)
+    baseline_fingerprint = _mutation_test_baseline_fingerprint(target, selection)
+    baseline_validated = baseline_validated or bool(
+        profile and profile.baseline_fingerprint == baseline_fingerprint
+    )
     if stats is not None:
         stats["selected_test_files"] = len(selection.paths)
         stats["selected_test_nodes"] = len(selection.ast_scores)
@@ -91,8 +101,11 @@ def _batch_function_test(
 
         def __init__(self) -> None:
             self.no_tests_found = False
+            self.no_target_tests = False
+            self.baseline_failed = False
             self.collected_tests = 0
             self.coverage_hits: set[str] = set()
+            self.coverage_calibrated = False
             self.executed_tests = 0
 
         @pytest.hookimpl(tryfirst=True)
@@ -108,8 +121,36 @@ def _batch_function_test(
                     for item in session.items
                     if str(item.nodeid) in prior_coverage
                 }
-                if persist_profile and (profile is None or profile.collected_tests <= 0):
+                self.coverage_calibrated = bool(profile and profile.coverage_calibrated)
+                stale_coverage = bool(
+                    profile
+                    and profile.coverage_calibrated
+                    and profile.coverage_hits
+                    and not self.coverage_hits
+                )
+                calibrated_now = False
+                if persist_profile and (not self.coverage_calibrated or stale_coverage):
                     self.coverage_hits = _calibrate_mutation_test_coverage(session, target)
+                    self.coverage_calibrated = True
+                    calibrated_now = True
+                    self.baseline_failed = bool(
+                        getattr(session, "_ordeal_mutation_baseline_failed", False)
+                    )
+                    if self.baseline_failed:
+                        return True
+                elif not baseline_validated:
+                    self.baseline_failed = _mutation_test_baseline_fails(session)
+                    if self.baseline_failed:
+                        return True
+                if (
+                    persist_profile
+                    and calibrated_now
+                    and not self.coverage_hits
+                    and not selection.ast_scores
+                    and not disk_mutation
+                ):
+                    self.no_target_tests = True
+                    return True
                 for mutant, mutated_func, mutated_tree in compiled:
                     killed = False
                     error = None
@@ -170,15 +211,41 @@ def _batch_function_test(
         stats["executed_tests"] = plugin.executed_tests
     if plugin.no_tests_found:
         _raise_no_tests_found(target)
+    if plugin.baseline_failed:
+        raise RuntimeError(
+            f"Selected tests for {target!r} fail before mutation; "
+            "cannot attribute a reliable mutant kill"
+        )
+    if plugin.no_target_tests:
+        _raise_no_tests_found(target)
+    if allow_broad_fallback and test_filter is None:
+        fallback_pairs = _surviving_mutant_pairs(mutant_pairs, results)
+        broad_selection = (
+            _broad_mutation_test_selection(target, selection) if fallback_pairs else None
+        )
+        if broad_selection is not None and fallback_pairs:
+            fallback_results = _batch_function_test(
+                target,
+                fallback_pairs,
+                test_filter=None,
+                disk_mutation=disk_mutation,
+                timings=phase_timings,
+                persist_profile=False,
+                selection_override=broad_selection,
+                allow_broad_fallback=False,
+            )
+            results = _merge_mutation_batch_results(results, fallback_results)
     if persist_profile:
         _record_mutation_execution_profile(
             target,
             results,
             coverage_hits=plugin.coverage_hits,
+            coverage_calibrated=plugin.coverage_calibrated,
             collected_tests=plugin.collected_tests,
             mutant_count=len(compiled),
             pytest_seconds=phase_timings.get("pytest_seconds", 0.0),
             workers=1,
+            baseline_fingerprint=baseline_fingerprint,
         )
     return results
 
@@ -192,6 +259,7 @@ def _parallel_function_batch_test(
     disk_mutation: bool = False,
     stats: dict[str, int] | None = None,
     timings: dict[str, float] | None = None,
+    baseline_validated: bool = False,
 ) -> list[tuple[Mutant, bool, str | None, str | None]]:
     """Run function-level mutation batches in parallel worker processes."""
     import multiprocessing as mp
@@ -212,18 +280,39 @@ def _parallel_function_batch_test(
         chunks.append(serialized[i : i + chunk_size])
 
     ctx = mp.get_context("fork" if sys.platform != "win32" else "spawn")
-    with _timed_phase(timings if timings is not None else {}, "pytest_seconds"):
+    phase_timings = timings if timings is not None else {}
+    with _timed_phase(phase_timings, "pytest_seconds"):
         with ctx.Pool(min(workers, len(chunks))) as pool:
             chunk_results = pool.map(
                 _parallel_function_batch_worker,
-                [(target, chunk, test_filter, disk_mutation) for chunk in chunks],
+                [
+                    (target, chunk, test_filter, disk_mutation, baseline_validated)
+                    for chunk in chunks
+                ],
             )
 
     results: list[tuple[Mutant, bool, str | None, str | None]] = []
     for chunk_result in chunk_results:
         results.extend(chunk_result)
-    prior = _load_mutation_execution_profile(target)
     selection = _mutation_test_selection(target, test_filter=test_filter)
+    if test_filter is None:
+        fallback_pairs = _surviving_mutant_pairs(mutant_pairs, results)
+        broad_selection = (
+            _broad_mutation_test_selection(target, selection) if fallback_pairs else None
+        )
+        if broad_selection is not None and fallback_pairs:
+            fallback_results = _batch_function_test(
+                target,
+                fallback_pairs,
+                test_filter=None,
+                disk_mutation=disk_mutation,
+                timings=phase_timings,
+                persist_profile=False,
+                selection_override=broad_selection,
+                allow_broad_fallback=False,
+            )
+            results = _merge_mutation_batch_results(results, fallback_results)
+    prior = _load_mutation_execution_profile(target)
     collected_hint = (
         prior.collected_tests
         if prior is not None and prior.collected_tests > 0
@@ -233,19 +322,21 @@ def _parallel_function_batch_test(
         target,
         results,
         coverage_hits=set(),
+        coverage_calibrated=False,
         collected_tests=collected_hint,
         mutant_count=len(serialized),
-        pytest_seconds=(timings or {}).get("pytest_seconds", 0.0),
+        pytest_seconds=phase_timings.get("pytest_seconds", 0.0),
         workers=min(workers, len(chunks)),
+        baseline_fingerprint=_mutation_test_baseline_fingerprint(target, selection),
     )
     return results
 
 
 def _parallel_function_batch_worker(
-    args: tuple[str, list[tuple[Mutant, str]], str | None, bool],
+    args: tuple[str, list[tuple[Mutant, str]], str | None, bool, bool],
 ) -> list[tuple[Mutant, bool, str | None, str | None]]:
     """Re-parse ASTs and batch-test one function-level chunk."""
-    target, chunk, test_filter, disk_mutation = args
+    target, chunk, test_filter, disk_mutation, baseline_validated = args
     reparsed = []
     for mutant, source_text in chunk:
         try:
@@ -258,4 +349,6 @@ def _parallel_function_batch_worker(
         test_filter=test_filter,
         disk_mutation=disk_mutation,
         persist_profile=False,
+        allow_broad_fallback=False,
+        baseline_validated=baseline_validated,
     )

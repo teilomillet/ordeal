@@ -9,6 +9,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 import ordeal.mutations as mutations
 import tests._mutation_bench_target as mutation_bench_target
 
@@ -270,6 +272,319 @@ def test_adaptive_mutation_workers_use_observed_calibration(monkeypatch):
         )
         == 1
     )
+    expensive_profile = mutations._MutationExecutionProfile(
+        collected_tests=22,
+        mutant_count=30,
+        pytest_seconds=0.40,
+        workers=1,
+    )
+    assert (
+        mutations._resolve_mutation_worker_count(
+            0,
+            mutant_count=30,
+            selected_test_count=22,
+            profile=expensive_profile,
+        )
+        == 4
+    )
+    short_cheap_calibration = mutations._MutationExecutionProfile(
+        collected_tests=22,
+        mutant_count=1,
+        pytest_seconds=0.001,
+        workers=1,
+    )
+    assert (
+        mutations._resolve_mutation_worker_count(
+            0,
+            mutant_count=30,
+            selected_test_count=22,
+            profile=short_cheap_calibration,
+        )
+        == 1
+    )
+
+
+def test_auto_parallel_preflight_requires_uncalibrated_timing_and_coverage():
+    assert mutations._needs_mutation_worker_preflight(
+        0,
+        preliminary_workers=4,
+        profile=None,
+        disk_mutation=False,
+    )
+    assert not mutations._needs_mutation_worker_preflight(
+        4,
+        preliminary_workers=4,
+        profile=None,
+        disk_mutation=False,
+    )
+    assert not mutations._needs_mutation_worker_preflight(
+        0,
+        preliminary_workers=4,
+        profile=mutations._MutationExecutionProfile(coverage_calibrated=True),
+        disk_mutation=False,
+    )
+
+
+def test_broad_fallback_keeps_indirect_killer(
+    tmp_path: Path,
+    monkeypatch,
+):
+    package = tmp_path / "fallbackpkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "calc.py").write_text(
+        "def compute(x: int) -> int:\n    return x + 1\n\n"
+        "def public_wrapper() -> int:\n    return compute(2)\n",
+        encoding="utf-8",
+    )
+    (package / "service.py").write_text(
+        "from . import calc\n\ndef value() -> int:\n    return calc.compute(2)\n",
+        encoding="utf-8",
+    )
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    fallback_marker = tests_dir / "fallback-marker.txt"
+    fallback_marker.write_text("pass", encoding="utf-8")
+    (tests_dir / "test_calc.py").write_text(
+        "import fallbackpkg.calc as calc\n\n"
+        "def test_direct_but_weak():\n"
+        "    assert calc.compute(2) in {1, 3}\n",
+        encoding="utf-8",
+    )
+    (tests_dir / "test_contract.py").write_text(
+        "from pathlib import Path\n\n"
+        "from fallbackpkg.service import value\n\n"
+        "def test_indirect_contract():\n"
+        "    assert value() in {1, 3}\n"
+        "    assert Path(__file__).with_name('fallback-marker.txt').read_text() == 'pass'\n",
+        encoding="utf-8",
+    )
+    (tests_dir / "test_mixed.py").write_text(
+        "import fallbackpkg.calc as calc\n"
+        "from fallbackpkg.service import value\n\n"
+        "def test_weak_direct():\n"
+        "    assert calc.compute(2) in {1, 3}\n\n"
+        "def test_weak_wrapper():\n"
+        "    assert calc.public_wrapper() in {1, 3}\n\n"
+        "def test_service_contract():\n"
+        "    assert value() == 3\n",
+        encoding="utf-8",
+    )
+    mutant = mutations.Mutant(
+        operator="arithmetic",
+        description="+ -> -",
+        line=2,
+        col=13,
+    )
+    mutated_tree = ast.parse("def compute(x: int) -> int:\n    return x - 1\n")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    mutations._all_test_files.cache_clear()
+    mutations._attributed_mutation_test_candidates.cache_clear()
+    mutations._named_mutation_test_candidates.cache_clear()
+    mutations._split_mutation_target.cache_clear()
+    mutations._mutation_test_selection.cache_clear()
+    mutations._save_mutation_execution_profile(
+        "fallbackpkg.calc.compute",
+        mutations._MutationExecutionProfile(
+            coverage_hits=("tests/test_removed.py::test_old_target",),
+            coverage_calibrated=True,
+            collected_tests=1,
+        ),
+    )
+    narrow_selection = mutations._mutation_test_selection("fallbackpkg.calc.compute")
+    broad_selection = mutations._broad_mutation_test_selection(
+        "fallbackpkg.calc.compute",
+        narrow_selection,
+    )
+    assert broad_selection is not None
+    assert [path.split("tests/", 1)[-1] for path in broad_selection.paths] == [
+        "test_contract.py::test_indirect_contract",
+        "test_mixed.py::test_weak_direct",
+        "test_mixed.py::test_weak_wrapper",
+        "test_mixed.py::test_service_contract",
+    ]
+    try:
+        results = mutations._batch_function_test(
+            "fallbackpkg.calc.compute",
+            [(mutant, mutated_tree)],
+        )
+    finally:
+        _clear_module_family("fallbackpkg")
+        mutations._all_test_files.cache_clear()
+        mutations._attributed_mutation_test_candidates.cache_clear()
+        mutations._named_mutation_test_candidates.cache_clear()
+        mutations._split_mutation_target.cache_clear()
+        mutations._mutation_test_selection.cache_clear()
+
+    assert results[0][1] is True
+    assert results[0][3] is not None
+    assert "test_mixed.py::test_service_contract" in results[0][3]
+    refreshed_profile = mutations._load_mutation_execution_profile(
+        "fallbackpkg.calc.compute"
+    )
+    assert refreshed_profile is not None
+    assert refreshed_profile.coverage_hits == (
+        "tests/test_calc.py::test_direct_but_weak",
+    )
+
+    mutations._mutation_test_selection.cache_clear()
+    learned_selection = mutations._mutation_test_selection("fallbackpkg.calc.compute")
+    assert learned_selection.paths[0].endswith("test_mixed.py")
+
+    mutations._mutation_profile_path("fallbackpkg.calc.compute").unlink()
+    fallback_marker.write_text("fail", encoding="utf-8")
+    mutations._mutation_test_selection.cache_clear()
+    with pytest.raises(RuntimeError, match="fail before mutation"):
+        mutations._batch_function_test(
+            "fallbackpkg.calc.compute",
+            [(mutant, mutated_tree)],
+        )
+
+
+def test_mutation_batch_rejects_failing_baseline(tmp_path: Path, monkeypatch):
+    package = tmp_path / "baselinepkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    target_source = package / "baselinecalc.py"
+    target_source.write_text(
+        "def compute(x: int) -> int:\n    return x + 1\n",
+        encoding="utf-8",
+    )
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    baseline_test = tests_dir / "test_baselinecalc.py"
+    baseline_test.write_text(
+        "import baselinepkg.baselinecalc as calc\n\n"
+        "def test_same_node_baseline():\n"
+        "    assert calc.compute(2) in {1, 3}\n",
+        encoding="utf-8",
+    )
+    mutant = mutations.Mutant(
+        operator="arithmetic",
+        description="+ -> -",
+        line=2,
+        col=13,
+    )
+    mutated_tree = ast.parse("def compute(x: int) -> int:\n    return x - 1\n")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    mutations._all_test_files.cache_clear()
+    mutations._attributed_mutation_test_candidates.cache_clear()
+    mutations._named_mutation_test_candidates.cache_clear()
+    mutations._split_mutation_target.cache_clear()
+    mutations._mutation_test_selection.cache_clear()
+    try:
+        first_results = mutations._batch_function_test(
+            "baselinepkg.baselinecalc.compute",
+            [(mutant, mutated_tree)],
+        )
+        assert first_results[0][1] is False
+        target_source.write_text(
+            "def compute(x: int) -> int:\n    return x + 200\n",
+            encoding="utf-8",
+        )
+        _clear_module_family("baselinepkg")
+        sys.modules.pop("test_baselinecalc", None)
+        with pytest.raises(RuntimeError, match="fail before mutation"):
+            mutations._batch_function_test(
+                "baselinepkg.baselinecalc.compute",
+                [(mutant, mutated_tree)],
+            )
+        target_source.write_text(
+            "def compute(x: int) -> int:\n    return x + 1\n",
+            encoding="utf-8",
+        )
+        baseline_test.write_text(
+            "import baselinepkg.baselinecalc as calc\n\n"
+            "def test_same_node_baseline():\n"
+            "    assert calc.compute(2) == 999\n",
+            encoding="utf-8",
+        )
+        _clear_module_family("baselinepkg")
+        sys.modules.pop("test_baselinecalc", None)
+        with pytest.raises(RuntimeError, match="fail before mutation"):
+            mutations._batch_function_test(
+                "baselinepkg.baselinecalc.compute",
+                [(mutant, mutated_tree)],
+            )
+    finally:
+        _clear_module_family("baselinepkg")
+        mutations._all_test_files.cache_clear()
+        mutations._attributed_mutation_test_candidates.cache_clear()
+        mutations._named_mutation_test_candidates.cache_clear()
+        mutations._split_mutation_target.cache_clear()
+        mutations._mutation_test_selection.cache_clear()
+
+
+def test_mutation_execution_profile_roundtrip(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    profile = mutations._MutationExecutionProfile(
+        kill_counts={"tests/test_calc.py::test_add": 2},
+        mutant_killers={"arithmetic|+ -> -|4|11|add": "tests/test_calc.py::test_add"},
+        coverage_hits=("tests/test_calc.py::test_add",),
+        coverage_calibrated=True,
+        baseline_fingerprint="baseline-v1",
+        collected_tests=3,
+        mutant_count=4,
+        pytest_seconds=0.25,
+        workers=2,
+    )
+
+    mutations._save_mutation_execution_profile("pkg.calc.add", profile)
+    loaded = mutations._load_mutation_execution_profile("pkg.calc.add")
+
+    assert loaded == profile
+
+
+def test_empty_path_baseline_fingerprint_tracks_discovered_tests_and_target(
+    tmp_path: Path,
+    monkeypatch,
+):
+    package = tmp_path / "fingerprintpkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    target_source = package / "calc.py"
+    target_source.write_text("def compute(x):\n    return x + 1\n", encoding="utf-8")
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    helper_source = tests_dir / "helpers.py"
+    helper_source.write_text("EXPECTED = True\n", encoding="utf-8")
+    test_source = tests_dir / "test_contract.py"
+    test_source.write_text(
+        "from helpers import EXPECTED\n\ndef test_same_node():\n    assert EXPECTED\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    mutations._all_test_files.cache_clear()
+    selection = mutations._MutationTestSelection(paths=(), k_filter="same_node")
+    first = mutations._mutation_test_baseline_fingerprint(
+        "fingerprintpkg.calc.compute",
+        selection,
+    )
+    test_source.write_text("def test_same_node():\n    assert False\n", encoding="utf-8")
+    test_changed = mutations._mutation_test_baseline_fingerprint(
+        "fingerprintpkg.calc.compute",
+        selection,
+    )
+    helper_source.write_text("EXPECTED = False\n", encoding="utf-8")
+    helper_changed = mutations._mutation_test_baseline_fingerprint(
+        "fingerprintpkg.calc.compute",
+        selection,
+    )
+    target_source.write_text("def compute(x):\n    return x + 200\n", encoding="utf-8")
+    target_changed = mutations._mutation_test_baseline_fingerprint(
+        "fingerprintpkg.calc.compute",
+        selection,
+    )
+
+    assert len({first, test_changed, helper_changed, target_changed}) == 4
+    _clear_module_family("fingerprintpkg")
+    mutations._all_test_files.cache_clear()
 
 
 def test_mutation_test_order_combines_prior_kills_coverage_ast_and_fallback():

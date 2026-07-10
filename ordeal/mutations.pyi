@@ -637,6 +637,8 @@ class _MutationExecutionProfile:
     kill_counts: dict[str, int] = ...
     mutant_killers: dict[str, str] = ...
     coverage_hits: tuple[str, ...] = ...
+    coverage_calibrated: bool = ...
+    baseline_fingerprint: str = ...
     collected_tests: int = ...
     mutant_count: int = ...
     pytest_seconds: float = ...
@@ -701,8 +703,8 @@ def mutate_and_test(
         llm_equivalence: If ``True`` and *llm* is provided, use the LLM
             to filter surviving mutants for semantic equivalence.
         test_filter: Pytest ``-k`` expression to narrow which tests run
-            against each mutant.  When ``None`` (default), derives a filter
-            from the target module name.
+            against each mutant. When ``None`` (default), ranks likely killer
+            tests and retains a broad fallback for surviving mutants.
         mutant_timeout: Maximum seconds for the mutant generation step.
             When exceeded, returns whatever mutants have been generated so
             far.  Prevents hanging on complex AST expressions (numpy, cv2).
@@ -842,9 +844,8 @@ def mutate_function_and_test(
         llm_equivalence: If ``True`` and *llm* is provided, use the LLM
             to filter surviving mutants that are semantically equivalent.
         test_filter: Pytest ``-k`` expression to narrow which tests run
-            against each mutant.  When ``None`` (default), derives a filter
-            from the target module name.  Set this to avoid running the
-            entire test suite per mutant (e.g. ``"test_compute"``).
+            against each mutant. When ``None`` (default), ranks likely killer
+            tests and retains a broad fallback for surviving mutants.
         mutant_timeout: Maximum seconds for the mutant generation step.
             When exceeded, returns whatever mutants have been generated so
             far.  Prevents hanging on complex AST expressions (numpy, cv2).
@@ -915,8 +916,8 @@ def mutate(
         llm_equivalence: If ``True`` and *llm* is provided, use the LLM
             to filter surviving mutants for semantic equivalence.
         test_filter: Pytest ``-k`` expression to narrow which tests run
-            against each mutant.  When ``None`` (default), derives a filter
-            from the target module name.
+            against each mutant. When ``None`` (default), ranks likely killer
+            tests and retains a broad fallback for surviving mutants.
         mutant_timeout: Maximum seconds for the mutant generation step.
             Prevents hanging on complex AST expressions (numpy, cv2).
         disk_mutation: Write the mutated source to disk so subprocesses

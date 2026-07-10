@@ -81,6 +81,7 @@ _PART_FILES = (
     "bytecodeequal.py",
     "mutatedmodule.py",
     "adaptiveexecution.py",
+    "attributedtests.py",
     "scoremutationtestfile.py",
     "functionbatch.py",
     "validationmatrix.py",

@@ -101,11 +101,22 @@ def _mutation_test_selection(
     module_name, func_name = _split_mutation_target(target)
     named = list(_named_mutation_test_candidates(module_name))
     profile = _load_mutation_execution_profile(target)
+    observed_path_scores: dict[str, int] = {}
     if profile is not None:
         known_paths = {str(Path(path).resolve()) for path in named}
-        for nodeid in (*profile.kill_counts, *profile.coverage_hits):
+        for nodeid, count in profile.kill_counts.items():
             path = nodeid.split("::", 1)[0]
             resolved = str(Path(path).resolve())
+            observed_path_scores[resolved] = observed_path_scores.get(resolved, 0) + (
+                max(1, count) * 1_000
+            )
+            if Path(path).exists() and resolved not in known_paths:
+                named.append(path)
+                known_paths.add(resolved)
+        for nodeid in profile.coverage_hits:
+            path = nodeid.split("::", 1)[0]
+            resolved = str(Path(path).resolve())
+            observed_path_scores[resolved] = observed_path_scores.get(resolved, 0) + 100
             if Path(path).exists() and resolved not in known_paths:
                 named.append(path)
                 known_paths.add(resolved)
@@ -119,6 +130,7 @@ def _mutation_test_selection(
             module_name=module_name,
             func_name=func_name,
         )
+        score += observed_path_scores.get(str(Path(path).resolve()), 0)
         if score > 0:
             scored.append((score, path))
             ast_scores.extend(
@@ -147,14 +159,6 @@ def _mutation_test_selection(
                     )
                 )
 
-    if not scored and func_name is not None:
-        fallback_filter = test_filter if test_filter is not None else func_name
-        return _MutationTestSelection(
-            paths=tuple(named),
-            k_filter=fallback_filter,
-            ast_scores=tuple(ast_scores),
-        )
-
     if scored:
         seen: set[str] = set()
         ranked_paths: list[str] = []
@@ -168,9 +172,15 @@ def _mutation_test_selection(
             ast_scores=tuple(ast_scores),
         )
 
-    short = module_name.split(".")[-1]
-    fallback_filter = test_filter if test_filter is not None else (func_name or f"test_{short}")
-    return _MutationTestSelection(paths=(), k_filter=fallback_filter, ast_scores=())
+    if test_filter is not None:
+        return _MutationTestSelection(
+            paths=tuple(named),
+            k_filter=test_filter,
+            ast_scores=(),
+        )
+
+    broad_paths = tuple(named) or _all_test_files()
+    return _MutationTestSelection(paths=broad_paths, k_filter=None, ast_scores=())
 
 
 def _raise_no_tests_found(target: str) -> None:
@@ -197,6 +207,9 @@ def _batch_module_test(
     stats: dict[str, int] | None = None,
     timings: dict[str, float] | None = None,
     persist_profile: bool = True,
+    selection_override: _MutationTestSelection | None = None,
+    allow_broad_fallback: bool = True,
+    baseline_validated: bool = False,
 ) -> list[tuple[Mutant, bool, str | None, str | None]]:
     """Run all mutants in a single pytest session via a custom plugin.
 
@@ -208,8 +221,15 @@ def _batch_module_test(
     results: list[tuple[Mutant, bool, str | None, str | None]] = []
     phase_timings = timings if timings is not None else {}
     with _timed_phase(phase_timings, "test_selection_seconds"):
-        selection = _mutation_test_selection(target, test_filter=test_filter)
+        selection = selection_override or _mutation_test_selection(
+            target,
+            test_filter=test_filter,
+        )
     profile = _load_mutation_execution_profile(target)
+    baseline_fingerprint = _mutation_test_baseline_fingerprint(target, selection)
+    baseline_validated = baseline_validated or bool(
+        profile and profile.baseline_fingerprint == baseline_fingerprint
+    )
     if stats is not None:
         stats["selected_test_files"] = len(selection.paths)
         stats["selected_test_nodes"] = len(selection.ast_scores)
@@ -219,8 +239,11 @@ def _batch_module_test(
 
         def __init__(self) -> None:
             self.no_tests_found = False
+            self.no_target_tests = False
+            self.baseline_failed = False
             self.collected_tests = 0
             self.coverage_hits: set[str] = set()
+            self.coverage_calibrated = False
             self.executed_tests = 0
 
         @pytest.hookimpl(tryfirst=True)
@@ -237,8 +260,36 @@ def _batch_module_test(
                     for item in session.items
                     if str(item.nodeid) in prior_coverage
                 }
-                if persist_profile and (profile is None or profile.collected_tests <= 0):
+                self.coverage_calibrated = bool(profile and profile.coverage_calibrated)
+                stale_coverage = bool(
+                    profile
+                    and profile.coverage_calibrated
+                    and profile.coverage_hits
+                    and not self.coverage_hits
+                )
+                calibrated_now = False
+                if persist_profile and (not self.coverage_calibrated or stale_coverage):
                     self.coverage_hits = _calibrate_mutation_test_coverage(session, target)
+                    self.coverage_calibrated = True
+                    calibrated_now = True
+                    self.baseline_failed = bool(
+                        getattr(session, "_ordeal_mutation_baseline_failed", False)
+                    )
+                    if self.baseline_failed:
+                        return True
+                elif not baseline_validated:
+                    self.baseline_failed = _mutation_test_baseline_fails(session)
+                    if self.baseline_failed:
+                        return True
+                if (
+                    persist_profile
+                    and calibrated_now
+                    and not self.coverage_hits
+                    and not selection.ast_scores
+                    and not disk_mutation
+                ):
+                    self.no_target_tests = True
+                    return True
                 for mutant, mutated_tree in mutant_pairs:
                     killed = False
                     error = None
@@ -298,15 +349,41 @@ def _batch_module_test(
         stats["executed_tests"] = plugin.executed_tests
     if plugin.no_tests_found:
         _raise_no_tests_found(target)
+    if plugin.baseline_failed:
+        raise RuntimeError(
+            f"Selected tests for {target!r} fail before mutation; "
+            "cannot attribute a reliable mutant kill"
+        )
+    if plugin.no_target_tests:
+        _raise_no_tests_found(target)
+    if allow_broad_fallback and test_filter is None:
+        fallback_pairs = _surviving_mutant_pairs(mutant_pairs, results)
+        broad_selection = (
+            _broad_mutation_test_selection(target, selection) if fallback_pairs else None
+        )
+        if broad_selection is not None and fallback_pairs:
+            fallback_results = _batch_module_test(
+                target,
+                fallback_pairs,
+                test_filter=None,
+                disk_mutation=disk_mutation,
+                timings=phase_timings,
+                persist_profile=False,
+                selection_override=broad_selection,
+                allow_broad_fallback=False,
+            )
+            results = _merge_mutation_batch_results(results, fallback_results)
     if persist_profile:
         _record_mutation_execution_profile(
             target,
             results,
             coverage_hits=plugin.coverage_hits,
+            coverage_calibrated=plugin.coverage_calibrated,
             collected_tests=plugin.collected_tests,
             mutant_count=len(mutant_pairs),
             pytest_seconds=phase_timings.get("pytest_seconds", 0.0),
             workers=1,
+            baseline_fingerprint=baseline_fingerprint,
         )
     return results
 
@@ -319,6 +396,7 @@ def _parallel_module_test(
     test_filter: str | None = None,
     disk_mutation: bool = False,
     timings: dict[str, float] | None = None,
+    baseline_validated: bool = False,
 ) -> list[tuple[Mutant, bool, str | None, str | None]]:
     """Run module-level mutants in parallel, each worker batch-testing a chunk.
 
@@ -348,15 +426,35 @@ def _parallel_module_test(
         with ctx.Pool(min(workers, len(chunks))) as pool:
             chunk_results = pool.map(
                 _parallel_module_batch_worker,
-                [(target, chunk, test_filter, disk_mutation) for chunk in chunks],
+                [
+                    (target, chunk, test_filter, disk_mutation, baseline_validated)
+                    for chunk in chunks
+                ],
             )
 
     # Flatten results
     results: list[tuple[Mutant, bool, str | None, str | None]] = []
     for chunk_result in chunk_results:
         results.extend(chunk_result)
-    prior = _load_mutation_execution_profile(target)
     selection = _mutation_test_selection(target, test_filter=test_filter)
+    if test_filter is None:
+        fallback_pairs = _surviving_mutant_pairs(mutant_pairs, results)
+        broad_selection = (
+            _broad_mutation_test_selection(target, selection) if fallback_pairs else None
+        )
+        if broad_selection is not None and fallback_pairs:
+            fallback_results = _batch_module_test(
+                target,
+                fallback_pairs,
+                test_filter=None,
+                disk_mutation=disk_mutation,
+                timings=phase_timings,
+                persist_profile=False,
+                selection_override=broad_selection,
+                allow_broad_fallback=False,
+            )
+            results = _merge_mutation_batch_results(results, fallback_results)
+    prior = _load_mutation_execution_profile(target)
     collected_hint = (
         prior.collected_tests
         if prior is not None and prior.collected_tests > 0
@@ -366,19 +464,21 @@ def _parallel_module_test(
         target,
         results,
         coverage_hits=set(),
+        coverage_calibrated=False,
         collected_tests=collected_hint,
         mutant_count=len(serialized),
         pytest_seconds=phase_timings.get("pytest_seconds", 0.0),
         workers=min(workers, len(chunks)),
+        baseline_fingerprint=_mutation_test_baseline_fingerprint(target, selection),
     )
     return results
 
 
 def _parallel_module_batch_worker(
-    args: tuple[str, list[tuple[Mutant, str]], str | None, bool],
+    args: tuple[str, list[tuple[Mutant, str]], str | None, bool, bool],
 ) -> list[tuple[Mutant, bool, str | None, str | None]]:
     """Re-parse ASTs and batch-test one module-level chunk."""
-    target, chunk, test_filter, disk_mutation = args
+    target, chunk, test_filter, disk_mutation, baseline_validated = args
     reparsed = []
     for mutant, source_text in chunk:
         try:
@@ -391,4 +491,6 @@ def _parallel_module_batch_worker(
         test_filter=test_filter,
         disk_mutation=disk_mutation,
         persist_profile=False,
+        allow_broad_fallback=False,
+        baseline_validated=baseline_validated,
     )

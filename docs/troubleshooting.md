@@ -17,6 +17,16 @@ Trouble saving, verifying, binding, or guarding a finding? Use the
 Trouble with scan targets, object factories, evidence status, exact replay, or
 speed? Use the dedicated [Scan troubleshooting guide](guides/scan-troubleshooting.md).
 
+Trouble comparing committed refs, importing either worktree, generating inputs,
+or replaying a mismatch? Use [Revision Diff Troubleshooting](guides/revision-diff-troubleshooting.md).
+
+Trouble with missing or unstable divergence evidence? Use
+[Divergence Evidence Troubleshooting](guides/divergence-evidence-troubleshooting.md).
+
+Comparing old and new stateful systems? Use [System Comparison
+Troubleshooting](guides/system-differential-troubleshooting.md) for factory
+isolation, state/effect probes, recovery, replay counts, and performance noise.
+
 !!! quote "Find your symptom, follow the fix"
     Something not working? You're probably not alone. Scan the headings below to find your symptom -- each section explains why it happens and exactly how to fix it. Issues are ordered from most common (explorer configuration) to most specific (simulation edge cases). If nothing here matches, check the Getting Help section at the bottom.
 

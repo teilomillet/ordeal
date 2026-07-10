@@ -130,6 +130,8 @@ verbose = true
 # # Repeat a recorded failure this many times, reporting attempted N /
 # # reproduced M instead of claiming deterministic replay.
 # replay_attempts = 5
+# # Optional clean-control response-oracle mutations for workload protection.
+# workload_mutations = 20
 # trace_dir = ".ordeal/traces"
 #
 # # False: take down only a topology ordeal itself started. Existing running
@@ -335,6 +337,23 @@ verbose = true
 # # gap_output_dir = "tests/gaps"   # must stay under the current workspace root
 # mutation_preset = "essential"
 # scan_max_examples = 10
+
+# Revision diff defaults — both refs run in detached worktrees/subprocesses.
+# Run with:  ordeal diff  (uses [diff].target when omitted)
+#
+# [diff]
+# target = "myapp.scoring"
+# base_ref = "origin/main"
+# candidate_ref = "HEAD"
+# max_examples = 100
+# seed = 42
+# # rtol = 1e-6
+# # atol = 1e-9
+# include_private = false
+# fixture_registries = []
+# replay_attempts = 2
+# save_artifacts = false
+# artifact_dir = ".ordeal/diff"  # must stay under the current workspace root
 
 
 # API chaos testing — built-in OpenAPI engine, no extra deps.

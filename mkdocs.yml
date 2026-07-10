@@ -48,12 +48,16 @@ extra:
 nav:
   - Home: index.md
   - Philosophy: philosophy.md
+  - Product Direction: roadmap.md
   - Getting Started: getting-started.md
   - Core Concepts: core-concepts.md
   - Concepts:
       - Chaos Testing: concepts/chaos-testing.md
       - Coverage Guidance: concepts/coverage-guidance.md
       - Meaningful Tests: concepts/test-meaningfulness.md
+      - Differential Testing: concepts/differential-testing.md
+      - Divergence Evidence, Explained Simply: concepts/divergence-evidence.md
+      - System Differential Testing: concepts/system-differential.md
       - Safe Module Migrations: concepts/safe-migrations.md
       - Durable Regressions: concepts/durable-regressions.md
       - Service Evidence Loop: concepts/service-evidence-loop.md
@@ -86,6 +90,17 @@ nav:
           - CI and Operations: guides/compose-operations.md
           - Troubleshooting: guides/compose-troubleshooting.md
       - Auto Testing: guides/auto.md
+      - Differential Testing:
+          - Quickstart: guides/differential-quickstart.md
+          - State and Side Effects: guides/differential-state-and-effects.md
+          - Evidence and Statuses: guides/differential-evidence.md
+          - Divergence Artifact Workflow: guides/divergence-evidence.md
+          - Divergence Artifact Troubleshooting: guides/divergence-evidence-troubleshooting.md
+          - Git Revision Diff: guides/revision-diff.md
+          - Git Revision Diff Troubleshooting: guides/revision-diff-troubleshooting.md
+          - First System Comparison: guides/system-differential.md
+          - System Recipes: guides/system-differential-recipes.md
+          - System Troubleshooting: guides/system-differential-troubleshooting.md
       - Base-to-Candidate Migration: guides/migration-workflow.md
       - Configuration: guides/configuration.md
       - CLI: guides/cli.md
@@ -99,7 +114,10 @@ nav:
       - Maintainer Evidence Records: guides/bug-evidence-records.md
   - Reference:
       - API: reference/api.md
+      - System Differential Reference: reference/system-differential.md
+      - Revision Diff Schema: reference/revision-diff-schema.md
       - Scan Evidence Schema: reference/scan-evidence-schema.md
       - Durable Regression Schema: reference/durable-regression-schema.md
+      - Divergence Evidence Schema: reference/divergence-evidence-schema.md
       - Test Protection Schema: reference/test-protection-schema.md
   - Troubleshooting: troubleshooting.md

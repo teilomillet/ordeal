@@ -26,6 +26,9 @@ Ordeal's design is built on a few key ideas. Each concept has its own deep-dive 
     - **Want to know whether your tests would catch wrong behavior?** → [Meaningful Tests](concepts/test-meaningfulness.md)
     - **Want to understand a failure ordeal found?** → [Shrinking](concepts/shrinking.md)
     - **Want to inject specific faults?** → [Fault Injection](concepts/fault-injection.md)
+    - **Want to compare a function before and after a rewrite?** → [Differential Testing](concepts/differential-testing.md)
+    - **Want to compare a whole workflow before and after a refactor?** → [System Differential Testing](concepts/system-differential.md)
+    - **Want to replace a module without copying its old bugs?** → [Safe Module Migrations](concepts/safe-migrations.md)
 
 - **[Chaos Testing](concepts/chaos-testing.md)** — What chaos testing is, how ChaosTest works, the nemesis, swarm mode. The foundation.
 
@@ -40,6 +43,12 @@ Ordeal's design is built on a few key ideas. Each concept has its own deep-dive 
 - **[Meaningful Tests](concepts/test-meaningfulness.md)** — Why coverage and passing tests are not enough; mutation score, attribution, property strength, and scoped protection verdicts.
 
 - **[Shrinking](concepts/shrinking.md)** — How ordeal minimizes failures: delta debugging, step elimination, fault simplification. From a 50-step trace to 3.
+
+- **[Differential Testing](concepts/differential-testing.md)** — Why both versions need isolated inputs, what the outcome envelope contains, and how to read four honest statuses.
+
+- **[System Differential Testing](concepts/system-differential.md)** — Replay the same operations and fault plan against two versions, then compare interface, outcomes, state, effects, recovery, and speed.
+
+- **[Safe Module Migrations](concepts/safe-migrations.md)** — Why matching old behavior is not enough, and how invariants, mutation testing, and a candidate-only scan protect the replacement. Then run the [complete workflow](guides/migration-workflow.md).
 
 !!! quote "In plain English"
     The table below is a cheat sheet. The "Origin" column shows where each idea comes from — industry-proven approaches from teams that build systems where bugs cost millions. Ordeal packages these ideas so you get the benefits without needing to know the history.
@@ -59,4 +68,7 @@ Ordeal's design is built on a few key ideas. Each concept has its own deep-dive 
 | Shrinking | Minimize failing traces to minimal reproduction | Delta debugging |
 | QuickCheck | Boundary-biased property testing | Jane Street |
 | Test protection | Coverage + mutation survival + property evidence | Meta ACH + specification mining |
+| Differential testing | Isolated old-versus-new outcome envelopes | Ordeal + Hypothesis |
+| System differential | One shared operation + fault story across two versions | Ordeal |
+| Safe migration | Parity plus explicit correctness and test-strength checks | Ordeal |
 | Invariants | Composable checks: `finite & bounded(0, 1)` | — |

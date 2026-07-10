@@ -16,6 +16,8 @@ High-signal entrypoints:
 - `ordeal verify <finding-id> --allow-unsafe-artifacts`
 - `ordeal verify --ci`
 - `ordeal explore --runner compose`
+- `ordeal diff <target> --base-ref origin/main --candidate-ref HEAD`
+- `ordeal migrate <base-module> <candidate-module> -c ordeal.toml`
 
 Read-first CLI:
 - `ordeal scan <target>`: unified bug discovery; `--save-artifacts` writes report, JSON bundle, regressions, and index entries
@@ -24,7 +26,43 @@ Read-first CLI:
 - `ordeal verify <finding-id> --allow-unsafe-artifacts`: re-run one bound regression after a fix and record the result
 - `ordeal verify --ci`: read-only guard for every regression in `tests/ordeal-regressions.json`
 - `ordeal explore -c ordeal.toml`: deeper coverage-guided exploration
-- `ordeal explore --runner compose`: long-lived services, worker faults, stateful HTTP requests, and exact traces with repeated replay counts
+- `ordeal explore --runner compose`: long-lived services, reliability coverage, optional workload mutations, and exact traces with repeated replay counts
+- `ordeal explore --runner compose --save-artifacts`: promote a replay-backed failure into a bound portable trace and the shared regression manifest
+- `ordeal diff <target>`: compare committed revisions in separate worktrees/subprocesses; `--save-artifacts` writes JSON and Markdown evidence
+- `diff(Old, New, sequence=[...])`: compare stateful interfaces, outcomes, state, faults, recovery, and optional performance through the same Python API
+- `ordeal migrate <base> <candidate>`: run the ordered audit/mine/diff/classify/regress/mutate/scan migration gate
+
+Migration learning path:
+- `docs/concepts/safe-migrations.md`: layman explanation of why parity can preserve an old bug
+- `docs/guides/migration-workflow.md`: complete command, statuses, decisions, gates, and artifacts
+- `docs/reference/api.md#migration-workflow`: exact Python contract
+
+Migration interpretation:
+- mined patterns are hypotheses, not business truth
+- differential parity reports what stayed the same; it cannot prove that behavior correct
+- the strongest verdict requires explicit invariants, all measured mutants killed, and a passing candidate-only scan
+
+Differential testing learning path:
+- `docs/concepts/differential-testing.md`: layman-first mental model and claim boundaries
+- `docs/guides/differential-quickstart.md`: first copy-paste function comparison
+- `docs/guides/differential-state-and-effects.md`: mutations, bound receivers, and selected external effects
+- `docs/guides/differential-evidence.md`: four statuses, one minimized witness, exact replay, and JSON evidence
+- `docs/concepts/divergence-evidence.md`: source-bound divergence evidence explained from story to artifact
+- `docs/guides/divergence-evidence.md`: artifact workflow from comparison to regression
+- `docs/guides/divergence-evidence-troubleshooting.md`: missing or unstable artifacts
+- `docs/reference/divergence-evidence-schema.md`: exact machine-readable card fields
+- `docs/guides/revision-diff.md`: committed Git revisions in isolated worktrees
+- `docs/guides/revision-diff-troubleshooting.md`: ref, import, fixture, replay, artifact, and trust-boundary failures
+- `docs/reference/revision-diff-schema.md`: exact revision result and embedded divergence-evidence fields
+- `docs/concepts/system-differential.md`: layman model for one shared system story
+- `docs/guides/system-differential.md`: first copyable stateful comparison
+- `docs/guides/system-differential-recipes.md`: state, effects, APIs, faults, and budgets
+- `docs/guides/system-differential-troubleshooting.md`: surprising results and fixes
+- `docs/reference/system-differential.md`: exact events, fields, and boundaries
+
+Do not collapse the three entry points: `diff(old, new)` compares functions,
+`diff(Old, New, sequence=[...])` compares stateful systems, and
+`ordeal diff TARGET` compares committed Git revisions.
 
 Test protection interpretation:
 - `ordeal mutate <target>` judges the selected existing tests directly
@@ -48,10 +86,15 @@ Write-producing CLI:
 - `ordeal init [target]`: starter tests plus `ordeal.toml`; `--install-skill`, `--close-gaps`, and `--ci` add extra writes
 - `ordeal mutate <target> --generate-stubs PATH`: writes suggested test stubs
 - `ordeal replay trace.json --output PATH`: writes replay artifacts
+- `ordeal diff <target> --save-artifacts`: writes `.ordeal/diff/<target>.json` and `.md`
+- `ordeal migrate <base> <candidate>`: writes `.ordeal/migrations/<pair>.json` and replayable pytest regressions for unexpected changes
 
 Artifacts:
 - `.ordeal/findings/`: Markdown reports, JSON bundles, and `index.json`
 - `.ordeal/traces/compose-*.json`: exact Compose action/fault traces and replay counts
+- `tests/ordeal-compose-regressions/`: committed Compose post-fix controls bound by canonical trace hashes
+- `.ordeal/diff/`: revision diff JSON and Markdown handoffs
+- `.ordeal/migrations/`: module-migration evidence and generated parity-regression bindings
 - `tests/test_ordeal_regressions.py`: default regression path
 - `tests/ordeal-regressions.json`: portable semantic bindings for CI; commit it with the pytest file
 - `ordeal.toml`: explorer configuration
@@ -67,13 +110,17 @@ Discovery:
 - `ordeal <command> --help`
 - `from ordeal import catalog; catalog()`
 - `docs/guides/compose-runner.md`: plain-English Compose starting point
+- `docs/concepts/service-evidence-loop.md`: layman model for the complete service evidence loop
 - `docs/guides/compose-configuration.md`: exact Compose schema and defaults
 - `docs/guides/compose-fault-model.md`: exact fault cycles and boundaries
 - `docs/guides/compose-traces.md`: trace fields and replay interpretation
-- `docs/concepts/durable-regressions.md`: plain-language model
-- `docs/guides/durable-regressions.md`: complete operational workflow
+- `docs/guides/compose-evidence-loop.md`: copyable failure-to-CI workflow and checked-in acceptance example
+- `docs/concepts/durable-regressions.md`: plain-language regression model
+- `docs/guides/durable-regressions.md`: complete regression workflow
 - `docs/guides/durable-regressions-ci.md`: provider-neutral CI policy and exit codes
 - `docs/reference/durable-regression-schema.md`: exact evidence, binding, and manifest fields
+- `docs/concepts/safe-migrations.md`: layman model for safe module replacement
+- `docs/guides/migration-workflow.md`: operational migration gate
 - https://docs.byordeal.com/
 
 Machine surfaces:

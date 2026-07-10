@@ -45,6 +45,8 @@ By default, `init` writes starter tests and `ordeal.toml`, validates them, and p
 **Other commands:**
 
 ```bash
+ordeal diff mymodule --base-ref origin/main --candidate-ref HEAD  # isolated refactor check
+ordeal migrate oldpkg newpkg -c ordeal.toml  # ordered migration evidence gate
 ordeal mine mymodule            # discover what functions actually do
 ordeal audit mymodule            # find gaps in existing tests
 ordeal explore                   # coverage-guided exploration (reads ordeal.toml)
@@ -54,11 +56,50 @@ ordeal mutate mymodule.func      # verify tests catch real code changes
 ordeal mutate mymodule --workers 4 --threshold 0.8  # parallel, CI gate
 ```
 
+**Differential documentation by audience:**
+
+- Plain-language mental model: `docs/concepts/differential-testing.md`
+- First function comparison: `docs/guides/differential-quickstart.md`
+- Mutations, receivers, and selected effects: `docs/guides/differential-state-and-effects.md`
+- Four statuses, minimized witness, replay, and JSON: `docs/guides/differential-evidence.md`
+- Source-bound mismatch artifacts: `docs/concepts/divergence-evidence.md`
+- Divergence evidence workflow: `docs/guides/divergence-evidence.md`
+- Missing or unstable artifacts: `docs/guides/divergence-evidence-troubleshooting.md`
+- Exact artifact schema: `docs/reference/divergence-evidence-schema.md`
+- Committed Git revisions: `docs/guides/revision-diff.md`
+- Revision diff problems: `docs/guides/revision-diff-troubleshooting.md`
+- Revision diff JSON contract: `docs/reference/revision-diff-schema.md`
+- Layman model for multi-step systems: `docs/concepts/system-differential.md`
+- First copyable system comparison: `docs/guides/system-differential.md`
+- System state, effects, APIs, faults, and budgets: `docs/guides/system-differential-recipes.md`
+- System isolation, recovery, replay, and performance help: `docs/guides/system-differential-troubleshooting.md`
+- Exact system event and result contract: `docs/reference/system-differential.md`
+
+Route a newcomer through the mental model and quickstart before the API
+reference. Keep `diff(old, new)`, `diff(Old, New, sequence=[...])`, and the
+`ordeal diff TARGET` CLI distinct. `no_divergence_observed` is sampled evidence,
+never general equivalence. A behavioral `divergent` result requires one minimized
+witness whose complete paired outcome envelope matched every immediate replay;
+explicit public-surface changes are reported separately without inventing a runtime
+witness.
+
+**Migration documentation by audience:**
+
+- Plain-language reason parity is insufficient: `docs/concepts/safe-migrations.md`
+- Complete base-to-candidate workflow: `docs/guides/migration-workflow.md`
+- Exact Python contract: `docs/reference/api.md#migration-workflow`
+
+Route a newcomer through the plain-language page before the workflow or API.
+Mined properties are hypotheses, not business truth. The strongest migration
+verdict also requires explicit invariants, no surviving measured mutants, and
+a passing candidate-only scan.
+
 **Long-lived Compose services:**
 
 ```bash
 ordeal explore --runner compose -c ordeal.toml
 ordeal replay .ordeal/traces/compose-42-abc.json --attempts 10
+ordeal explore --runner compose -c ordeal.toml --save-artifacts
 ```
 
 - `[compose]` configures lifecycle, budgets, services, faults, and replay attempts.
@@ -66,11 +107,15 @@ ordeal replay .ordeal/traces/compose-42-abc.json --attempts 10
 - `kill` and `restart` affect named Compose services; delay and corruption operate at ordeal's client response boundary.
 - Fault-window requests are recorded without validation; clean recovery requests are validated and may capture state.
 - The trace is exact, but external timing is not. Report `attempted N / reproduced M`, never deterministic replay unless evidence supports it.
+- Compose reports operation × fault × property coverage; `[compose].workload_mutations` measures recorded response-oracle discrimination.
+- Only replay-backed failures become bound traces in `tests/ordeal-compose-regressions/`; post-fix verification requires every attempt to complete cleanly.
 - POST and other mutating methods are not faultable by default because a fault cycle may repeat the operation.
 
 Compose documentation:
+- Plain-language service evidence loop: `docs/concepts/service-evidence-loop.md`
 - Start here: `docs/guides/compose-runner.md`
 - Beginner walkthrough: `docs/guides/compose-quickstart.md`
+- Complete evidence-loop workflow: `docs/guides/compose-evidence-loop.md`
 - Exact schema: `docs/guides/compose-configuration.md`
 - Fault semantics: `docs/guides/compose-fault-model.md`
 - Trace and replay: `docs/guides/compose-traces.md`

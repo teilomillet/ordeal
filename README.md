@@ -172,7 +172,7 @@ Ordeal automates this. It brings ideas from the most rigorous engineering cultur
 | Inline fault injection | `buggify()` — no-op in production, probabilistic fault in testing | [FoundationDB](https://apple.github.io/foundationdb/testing.html) |
 | Boundary-biased generation | Test at 0, -1, empty, max-length — where bugs actually cluster | [Jane Street QuickCheck](https://blog.janestreet.com/quickcheck-for-core/) |
 | Mutation testing | Flip `+` to `-`, `<` to `<=` — verify your tests actually catch real bugs | [Meta ACH](https://engineering.fb.com) |
-| Differential testing | Compare two implementations on random inputs — catches regressions | Equivalence testing |
+| Differential testing | Compare functions or replay one whole operation-and-fault story across two systems | Refactor validation |
 | Property mining | Discover invariants from execution traces — type, bounds, monotonicity | Specification mining |
 | Metamorphic testing | Check output *relationships* across transformed inputs | [Metamorphic relations](https://en.wikipedia.org/wiki/Metamorphic_testing) |
 
@@ -406,13 +406,81 @@ fs.inject_fault("/data.json", "corrupt") # reads return random bytes
 
 Compare two implementations on the same random inputs — catches regressions and validates refactors:
 
+New to this? Start with [Differential Testing, Without Jargon](https://docs.byordeal.com/concepts/differential-testing/),
+then follow the copy-paste [Differential Quickstart](https://docs.byordeal.com/guides/differential-quickstart/).
+
 ```python
 from ordeal.diff import diff
 
 result = diff(score_v1, score_v2, rtol=1e-6)
-assert result.equivalent, result.summary()
-# diff(score_v1, score_v2): 100 examples, EQUIVALENT
+assert result.status == "no_divergence_observed", result.summary()
+# diff(score_v1, score_v2): 100 examples, NO DIVERGENCE OBSERVED
 ```
+
+Each side receives independent inputs and receiver state. The comparison covers
+returns, exceptions, mutated arguments, receiver state, and selected restorable
+side effects. A divergence carries one minimized, replay-verified witness;
+sampled agreement remains bounded evidence, not equivalence.
+
+Every divergence also exposes a source-bound JSON record in `result.artifacts`.
+Pass `artifact_dir=".ordeal/divergences"` to persist the same canonical record.
+Use [State and Side Effects](https://docs.byordeal.com/guides/differential-state-and-effects/)
+for mutations, receivers, logs, caches, or other external state, and
+[Evidence and Statuses](https://docs.byordeal.com/guides/differential-evidence/)
+when reviewing a witness or deciding what a result proves.
+For a story-led explanation of the durable card itself, read
+[Divergence Evidence](https://docs.byordeal.com/concepts/divergence-evidence/),
+then use its [workflow](https://docs.byordeal.com/guides/divergence-evidence/),
+[troubleshooting](https://docs.byordeal.com/guides/divergence-evidence-troubleshooting/),
+or [exact schema](https://docs.byordeal.com/reference/divergence-evidence-schema/).
+
+For stateful systems, pass two zero-argument factories and one operation/fault
+sequence. The same `diff()` call compares interface, outcomes, state, selected
+side effects, recovery parity, and an optional separate performance budget:
+
+```python
+from ordeal.diff import FaultEvent, Operation, diff
+
+result = diff(
+    OldStore,
+    NewStore,
+    sequence=[FaultEvent("timeout"), Operation("read")],
+    apply_fault=apply_fault,
+)
+```
+
+If “operation-and-fault story” is new to you, start with the
+[plain-language mental model](https://docs.byordeal.com/concepts/system-differential/),
+then run the self-contained [first system comparison](https://docs.byordeal.com/guides/system-differential/).
+The [recipes](https://docs.byordeal.com/guides/system-differential-recipes/)
+cover APIs, state, effects, and budgets; the
+[troubleshooting guide](https://docs.byordeal.com/guides/system-differential-troubleshooting/)
+explains every common surprising result.
+
+For a committed refactor, run both versions in isolated worktrees and
+subprocesses while replaying the same inputs:
+
+```bash
+ordeal diff myapp.scoring --base-ref origin/main --candidate-ref HEAD --save-artifacts
+```
+
+Start with [Compare Two Git Revisions](https://docs.byordeal.com/guides/revision-diff/)
+for the sealed-worktree mental model and first result. Use
+[Revision Diff Troubleshooting](https://docs.byordeal.com/guides/revision-diff-troubleshooting/)
+for refs, imports, fixtures, and inconclusive replay; the
+[Revision Diff Schema](https://docs.byordeal.com/reference/revision-diff-schema/)
+is the machine contract for saved JSON.
+
+Replacing a whole module? Matching the old version is not enough: a perfect
+copy can preserve an old bug. The migration workflow also checks explicit
+business rules, test strength, and the replacement on its own:
+
+```bash
+ordeal migrate oldpkg.scoring newpkg.scoring -c ordeal.toml
+```
+
+Start with the layman-friendly [Safe Module Migrations](https://docs.byordeal.com/concepts/safe-migrations/),
+then follow the [migration workflow](https://docs.byordeal.com/guides/migration-workflow/).
 
 ### Mutation testing
 
@@ -511,6 +579,7 @@ for the plain-language model, then use the
 
 ```bash
 ordeal audit myapp.scoring              # compare existing tests vs ordeal
+ordeal migrate oldpkg newpkg -c ordeal.toml  # ordered replacement validation
 ordeal explore                          # run from ordeal.toml
 ordeal explore -w 8                     # parallel with 8 workers
 ordeal explore -c ci.toml -v            # custom config, verbose
@@ -538,7 +607,11 @@ Every goal maps to a starting point — a command to run, a module to import, an
 | Add fail-safe gates to production code | `from ordeal.buggify import buggify` | `ordeal/buggify.py` | [Fault Injection](https://docs.byordeal.com/concepts/fault-injection) |
 | Make assertions across all runs | `from ordeal import always, sometimes` | `ordeal/assertions.py` | [Assertions](https://docs.byordeal.com/concepts/property-assertions) |
 | Control time / filesystem in tests | `from ordeal.simulate import Clock` | `ordeal/simulate.py` | [Simulation](https://docs.byordeal.com/guides/simulate) |
-| Compare two implementations | `ordeal mine-pair mod.fn1 mod.fn2` | `ordeal/diff.py` | [Auto Testing](https://docs.byordeal.com/guides/auto) |
+| Compare two function implementations | `diff(old, new)` | `ordeal/diff.py` | [Differential Quickstart](https://docs.byordeal.com/guides/differential-quickstart) |
+| Validate a refactor across revisions | `ordeal diff mypkg.scoring` | `ordeal/_revision_diff.py` | [Divergence Evidence](https://docs.byordeal.com/concepts/divergence-evidence/) |
+| Compare stateful system refactors | `diff(Old, New, sequence=[...])` | `ordeal/system_diff.py` | [System Learning Path](https://docs.byordeal.com/concepts/system-differential) |
+| Replace a module without copying old bugs | `migrate("old.mod", "new.mod", ...)` | `ordeal/migration.py` | [Safe Module Migrations](https://docs.byordeal.com/concepts/safe-migrations/) |
+| Discover round trips between functions | `ordeal mine-pair mod.fn1 mod.fn2` | `ordeal/mine.py` | [Auto Testing](https://docs.byordeal.com/guides/auto) |
 | Compose validation rules | `from ordeal.invariants import no_nan` | `ordeal/invariants.py` | [API Reference](https://docs.byordeal.com/reference/api) |
 | Test API endpoints for faults | `from ordeal.integrations.openapi import chaos_api_test` | `ordeal/integrations/openapi.py` | [Integrations](https://docs.byordeal.com/guides/integrations) |
 | Extend ordeal with a new fault | Follow the pattern in `faults/*.py` | `ordeal/faults/` | [Fault Injection](https://docs.byordeal.com/concepts/fault-injection) |
@@ -568,6 +641,8 @@ ordeal/
 ├── regression_evidence.py AST bindings for generated witness regressions
 ├── trace.py           Trace recording, JSON serialization, replay, delta-debugging shrink
 ├── compose.py         Long-lived Compose services, faults, state, exact trace and replay counts
+├── system_diff.py     Stateful refactor parity, fault/recovery replay, performance budgets
+├── migration.py       Ordered audit/mine/diff/regression/mutation/scan migration gate
 ├── config.py          ordeal.toml loader — strict validation
 ├── cli.py             CLI entry point — explore, replay, mine, audit
 ├── plugin.py          Pytest plugin — --chaos, --chaos-seed, --buggify-prob

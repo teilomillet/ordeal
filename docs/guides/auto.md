@@ -187,14 +187,21 @@ ordeal mine-pair myapp.encode myapp.decode    # CLI equivalent
 !!! quote "How to explore this"
     Rewriting a function? Porting to a faster implementation? `diff` runs both versions on the same random inputs and tells you exactly where they disagree. You don't need to write comparison logic -- ordeal generates the inputs and checks the outputs for you.
 
+    If this is your first differential test, read the plain-language
+    [mental model](../concepts/differential-testing.md), then use the
+    [Differential Quickstart](differential-quickstart.md). The dedicated
+    [state/effects](differential-state-and-effects.md) and
+    [evidence/status](differential-evidence.md) pages explain the soundness
+    boundaries without requiring testing jargon.
+
 Differential testing: run two functions on the same random inputs and check their outputs match. Catches regressions, validates refactors, and verifies backend ports:
 
 ```python
 from ordeal.diff import diff
 
-# Exact comparison — are v1 and v2 identical?
+# Exact comparison — can sampled inputs distinguish v1 and v2?
 result = diff(score_v1, score_v2, max_examples=200)
-assert result.equivalent, result.summary()
+assert result.status == "no_divergence_observed", result.summary()
 
 # Floating-point tolerance — are old and new close enough?
 result = diff(compute_old, compute_new, rtol=1e-6)
@@ -203,12 +210,45 @@ result = diff(compute_old, compute_new, rtol=1e-6)
 result = diff(api_v1, api_v2, compare=lambda a, b: a.status == b.status)
 ```
 
-When outputs differ, `result.mismatches` contains the exact inputs and both outputs so you can debug the divergence. Strategies are inferred from `fn_a`'s type hints — both functions must accept the same parameters.
+Each implementation receives independent copies of the sampled arguments and
+bound receiver. Ordeal compares a full outcome envelope: return value, exact
+exception type/message, mutated arguments, receiver state, and explicitly
+selected restorable side effects. A divergent result contains exactly one
+immutable witness after Hypothesis minimization and an exact replay check.
+`result.artifacts` contains its source-bound JSON evidence: both revisions,
+comparison/normalization semantics, original and minimized inputs, both full
+observations, replay counts, and the evidence boundary. Add
+`artifact_dir=".ordeal/divergences"` to persist it.
+The [Divergence Evidence guide](divergence-evidence.md) explains this record in
+plain language; the [schema](../reference/divergence-evidence-schema.md) defines
+every machine field.
+
+Read `result.status` directly: `divergent`, `no_divergence_observed`,
+`proven_equivalent`, or `inconclusive`. Sampled agreement is never reported as
+equivalence. `proven_equivalent` requires a caller-supplied verifier covering
+the complete selected envelope and input domain.
 
 Use cases:
-- **Refactoring**: verify the new implementation matches the old
+- **Refactoring**: search for inputs where the new implementation differs
 - **Porting**: compare a Python prototype against a Rust/C extension
 - **Regression testing**: ensure a bugfix doesn't change other outputs
+
+For services and stateful classes, the same `diff()` function accepts an
+ordered operation and fault sequence, state/side-effect probes, and a separate
+performance budget. Start with the
+[plain-language system model](../concepts/system-differential.md), then use the
+[first comparison](system-differential.md),
+[recipes](system-differential-recipes.md), or
+[troubleshooting](system-differential-troubleshooting.md).
+
+For a committed refactor, use the same diff concept through the CLI:
+
+```bash
+ordeal diff mypkg.scoring --base-ref origin/main --candidate-ref HEAD
+```
+
+That mode runs each revision in a separate worktree/subprocess and replays the
+baseline's exact inputs in the candidate. See [Revision Diff](revision-diff.md).
 
 ## register_fixture — teach ordeal your types
 

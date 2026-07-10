@@ -23,7 +23,7 @@ One file, checked into your repo, that anyone (or anything) can read and modify.
 ## Schema
 
 !!! quote "Think of it this way"
-    The config file now covers the main CLI workflows too. `[explorer]` and `[[tests]]` drive stateful exploration, `[compose]` drives long-lived service exploration, `[report]` controls output, `[fixtures]`, `[[scan]]`, `[[objects]]`, and `[[contracts]]` tune exploratory module scans, `[audit]` sets test-quality defaults, and `[init]` sets bootstrap defaults for starter tests and gap-closing passes.
+    The config file now covers the main CLI workflows too. `[explorer]` and `[[tests]]` drive stateful exploration, `[compose]` drives long-lived service exploration, `[report]` controls output, `[fixtures]`, `[[scan]]`, `[[objects]]`, and `[[contracts]]` tune exploratory module scans, `[audit]` sets test-quality defaults, `[init]` sets bootstrap defaults, and `[diff]` defines revision-comparison defaults.
 
 ### `[explorer]`
 
@@ -300,6 +300,28 @@ scan_max_examples = 12
 ```
 
 `output_dir` and `gap_output_dir` are also workspace-local output paths; values outside the current repo root are rejected.
+
+### `[diff]`
+
+Set defaults for revision-isolated `ordeal diff` runs:
+
+```toml
+[diff]
+target = "myapp.scoring"
+base_ref = "origin/main"
+candidate_ref = "HEAD"
+max_examples = 100
+seed = 42
+replay_attempts = 2
+save_artifacts = true
+artifact_dir = ".ordeal/diff"
+```
+
+Optional `rtol` and `atol` values relax numeric output comparison.
+`fixture_registries` imports project-specific strategy registrations in the
+baseline worker, while `replay_attempts` controls immediate same-input evidence
+checks. CLI flags override these values. See
+[Revision Diff](revision-diff.md) for isolation, statuses, and trust boundaries.
 
 ## Tuning guide
 

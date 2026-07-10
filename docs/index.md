@@ -137,7 +137,14 @@ Every goal maps to a starting point — a command to run, a module to import, an
 | Make assertions across all runs | `from ordeal import always, sometimes` | [Assertions](concepts/property-assertions.md) |
 | See behavior tested under each fault | `always(..., operation=..., fault=...)` | [Reliability Coverage](concepts/reliability-coverage.md) |
 | Control time / filesystem in tests | `from ordeal.simulate import Clock` | [Simulation](guides/simulate.md) |
-| Compare two implementations | `ordeal mine-pair mod.fn1 mod.fn2` | [Auto Testing](guides/auto.md) |
+| Compare two functions before and after a change | `diff(old, new)` | [Differential Quickstart](guides/differential-quickstart.md) |
+| Validate a refactor across Git revisions | `ordeal diff mypkg.scoring` | [Compare Two Git Revisions](guides/revision-diff.md) |
+| Diagnose a blocked or surprising revision diff | Match the symptom | [Revision Diff Troubleshooting](guides/revision-diff-troubleshooting.md) |
+| Understand one source-bound mismatch artifact | Read the witness first | [Divergence Evidence](concepts/divergence-evidence.md) |
+| Understand whole-workflow comparison first | Read the delivery-van story | [System Differential Testing](concepts/system-differential.md) |
+| Compare two stateful system versions | `diff(Old, New, sequence=[...])` | [First System Comparison](guides/system-differential.md) |
+| Replace a module without copying its old bugs | `migrate("old.mod", "new.mod", ...)` | [Safe Module Migrations](concepts/safe-migrations.md) |
+| Discover round trips between two functions | `ordeal mine-pair mod.fn1 mod.fn2` | [Auto Testing](guides/auto.md) |
 | Test API endpoints for faults | `from ordeal.integrations.openapi import chaos_api_test` | [Integrations](guides/integrations.md) |
 | Extend ordeal with a new fault | Follow the pattern in `ordeal/faults/*.py` | [Fault Injection](concepts/fault-injection.md) |
 | Configure reproducible runs | Create `ordeal.toml` | [Configuration](guides/configuration.md) |
@@ -153,8 +160,12 @@ Every goal maps to a starting point — a command to run, a module to import, an
     - **"I want to write chaos tests for my service"** → Start with [Getting Started](getting-started.md), then [Writing Tests](guides/writing-tests.md)
     - **"I want to understand the ideas behind ordeal"** → Read [Philosophy](philosophy.md), then the [Concepts](core-concepts.md)
     - **"I need to check if my tests are any good"** → Run `ordeal audit` — see [Test Protection](guides/test-protection.md)
+    - **"I rewrote a function and fear subtle behavior changes"** → Read [Differential Testing](concepts/differential-testing.md), then run the [Quickstart](guides/differential-quickstart.md)
+    - **"I refactored a service and need the whole workflow to stay the same"** → Read [System Differential Testing](concepts/system-differential.md), then run the [first system comparison](guides/system-differential.md)
+    - **"I am replacing a whole module and do not want to copy its old bugs"** → Read [Safe Module Migrations](concepts/safe-migrations.md), then run the [migration guide](guides/migration-workflow.md)
     - **"I want to run ordeal in CI"** → See the [Explorer guide](guides/explorer.md) and [Configuration](guides/configuration.md)
     - **"I found a failure and never want it back"** → Follow the [Durable Regression Workflow](guides/durable-regressions.md)
+    - **"My service is healthy after restart but still behaves wrongly"** → Read the [Service Evidence Loop](concepts/service-evidence-loop.md), then run the [checked-in example](guides/compose-evidence-loop.md#run-the-checked-in-acceptance-example)
     - **"I want to explore the source code"** → See the [Architecture section in the README](https://github.com/teilomillet/ordeal#architecture--code-map) for a full code map
 
 ## Start here
@@ -187,9 +198,29 @@ Every goal maps to a starting point — a command to run, a module to import, an
 
     Why passing and coverage are not enough, explained without testing jargon.
 
+-   **[Differential Testing](concepts/differential-testing.md)**
+
+    Compare two versions fairly, understand the four statuses, and avoid false equivalence claims.
+
+-   **[Divergence Evidence](concepts/divergence-evidence.md)**
+
+    Follow one same-input mismatch from paired observations to replay and honest limits.
+
+-   **[System Differential Testing](concepts/system-differential.md)**
+
+    Follow one operation-and-fault story across two versions, from a layman mental model to recovery evidence.
+
+-   **[Safe Module Migrations](concepts/safe-migrations.md)**
+
+    Replace a module without confusing "same as before" with "correct and protected."
+
 -   **[Durable Regressions](concepts/durable-regressions.md)**
 
     Why a report is temporary but a bound regression can protect every future change.
+
+-   **[Service Evidence Loop](concepts/service-evidence-loop.md)**
+
+    Turn one real recovery failure into a portable CI guard, without testing jargon.
 
 -   **[Reliability Coverage](concepts/reliability-coverage.md)**
 
@@ -219,6 +250,7 @@ Every goal maps to a starting point — a command to run, a module to import, an
 -   **[Finding Evidence](guides/finding-evidence.md)** — Read bounded claims, witnesses, replay, and proof limits
 -   **[Scan Troubleshooting](guides/scan-troubleshooting.md)** — Diagnose missing targets, blocked harnesses, noise, and speed
 -   **[Compose Services](guides/compose-runner.md)** — Start with a plain-English map, then go as deep as configuration, fault semantics, traces, CI, and troubleshooting
+-   **[Compose Evidence Loop](guides/compose-evidence-loop.md)** — Copy the complete broken-service-to-CI workflow and run its checked-in buggy/fixed example
 -   **[Writing Tests](guides/writing-tests.md)** — Patterns for effective chaos tests
 -   **[Durable Regression Workflow](guides/durable-regressions.md)** — Discover, reproduce, minimize, save, fix, verify, and guard one failure
 -   **[Durable Regressions in CI](guides/durable-regressions-ci.md)** — Run the provider-neutral, read-only repository guard
@@ -226,6 +258,20 @@ Every goal maps to a starting point — a command to run, a module to import, an
 -   **[Reliability Coverage](guides/reliability-coverage.md)** — Add operation × fault × property evidence
 -   **[Reliability Coverage in CI](guides/reliability-coverage-ci.md)** — Gate and export the matrix
 -   **[Auto Testing](guides/auto.md)** — Zero-boilerplate: scan_module, fuzz, mine, diff, chaos_for
+-   **[Differential Quickstart](guides/differential-quickstart.md)** — Compare two functions and read the result in ten minutes
+-   **[Differential State and Side Effects](guides/differential-state-and-effects.md)** — Observe mutations, receivers, logs, caches, and other selected effects
+-   **[Differential Evidence](guides/differential-evidence.md)** — Review statuses, one minimized witness, exact replay, and JSON artifacts
+-   **[Divergence Artifact Workflow](guides/divergence-evidence.md)** — Save, read, and act on the source-bound card
+-   **[Divergence Artifact Troubleshooting](guides/divergence-evidence-troubleshooting.md)** — Diagnose missing, unstable, or inconclusive evidence
+-   **[Compare Two Git Revisions](guides/revision-diff.md)** — Run committed revisions in sealed worktrees and read the result honestly
+-   **[Revision Diff Troubleshooting](guides/revision-diff-troubleshooting.md)** — Fix refs, imports, fixtures, replay, and artifact problems
+-   **[Revision Diff Schema](reference/revision-diff-schema.md)** — Consume exact JSON fields, bindings, statuses, and exit codes
+-   **[First System Comparison](guides/system-differential.md)** — Run a complete old/new store example with timeout recovery
+-   **[System Comparison Recipes](guides/system-differential-recipes.md)** — Adapt state, effects, API adapters, faults, and budgets
+-   **[System Comparison Troubleshooting](guides/system-differential-troubleshooting.md)** — Explain isolation, replay, recovery, and noisy performance
+-   **[System Differential Reference](reference/system-differential.md)** — Exact event, result, replay, and timing contracts
+-   **[Divergence Evidence Schema](reference/divergence-evidence-schema.md)** — Exact revision, comparison, witness, observation, replay, and boundary fields
+-   **[Base-to-Candidate Migration](guides/migration-workflow.md)** — Run and understand the complete replacement gate
 -   **[Simulation](guides/simulate.md)** — Deterministic Clock and FileSystem
 -   **[Mutations](guides/mutations.md)** — Validate that your tests catch real bugs
 -   **[Test Protection](guides/test-protection.md)** — Combine mutations, properties, attribution, and coverage into a scoped verdict

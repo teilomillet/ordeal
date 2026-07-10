@@ -609,6 +609,11 @@ explorer.run(
 ) -> ExplorationResult
 ```
 
+The parent process bounds parallel collection beyond the exploration and shrink
+budgets. Shared-memory allocation errors or a worker-pool timeout terminate the
+pool and rerun the same configuration sequentially; the reason is exposed as
+`ExplorationResult.parallel_fallback_reason`.
+
 | Method | Returns | Description |
 |---|---|---|
 | `save_state(path)` | `None` | Save checkpoint corpus, edges, and RNG state to a pickle file for later resumption |
@@ -695,8 +700,12 @@ from ordeal.compose import (
     ComposeTraceAction,
     HttpResponse,
     HttpTransport,
+    build_compose_finding_evidence,
+    compose_reliability_coverage,
+    measure_compose_workload_strength,
     replay_compose_trace,
     run_compose_exploration,
+    save_compose_regression,
 )
 from ordeal.config import ComposeConfig, ComposeRequestConfig
 ```
@@ -841,6 +850,9 @@ URL, and OS errors raise `ServiceRequestError`.
 | `requests` | `int` | Request actions recorded |
 | `faults` | `int` | Fault actions recorded |
 | `duration` | `float` | Original exploration duration |
+| `coverage` | `dict` | Operation × fault × property matrix |
+| `protection` | `dict` | Mutation-backed Compose workload verdict |
+| `evidence` | `dict | None` | Shared bounded finding card on failure |
 
 ### run_compose_exploration
 
@@ -855,6 +867,12 @@ run_compose_exploration(
 ```
 
 Saves the trace and, on failure, attempts exact replay `N` times.
+
+`compose_reliability_coverage(trace)` returns the declared and observed matrix.
+`measure_compose_workload_strength(trace, budget=N)` runs clean-control oracle
+mutations. `build_compose_finding_evidence(...)` emits
+`ordeal.finding-evidence/v1`. `save_compose_regression(result)` promotes only a
+replay-backed failure into the portable manifest and returns its artifact paths.
 
 ### replay_compose_trace
 
@@ -1550,10 +1568,24 @@ Lower bound of the Wilson score confidence interval. For mined properties: 500/5
 ## Diff
 
 ```python
-from ordeal.diff import diff, DiffResult, Mismatch
+from ordeal.diff import (
+    DiffOutcome, DiffResult, DiffWitness, FaultEvent, Operation,
+    PerformanceBudget, SideEffect, SystemDiffResult, diff,
+)
 ```
 
-Differential testing — compare two implementations on the same random inputs.
+Differential testing over isolated executions and an explicit outcome envelope.
+
+New users should begin with [Differential Testing, Without Jargon](../concepts/differential-testing.md)
+and the [Differential Quickstart](../guides/differential-quickstart.md). This
+section is the exact type and parameter reference.
+To compare one target across committed Git refs, use `ordeal diff TARGET`; see
+[Compare Two Git Revisions](../guides/revision-diff.md),
+[Revision Diff Troubleshooting](../guides/revision-diff-troubleshooting.md), and
+the [Revision Diff Schema](revision-diff-schema.md).
+The [Divergence Evidence guide](../concepts/divergence-evidence.md) explains the
+artifact narrative; its [schema](divergence-evidence-schema.md) defines every
+source, comparison, witness, observation, replay, and boundary field.
 
 ### diff
 
@@ -1566,23 +1598,94 @@ diff(
     rtol: float | None = None,                  # relative tolerance
     atol: float | None = None,                  # absolute tolerance
     compare: Callable[[Any, Any], bool] | None = None,  # custom comparator
+    normalize: Callable[[Any], Any] | None = None,
+    replay_attempts: int = 2,
+    artifact_dir: str | Path | None = None,
+    side_effects: Mapping[str, SideEffect] | Callable[[Any], Any] | None = None,
+    equivalence_proof: Callable[[Callable, Callable], bool] | None = None,
+    sequence: Sequence[Operation | FaultEvent] | None = None,
+    state: Callable[[Any], Any] | None = None,
+    apply_fault: Callable[[Any, FaultEvent], None] | None = None,
+    performance: PerformanceBudget | None = None,
+    minimize: bool = True,
     **fixtures: SearchStrategy | Any,
-) -> DiffResult
+) -> DiffResult | SystemDiffResult
 ```
 
-Compare two functions for equivalence. Infers strategies from `fn_a`'s type hints. Both functions must accept the same parameters.
+Each function receives independently reconstructed arguments and, for bound
+methods, an independently reconstructed receiver. Ordeal compares return value,
+exact exception type/message, mutated arguments, receiver state, and selected
+side effects. Selected effects must provide both capture and restore hooks so
+each side starts from the same baseline.
 
 ```python
 # Exact comparison
 result = diff(score_v1, score_v2)
-assert result.equivalent
+assert result.status == "no_divergence_observed"
 
 # Floating-point tolerance
 result = diff(compute_old, compute_new, rtol=1e-6)
 
 # Custom comparator
 result = diff(fn_a, fn_b, compare=lambda a, b: a.status == b.status)
+
+# Source-bound evidence is always in memory; optionally persist canonical JSON
+result = diff(old, new, normalize=canonicalize, artifact_dir=".ordeal/divergences")
+
+# Explicit restorable effect
+effect = SideEffect(capture=lambda: list(events), restore=lambda old: events.__setitem__(slice(None), old))
+result = diff(fn_a, fn_b, side_effects={"events": effect})
 ```
+
+### System mode
+
+Providing `sequence=` changes the unit from generated function calls to two
+fresh systems returned by zero-argument factories.
+
+```python
+events = [
+    Operation("put", args=("key", 1)),
+    FaultEvent("timeout", "activate"),
+    Operation("get", args=("key",)),
+    FaultEvent("timeout", "deactivate"),
+    Operation("get", args=("key",)),
+]
+
+result = diff(
+    OldStore,
+    NewStore,
+    sequence=events,
+    apply_fault=lambda store, fault: store.apply_fault(fault),
+    state=lambda store: store.snapshot(),
+    side_effects=lambda store: list(store.events),
+    performance=PerformanceBudget(max_slowdown=1.2),
+)
+```
+
+The report compares public exports/signatures, operation return or exception
+outcomes, state, selected side effects, identical fault transitions, and clean
+operations after recovery transitions. A divergence is minimized against its
+exact first mismatch and replayed `replay_attempts` times. Performance measures
+the original sequence and never changes the semantic `status`.
+
+### SystemDiffResult
+
+| Attribute | Type | Description |
+|---|---|---|
+| `interface` | `InterfaceReport` | Public export and signature differences |
+| `sequence` | `tuple[Operation \| FaultEvent, ...]` | Minimized shared event stream |
+| `steps` | `list[StepComparison]` | Per-event outcome, state, and side-effect observations |
+| `mismatches` | `list[SystemMismatch]` | Direct semantic divergences |
+| `fault_schedule` | `tuple[FaultEvent, ...]` | Fault-only view of the minimized stream |
+| `recovery_parity` | `bool \| None` | Measured post-recovery parity |
+| `replay_attempts`, `replay_matches` | `int` | Exact final-sequence replay counts |
+| `performance` | `PerformanceResult \| None` | Separate repeated latency evidence |
+| `status` | `str` | `divergent` or `no_divergence_observed` |
+
+Start with [System Differential Testing](../concepts/system-differential.md),
+follow the [first comparison](../guides/system-differential.md), and use the
+[dedicated reference](system-differential.md) for every event, report field, and
+performance measurement boundary.
 
 ### DiffResult
 
@@ -1591,17 +1694,98 @@ result = diff(fn_a, fn_b, compare=lambda a, b: a.status == b.status)
 | `function_a` | `str` | Name of reference function |
 | `function_b` | `str` | Name of compared function |
 | `total` | `int` | Examples tested |
-| `mismatches` | `list[Mismatch]` | Inputs where outputs differed |
-| `equivalent` | `bool` | True if no mismatches |
+| `status` | `str` | `divergent`, `no_divergence_observed`, `proven_equivalent`, or `inconclusive` |
+| `witness` | `DiffWitness \| None` | The one minimized, replay-verified divergence witness |
+| `reason` | `str \| None` | Why a sound comparison was inconclusive |
+| `proof_method` | `str \| None` | Verifier behind `proven_equivalent` |
+| `artifacts` | `list[dict]` | Source-bound evidence for every returned divergence |
+| `artifact_paths` | `list[str]` | Canonical JSON paths written through `artifact_dir` |
 | `summary()` | `str` | Human-readable report |
 
-### Mismatch
+A finite sample can establish divergence but cannot establish equivalence.
+`proven_equivalent` is only emitted when `equivalence_proof` explicitly verifies
+the complete selected envelope and input domain.
+
+### DiffWitness
 
 | Attribute | Type | Description |
 |---|---|---|
-| `args` | `dict` | Input arguments that caused divergence |
-| `output_a` | `Any` | Output from `fn_a` |
-| `output_b` | `Any` | Output from `fn_b` |
+| `args` | `Mapping` | Immutable minimized input snapshot |
+| `outcome_a` | `DiffOutcome` | Replay outcome from `fn_a` |
+| `outcome_b` | `DiffOutcome` | Replay outcome from `fn_b` |
+| `differences` | `tuple[str, ...]` | Envelope fields that differed |
+| `replay_attempts`, `replay_matches` | `int` | Exact same-witness replay counts |
+| `replay_verified` | `bool` | Always true for a returned divergent witness |
+| `artifact` | `Mapping` | Immutable `ordeal.divergence-evidence/v1` record |
+| `artifact_path` | `str \| None` | Persisted JSON path when requested |
+
+`Mismatch` remains as a compact compatibility view; `DiffWitness` is the
+canonical full-envelope record and shrinking intermediates are not returned.
+
+### DiffOutcome
+
+| Attribute | Description |
+|---|---|
+| `returned`, `return_value` | Return disposition and immutable value snapshot |
+| `exception_type`, `exception_message` | Exact raised-exception identity |
+| `mutated_arguments` | Post-invocation arguments |
+| `receiver_state` | Post-invocation bound-receiver state |
+| `side_effects` | Final snapshots of selected effects |
+| `normalized_value` | Return value after the recorded normalizer |
+| `terminal_source_location` | Terminal frame for exact exception replay |
+
+---
+
+## Migration workflow
+
+For the plain-language mental model, start with
+[Safe Module Migrations](../concepts/safe-migrations.md). The API below is the
+exact contract behind the [complete workflow](../guides/migration-workflow.md).
+
+```python
+from ordeal import ContractCheck, MigrationResult, migrate
+```
+
+### migrate
+
+```python
+migrate(
+    base: str,
+    candidate: str,
+    *,
+    intended_changes: Collection[str] | Mapping[str, str] = (),
+    classify: ChangeClassifier | None = None,
+    invariants: Mapping[str, Sequence[ContractCheck]] | None = None,
+    test_dir: str = "tests",
+    audit_max_examples: int = 20,
+    mine_max_examples: int = 200,
+    diff_max_examples: int = 100,
+    scan_max_examples: int = 50,
+    mutation_preset: Literal["essential", "standard", "thorough"] = "standard",
+    mutation_workers: int = 1,
+    mutation_threshold: float = 1.0,
+    mine_fixtures: Mapping[str, Any] | None = None,
+    diff_options: Mapping[str, Mapping[str, Any]] | None = None,
+    scan_options: Mapping[str, Any] | None = None,
+    evidence_path: str | Path | None = None,
+    regression_path: str | Path | None = None,
+) -> MigrationResult
+```
+
+Runs `audit base -> mine candidate -> diff -> classify -> save unexpected ->
+mutate resulting tests -> scan candidate`. Mined contracts are labeled
+`mined_hypothesis`; only explicit `ContractCheck` invariants carry domain
+correctness intent.
+
+Unexpected divergences produce saved parity regressions and block mutation
+until the candidate passes them. Re-running after a fix resumes with the saved
+witnesses. `protected_within_measured_scope` requires an unblocked base audit,
+no unexpected or inconclusive diffs, at least one explicit invariant, a measured
+mutation run in which every tested mutant was killed, and a passing candidate-only
+scan. A lower `mutation_threshold` can describe a local policy stage but never
+upgrades the final protection verdict.
+
+See [Base-to-Candidate Migration](../guides/migration-workflow.md).
 
 ---
 
@@ -1989,6 +2173,7 @@ Load and validate an `ordeal.toml`. Raises `FileNotFoundError` if missing, `Conf
 | `request_timeout` | `float` | `5.0` |
 | `startup_timeout` | `float` | `30.0` |
 | `replay_attempts` | `int` | `3` |
+| `workload_mutations` | `int` | `0` |
 | `trace_dir` | `str` | `.ordeal/traces` |
 | `keep_running` | `bool` | `False` |
 

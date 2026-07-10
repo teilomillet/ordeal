@@ -59,6 +59,7 @@ def test_docs_cover_the_complete_bounded_workflow() -> None:
 def test_schema_reference_names_every_machine_contract() -> None:
     schema = PAGES["schema"].read_text(encoding="utf-8")
     assert "ordeal.finding-evidence/v1" in schema
+    assert "ordeal.divergence-evidence/v1" in schema
     assert "ordeal.regression-binding/v1" in schema
     assert "ordeal.regression-manifest/v1" in schema
 

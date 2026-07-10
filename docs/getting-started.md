@@ -368,12 +368,18 @@ c["faults"]    # all fault types with names, signatures, and docs
 - [Chaos Testing](concepts/chaos-testing.md) — how faults, nemesis, and swarm mode work together
 - [Property Assertions](concepts/property-assertions.md) — always, sometimes, reachable, unreachable
 - [Coverage Guidance](concepts/coverage-guidance.md) — how the explorer systematically finds bugs
+- [Divergence Evidence](concepts/divergence-evidence.md) — how two observations become a source-bound, replay-scoped claim
+- [System Differential Testing](concepts/system-differential.md) — compare an old and new workflow through the same operations and faults
 
 **Use more features:**
 
 - [Explorer](guides/explorer.md) — coverage-guided exploration with `ordeal explore`
 - [Configuration](guides/configuration.md) — `ordeal.toml` for reproducible, shareable test runs
 - [Auto Testing](guides/auto.md) — point ordeal at your module, get tests automatically
+- [Compare Two Git Revisions](guides/revision-diff.md) — check a committed refactor in sealed worktrees
+- [Revision Diff Troubleshooting](guides/revision-diff-troubleshooting.md) — fix ref, import, fixture, and replay problems
+- [Revision Diff Schema](reference/revision-diff-schema.md) — consume saved revision evidence safely
+- [First System Comparison](guides/system-differential.md) — copy a complete old/new timeout-recovery example
 
 **Understand the philosophy:**
 

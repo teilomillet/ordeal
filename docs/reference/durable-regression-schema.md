@@ -5,120 +5,126 @@ description: Exact evidence-card, regression-binding, manifest, and verification
 
 # Durable regression schema
 
-This is the machine-readable contract behind `scan --save-artifacts`,
+This is the machine contract behind saved scan and Compose findings,
 single-finding verification, and `verify --ci`.
 
 ## Finding evidence card
 
-The card schema identifier is `ordeal.finding-evidence/v1`.
+The shared card identifier is `ordeal.finding-evidence/v1`.
 
-| Field | Type | Meaning |
-|---|---|---|
-| `status` | `str` | `supported`, `exploratory`, or `expected` |
-| `claim` | `str` | Smallest human-readable claim justified by the observation |
-| `subject` | `object` | Qualified target and callable source SHA-256 |
-| `witness` | `object` | Availability, canonical input, SHA-256, and source |
-| `observation` | `object` | Exception, property violation, or contract violation |
-| `replay` | `object` | Status, attempts, exact matches, basis, and command |
-| `minimization` | `object` | Status, method, complexity proxy, replay counts, boundary |
-| `contrast` | `object` | Passing/failing example counts when measured |
-| `regression` | `object` | Save status, path, test name, and binding |
-| `post_fix_control` | `object` | Pending/passed/failed/error state and acceptance rule |
-| `ci_guard` | `object` | Readiness, command, and acceptance rule |
-| `workflow` | `object` | Compact state of all six durable-loop stages |
-| `boundaries` | `object` | What the evidence establishes and does not establish |
-| `runtime` | `object` | Python version and implementation used for the scan |
+| Field | Meaning |
+|---|---|
+| `status` | `supported`, `exploratory`, or `expected` |
+| `claim` | Smallest statement justified by the observation |
+| `subject` | Target plus callable-source or Compose trace/config hashes |
+| `witness` | Canonical input or action trace and its SHA-256 |
+| `observation` | Exception, contract/property violation, or Compose failure |
+| `replay` | Status, attempts, exact matches, basis, command, and boundary |
+| `minimization` | Explicit state, method, complexity, and replay counts |
+| `contrast` | Passing/failing observations when measured |
+| `reliability_coverage` | Optional operation × fault × property matrix |
+| `test_protection` | Optional mutation-backed scoped verdict |
+| `regression` | Save state, path, test name, and binding |
+| `post_fix_control` | Pending/passed/failed/error state and acceptance rule |
+| `ci_guard` | Readiness, command, and acceptance rule |
+| `workflow` | Discover, reproduce, minimize, save, verify, and guard states |
+| `boundaries` | What the evidence does and does not establish |
+| `runtime` | Python version and implementation |
 
-Replay statuses are `verified`, `failed`, and `not_run`. Minimization records its
-explicit state. Regression states include `not_ready`, `not_saved`, `generated`,
-`saved`, and `not_applicable`.
+Replay states include `verified`, `supported`, `failed`, and `not_run`.
+`supported` is useful for probabilistic Compose replay: at least one exact match
+was observed, without claiming deterministic reproduction.
 
-## Workflow object
+## Divergence evidence
 
-```json
-{
-  "discover": "observed",
-  "reproduce": "verified",
-  "minimize": "verified",
-  "save_regression": "saved",
-  "verify_fix": "pending",
-  "guard_ci": "ready"
-}
-```
+The cross-version card identifier is `ordeal.divergence-evidence/v1`.
 
-The workflow is only a summary. Read replay counts, binding data, acceptance
-text, and boundaries before making a decision.
+| Field | Meaning |
+|---|---|
+| `revisions` | Both refs/commits, callable locations, and source SHA-256 values |
+| `comparison` | Source-bound comparator/normalizer and their parameters |
+| `witness` | Original and minimized same-input values plus SHA-256 values |
+| `observations` | Both full outcome envelopes |
+| `replay` | Attempts, exact matches, basis, and paired signatures |
+| `minimization` | Method, original observation, and search boundary |
+| `boundaries` | What the divergence establishes and leaves open |
 
-## Regression binding
+Full replay plus complete source binding is `supported`; otherwise it remains `exploratory`.
 
-The binding schema identifier is `ordeal.regression-binding/v1`.
+## Python regression binding
 
-| Field | Type | Meaning |
-|---|---|---|
-| `test_name` | `str` | Exact pytest function name |
-| `test_ast_sha256` | `str` | Semantic AST hash of the test function |
-| `import_ast_sha256` | `list[str]` | Required top-level import AST hashes |
-| `global_names` | `list[str]` | Module globals or builtins loaded by the test |
-| `global_binding_ast_sha256` | `list[str]` | Ordered hashes of statements affecting those globals |
+The identifier is `ordeal.regression-binding/v1`.
+| Field | Meaning |
+|---|---|
+| `test_name` | Exact pytest function name |
+| `test_ast_sha256` | Semantic AST hash of the test function |
+| `import_ast_sha256` | Required top-level import AST hashes |
+| `global_names` | Globals or builtins loaded by the test |
+| `global_binding_ast_sha256` | Ordered hashes of statements affecting globals |
 
-Formatting and line-number changes do not alter an AST hash. Semantic changes
-do. Extra unrelated imports may be allowed, but required imports, global
-resolution, relevant top-level statements, and the test body must still match.
+Formatting changes do not alter AST hashes; semantic or relevant global-binding
+changes do. Required imports must remain, while unrelated additions are allowed.
+
+## Compose trace binding
+
+The identifier is `ordeal.compose-regression-binding/v1`.
+
+| Field | Meaning |
+|---|---|
+| `trace_sha256` | Canonical JSON hash of the exact redacted portable trace |
+| `failure_signature` | Discovery failure kind/message/action identity hash |
+| `action_count` | Bound lifecycle, fault, and request action count |
+
+Compose promotion requires at least one exact discovery replay. The post-fix
+control then runs the same bound trace and accepts only attempts with no failure;
+a different failure is not a pass.
 
 ## Portable CI manifest
 
-The default path is `tests/ordeal-regressions.json`.
+The default path is `tests/ordeal-regressions.json`, with schema
+`ordeal.regression-manifest/v1`. Records are a tagged union:
 
 ```json
 {
   "schema": "ordeal.regression-manifest/v1",
   "regressions": [
-    {
-      "finding_id": "fnd_abc123",
-      "target": "myapp.scoring.divide",
-      "test_file": "tests/test_ordeal_regressions.py",
-      "test_name": "test_divide_crash_regression",
-      "binding": {"schema": "ordeal.regression-binding/v1"},
-      "witness_sha256": "<64 hex characters>",
-      "source_sha256": "<64 hex characters>"
-    }
+    {"finding_id": "fnd_python", "target": "myapp.scoring.divide",
+     "test_file": "tests/test_ordeal_regressions.py",
+     "binding": {"schema": "ordeal.regression-binding/v1"}},
+    {"finding_id": "fnd_compose_abc", "runner": "compose",
+     "trace_file": "tests/ordeal-compose-regressions/fnd_compose_abc.json",
+     "binding": {"schema": "ordeal.compose-regression-binding/v1"}}
   ]
 }
 ```
 
-`finding_id` must be unique. CI requires `test_file`, `test_name`, and `binding`.
-Hashes preserve correlation; source code may legitimately change after a fix.
+`finding_id` must be unique. Python records require `test_file`, `test_name`,
+and an AST binding. Compose records require `runner`, `trace_file`, a trace
+binding, and a clean replay policy.
 
-## Local bundle and index
+## Local history and verification
 
-The JSON bundle under `.ordeal/findings/` contains full cards, artifact paths,
-commands, and the latest verification result. Its append-only index records scan
-and verification events. Single-finding verification updates these local files.
+Scan bundles under `.ordeal/findings/` contain full cards, commands, and latest
+verification state. Compose records can be verified directly from the portable
+manifest. `verify --ci` reads but never mutates either form.
 
-CI reads the portable manifest and does not require or mutate local history.
-
-## Verification transitions
-
-| Pytest result | Finding status | Post-fix control | Command exit |
-|---|---|---|---|
-| test passed | `verified` | `passed` | `0` |
-| test failed | `reproduced` | `failed` | `1` |
-| execution error | unchanged/error context | `error` when recordable | `2` |
-
-CI returns `0` when all records pass, `1` when any regression fails, and `2`
-for manifest, binding, path, or execution errors.
+| Control result | Meaning | Exit |
+|---|---|---|
+| Python test passed | same-witness control is green | `0` |
+| Python test failed | original defect still reproduces | `1` |
+| all Compose attempts clean | bound service control is green | `0` |
+| any Compose attempt fails | original or another failure remains | `1` |
+| binding/path/execution error | control is invalid or unavailable | `2` |
 
 ## Compatibility and safety
 
-- Unknown schema versions fail closed.
-- CI rejects missing/duplicate IDs and paths outside the workspace.
-- Hashes detect structural change; they are not signatures or provenance proof.
-- Repository tests remain executable code and require normal review/isolation.
-- The bounded claim applies only to the recorded witness and measured runtime.
+- Unknown schemas, missing/duplicate IDs, and incomplete records fail closed.
+- CI rejects regression traces, tests, and Compose files outside the workspace.
+- Hashes detect change; they are not signatures or provenance proof.
+- Repository tests and Compose files remain executable and require review.
+- Claims remain bounded to the recorded witness, workload, faults, and runtime.
 
-## Related references
-
-- Human interpretation: [Finding Evidence](../guides/finding-evidence.md)
-- Scan proof and harness fields: [Scan Evidence Schema](scan-evidence-schema.md)
-- Operational artifacts: [Bug Bundle](../guides/bug-bundle.md)
-- CI behavior: [Durable Regressions in CI](../guides/durable-regressions-ci.md)
+Related: [Divergence Evidence Schema](divergence-evidence-schema.md), [Compose evidence loop](../guides/compose-evidence-loop.md),
+[Finding Evidence](../guides/finding-evidence.md),
+[Scan Evidence Schema](scan-evidence-schema.md), and
+[Durable Regressions in CI](../guides/durable-regressions-ci.md).

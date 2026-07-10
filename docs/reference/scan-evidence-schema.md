@@ -17,8 +17,9 @@ The card schema is `ordeal.finding-evidence/v1`.
 |---|---|
 | `status` | `supported`, `exploratory`, or `expected` |
 | `claim` | Smallest statement justified by this observation |
-| `subject.target` | Fully qualified callable |
+| `subject.target` | Fully qualified callable or Compose project/file |
 | `subject.source_sha256` | Hash of inspected callable source, or `null` |
+| `subject.trace_sha256` | Canonical Compose trace hash, when applicable |
 | `witness.input` | JSON-safe exact input |
 | `witness.sha256` | Canonical JSON hash of that input |
 | `observation` | Exception, contract, or property result |
@@ -28,6 +29,11 @@ The card schema is `ordeal.finding-evidence/v1`.
 | `regression` | Generated/saved/not-ready state and binding |
 | `ci_guard` | Whether portable verification is ready |
 | `boundaries` | Explicitly unsupported conclusions |
+
+Compose uses the same card schema and adds `reliability_coverage` plus
+`test_protection`. Partial real-service replay uses `supported`; it never turns
+an exact action trace into a deterministic scheduling claim. See the
+[Compose evidence loop](../guides/compose-evidence-loop.md).
 
 ## Crash replay identity
 

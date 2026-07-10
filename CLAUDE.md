@@ -25,6 +25,7 @@ uv run ordeal explore            # run coverage-guided explorer (reads ordeal.to
 uv run ordeal mutate <target>    # mutation testing (preset="standard" by default)
 uv run ordeal audit <module>     # audit test coverage for a module
 uv run ordeal mine <target>      # discover properties of a function
+uv run ordeal diff <target> --base-ref origin/main --candidate-ref HEAD
 uv run ordeal replay <trace>     # replay a failure trace
 uv run ordeal benchmark          # USL scaling analysis (reads ordeal.toml)
 uv run ordeal skill              # install AI agent skill (.claude/skills/ordeal/SKILL.md)
@@ -32,7 +33,11 @@ uv run ordeal skill              # install AI agent skill (.claude/skills/ordeal
 
 ## Discovery
 
-See [AGENTS.md § Discovery](AGENTS.md#discovery) for the full reference. Quick start: `from ordeal import catalog; catalog()` returns all capabilities via runtime introspection.
+See [AGENTS.md](AGENTS.md) for the full reference. `from ordeal import catalog; catalog()`
+returns every capability through runtime introspection. For committed refactors,
+start with `docs/guides/revision-diff.md`, then use
+`docs/guides/revision-diff-troubleshooting.md` or
+`docs/reference/revision-diff-schema.md` as needed.
 
 ## Architecture
 
@@ -52,6 +57,8 @@ ordeal/
 ├── auto.py             Auto-scan: smoke-test, fuzz, chaos_for entire modules
 ├── metamorphic.py      Metamorphic testing — relation-based property checking
 ├── diff.py             Differential testing — compare two implementations
+├── _revision_diff.py   Git worktree/subprocess orchestration for ordeal diff
+├── _diff_worker.py     Private same-input revision worker protocol
 ├── scaling.py          USL scaling analysis — fit_usl, analyze, benchmark
 ├── trace.py            Trace recording, JSON serialization, replay, shrink, fault ablation
 ├── config.py           ordeal.toml loader with strict validation
@@ -234,12 +241,22 @@ print(report)
 
 Differential testing — run two functions on the same random inputs, catch divergence:
 
+Start a newcomer with `docs/concepts/differential-testing.md` and
+`docs/guides/differential-quickstart.md`. Use
+`docs/guides/differential-state-and-effects.md` for mutation/receiver/effect
+questions and `docs/guides/differential-evidence.md` for status or witness review.
+Read the Divergence Evidence guide at `docs/concepts/divergence-evidence.md`
+when the question is how source bindings, comparison rules, replay counts, and
+claim boundaries fit together.
+Use `docs/guides/divergence-evidence.md` for the operational handoff and
+`docs/reference/divergence-evidence-schema.md` for exact artifact fields.
+
 ```python
 from ordeal.diff import diff
 
 result = diff(score_v1, score_v2, max_examples=100)
-assert result.equivalent      # True if no mismatches
-print(result.summary())       # "diff(score_v1, score_v2): 100 examples, EQUIVALENT"
+assert result.status == "no_divergence_observed"
+print(result.summary())       # bounded sampled evidence, not equivalence
 
 # Floating-point tolerance:
 result = diff(compute_old, compute_new, rtol=1e-6)
@@ -247,10 +264,25 @@ result = diff(compute_old, compute_new, rtol=1e-6)
 # Custom comparator:
 result = diff(fn_a, fn_b, compare=lambda a, b: a.keys() == b.keys())
 
-# Inspect mismatches:
-for m in result.mismatches:
-    print(m)  # args, output_a, output_b
+# Inspect the one durable divergence witness:
+if result.witness is not None:
+    print(result.witness)
 ```
+
+For stateful services, use the same function with `Operation`/`FaultEvent`
+objects and `sequence=`. For committed code, use `ordeal diff TARGET` to run
+both Git revisions in isolated worktrees. For a full module replacement gate,
+use `ordeal migrate BASE CANDIDATE -c ordeal.toml`.
+
+For module replacement, start with the layman mental model in
+`docs/concepts/safe-migrations.md`, then follow
+`docs/guides/migration-workflow.md`. Parity can preserve an old bug; the final
+gate also requires explicit invariants, mutation protection, and a candidate-only
+scan.
+
+For system comparisons, start with `docs/concepts/system-differential.md`, run
+`docs/guides/system-differential.md`, then use the recipes, troubleshooting,
+and exact reference pages with the same `system-differential` name.
 
 ### "Discover and test algebraic relations" / `metamorphic`
 

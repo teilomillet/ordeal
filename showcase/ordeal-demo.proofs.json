@@ -1,0 +1,297 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "finding_id": "fnd_8dbee6c2f122",
+      "qualname": "ordeal.demo.decode",
+      "summary": "decode: strong candidate issue on contract-valid inputs",
+      "evidence_class": "candidate_issue",
+      "proof_bundle": {
+        "version": 2,
+        "witness": {
+          "input": {
+            "s": "utf-8",
+            "errors": "backslashreplace"
+          },
+          "source": "call_site",
+          "seed_sources": [
+            {
+              "source": "call_site",
+              "evidence": "agent_schema.py:33"
+            }
+          ],
+          "supporting_evidence": [
+            {
+              "parameter": "s",
+              "value": "utf-8",
+              "value_type": "str",
+              "checks": [
+                {
+                  "kind": "type_hint",
+                  "detail": "builtins.str"
+                },
+                {
+                  "kind": "observed_types",
+                  "detail": [
+                    "str"
+                  ],
+                  "matched": true
+                },
+                {
+                  "kind": "docstring",
+                  "detail": "s is mentioned in the callable docstring"
+                }
+              ]
+            },
+            {
+              "parameter": "errors",
+              "value": "backslashreplace",
+              "value_type": "str",
+              "checks": []
+            }
+          ]
+        },
+        "valid_input_witness": {
+          "input": {
+            "s": "utf-8",
+            "errors": "backslashreplace"
+          },
+          "source": "call_site",
+          "seed_sources": [
+            {
+              "source": "call_site",
+              "evidence": "agent_schema.py:33"
+            }
+          ],
+          "supporting_evidence": [
+            {
+              "parameter": "s",
+              "value": "utf-8",
+              "value_type": "str",
+              "checks": [
+                {
+                  "kind": "type_hint",
+                  "detail": "builtins.str"
+                },
+                {
+                  "kind": "observed_types",
+                  "detail": [
+                    "str"
+                  ],
+                  "matched": true
+                },
+                {
+                  "kind": "docstring",
+                  "detail": "s is mentioned in the callable docstring"
+                }
+              ]
+            },
+            {
+              "parameter": "errors",
+              "value": "backslashreplace",
+              "value_type": "str",
+              "checks": []
+            }
+          ],
+          "contract_fit": 0.595,
+          "reachability": 0.85,
+          "realism": 0.55,
+          "rationale": [
+            "s: matches type hint",
+            "s: matches observed test shape",
+            "matches a concrete seed from tests/docs/code"
+          ]
+        },
+        "contract_basis": {
+          "category": "likely_bug",
+          "evidence_class": "candidate_issue",
+          "fit": 0.595,
+          "reachability": 0.85,
+          "realism": 0.55,
+          "fixture_completeness": 1.0,
+          "basis": [
+            "s: matches type hint",
+            "s: matches observed test shape",
+            "matches a concrete seed from tests/docs/code"
+          ],
+          "likely_contract": {
+            "s": {
+              "hint": "builtins.str",
+              "weak_hint": false,
+              "semantic": "generic",
+              "observed_types": [
+                "str"
+              ],
+              "comparison_values": [],
+              "doc_mentions": 1
+            }
+          },
+          "supporting_evidence": [
+            {
+              "parameter": "s",
+              "value": "utf-8",
+              "value_type": "str",
+              "checks": [
+                {
+                  "kind": "type_hint",
+                  "detail": "builtins.str"
+                },
+                {
+                  "kind": "observed_types",
+                  "detail": [
+                    "str"
+                  ],
+                  "matched": true
+                },
+                {
+                  "kind": "docstring",
+                  "detail": "s is mentioned in the callable docstring"
+                }
+              ]
+            },
+            {
+              "parameter": "errors",
+              "value": "backslashreplace",
+              "value_type": "str",
+              "checks": []
+            }
+          ],
+          "input_source": "call_site",
+          "matched_seed_sources": [
+            {
+              "source": "call_site",
+              "evidence": "agent_schema.py:33"
+            }
+          ],
+          "security_focus": false,
+          "sink_categories": [],
+          "callable_sink_categories": [],
+          "critical_sinks": []
+        },
+        "contract_validity": {
+          "category": "likely_bug",
+          "evidence_class": "candidate_issue",
+          "likely_contract": {
+            "s": {
+              "hint": "builtins.str",
+              "weak_hint": false,
+              "semantic": "generic",
+              "observed_types": [
+                "str"
+              ],
+              "comparison_values": [],
+              "doc_mentions": 1
+            }
+          },
+          "rationale": [
+            "s: matches type hint",
+            "s: matches observed test shape",
+            "matches a concrete seed from tests/docs/code"
+          ],
+          "supporting_evidence": [
+            {
+              "parameter": "s",
+              "value": "utf-8",
+              "value_type": "str",
+              "checks": [
+                {
+                  "kind": "type_hint",
+                  "detail": "builtins.str"
+                },
+                {
+                  "kind": "observed_types",
+                  "detail": [
+                    "str"
+                  ],
+                  "matched": true
+                },
+                {
+                  "kind": "docstring",
+                  "detail": "s is mentioned in the callable docstring"
+                }
+              ]
+            },
+            {
+              "parameter": "errors",
+              "value": "backslashreplace",
+              "value_type": "str",
+              "checks": []
+            }
+          ]
+        },
+        "confidence_breakdown": {
+          "replayability": 1.0,
+          "contract_fit": 0.595,
+          "reachability": 0.85,
+          "realism": 0.55,
+          "fixture_completeness": 1.0,
+          "sink_signal": 0.0,
+          "replay_attempts": 2,
+          "replay_matches": 2
+        },
+        "failure_path": {
+          "target": "ordeal.demo.decode",
+          "qualname": "ordeal.demo.decode",
+          "error_type": "TypeError",
+          "error": "decode() got an unexpected keyword argument 'errors'",
+          "traceback": [
+            "auto.py:9308:_test_one_function",
+            "auto.py:9284:_run_one",
+            "auto.py:2237:_call_sync"
+          ]
+        },
+        "failing_path": {
+          "target": "ordeal.demo.decode",
+          "qualname": "ordeal.demo.decode",
+          "error_type": "TypeError",
+          "error": "decode() got an unexpected keyword argument 'errors'",
+          "traceback": [
+            "auto.py:9308:_test_one_function",
+            "auto.py:9284:_run_one",
+            "auto.py:2237:_call_sync"
+          ]
+        },
+        "minimal_reproduction": {
+          "target": "ordeal.demo:decode",
+          "command": "uv run ordeal scan ordeal.demo --mode candidate --targets ordeal.demo:decode -n 1",
+          "python_snippet": "from importlib import import_module\nmod = import_module('ordeal.demo')\nargs = {'s': 'utf-8', 'errors': 'backslashreplace'}\nmod.decode(**args)",
+          "direct_call_supported": true,
+          "note": null
+        },
+        "reproduction": {
+          "replayable": true,
+          "replay_attempts": 2,
+          "replay_matches": 2,
+          "failing_args": {
+            "s": "utf-8",
+            "errors": "backslashreplace"
+          },
+          "target": "ordeal.demo:decode",
+          "command": "uv run ordeal scan ordeal.demo --mode candidate --targets ordeal.demo:decode -n 1",
+          "python_snippet": "from importlib import import_module\nmod = import_module('ordeal.demo')\nargs = {'s': 'utf-8', 'errors': 'backslashreplace'}\nmod.decode(**args)",
+          "direct_call_supported": true,
+          "note": null
+        },
+        "impact": {
+          "summary": "the function crashes on an input that matches the inferred contract.",
+          "class": "likely_bug",
+          "evidence_class": "candidate_issue",
+          "sink_categories": [],
+          "callable_sink_categories": [],
+          "critical_sinks": [],
+          "trust_boundary_signal": 0.0,
+          "security_focus": false
+        },
+        "sink_categories": [],
+        "callable_sink_categories": [],
+        "likely_impact": "the function crashes on an input that matches the inferred contract.",
+        "verdict": {
+          "category": "likely_bug",
+          "evidence_class": "candidate_issue",
+          "promoted": true,
+          "demotion_reason": null
+        }
+      }
+    }
+  ]
+}

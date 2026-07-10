@@ -1,0 +1,24 @@
+{
+  "generated_at": "2026-04-17",
+  "target": "ordeal.demo",
+  "status": "findings",
+  "summary": "findings found: Audited: 1 module(s) | Findings: 14 | Blocked modules: 0 | Function evidence: 7 exercised, 0 exploratory, 0 uncovered | Coverage preserved: 0/1 | Config suggestions: 1 ready-to-paste ordeal.toml block | Evidence: search depth=1 modules/2 measurements, replayability=100%, mutation strength=85%, fixture completeness=100% | Surface map: 7 entries, 7 runnable, provenance=o56/d0/i7",
+  "current_suite": {
+    "tests": 5,
+    "lines": 32,
+    "coverage_percent": 100.0
+  },
+  "mutation_validation": {
+    "score": "22/26 (85%)",
+    "status": "promoted_gaps",
+    "promoted_boundary_count": 1,
+    "weakest_target": "ordeal.demo.score",
+    "weakest_score": "2/5 (40%)"
+  },
+  "finding_count": 14,
+  "suggested_commands": [
+    "ordeal audit ordeal.demo --show-generated",
+    "ordeal mine ordeal.demo -n 200",
+    "ordeal mutate ordeal.demo"
+  ]
+}

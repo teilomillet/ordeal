@@ -1,0 +1,561 @@
+{
+  "version": 1,
+  "saved_at": "2026-04-17T21:12:24.202004Z",
+  "tool": "scan",
+  "target": "ordeal.demo",
+  "workspace": ".",
+  "status": "findings found",
+  "confidence": 0.8571,
+  "seed": 42,
+  "summary": [
+    "Checked: 7 functions, 2 transitions, 2 checkpoints",
+    "Promoted findings: 1",
+    "Lifecycle contracts: 0",
+    "Semantic contracts: 0",
+    "Coverage gaps: 0",
+    "Invalid-input crashes: 0",
+    "Beyond-contract robustness: 0",
+    "Exploratory crashes: 0",
+    "Exploratory properties: 1",
+    "Expected precondition failures: 0",
+    "Gaps: 1",
+    "Evidence: search depth=7 functions/2 transitions/2 checkpoints, replayability=2/2, mutation strength=n/a, fixture completeness=100%",
+    "Config suggestions: 1 ready-to-paste ordeal.toml block"
+  ],
+  "gaps": [
+    "`ordeal.demo.normalize`: property: idempotent (97%)"
+  ],
+  "finding_count": 2,
+  "findings": [
+    {
+      "kind": "crash",
+      "category": "likely_bug",
+      "evidence_class": "candidate_issue",
+      "function": "decode",
+      "summary": "decode: strong candidate issue on contract-valid inputs",
+      "error": "decode() got an unexpected keyword argument 'errors'",
+      "failing_args": {
+        "s": "utf-8",
+        "errors": "backslashreplace"
+      },
+      "replayable": true,
+      "replay_attempts": 2,
+      "replay_matches": 2,
+      "contract_fit": 0.5950000000000001,
+      "reachability": 0.85,
+      "realism": 0.55,
+      "sink_signal": 0.0,
+      "sink_categories": [],
+      "input_sources": [
+        {
+          "source": "call_site",
+          "evidence": "agent_schema.py:33"
+        }
+      ],
+      "input_source": "call_site",
+      "proof_bundle": {
+        "version": 2,
+        "witness": {
+          "input": {
+            "s": "utf-8",
+            "errors": "backslashreplace"
+          },
+          "source": "call_site",
+          "seed_sources": [
+            {
+              "source": "call_site",
+              "evidence": "agent_schema.py:33"
+            }
+          ],
+          "supporting_evidence": [
+            {
+              "parameter": "s",
+              "value": "utf-8",
+              "value_type": "str",
+              "checks": [
+                {
+                  "kind": "type_hint",
+                  "detail": "builtins.str"
+                },
+                {
+                  "kind": "observed_types",
+                  "detail": [
+                    "str"
+                  ],
+                  "matched": true
+                },
+                {
+                  "kind": "docstring",
+                  "detail": "s is mentioned in the callable docstring"
+                }
+              ]
+            },
+            {
+              "parameter": "errors",
+              "value": "backslashreplace",
+              "value_type": "str",
+              "checks": []
+            }
+          ]
+        },
+        "valid_input_witness": {
+          "input": {
+            "s": "utf-8",
+            "errors": "backslashreplace"
+          },
+          "source": "call_site",
+          "seed_sources": [
+            {
+              "source": "call_site",
+              "evidence": "agent_schema.py:33"
+            }
+          ],
+          "supporting_evidence": [
+            {
+              "parameter": "s",
+              "value": "utf-8",
+              "value_type": "str",
+              "checks": [
+                {
+                  "kind": "type_hint",
+                  "detail": "builtins.str"
+                },
+                {
+                  "kind": "observed_types",
+                  "detail": [
+                    "str"
+                  ],
+                  "matched": true
+                },
+                {
+                  "kind": "docstring",
+                  "detail": "s is mentioned in the callable docstring"
+                }
+              ]
+            },
+            {
+              "parameter": "errors",
+              "value": "backslashreplace",
+              "value_type": "str",
+              "checks": []
+            }
+          ],
+          "contract_fit": 0.595,
+          "reachability": 0.85,
+          "realism": 0.55,
+          "rationale": [
+            "s: matches type hint",
+            "s: matches observed test shape",
+            "matches a concrete seed from tests/docs/code"
+          ]
+        },
+        "contract_basis": {
+          "category": "likely_bug",
+          "evidence_class": "candidate_issue",
+          "fit": 0.595,
+          "reachability": 0.85,
+          "realism": 0.55,
+          "fixture_completeness": 1.0,
+          "basis": [
+            "s: matches type hint",
+            "s: matches observed test shape",
+            "matches a concrete seed from tests/docs/code"
+          ],
+          "likely_contract": {
+            "s": {
+              "hint": "builtins.str",
+              "weak_hint": false,
+              "semantic": "generic",
+              "observed_types": [
+                "str"
+              ],
+              "comparison_values": [],
+              "doc_mentions": 1
+            }
+          },
+          "supporting_evidence": [
+            {
+              "parameter": "s",
+              "value": "utf-8",
+              "value_type": "str",
+              "checks": [
+                {
+                  "kind": "type_hint",
+                  "detail": "builtins.str"
+                },
+                {
+                  "kind": "observed_types",
+                  "detail": [
+                    "str"
+                  ],
+                  "matched": true
+                },
+                {
+                  "kind": "docstring",
+                  "detail": "s is mentioned in the callable docstring"
+                }
+              ]
+            },
+            {
+              "parameter": "errors",
+              "value": "backslashreplace",
+              "value_type": "str",
+              "checks": []
+            }
+          ],
+          "input_source": "call_site",
+          "matched_seed_sources": [
+            {
+              "source": "call_site",
+              "evidence": "agent_schema.py:33"
+            }
+          ],
+          "security_focus": false,
+          "sink_categories": [],
+          "callable_sink_categories": [],
+          "critical_sinks": []
+        },
+        "contract_validity": {
+          "category": "likely_bug",
+          "evidence_class": "candidate_issue",
+          "likely_contract": {
+            "s": {
+              "hint": "builtins.str",
+              "weak_hint": false,
+              "semantic": "generic",
+              "observed_types": [
+                "str"
+              ],
+              "comparison_values": [],
+              "doc_mentions": 1
+            }
+          },
+          "rationale": [
+            "s: matches type hint",
+            "s: matches observed test shape",
+            "matches a concrete seed from tests/docs/code"
+          ],
+          "supporting_evidence": [
+            {
+              "parameter": "s",
+              "value": "utf-8",
+              "value_type": "str",
+              "checks": [
+                {
+                  "kind": "type_hint",
+                  "detail": "builtins.str"
+                },
+                {
+                  "kind": "observed_types",
+                  "detail": [
+                    "str"
+                  ],
+                  "matched": true
+                },
+                {
+                  "kind": "docstring",
+                  "detail": "s is mentioned in the callable docstring"
+                }
+              ]
+            },
+            {
+              "parameter": "errors",
+              "value": "backslashreplace",
+              "value_type": "str",
+              "checks": []
+            }
+          ]
+        },
+        "confidence_breakdown": {
+          "replayability": 1.0,
+          "contract_fit": 0.595,
+          "reachability": 0.85,
+          "realism": 0.55,
+          "fixture_completeness": 1.0,
+          "sink_signal": 0.0,
+          "replay_attempts": 2,
+          "replay_matches": 2
+        },
+        "failure_path": {
+          "target": "ordeal.demo.decode",
+          "qualname": "ordeal.demo.decode",
+          "error_type": "TypeError",
+          "error": "decode() got an unexpected keyword argument 'errors'",
+          "traceback": [
+            "auto.py:9308:_test_one_function",
+            "auto.py:9284:_run_one",
+            "auto.py:2237:_call_sync"
+          ]
+        },
+        "failing_path": {
+          "target": "ordeal.demo.decode",
+          "qualname": "ordeal.demo.decode",
+          "error_type": "TypeError",
+          "error": "decode() got an unexpected keyword argument 'errors'",
+          "traceback": [
+            "auto.py:9308:_test_one_function",
+            "auto.py:9284:_run_one",
+            "auto.py:2237:_call_sync"
+          ]
+        },
+        "minimal_reproduction": {
+          "target": "ordeal.demo:decode",
+          "command": "uv run ordeal scan ordeal.demo --mode candidate --targets ordeal.demo:decode -n 1",
+          "python_snippet": "from importlib import import_module\nmod = import_module('ordeal.demo')\nargs = {'s': 'utf-8', 'errors': 'backslashreplace'}\nmod.decode(**args)",
+          "direct_call_supported": true,
+          "note": null
+        },
+        "reproduction": {
+          "replayable": true,
+          "replay_attempts": 2,
+          "replay_matches": 2,
+          "failing_args": {
+            "s": "utf-8",
+            "errors": "backslashreplace"
+          },
+          "target": "ordeal.demo:decode",
+          "command": "uv run ordeal scan ordeal.demo --mode candidate --targets ordeal.demo:decode -n 1",
+          "python_snippet": "from importlib import import_module\nmod = import_module('ordeal.demo')\nargs = {'s': 'utf-8', 'errors': 'backslashreplace'}\nmod.decode(**args)",
+          "direct_call_supported": true,
+          "note": null
+        },
+        "impact": {
+          "summary": "the function crashes on an input that matches the inferred contract.",
+          "class": "likely_bug",
+          "evidence_class": "candidate_issue",
+          "sink_categories": [],
+          "callable_sink_categories": [],
+          "critical_sinks": [],
+          "trust_boundary_signal": 0.0,
+          "security_focus": false
+        },
+        "sink_categories": [],
+        "callable_sink_categories": [],
+        "likely_impact": "the function crashes on an input that matches the inferred contract.",
+        "verdict": {
+          "category": "likely_bug",
+          "evidence_class": "candidate_issue",
+          "promoted": true,
+          "demotion_reason": null
+        }
+      },
+      "lifecycle_signal": 0.0,
+      "module": "ordeal.demo",
+      "qualname": "ordeal.demo.decode",
+      "finding_id": "fnd_8dbee6c2f122",
+      "fingerprint": "8dbee6c2f1226bed8759a7ef5c7b0df1e3a67f8e3f81eafe87d1ecf21fd4020e",
+      "status": "open",
+      "regression_test": "test_decode_crash_regression"
+    },
+    {
+      "kind": "property",
+      "category": "speculative_property",
+      "evidence_class": "speculative_property",
+      "function": "normalize",
+      "name": "idempotent",
+      "summary": "idempotent (97%)",
+      "confidence": 0.9667,
+      "holds": 29,
+      "total": 30,
+      "counterexample": {
+        "index": 22,
+        "input": {
+          "xs": [
+            -0.5,
+            -1e-10,
+            1e-10,
+            -1e-10,
+            4.144458155102842e+156,
+            -6.6963419951248536e+16,
+            1.7976931348623157e+308,
+            -3.616486811991499e+101,
+            -0.5,
+            1.0,
+            -4.068483339364122e+16,
+            1.0,
+            0.5,
+            10000000000.0,
+            9.86824931803198e-277,
+            -0.5,
+            -1.0,
+            -0.5,
+            -0.5,
+            6.547575912135547e+16,
+            -1.9198634850646304e+173,
+            1.0,
+            1.7976931348623157e+308,
+            -3.636904938664375e+16,
+            1.0,
+            -0.5,
+            4.5747212034095016e+16,
+            3.888417926073227e+16,
+            0.5,
+            0.5,
+            0.5,
+            0.5,
+            -2.225073858507e-311,
+            3.961967807725296e+16,
+            -3.5795266015245828e+249,
+            1.0,
+            1.1065494390694392e+244,
+            10000000000.0,
+            -1.0,
+            -6.995147908889531e+16,
+            2.2651147357678012e+216,
+            -10000000000.0,
+            1e-10,
+            -1e-10,
+            -1.0336413497027154e-241,
+            -10000000000.0,
+            -1e-10,
+            -1.2317946419553132e+262
+          ]
+        },
+        "output": [
+          -0.0,
+          -0.0,
+          0.0,
+          -0.0,
+          0.0,
+          -0.0,
+          0.0,
+          -0.0,
+          -0.0,
+          0.0,
+          -0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          -0.0,
+          -0.0,
+          -0.0,
+          -0.0,
+          0.0,
+          -0.0,
+          0.0,
+          0.0,
+          -0.0,
+          0.0,
+          -0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          -0.0,
+          0.0,
+          -0.0,
+          0.0,
+          0.0,
+          0.0,
+          -0.0,
+          -0.0,
+          0.0,
+          -0.0,
+          0.0,
+          -0.0,
+          -0.0,
+          -0.0,
+          -0.0,
+          -0.0
+        ],
+        "replayed": [
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332,
+          0.020833333333333332
+        ]
+      },
+      "module": "ordeal.demo",
+      "qualname": "ordeal.demo.normalize",
+      "finding_id": "fnd_dcb0fc0808d3",
+      "fingerprint": "dcb0fc0808d3eb75cf33899d7dd79de2411cb2501bad285ce44d4ae74d2fc427",
+      "status": "open",
+      "regression_test": "test_normalize_idempotent_regression"
+    }
+  ],
+  "config_suggestions": [
+    {
+      "title": "Persist scan defaults for ordeal.demo",
+      "reason": "Keep this scan target selection and runtime policy in ordeal.toml.",
+      "filename": "ordeal.toml",
+      "section": "[[scan]]",
+      "target": "ordeal.demo",
+      "snippet": "[[scan]]\nmodule = \"ordeal.demo\"\n",
+      "evidence": [],
+      "entries": [
+        {
+          "section": "[[scan]]",
+          "module": "ordeal.demo",
+          "targets": [],
+          "mode": "evidence",
+          "max_examples": 50,
+          "security_focus": false
+        }
+      ]
+    }
+  ],
+  "support_suggestions": [],
+  "scenario_libraries": [],
+  "artifacts": {
+    "report": ".ordeal/findings/ordeal/demo.md",
+    "bundle": ".ordeal/findings/ordeal/demo.json",
+    "regression": "tests/test_ordeal_regressions.py",
+    "config": ".ordeal/findings/ordeal/demo.ordeal.toml",
+    "support": null,
+    "proofs": ".ordeal/findings/ordeal/demo.proofs.json",
+    "replay": ".ordeal/findings/ordeal/demo.replay.md",
+    "scenario_libraries": null,
+    "index": ".ordeal/findings/index.json"
+  },
+  "commands": {
+    "pytest": "uv run pytest tests/test_ordeal_regressions.py -q",
+    "rescan": "uv run ordeal scan ordeal.demo --save-artifacts"
+  }
+}

@@ -1,0 +1,145 @@
+schema_version = 1
+evidence_id = "bugsinpy-tornado-14"
+claim = "Tornado's forced-current guard rejected the first IOLoop when no current loop existed; the fix allows the first loop and rejects a second without replacing it."
+scope = "Only the two-construction make_current=True lifecycle exercised by TestIOLoopCurrent.test_force_current is claimed."
+basis = "Pinned BugsInPy metadata, immutable upstream source bytes, and fresh-process isolated replay."
+online_sources_required = true
+limitations = [
+  "This is a modern state-model reproduction, not the historical Python 3.7.0 Tornado runtime.",
+  "It establishes this regression pair only; it does not estimate general bug-finding accuracy.",
+]
+
+[upstream]
+repository = "https://github.com/tornadoweb/tornado"
+bugsinpy_repository = "https://github.com/soarsmu/BugsInPy"
+bugsinpy_snapshot_commit = "11c5f1eea954a42132cfd06bf257766a7963e0fd"
+project = "tornado"
+bug_id = "14"
+python_version = "3.7.0"
+buggy_commit = "81ee310adcd905fbdf7c98d9fb6ef0c5a46026c2"
+fixed_commit = "1d02ed606f1c52636462633d009bdcbaac644331"
+source_path = "tornado/ioloop.py"
+test_path = "tornado/test/ioloop_test.py"
+test_nodeid = "tornado.test.ioloop_test.TestIOLoopCurrent.test_force_current"
+
+[[sources]]
+name = "bugsinpy_bug_info"
+url = "https://raw.githubusercontent.com/soarsmu/BugsInPy/11c5f1eea954a42132cfd06bf257766a7963e0fd/projects/tornado/bugs/14/bug.info"
+sha256 = "9c9b0a070d6b147dd6e34bf40990def09b4ac3fbadd1e8c100d2138ff094b239"
+bytes = 194
+
+[[sources]]
+name = "bugsinpy_patch"
+url = "https://raw.githubusercontent.com/soarsmu/BugsInPy/11c5f1eea954a42132cfd06bf257766a7963e0fd/projects/tornado/bugs/14/bug_patch.txt"
+sha256 = "9d5e4a277b61c7f5f6f2a5fc59c7a21e8ce6236d7f236c9e230c022027498120"
+bytes = 520
+
+[[sources]]
+name = "bugsinpy_run_test"
+url = "https://raw.githubusercontent.com/soarsmu/BugsInPy/11c5f1eea954a42132cfd06bf257766a7963e0fd/projects/tornado/bugs/14/run_test.sh"
+sha256 = "eb5c459900ecc9d19ce7a992fe5a633b81c0e3c769d140fde2278faa69be7459"
+bytes = 83
+
+[[sources]]
+name = "upstream_buggy_source"
+url = "https://raw.githubusercontent.com/tornadoweb/tornado/81ee310adcd905fbdf7c98d9fb6ef0c5a46026c2/tornado/ioloop.py"
+sha256 = "d858c0efcc1db871081355d0466db2598cb09602387576be8d68dbcbf330d205"
+bytes = 40479
+
+[[sources]]
+name = "upstream_fixed_source"
+url = "https://raw.githubusercontent.com/tornadoweb/tornado/1d02ed606f1c52636462633d009bdcbaac644331/tornado/ioloop.py"
+sha256 = "dfbeb219761aafce14f639baad5bac7936e176a60feed77fa432831f7decc124"
+bytes = 40483
+
+[[sources]]
+name = "upstream_fixed_test"
+url = "https://raw.githubusercontent.com/tornadoweb/tornado/1d02ed606f1c52636462633d009bdcbaac644331/tornado/test/ioloop_test.py"
+sha256 = "3a24450b406ff2d7e16861295397cad3451cc261a149da140a0686e240a1158a"
+bytes = 23314
+
+[[content_checks]]
+name = "metadata_buggy_commit"
+source = "bugsinpy_bug_info"
+contains = 'buggy_commit_id="81ee310adcd905fbdf7c98d9fb6ef0c5a46026c2"'
+
+[[content_checks]]
+name = "metadata_fixed_commit"
+source = "bugsinpy_bug_info"
+contains = 'fixed_commit_id="1d02ed606f1c52636462633d009bdcbaac644331"'
+
+[[content_checks]]
+name = "metadata_python"
+source = "bugsinpy_bug_info"
+contains = 'python_version="3.7.0"'
+
+[[content_checks]]
+name = "single_test_node"
+source = "bugsinpy_run_test"
+contains = "python -m unittest -q tornado.test.ioloop_test.TestIOLoopCurrent.test_force_current"
+
+[[content_checks]]
+name = "patch_corrects_guard"
+source = "bugsinpy_patch"
+contains = "if IOLoop.current(instance=False) is not None:"
+
+[[content_checks]]
+name = "buggy_source_has_inverted_forced_guard"
+source = "upstream_buggy_source"
+contains = """elif make_current:
+            if IOLoop.current(instance=False) is None:"""
+
+[[content_checks]]
+name = "fixed_source_has_correct_forced_guard"
+source = "upstream_fixed_source"
+contains = """elif make_current:
+            if IOLoop.current(instance=False) is not None:"""
+
+[[content_checks]]
+name = "fixed_test_has_regression"
+source = "upstream_fixed_test"
+contains = "def test_force_current"
+
+[reproduction]
+workspace = "../fixtures"
+buggy_module = "public_bugs.tornado_ioloop"
+fixed_module = "public_controls.tornado_ioloop"
+callable = "force_current_sequence"
+kwargs_json = '{"make_current":true}'
+kwargs_sha256 = "c49dbffe64d4cfcab1f753a0c6fade4928fef28f66bda199d3845e900dfa6972"
+repetitions = 5
+timeout_seconds = 10.0
+requires_python = ">=3.12"
+
+[expected.buggy]
+outcome = "exception"
+exception_type = "RuntimeError"
+exception_message = "current IOLoop already exists"
+
+[expected.fixed]
+outcome = "return"
+result_json = '{"current_preserved":true,"second_error":"current IOLoop already exists"}'
+
+[[artifacts]]
+name = "buggy_fixture"
+path = "../fixtures/public_bugs/tornado_ioloop.py"
+sha256 = "8b03374e8c3b02d90cb41d010f2e3ac5ba824b71168bf4ebf658e4953c9a8dd5"
+bytes = 1036
+
+[[artifacts]]
+name = "buggy_package"
+path = "../fixtures/public_bugs/__init__.py"
+sha256 = "332b7be8d9ef962c97799b3677abcaca1524f9bcd43452ca84cb8f7da0b59405"
+bytes = 61
+
+[[artifacts]]
+name = "fixed_fixture"
+path = "../fixtures/public_controls/tornado_ioloop.py"
+sha256 = "4d29e04607e3458fb29ee0fe622f6e19f6070b8367c146680d810dd360c2af2d"
+bytes = 1046
+
+[[artifacts]]
+name = "fixed_package"
+path = "../fixtures/public_controls/__init__.py"
+sha256 = "fdbc7e0ae0f8804724dd7cc2f2abe785432dd157e239decf622f6c6b11fefac8"
+bytes = 77

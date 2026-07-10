@@ -1,0 +1,143 @@
+# Public, modern reproductions for `ordeal benchmark --bug-manifest`.
+#
+# These cases are intentionally report-only:
+# - `allowed_for_optimization = false`
+# - each fixture is a minimal reproduction of a public BugsInPy patch
+# - original oracle versions are provenance, not runner requirements
+
+[certification]
+enabled = false
+confidence_level = 0.95
+min_positive_cases = 3
+min_negative_cases = 3
+min_recall = 1.0
+min_precision = 1.0
+min_specificity = 1.0
+min_confidence_bound = 0.40
+require_complete = true
+require_provenance = true
+require_paired_controls = true
+# All pairs have executable evidence; broad certification remains disabled
+# because three public regressions do not estimate general accuracy.
+
+[defaults]
+dataset = "bugsinpy-reproduction"
+protocol = "scan"
+tier = "public"
+mode = "candidate"
+max_examples = 25
+workspace = "fixtures"
+requires_python = ">=3.12"
+oracle_source = "upstream triggering test and fix recorded by BugsInPy"
+evidence_level = "ported_reproduction"
+saturation_risk = "public"
+allowed_for_optimization = false
+
+[[cases]]
+name = "httpie_3_reproduction"
+project = "httpie"
+bug_id = "3"
+expected_outcome = "bug"
+pair_id = "bugsinpy-httpie-3"
+oracle_python_version = "3.7.3"
+module = "public_bugs.httpie_sessions"
+expected_targets = ["public_bugs.httpie_sessions.update_headers"]
+evidence_path = "evidence/httpie-3.toml"
+expected_error_type = "AttributeError"
+expected_error_message = "'NoneType' object has no attribute 'decode'"
+expected_witness_sha256 = "bdd0c82f4c058188fce09292f1530bfa3665fb9b544189251ec6c3942a65d296"
+selection_reason = "Typed reproduction of HTTPie's explicit-None header decoding crash."
+fix_commit = "589887939507ff26d36ec74bd2c045819cfa3d56"
+oracle_url = "https://github.com/httpie/cli/commit/589887939507ff26d36ec74bd2c045819cfa3d56"
+failure_command = "upstream tests/test_sessions.py"
+notes = "Modern minimal reproduction; original environment remains provenance only."
+
+[[cases]]
+name = "pysnooper_3_reproduction"
+project = "PySnooper"
+bug_id = "3"
+expected_outcome = "bug"
+pair_id = "bugsinpy-pysnooper-3"
+oracle_python_version = "3.8.1"
+module = "public_bugs.pysnooper_writer"
+targets = ["write_to_path"]
+expected_targets = ["public_bugs.pysnooper_writer.write_to_path"]
+evidence_path = "evidence/pysnooper-3.toml"
+expected_error_type = "NameError"
+expected_error_message = "name 'output_path' is not defined"
+expected_witness_sha256 = "aa8a92b273e3465d2712da546a934467fc4de7a635d79465989775853efc993d"
+selection_reason = "Typed closure reproduction of PySnooper's undefined path variable."
+fix_commit = "15555ed760000b049aff8fecc79d29339c1224c3"
+oracle_url = "https://github.com/cool-RR/PySnooper/commit/15555ed760000b049aff8fecc79d29339c1224c3"
+failure_command = "upstream tests/test_pysnooper.py"
+notes = "Modern minimal reproduction; original environment remains provenance only."
+
+[[cases]]
+name = "tornado_14_reproduction"
+project = "tornado"
+bug_id = "14"
+expected_outcome = "bug"
+pair_id = "bugsinpy-tornado-14"
+oracle_python_version = "3.7.0"
+module = "public_bugs.tornado_ioloop"
+targets = ["force_current_sequence"]
+expected_targets = ["public_bugs.tornado_ioloop.force_current_sequence"]
+evidence_path = "evidence/tornado-14.toml"
+expected_error_type = "RuntimeError"
+expected_error_message = "current IOLoop already exists"
+expected_witness_sha256 = "c49dbffe64d4cfcab1f753a0c6fade4928fef28f66bda199d3845e900dfa6972"
+selection_reason = "Typed lifecycle reproduction of Tornado's reversed current-loop guard."
+fix_commit = "1d02ed606f1c52636462633d009bdcbaac644331"
+oracle_url = "https://github.com/tornadoweb/tornado/commit/1d02ed606f1c52636462633d009bdcbaac644331"
+failure_command = "upstream tornado/test/ioloop_test.py"
+notes = "Modern minimal reproduction; original environment remains provenance only."
+
+[[cases]]
+name = "httpie_3_fixed_control"
+project = "httpie"
+bug_id = "3"
+expected_outcome = "clean"
+pair_id = "bugsinpy-httpie-3"
+oracle_python_version = "3.7.3"
+module = "public_controls.httpie_sessions"
+expected_targets = ["public_controls.httpie_sessions.update_headers"]
+evidence_path = "evidence/httpie-3.toml"
+selection_reason = "Negative control implementing the same upstream fix used as the oracle."
+fix_commit = "589887939507ff26d36ec74bd2c045819cfa3d56"
+oracle_url = "https://github.com/httpie/cli/commit/589887939507ff26d36ec74bd2c045819cfa3d56"
+failure_command = "upstream tests/test_sessions.py"
+notes = "Paired fixed sibling; any scoped finding is a false positive."
+
+[[cases]]
+name = "pysnooper_3_fixed_control"
+project = "PySnooper"
+bug_id = "3"
+expected_outcome = "clean"
+pair_id = "bugsinpy-pysnooper-3"
+oracle_python_version = "3.8.1"
+module = "public_controls.pysnooper_writer"
+targets = ["write_to_path"]
+expected_targets = ["public_controls.pysnooper_writer.write_to_path"]
+evidence_path = "evidence/pysnooper-3.toml"
+selection_reason = "Negative control implementing the same upstream fix used as the oracle."
+fix_commit = "15555ed760000b049aff8fecc79d29339c1224c3"
+oracle_url = "https://github.com/cool-RR/PySnooper/commit/15555ed760000b049aff8fecc79d29339c1224c3"
+failure_command = "upstream tests/test_pysnooper.py"
+notes = "Paired fixed sibling; any scoped finding is a false positive."
+
+[[cases]]
+name = "tornado_14_fixed_control"
+project = "tornado"
+bug_id = "14"
+expected_outcome = "clean"
+pair_id = "bugsinpy-tornado-14"
+oracle_python_version = "3.7.0"
+module = "public_controls.tornado_ioloop"
+targets = ["force_current_sequence"]
+expected_targets = ["public_controls.tornado_ioloop.force_current_sequence"]
+evidence_path = "evidence/tornado-14.toml"
+selection_reason = "Negative control implementing the same upstream fix and regression domain."
+fix_commit = "1d02ed606f1c52636462633d009bdcbaac644331"
+oracle_url = "https://github.com/tornadoweb/tornado/commit/1d02ed606f1c52636462633d009bdcbaac644331"
+failure_command = "upstream tornado/test/ioloop_test.py"
+notes = "Paired fixed sibling; any scoped finding is a false positive."

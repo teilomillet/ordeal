@@ -1,0 +1,143 @@
+schema_version = 1
+evidence_id = "bugsinpy-httpie-3"
+claim = "HTTPie session download crashed when an explicitly unset header was decoded; the fix skips that None value."
+scope = "Only the explicitly-unset-header path exercised by the upstream regression is claimed."
+basis = "Pinned BugsInPy metadata, immutable upstream source bytes, and fresh-process replay."
+online_sources_required = true
+limitations = [
+  "This is a modern minimal reproduction, not the historical Python 3.7.3 environment.",
+  "It establishes this regression pair only; it does not estimate general bug-finding accuracy.",
+]
+
+[upstream]
+repository = "https://github.com/httpie/cli"
+bugsinpy_repository = "https://github.com/soarsmu/BugsInPy"
+bugsinpy_snapshot_commit = "11c5f1eea954a42132cfd06bf257766a7963e0fd"
+project = "httpie"
+bug_id = "3"
+python_version = "3.7.3"
+buggy_commit = "8c33e5e3d31d3cd6476c4d9bc963a4c529f883d2"
+fixed_commit = "589887939507ff26d36ec74bd2c045819cfa3d56"
+source_path = "httpie/sessions.py"
+test_path = "tests/test_sessions.py"
+test_nodeid = "tests/test_sessions.py::TestSession::test_download_in_session"
+
+[[sources]]
+name = "bugsinpy_bug_info"
+url = "https://raw.githubusercontent.com/soarsmu/BugsInPy/11c5f1eea954a42132cfd06bf257766a7963e0fd/projects/httpie/bugs/3/bug.info"
+sha256 = "b477c55b1552be926d23fe00189538a6026762780471a693ca66c68297f32856"
+bytes = 176
+
+[[sources]]
+name = "bugsinpy_patch"
+url = "https://raw.githubusercontent.com/soarsmu/BugsInPy/11c5f1eea954a42132cfd06bf257766a7963e0fd/projects/httpie/bugs/3/bug_patch.txt"
+sha256 = "977b997e37be9dfbec1ad9669e4b99e1ff17e4b131fcf79f0195c712133a14e1"
+bytes = 488
+
+[[sources]]
+name = "bugsinpy_run_test"
+url = "https://raw.githubusercontent.com/soarsmu/BugsInPy/11c5f1eea954a42132cfd06bf257766a7963e0fd/projects/httpie/bugs/3/run_test.sh"
+sha256 = "8de86574c2548bd2bde5aeb7e31c9430ded0fcc382a42e45a8bd97bf13301cf1"
+bytes = 68
+
+[[sources]]
+name = "upstream_buggy_source"
+url = "https://raw.githubusercontent.com/httpie/cli/8c33e5e3d31d3cd6476c4d9bc963a4c529f883d2/httpie/sessions.py"
+sha256 = "ff0137c2be4cf5649d40abd6cccd18314031ed6ce6adb56181b96cc95445b511"
+bytes = 4685
+
+[[sources]]
+name = "upstream_fixed_source"
+url = "https://raw.githubusercontent.com/httpie/cli/589887939507ff26d36ec74bd2c045819cfa3d56/httpie/sessions.py"
+sha256 = "ef0588dcbf83c97fc823cf7e8e695075066984d8a194a72798ac3cbd4baff069"
+bytes = 4778
+
+[[sources]]
+name = "upstream_fixed_test"
+url = "https://raw.githubusercontent.com/httpie/cli/589887939507ff26d36ec74bd2c045819cfa3d56/tests/test_sessions.py"
+sha256 = "42345b4bb38bfff6f0a8e3e9e4071822cfe80d9dd8e9bd9f1763b17e54874bbb"
+bytes = 6819
+
+[[content_checks]]
+name = "metadata_buggy_commit"
+source = "bugsinpy_bug_info"
+contains = 'buggy_commit_id="8c33e5e3d31d3cd6476c4d9bc963a4c529f883d2"'
+
+[[content_checks]]
+name = "metadata_fixed_commit"
+source = "bugsinpy_bug_info"
+contains = 'fixed_commit_id="589887939507ff26d36ec74bd2c045819cfa3d56"'
+
+[[content_checks]]
+name = "metadata_python"
+source = "bugsinpy_bug_info"
+contains = 'python_version="3.7.3"'
+
+[[content_checks]]
+name = "single_test_node"
+source = "bugsinpy_run_test"
+contains = "pytest tests/test_sessions.py::TestSession::test_download_in_session"
+
+[[content_checks]]
+name = "patch_adds_none_guard"
+source = "bugsinpy_patch"
+contains = "if value is None:"
+
+[[content_checks]]
+name = "buggy_source_has_no_none_guard"
+source = "upstream_buggy_source"
+absent = "if value is None:"
+
+[[content_checks]]
+name = "fixed_source_has_none_guard"
+source = "upstream_fixed_source"
+contains = "if value is None:"
+
+[[content_checks]]
+name = "fixed_test_has_regression"
+source = "upstream_fixed_test"
+contains = "def test_download_in_session"
+
+[reproduction]
+workspace = "../fixtures"
+buggy_module = "public_bugs.httpie_sessions"
+fixed_module = "public_controls.httpie_sessions"
+callable = "update_headers"
+kwargs_json = '{"request_headers":{"X-Ordeal":null}}'
+kwargs_sha256 = "bdd0c82f4c058188fce09292f1530bfa3665fb9b544189251ec6c3942a65d296"
+repetitions = 5
+timeout_seconds = 10.0
+requires_python = ">=3.12"
+
+[expected.buggy]
+outcome = "exception"
+exception_type = "AttributeError"
+exception_message = "'NoneType' object has no attribute 'decode'"
+
+[expected.fixed]
+outcome = "return"
+result_json = "{}"
+
+[[artifacts]]
+name = "buggy_fixture"
+path = "../fixtures/public_bugs/httpie_sessions.py"
+sha256 = "b4cf2552fef91490546dcabea2d21bde20315a73048e609fd1ff7a7d29dc9b0c"
+bytes = 702
+
+[[artifacts]]
+name = "buggy_package"
+path = "../fixtures/public_bugs/__init__.py"
+sha256 = "332b7be8d9ef962c97799b3677abcaca1524f9bcd43452ca84cb8f7da0b59405"
+bytes = 61
+
+[[artifacts]]
+name = "fixed_fixture"
+path = "../fixtures/public_controls/httpie_sessions.py"
+sha256 = "37c1bc759ea62268740b0c8e7f2f3b983f380679107f9d9c0d4708756af72669"
+bytes = 605
+
+[[artifacts]]
+name = "fixed_package"
+path = "../fixtures/public_controls/__init__.py"
+sha256 = "fdbc7e0ae0f8804724dd7cc2f2abe785432dd157e239decf622f6c6b11fefac8"
+bytes = 77

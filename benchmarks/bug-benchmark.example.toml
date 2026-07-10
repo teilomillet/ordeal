@@ -1,0 +1,116 @@
+# bug benchmark manifest for `ordeal benchmark --bug-manifest`
+#
+# Use one manifest format for both:
+# - a public track made from modern, replay-backed reproductions
+# - a rolling private track harvested from recent bug-fix commits
+#
+# The public track gives you an external story to tell.
+# The private track gives you an unsaturated target to optimize against.
+
+[certification]
+enabled = true
+confidence_level = 0.95
+min_positive_cases = 1
+min_negative_cases = 1
+min_recall = 1.0
+min_precision = 1.0
+min_specificity = 1.0
+min_confidence_bound = 0.0
+require_complete = true
+require_provenance = true
+require_paired_controls = true
+
+[defaults]
+protocol = "scan"
+mode = "candidate"
+max_examples = 20
+compile_checkout = true
+save_artifacts = false
+oracle_source = "upstream failing tests"
+evidence_level = "benchmark_curated"
+
+[[cases]]
+name = "public_reproduction"
+dataset = "public-reproduction"
+tier = "public"
+saturation_risk = "public"
+allowed_for_optimization = false
+workspace = "fixtures"
+requires_python = ">=3.12"
+oracle_python_version = "3.8.1"
+project = "replace-me"
+bug_id = "1"
+expected_outcome = "bug"
+pair_id = "public-replace-me-1"
+module = "public_bugs.replace_me"
+targets = ["run"]
+expected_targets = ["public_bugs.replace_me.run"]
+selection_reason = "Public comparability case backed by a minimal modern reproduction."
+fix_commit = "0123456789abcdef0123456789abcdef01234567"
+oracle_url = "https://github.com/owner/project/commit/0123456789abcdef0123456789abcdef01234567"
+failure_command = "upstream regression test"
+notes = "Record the original runtime as provenance; run the reproduction on supported Python."
+
+[[cases]]
+name = "public_fixed_control"
+dataset = "public-reproduction"
+tier = "public"
+saturation_risk = "public"
+allowed_for_optimization = false
+workspace = "fixtures"
+requires_python = ">=3.12"
+oracle_python_version = "3.8.1"
+project = "replace-me"
+bug_id = "1"
+expected_outcome = "clean"
+pair_id = "public-replace-me-1"
+module = "public_controls.replace_me"
+targets = ["run"]
+expected_targets = ["public_controls.replace_me.run"]
+selection_reason = "Fixed negative control from the same upstream patch."
+fix_commit = "0123456789abcdef0123456789abcdef01234567"
+oracle_url = "https://github.com/owner/project/commit/0123456789abcdef0123456789abcdef01234567"
+failure_command = "upstream regression test"
+
+[[cases]]
+name = "private_recent_case"
+dataset = "rolling"
+tier = "private"
+saturation_risk = "private"
+allowed_for_optimization = true
+requires_python = ">=3.12"
+workspace = "../private-benchmarks/recent_case"
+module = "private_pkg.module"
+expected_outcome = "bug"
+pair_id = "private-recent-case"
+targets = ["Runner.run"]
+expected_targets = ["private_pkg.module.Runner.run"]
+selection_reason = "Private holdout case harvested after the current prompt/model stack."
+oracle_source = "fixed commit replay plus local failing regression"
+evidence_level = "local_replay"
+harvested_at = "2026-04-17"
+fix_commit = "replace-me"
+oracle_url = "https://git.example.invalid/project/commit/replace-me"
+failure_command = "pytest tests/test_regression.py -q"
+notes = "Private cases are the optimization target."
+
+[[cases]]
+name = "private_recent_fixed_control"
+dataset = "rolling"
+tier = "private"
+saturation_risk = "private"
+allowed_for_optimization = true
+requires_python = ">=3.12"
+workspace = "../private-benchmarks/recent_case_fixed"
+module = "private_pkg.module"
+expected_outcome = "clean"
+pair_id = "private-recent-case"
+targets = ["Runner.run"]
+expected_targets = ["private_pkg.module.Runner.run"]
+selection_reason = "Fixed negative control from the same private fix commit."
+oracle_source = "fixed commit replay plus local passing regression"
+evidence_level = "local_replay"
+harvested_at = "2026-04-17"
+fix_commit = "replace-me"
+oracle_url = "https://git.example.invalid/project/commit/replace-me"
+failure_command = "pytest tests/test_regression.py -q"

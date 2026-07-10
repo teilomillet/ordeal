@@ -1,0 +1,154 @@
+{
+  "case_count": 4,
+  "cases": [
+    {
+      "budget_seconds": 0.08,
+      "details": {},
+      "kind": "import",
+      "median_seconds": 0.0208951669999351,
+      "name": "import_cli",
+      "passed": true,
+      "score_gap": null,
+      "seconds": [
+        0.02069883299986941,
+        0.0217864159999408,
+        0.020621791999928973,
+        0.0208951669999351,
+        0.021730458999854818
+      ],
+      "spec": {
+        "compare_validation_mode": null,
+        "filter_equivalent": true,
+        "kind": "import",
+        "max_examples": 20,
+        "max_score_gap": null,
+        "max_seconds": 0.08,
+        "mode": "cold",
+        "module": "ordeal.cli",
+        "name": "import_cli",
+        "preset": "standard",
+        "repeats": 5,
+        "target": null,
+        "test_dir": "tests",
+        "test_filter": null,
+        "tier": "pr",
+        "validation_mode": "fast",
+        "workers": 1
+      },
+      "summary": "PASS import_cli: median=0.021s over 5 run(s), budget=0.080s"
+    },
+    {
+      "budget_seconds": 2.25,
+      "details": {},
+      "kind": "audit",
+      "median_seconds": 0.6376651250000123,
+      "name": "audit_demo_cold",
+      "passed": true,
+      "score_gap": null,
+      "seconds": [
+        0.6376651250000123,
+        0.6417624580001302,
+        0.62754474999997
+      ],
+      "spec": {
+        "compare_validation_mode": null,
+        "filter_equivalent": true,
+        "kind": "audit",
+        "max_examples": 20,
+        "max_score_gap": null,
+        "max_seconds": 2.25,
+        "mode": "cold",
+        "module": "ordeal.demo",
+        "name": "audit_demo_cold",
+        "preset": "standard",
+        "repeats": 3,
+        "target": null,
+        "test_dir": "tests",
+        "test_filter": null,
+        "tier": "pr",
+        "validation_mode": "fast",
+        "workers": 1
+      },
+      "summary": "PASS audit_demo_cold: median=0.638s over 3 run(s), budget=2.250s (mode=cold, validation=fast)"
+    },
+    {
+      "budget_seconds": 0.3,
+      "details": {},
+      "kind": "audit",
+      "median_seconds": 0.10712629099998594,
+      "name": "audit_demo_warm",
+      "passed": true,
+      "score_gap": null,
+      "seconds": [
+        0.1052478329997939,
+        0.12638304199981576,
+        0.10712629099998594
+      ],
+      "spec": {
+        "compare_validation_mode": null,
+        "filter_equivalent": true,
+        "kind": "audit",
+        "max_examples": 20,
+        "max_score_gap": null,
+        "max_seconds": 0.3,
+        "mode": "warm",
+        "module": "ordeal.demo",
+        "name": "audit_demo_warm",
+        "preset": "standard",
+        "repeats": 3,
+        "target": null,
+        "test_dir": "tests",
+        "test_filter": null,
+        "tier": "pr",
+        "validation_mode": "fast",
+        "workers": 1
+      },
+      "summary": "PASS audit_demo_warm: median=0.107s over 3 run(s), budget=0.300s (mode=warm, validation=fast)"
+    },
+    {
+      "budget_seconds": 0.4,
+      "details": {
+        "killed": 2,
+        "score": 1.0,
+        "total": 2
+      },
+      "kind": "mutate",
+      "median_seconds": 0.1179824999999255,
+      "name": "mutate_tiny_add",
+      "passed": true,
+      "score_gap": null,
+      "seconds": [
+        0.11999249999985295,
+        0.11722774999998364,
+        0.12066829200011853,
+        0.10816124999996646,
+        0.1179824999999255
+      ],
+      "spec": {
+        "compare_validation_mode": null,
+        "filter_equivalent": true,
+        "kind": "mutate",
+        "max_examples": 20,
+        "max_score_gap": null,
+        "max_seconds": 0.4,
+        "mode": "cold",
+        "module": null,
+        "name": "mutate_tiny_add",
+        "preset": "standard",
+        "repeats": 5,
+        "target": "tests._mutation_bench_target.tiny_add",
+        "test_dir": "tests",
+        "test_filter": "tiny_add",
+        "tier": "pr",
+        "validation_mode": "fast",
+        "workers": 1
+      },
+      "summary": "PASS mutate_tiny_add: median=0.118s over 5 run(s), budget=0.400s (score=100%)"
+    }
+  ],
+  "contract_path": "ordeal.perf.toml",
+  "failure_count": 0,
+  "failures": [],
+  "passed": true,
+  "summary": "Performance Contract [PASS]\n  file=ordeal.perf.toml\n  PASS import_cli: median=0.021s over 5 run(s), budget=0.080s\n  PASS audit_demo_cold: median=0.638s over 3 run(s), budget=2.250s (mode=cold, validation=fast)\n  PASS audit_demo_warm: median=0.107s over 3 run(s), budget=0.300s (mode=warm, validation=fast)\n  PASS mutate_tiny_add: median=0.118s over 5 run(s), budget=0.400s (score=100%)"
+}

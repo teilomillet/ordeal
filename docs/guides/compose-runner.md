@@ -39,7 +39,7 @@ Compose file and one HTTP URL that ordeal can reach from the host.
 | Build create/read/update workflows | [Stateful workflows](compose-stateful-workflows.md) |
 | Understand exactly what each fault does | [Fault model](compose-fault-model.md) |
 | Read or replay a saved failure | [Traces and replay](compose-traces.md) |
-| Put the runner in CI | [CI and operations](compose-operations.md) |
+| Put the runner in CI or inspect ordeal's real Docker gate | [CI and operations](compose-operations.md) |
 | Fix an error or surprising result | [Troubleshooting](compose-troubleshooting.md) |
 | Call the runner from Python | [API reference](../reference/api.md#compose-service-runner) |
 
@@ -78,6 +78,19 @@ ordeal explore --runner compose
 
 Every run saves a trace under `.ordeal/traces/`. A failure also gets repeated
 replay reporting such as `attempted 5 / reproduced 3`.
+
+## Real Docker evidence in this repository
+
+The unit tests use controlled fake Docker commands and HTTP responses to cover
+edge cases quickly. Separately, the checked-in `compose-e2e` CI job finds a real
+post-`SIGKILL` recovery defect in the buggy container, reproduces its exact
+signature 3/3, saves a portable regression, proves `verify --ci` is red on the
+buggy variant and green on the fixed control, then measures workload strength.
+The publish job cannot run unless that Docker-backed evidence loop passes.
+
+This proves that one complete kill-and-recovery path works on the CI runner. It
+does not prove every topology or add faults outside the documented model. See
+[CI and operations](compose-operations.md) for the exact gate and proof boundary.
 
 Keep credentials replayable without writing them to traces by using environment
 placeholders in headers or JSON bodies:

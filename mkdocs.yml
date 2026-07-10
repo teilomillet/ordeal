@@ -56,6 +56,7 @@ nav:
       - Meaningful Tests: concepts/test-meaningfulness.md
       - Safe Module Migrations: concepts/safe-migrations.md
       - Durable Regressions: concepts/durable-regressions.md
+      - Service Evidence Loop: concepts/service-evidence-loop.md
       - Reliability Coverage: concepts/reliability-coverage.md
       - Property Assertions: concepts/property-assertions.md
       - Fault Injection: concepts/fault-injection.md
@@ -81,6 +82,7 @@ nav:
           - Stateful Workflows: guides/compose-stateful-workflows.md
           - Fault Model: guides/compose-fault-model.md
           - Traces and Replay: guides/compose-traces.md
+          - "Evidence Loop: Failure to CI Guard": guides/compose-evidence-loop.md
           - CI and Operations: guides/compose-operations.md
           - Troubleshooting: guides/compose-troubleshooting.md
       - Auto Testing: guides/auto.md

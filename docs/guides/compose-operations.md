@@ -55,8 +55,31 @@ Use a runner where Docker Compose is available and ordeal is already installed:
     path: .ordeal/compose-traces/
 ```
 
-Upload traces with `if: always()` because passing runs also provide useful action
-evidence, and a failed command would otherwise skip the artifact step.
+Upload traces with `if: always()` so failed commands do not skip their evidence.
+
+## The real gate in this repository
+
+The checked-in [`compose-e2e` job](https://github.com/teilomillet/ordeal/blob/main/.github/workflows/ci.yml)
+uses the [`compose_e2e` fixture](https://github.com/teilomillet/ordeal/tree/main/tests/fixtures/compose_e2e);
+it does not use the fake Docker controller or fake HTTP transport from the unit
+tests. It runs the same portable trace against checked-in `buggy` and `fixed`
+service variants:
+
+1. The buggy service passes a baseline request, then loses recovery state after `SIGKILL`.
+2. The exact failure signature must reproduce in 3/3 immediate replays.
+3. Ordeal saves the coverage matrix, bounded finding, trace binding, and manifest.
+4. `verify --ci` must fail on the buggy variant and pass 3/3 on the fixed control.
+5. The fixed workload must cover every declared cell and kill 4/4 oracle mutations.
+
+The publish job depends on `compose-e2e`, so these steps cannot be replaced by a
+unit-test-only green result.
+
+### What a green job establishes
+
+A green job is direct differential evidence for this one Docker-backed recovery
+defect, fixed control, and workload. It is not a correctness certificate for
+arbitrary applications, other topologies, or faults outside the documented
+[fault model](compose-fault-model.md).
 
 ## Budgets and repeatability
 

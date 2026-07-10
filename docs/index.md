@@ -130,6 +130,8 @@ Every goal maps to a starting point — a command to run, a module to import, an
 | Inject specific failures (timeout, NaN, ...) | `from ordeal.faults import timing` | [Fault Injection](concepts/fault-injection.md) |
 | Explore all failure combinations | `ordeal explore` | [Explorer](guides/explorer.md) |
 | Explore long-lived services | `ordeal explore --runner compose` | [Compose Services](guides/compose-runner.md) |
+| Turn a real recovery failure into a permanent CI guard | Follow the seven-stage service evidence loop | [From “it broke once” to “it cannot come back”](concepts/service-evidence-loop.md) |
+| Put real Compose recovery in CI | Start with one forced fault | [Compose CI and Operations](guides/compose-operations.md) |
 | Reproduce and shrink a failure | `ordeal replay trace.json` | [Shrinking](concepts/shrinking.md) |
 | Add fail-safe gates to production code | `from ordeal.buggify import buggify` | [Fault Injection](concepts/fault-injection.md) |
 | Make assertions across all runs | `from ordeal import always, sometimes` | [Assertions](concepts/property-assertions.md) |

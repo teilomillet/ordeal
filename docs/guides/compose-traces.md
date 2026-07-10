@@ -34,7 +34,9 @@ and `request`.
 Request parameters contain the URL, redacted headers and JSON body,
 expectations, capture map, validation mode, and response fault. Results contain
 status, elapsed time, redacted response headers, full-body SHA-256, and
-original-body SHA-256. Response body bytes and previews are not stored.
+original-body SHA-256. Validated actions also contain redaction-safe
+`property_results` used for operation × fault × property coverage. Response
+body bytes and previews are not stored.
 
 ## Failure kinds
 
@@ -86,6 +88,14 @@ thirteen runs were equivalent or that the root cause is known.
 Compose traces do not support `--shrink`, `--ablate`, or `--output`. Those options
 belong to Python state-machine traces; real service actions can have persistent
 side effects that make automatic deletion of steps misleading.
+
+## Durable post-fix control
+
+`explore --runner compose --save-artifacts` promotes only a failure with at
+least one exact replay match. It writes a portable bound copy under `tests/`.
+After a fix, `ordeal verify <finding-id> --allow-unsafe-artifacts` accepts the
+trace only when every replay attempt completes without any failure. See the
+[Compose evidence loop](compose-evidence-loop.md).
 
 ## Confidentiality
 

@@ -1,0 +1,23 @@
+services:
+  api:
+    image: python:3.12-alpine
+    command: ["python", "-u", "/app/service.py"]
+    environment:
+      ORDEAL_SERVICE_VARIANT: ${ORDEAL_SERVICE_VARIANT:-fixed}
+    init: true
+    restart: "no"
+    volumes:
+      - ./service.py:/app/service.py:ro
+    ports:
+      - "127.0.0.1:18080:8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=1)
+      interval: 1s
+      timeout: 2s
+      retries: 20

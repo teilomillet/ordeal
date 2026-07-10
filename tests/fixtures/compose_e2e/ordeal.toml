@@ -1,0 +1,25 @@
+[compose]
+file = "compose.yaml"
+project_name = "ordeal-compose-e2e"
+base_url = "http://127.0.0.1:18080"
+health_path = "/health"
+services = ["api"]
+steps = 2
+max_time = 30
+seed = 0
+fault_probability = 0.5
+faults = ["kill"]
+request_timeout = 2
+startup_timeout = 30
+replay_attempts = 3
+workload_mutations = 0
+trace_dir = ".ordeal/traces"
+keep_running = false
+
+[[compose.requests]]
+name = "probe"
+method = "GET"
+path = "/state"
+expect_status = 200
+expect_json = { "json.status" = "ok", "json.service" = "compose-e2e" }
+faultable = true

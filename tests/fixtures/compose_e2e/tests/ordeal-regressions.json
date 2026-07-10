@@ -1,0 +1,468 @@
+{
+  "schema": "ordeal.regression-manifest/v1",
+  "regressions": [
+    {
+      "finding_id": "fnd_compose_bac551d3c51dce6b",
+      "runner": "compose",
+      "trace_file": "tests/ordeal-compose-regressions/fnd_compose_bac551d3c51dce6b.json",
+      "binding": {
+        "schema": "ordeal.compose-regression-binding/v1",
+        "trace_sha256": "76888a71701de7b2efcda43b95cf4f97a44b855d750b8e71b239d7ee845198e2",
+        "failure_signature": "5e33768132ba62325e43394f9f136157163ee77e8034c2b090d3b0d911471acd",
+        "action_count": 8
+      },
+      "failure_signature": "5e33768132ba62325e43394f9f136157163ee77e8034c2b090d3b0d911471acd",
+      "replay_policy": {
+        "attempts": 3,
+        "expected": "clean",
+        "maximum_failures": 0
+      },
+      "evidence": {
+        "schema": "ordeal.finding-evidence/v1",
+        "status": "supported",
+        "claim": "The recorded Compose trace reproduced unexpected_json with the exact failure signature in 3/3 attempts.",
+        "subject": {
+          "target": "ordeal-compose-e2e",
+          "runner": "compose",
+          "source_sha256": null,
+          "trace_sha256": "76888a71701de7b2efcda43b95cf4f97a44b855d750b8e71b239d7ee845198e2",
+          "config_sha256": "1617c56f0e87dd230f6c080f410ac9143cbc8115a2948585b2ac563e24b1b0bf"
+        },
+        "witness": {
+          "available": true,
+          "input": {
+            "actions": [
+              {
+                "index": 0,
+                "kind": "lifecycle",
+                "name": "up",
+                "params": {},
+                "result": {
+                  "owned_cleanup": true
+                },
+                "timestamp_offset": 1.9291008356958628e-05
+              },
+              {
+                "index": 1,
+                "kind": "lifecycle",
+                "name": "wait_ready",
+                "params": {
+                  "timeout": 30.0,
+                  "url": "http://127.0.0.1:18080/health"
+                },
+                "result": {
+                  "attempts": 1,
+                  "status": 200
+                },
+                "timestamp_offset": 0.9720464160054689
+              },
+              {
+                "index": 2,
+                "kind": "request",
+                "name": "probe",
+                "params": {
+                  "capture": {},
+                  "delay_seconds": 0.5,
+                  "expect_json": {
+                    "json.service": "compose-e2e",
+                    "json.status": "ok"
+                  },
+                  "expect_status": [
+                    200
+                  ],
+                  "fault": "none",
+                  "headers": {},
+                  "json_body": null,
+                  "method": "GET",
+                  "response_fault": null,
+                  "url": "http://127.0.0.1:18080/state",
+                  "validate": true
+                },
+                "result": {
+                  "body_sha256": "ee56f9e7221811b29c4b8139933bd106dfb086aabbd48ca6d86e8ce05184ff8a",
+                  "captured_state": {},
+                  "elapsed_seconds": 0.0012279170041438192,
+                  "expected_fault_window": false,
+                  "headers": {
+                    "Content-Length": "57",
+                    "Content-Type": "application/json",
+                    "Date": "Fri, 10 Jul 2026 09:40:08 GMT",
+                    "Server": "BaseHTTP/0.6 Python/3.12.13"
+                  },
+                  "original_body_sha256": "ee56f9e7221811b29c4b8139933bd106dfb086aabbd48ca6d86e8ce05184ff8a",
+                  "property_results": [
+                    {
+                      "passed": true,
+                      "property": "status:200",
+                      "type": "always"
+                    },
+                    {
+                      "passed": true,
+                      "property": "valid_json",
+                      "type": "always"
+                    },
+                    {
+                      "passed": true,
+                      "property": "json:json.status",
+                      "type": "always"
+                    },
+                    {
+                      "passed": true,
+                      "property": "json:json.service",
+                      "type": "always"
+                    }
+                  ],
+                  "response_fault": null,
+                  "status": 200
+                },
+                "timestamp_offset": 1.1749172910058405
+              },
+              {
+                "index": 3,
+                "kind": "fault",
+                "name": "kill",
+                "params": {
+                  "service": "api"
+                },
+                "result": {
+                  "service": "api",
+                  "signal": "SIGKILL"
+                },
+                "timestamp_offset": 1.1764000830007717
+              },
+              {
+                "index": 4,
+                "kind": "request",
+                "name": "probe",
+                "params": {
+                  "capture": {},
+                  "delay_seconds": 0.5,
+                  "expect_json": {
+                    "json.service": "compose-e2e",
+                    "json.status": "ok"
+                  },
+                  "expect_status": [
+                    200
+                  ],
+                  "fault": "kill",
+                  "headers": {},
+                  "json_body": null,
+                  "method": "GET",
+                  "response_fault": null,
+                  "url": "http://127.0.0.1:18080/state",
+                  "validate": false
+                },
+                "result": {
+                  "expected_fault_window": true,
+                  "request_error": "<urlopen error [Errno 61] Connection refused>"
+                },
+                "timestamp_offset": 1.4213950000121258
+              },
+              {
+                "index": 5,
+                "kind": "lifecycle",
+                "name": "start_service",
+                "params": {
+                  "service": "api"
+                },
+                "result": {
+                  "service": "api",
+                  "started": true
+                },
+                "timestamp_offset": 1.4217136660008691
+              },
+              {
+                "index": 6,
+                "kind": "lifecycle",
+                "name": "wait_ready",
+                "params": {
+                  "fault": "kill",
+                  "operation": "probe",
+                  "timeout": 30.0,
+                  "url": "http://127.0.0.1:18080/health"
+                },
+                "result": {
+                  "attempts": 1,
+                  "property_results": [
+                    {
+                      "passed": true,
+                      "property": "service_ready",
+                      "type": "always"
+                    }
+                  ],
+                  "status": 200
+                },
+                "timestamp_offset": 1.8661237910127966
+              },
+              {
+                "index": 7,
+                "kind": "request",
+                "name": "probe",
+                "params": {
+                  "capture": {},
+                  "delay_seconds": 0.5,
+                  "expect_json": {
+                    "json.service": "compose-e2e",
+                    "json.status": "ok"
+                  },
+                  "expect_status": [
+                    200
+                  ],
+                  "fault": "kill",
+                  "headers": {},
+                  "json_body": null,
+                  "method": "GET",
+                  "response_fault": null,
+                  "url": "http://127.0.0.1:18080/state",
+                  "validate": true
+                },
+                "result": {
+                  "body_sha256": "434bb98ff2cf2151b4b6e4f85241caa8eebd0c980cb60fc15d2d6d33af41c703",
+                  "elapsed_seconds": 0.0019344169995747507,
+                  "error": "GET http://127.0.0.1:18080/state response differed at 'json.status'",
+                  "expected_fault_window": false,
+                  "failure_kind": "unexpected_json",
+                  "headers": {
+                    "Content-Length": "63",
+                    "Content-Type": "application/json",
+                    "Date": "Fri, 10 Jul 2026 09:40:08 GMT",
+                    "Server": "BaseHTTP/0.6 Python/3.12.13"
+                  },
+                  "original_body_sha256": "434bb98ff2cf2151b4b6e4f85241caa8eebd0c980cb60fc15d2d6d33af41c703",
+                  "property_results": [
+                    {
+                      "passed": true,
+                      "property": "status:200",
+                      "type": "always"
+                    },
+                    {
+                      "passed": true,
+                      "property": "valid_json",
+                      "type": "always"
+                    },
+                    {
+                      "passed": false,
+                      "property": "json:json.status",
+                      "type": "always"
+                    }
+                  ],
+                  "response_fault": null,
+                  "status": 200
+                },
+                "timestamp_offset": 1.9026355410023825
+              }
+            ],
+            "seed": 0,
+            "trace_path": "/Users/teilomillet/Code/ordeal/tests/fixtures/compose_e2e/.ordeal/traces/compose-0-6cfb26c5834c.json"
+          },
+          "sha256": "2bd9d6719df47fe7e500cb784c54d4b38ee180ac9eea7f0c241c21037a159ffe",
+          "source": "compose_trace"
+        },
+        "observation": {
+          "kind": "compose_failure",
+          "failure_kind": "unexpected_json",
+          "message": "GET http://127.0.0.1:18080/state response differed at 'json.status'",
+          "action_index": 7,
+          "action_name": "probe",
+          "failure_signature": "5e33768132ba62325e43394f9f136157163ee77e8034c2b090d3b0d911471acd"
+        },
+        "replay": {
+          "status": "verified",
+          "attempts": 3,
+          "exact_matches": 3,
+          "match_basis": "same failure kind, message, action index, and action name",
+          "command": "ordeal replay /Users/teilomillet/Code/ordeal/tests/fixtures/compose_e2e/.ordeal/traces/compose-0-6cfb26c5834c.json",
+          "boundary": "The action and fault trace is exact, but container scheduling, network timing, and external service behavior are not deterministic. Response delay and corruption are injected at the harness transport boundary."
+        },
+        "minimization": {
+          "status": "not_run",
+          "method": null,
+          "original_complexity": 8,
+          "minimized_complexity": null,
+          "replay_attempts": 0,
+          "replay_matches": 0,
+          "boundary": "Compose traces are exact but are not currently minimized."
+        },
+        "contrast": {
+          "status": "observed",
+          "passing_examples": 7,
+          "failing_examples": 1
+        },
+        "reliability_coverage": {
+          "dimensions": [
+            "operation",
+            "fault",
+            "property"
+          ],
+          "rows": [
+            {
+              "failures": 0,
+              "fault": "kill",
+              "hits": 0,
+              "operation": "probe",
+              "passes": 0,
+              "property": "json:json.service",
+              "status": "NOT EXERCISED",
+              "type": "always"
+            },
+            {
+              "failures": 1,
+              "fault": "kill",
+              "hits": 1,
+              "operation": "probe",
+              "passes": 0,
+              "property": "json:json.status",
+              "status": "FAIL",
+              "type": "always"
+            },
+            {
+              "failures": 0,
+              "fault": "kill",
+              "hits": 1,
+              "operation": "probe",
+              "passes": 1,
+              "property": "service_ready",
+              "status": "PASS",
+              "type": "always"
+            },
+            {
+              "failures": 0,
+              "fault": "kill",
+              "hits": 1,
+              "operation": "probe",
+              "passes": 1,
+              "property": "status:200",
+              "status": "PASS",
+              "type": "always"
+            },
+            {
+              "failures": 0,
+              "fault": "kill",
+              "hits": 1,
+              "operation": "probe",
+              "passes": 1,
+              "property": "valid_json",
+              "status": "PASS",
+              "type": "always"
+            },
+            {
+              "failures": 0,
+              "fault": "none",
+              "hits": 1,
+              "operation": "probe",
+              "passes": 1,
+              "property": "json:json.service",
+              "status": "PASS",
+              "type": "always"
+            },
+            {
+              "failures": 0,
+              "fault": "none",
+              "hits": 1,
+              "operation": "probe",
+              "passes": 1,
+              "property": "json:json.status",
+              "status": "PASS",
+              "type": "always"
+            },
+            {
+              "failures": 0,
+              "fault": "none",
+              "hits": 1,
+              "operation": "probe",
+              "passes": 1,
+              "property": "status:200",
+              "status": "PASS",
+              "type": "always"
+            },
+            {
+              "failures": 0,
+              "fault": "none",
+              "hits": 1,
+              "operation": "probe",
+              "passes": 1,
+              "property": "valid_json",
+              "status": "PASS",
+              "type": "always"
+            }
+          ],
+          "summary": {
+            "fail": 1,
+            "not_exercised": 1,
+            "pass": 7,
+            "total": 9
+          }
+        },
+        "test_protection": {
+          "failed_properties": [
+            {
+              "fault": "kill",
+              "operation": "probe",
+              "property": "json:json.status"
+            }
+          ],
+          "inconclusive_mutants": 0,
+          "killed_mutants": 0,
+          "label": "compose workload protection",
+          "mutation_scope": "recorded Compose response oracles, not service source code",
+          "mutation_score": null,
+          "mutations": [],
+          "protects": false,
+          "status": "weak",
+          "summary": "1 reliability cell(s) failed",
+          "surviving_mutants": 0,
+          "tested_mutants": 0,
+          "unexercised_properties": [
+            {
+              "fault": "kill",
+              "operation": "probe",
+              "property": "json:json.service"
+            }
+          ]
+        },
+        "regression": {
+          "status": "saved",
+          "path": "tests/ordeal-compose-regressions/fnd_compose_bac551d3c51dce6b.json",
+          "test_name": null,
+          "binding": {
+            "schema": "ordeal.compose-regression-binding/v1",
+            "trace_sha256": "76888a71701de7b2efcda43b95cf4f97a44b855d750b8e71b239d7ee845198e2",
+            "failure_signature": "5e33768132ba62325e43394f9f136157163ee77e8034c2b090d3b0d911471acd",
+            "action_count": 8
+          }
+        },
+        "post_fix_control": {
+          "status": "pending",
+          "method": "same_trace_after_fix",
+          "acceptance": "After the fix, the same trace must stop reproducing the exact failure signature."
+        },
+        "ci_guard": {
+          "status": "ready",
+          "command": "uv run ordeal verify --ci",
+          "acceptance": "Every replay attempt must complete without any failure after the fix."
+        },
+        "workflow": {
+          "discover": "observed",
+          "reproduce": "verified",
+          "minimize": "not_run",
+          "save_regression": "saved",
+          "verify_fix": "pending",
+          "guard_ci": "ready"
+        },
+        "boundaries": {
+          "establishes": "The exact failure signature matched in 3/3 replay attempts; the action/fault trace was exact but external timing was not deterministic.",
+          "does_not_establish": [
+            "deterministic replay",
+            "the root cause",
+            "behavior outside the recorded operation, fault, and property cells",
+            "that a future fix works"
+          ]
+        },
+        "runtime": {
+          "python_version": "3.12.11",
+          "python_implementation": "CPython"
+        }
+      }
+    }
+  ]
+}

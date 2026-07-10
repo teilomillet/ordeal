@@ -219,6 +219,77 @@ jobs:
           path: .artifacts/tornado-14-evidence.json
           retention-days: 14
 
+  compose-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      UV_PYTHON: "3.12"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.28"
+
+      - run: uv python install 3.12
+
+      - run: uv lock --check
+
+      - run: uv sync --locked --extra dev
+
+      - run: uv run python -c "import os, platform; assert platform.python_version().startswith(os.environ['UV_PYTHON'] + '.')"
+
+      - name: Validate real Compose fixture
+        run: |
+          docker compose version
+          docker compose \
+            -f tests/fixtures/compose_e2e/compose.yaml \
+            config --quiet
+
+      - name: Verify parent-side parallel liveness fallback
+        run: |
+          uv run pytest tests/test_explore_internals.py -q \
+            -k "shared_memory_failure_falls_back_in_parent or worker_pool_hang_times_out_and_falls_back_in_parent"
+
+      - name: Run buggy-to-fixed provider-neutral evidence loop
+        run: |
+          mkdir -p .artifacts
+          uv run python scripts/verify_compose_evidence_loop.py \
+            --output .artifacts/compose-evidence-loop.json
+
+      - name: Show Compose diagnostics
+        if: failure()
+        continue-on-error: true
+        run: |
+          docker compose \
+            -f tests/fixtures/compose_e2e/compose.yaml \
+            --project-name ordeal-compose-e2e \
+            ps -a
+          docker compose \
+            -f tests/fixtures/compose_e2e/compose.yaml \
+            --project-name ordeal-compose-e2e \
+            logs --no-color
+
+      - name: Clean up Compose fixture
+        if: always()
+        run: |
+          docker compose \
+            -f tests/fixtures/compose_e2e/compose.yaml \
+            --project-name ordeal-compose-e2e \
+            down --remove-orphans
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: compose-evidence-loop
+          path: |
+            .artifacts/compose-evidence-loop.json
+            tests/fixtures/compose_e2e/.ordeal/
+            tests/fixtures/compose_e2e/tests/ordeal-regressions.json
+            tests/fixtures/compose_e2e/tests/ordeal-compose-regressions/
+          if-no-files-found: warn
+          retention-days: 14
+
   bump-and-publish:
     if: github.event_name == 'push'
     needs:
@@ -228,6 +299,7 @@ jobs:
       - bug-evidence-httpie
       - bug-evidence-pysnooper
       - bug-evidence-tornado
+      - compose-e2e
     runs-on: ubuntu-latest
     env:
       UV_PYTHON: "3.12"

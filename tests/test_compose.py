@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import threading
 from dataclasses import fields
@@ -29,6 +30,7 @@ from ordeal.compose import (
     save_compose_regression,
 )
 from ordeal.config import ComposeConfig, ComposeRequestConfig, ConfigError, load_config
+from scripts.verify_compose_e2e_trace import EXPECTED_ACTIONS, verify_trace
 
 
 class FakeController:
@@ -212,6 +214,7 @@ class TestComposeDocumentation:
         "compose-stateful-workflows.md",
         "compose-fault-model.md",
         "compose-traces.md",
+        "compose-evidence-loop.md",
         "compose-operations.md",
         "compose-troubleshooting.md",
     )
@@ -236,6 +239,162 @@ class TestComposeDocumentation:
             page = root / "docs" / "guides" / filename
             assert len(page.read_text(encoding="utf-8").splitlines()) <= 130
             assert f"guides/{filename}" in nav
+
+
+class TestComposeEndToEndGate:
+    def test_checked_in_gate_uses_real_runner_and_blocks_publish(self) -> None:
+        root = Path(__file__).parents[1]
+        fixture = root / "tests" / "fixtures" / "compose_e2e"
+        cfg = load_config(fixture / "ordeal.toml").compose
+        assert cfg is not None
+        assert cfg.file == str((fixture / "compose.yaml").resolve())
+        assert cfg.services == ["api"]
+        assert cfg.steps == 2
+        assert cfg.seed == 0
+        assert cfg.fault_probability == 0.5
+        assert cfg.faults == ["kill"]
+        assert cfg.replay_attempts == 3
+        assert cfg.requests[0].expect_json == {
+            "json.status": "ok",
+            "json.service": "compose-e2e",
+        }
+
+        workflow = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        job = workflow.split("  compose-e2e:\n", 1)[1].split("  bump-and-publish:\n", 1)[0]
+        assert "docker compose" in job
+        assert "verify_compose_evidence_loop.py" in job
+        assert "compose-evidence-loop.json" in job
+        assert "shared_memory_failure_falls_back_in_parent" in job
+        service = (fixture / "service.py").read_text(encoding="utf-8")
+        compose = (fixture / "compose.yaml").read_text(encoding="utf-8")
+        assert {'"buggy"', '"fixed"'} <= set(re.findall(r'"[a-z]+"', service))
+        assert "ORDEAL_SERVICE_VARIANT" in compose
+        publish_needs = workflow.split("  bump-and-publish:\n", 1)[1].split("    runs-on:", 1)[0]
+        assert "      - compose-e2e\n" in publish_needs
+
+    def test_checked_in_service_regression_is_portable_and_replay_bounded(self) -> None:
+        root = Path(__file__).parents[1]
+        fixture = root / "tests" / "fixtures" / "compose_e2e"
+        manifest_path = fixture / "tests" / "ordeal-regressions.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        assert manifest["schema"] == "ordeal.regression-manifest/v1"
+        assert len(manifest["regressions"]) == 1
+        record = manifest["regressions"][0]
+        assert record["runner"] == "compose"
+        assert not Path(record["trace_file"]).is_absolute()
+        assert record["replay_policy"] == {
+            "attempts": 3,
+            "expected": "clean",
+            "maximum_failures": 0,
+        }
+        trace = ComposeTrace.load(fixture / record["trace_file"])
+        assert trace.compose["file"] == "compose.yaml"
+        assert trace.replay is not None
+        assert trace.replay.attempted == 3
+        assert trace.replay.reproduced == 3
+        assert trace.replay.observed_signatures == [trace.failure_signature] * 3
+        assert [(action.kind, action.name) for action in trace.actions] == EXPECTED_ACTIONS[:-1]
+
+    def test_fixed_fixture_shape_covers_all_cells_and_controls_both_paths(self) -> None:
+        root = Path(__file__).parents[1]
+        fixture = root / "tests" / "fixtures" / "compose_e2e"
+        config = load_config(fixture / "ordeal.toml").compose
+        assert config is not None
+        fixed_body = b'{"service":"compose-e2e","status":"ok","variant":"fixed"}'
+        trace = ComposeRunner(
+            config,
+            controller=FakeController(),
+            transport=FakeTransport(
+                [
+                    response(),
+                    response(body=fixed_body),
+                    response(),
+                    response(),
+                    response(body=fixed_body),
+                ]
+            ),
+            sleep=lambda _seconds: None,
+        ).run()
+        assert trace.failure is None
+        assert compose_reliability_coverage(trace)["summary"] == {
+            "pass": 9,
+            "not_exercised": 0,
+            "fail": 0,
+            "total": 9,
+        }
+
+        class OracleRunner:
+            def __init__(self, replay_config: ComposeConfig) -> None:
+                assert replay_config.project_name == "ordeal-compose-e2e"
+
+            def replay(self, source: ComposeTrace) -> ComposeFailure | None:
+                action = next(
+                    candidate
+                    for candidate in reversed(source.actions)
+                    if candidate.kind == "request" and candidate.params.get("validate")
+                )
+                if action.params.get("expect_status") != [200]:
+                    return ComposeFailure("unexpected_status", "mutant", action.index, action.name)
+                expected = {"json.status": "ok", "json.service": "compose-e2e"}
+                if action.params.get("expect_json") != expected:
+                    return ComposeFailure("unexpected_json", "mutant", action.index, action.name)
+                return None
+
+        protection = measure_compose_workload_strength(
+            trace,
+            budget=4,
+            runner_factory=OracleRunner,
+        )
+        assert protection["status"] == "protective_within_measured_scope"
+        assert protection["mutation_score"] == "4/4 (100%)"
+        assert {row["fault"] for row in protection["mutations"]} == {"none", "kill"}
+
+    def test_documentation_exposes_the_gate_from_main_entrypoints(self) -> None:
+        root = Path(__file__).parents[1]
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        docs_index = (root / "docs" / "index.md").read_text(encoding="utf-8")
+        overview = (root / "docs" / "guides" / "compose-runner.md").read_text(encoding="utf-8")
+        operations = (root / "docs" / "guides" / "compose-operations.md").read_text(
+            encoding="utf-8"
+        )
+
+        assert "Compose CI and operations" in readme
+        assert "Put real Compose recovery in CI" in docs_index
+        assert "Real Docker evidence in this repository" in overview
+        assert "The real gate in this repository" in operations
+        assert "What a green job establishes" in operations
+        assert "fault model" in operations
+
+    def test_trace_verifier_requires_the_full_kill_recovery_sequence(self, tmp_path: Path) -> None:
+        results = [
+            {"owned_cleanup": True},
+            {"attempts": 1, "status": 200},
+            {"expected_fault_window": False, "status": 200},
+            {"service": "api", "signal": "SIGKILL"},
+            {"expected_fault_window": True, "request_error": "connection refused"},
+            {"service": "api", "started": True},
+            {"attempts": 1, "status": 200},
+            {"expected_fault_window": False, "status": 200},
+            {"stopped": True},
+        ]
+        trace = ComposeTrace(
+            seed=42,
+            compose={"base_url": "http://127.0.0.1:18080", "requests": []},
+            actions=[
+                compose_module.ComposeTraceAction(
+                    index=index,
+                    kind=kind,
+                    name=name,
+                    result=result,
+                )
+                for index, ((kind, name), result) in enumerate(zip(EXPECTED_ACTIONS, results))
+            ],
+        )
+        trace_path = tmp_path / "compose-42-test.json"
+        trace.save(trace_path)
+
+        assert verify_trace(tmp_path) == trace_path
 
 
 class TestComposeController:

@@ -96,13 +96,24 @@ path = "/items"
 
 ```bash
 ordeal explore --runner compose
+ordeal explore --runner compose --save-artifacts  # bound trace + durable manifest
 ```
 
 Real service timing is not perfectly deterministic. Ordeal says so directly:
 the trace is exact, while replay is reported as `attempted N / reproduced M`.
-Start with the [plain-English overview](https://docs.byordeal.com/guides/compose-runner/),
-then use the linked quickstart, full schema, fault model, trace reference, CI guide,
-or troubleshooting page when you need more depth.
+The complete service evidence loop is:
+`explore → coverage → exact replay → bounded finding → committed regression → verify --ci → test the test`.
+
+New to those terms? Start with
+[From “it broke once” to “it cannot come back”](https://docs.byordeal.com/concepts/service-evidence-loop/).
+Then follow the copyable
+[Compose evidence loop](https://docs.byordeal.com/guides/compose-evidence-loop/)
+or use the [plain-English service overview](https://docs.byordeal.com/guides/compose-runner/)
+to choose a quickstart, schema, fault model, trace reference, CI guide, or fix.
+
+Ordeal itself runs a real Docker Compose kill-and-recovery gate before publishing.
+See [Compose CI and operations](https://docs.byordeal.com/guides/compose-operations/)
+for the exact sequence, what a green job proves, and what remains outside its scope.
 
 ## Know what reliability behavior was actually tested
 

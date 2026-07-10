@@ -120,5 +120,6 @@ Do not increase the budget. Read the recorded failure kind and start with
 [Troubleshooting](compose-troubleshooting.md). A missing Docker binary, bad health
 URL, and unexpected application response require different fixes.
 
-Next: learn every setting in [Configuration](compose-configuration.md), or build
-multi-request scenarios with [Stateful Workflows](compose-stateful-workflows.md).
+Next: learn every setting in [Configuration](compose-configuration.md), build
+multi-request scenarios with [Stateful Workflows](compose-stateful-workflows.md),
+or move a stable recovery check into [CI](compose-operations.md).

@@ -10,6 +10,8 @@ Covers public APIs with zero or insufficient test coverage:
 
 from __future__ import annotations
 
+import pytest
+
 # ============================================================================
 # audit_report
 # ============================================================================
@@ -50,71 +52,80 @@ class TestAuditReport:
 
 class TestMismatch:
     def test_str_format(self):
-        """Mismatch.__str__ produces readable multi-line output."""
-        from ordeal.diff import Mismatch
+        """DiffWitness.__str__ produces readable envelope output."""
+        from ordeal.diff import DiffOutcome, DiffWitness
 
-        m = Mismatch(args={"x": 1, "y": 2}, output_a=3, output_b=4)
-        s = str(m)
+        def returned(value: object) -> DiffOutcome:
+            return DiffOutcome(
+                returned=True,
+                return_value=value,
+                exception_type=None,
+                exception_message=None,
+                mutated_arguments={},
+                receiver_state=None,
+                side_effects={},
+            )
+
+        witness = DiffWitness(
+            args={"x": 1, "y": 2},
+            outcome_a=returned(3),
+            outcome_b=returned(4),
+            differences=("return_value",),
+        )
+        s = str(witness)
         assert "args:" in s
-        assert "output_a:" in s
-        assert "output_b:" in s
+        assert "outcome_a:" in s
+        assert "outcome_b:" in s
         assert "3" in s
         assert "4" in s
 
     def test_str_truncates_long_values(self):
-        """Mismatch.__str__ truncates very long repr values."""
-        from ordeal.diff import Mismatch
+        """DiffWitness.__str__ truncates very long repr values."""
+        from ordeal.diff import DiffOutcome, DiffWitness
 
         long_str = "x" * 200
-        m = Mismatch(args={"data": long_str}, output_a=long_str, output_b="short")
-        s = str(m)
+        outcome = DiffOutcome(True, long_str, None, None, {}, None, {})
+        witness = DiffWitness(
+            args={"data": long_str},
+            outcome_a=outcome,
+            outcome_b=DiffOutcome(True, "short", None, None, {}, None, {}),
+            differences=("return_value",),
+        )
+        s = str(witness)
         assert "..." in s
 
 
 class TestDiffResult:
-    def test_equivalent_when_no_mismatches(self):
+    def test_no_divergence_observed_is_explicit(self):
         from ordeal.diff import DiffResult
 
-        r = DiffResult(function_a="f", function_b="g", total=10)
-        assert r.equivalent is True
-
-    def test_not_equivalent_with_mismatches(self):
-        from ordeal.diff import DiffResult, Mismatch
-
-        r = DiffResult(
+        result = DiffResult(
             function_a="f",
             function_b="g",
             total=10,
-            mismatches=[Mismatch(args={"x": 1}, output_a=2, output_b=3)],
+            status="no_divergence_observed",
         )
-        assert r.equivalent is False
+        assert result.status == "no_divergence_observed"
+        assert result.witness is None
 
-    def test_summary_equivalent(self):
+    def test_divergent_requires_one_witness(self):
         from ordeal.diff import DiffResult
 
-        r = DiffResult(function_a="score_v1", function_b="score_v2", total=50)
-        s = r.summary()
-        assert "EQUIVALENT" in s
+        with pytest.raises(ValueError, match="require"):
+            DiffResult(function_a="f", function_b="g", total=10, status="divergent")
+
+    def test_summary_reports_no_divergence_observed(self):
+        from ordeal.diff import DiffResult
+
+        result = DiffResult(
+            function_a="score_v1",
+            function_b="score_v2",
+            total=50,
+            status="no_divergence_observed",
+        )
+        s = result.summary()
+        assert "NO DIVERGENCE OBSERVED" in s
         assert "50 examples" in s
-
-    def test_summary_divergent_with_truncation(self):
-        from ordeal.diff import DiffResult, Mismatch
-
-        mismatches = [Mismatch(args={"x": i}, output_a=i, output_b=i + 1) for i in range(5)]
-        r = DiffResult(function_a="f", function_b="g", total=100, mismatches=mismatches)
-        s = r.summary()
-        assert "DIVERGENT" in s
-        assert "5 mismatch(es)" in s
-        assert "... and 2 more" in s
-
-    def test_summary_exactly_3_no_truncation(self):
-        from ordeal.diff import DiffResult, Mismatch
-
-        mismatches = [Mismatch(args={"x": i}, output_a=i, output_b=i + 1) for i in range(3)]
-        r = DiffResult(function_a="f", function_b="g", total=50, mismatches=mismatches)
-        s = r.summary()
-        assert "3 mismatch(es)" in s
-        assert "more" not in s
 
 
 class TestDiffFunction:
@@ -125,7 +136,7 @@ class TestDiffFunction:
             return a + b
 
         result = diff(add, add, max_examples=20)
-        assert result.equivalent
+        assert result.status == "no_divergence_observed"
         assert result.total == 20
 
     def test_different_functions(self):
@@ -138,8 +149,8 @@ class TestDiffFunction:
             return a - b
 
         result = diff(add, sub, max_examples=20)
-        assert not result.equivalent
-        assert len(result.mismatches) > 0
+        assert result.status == "divergent"
+        assert result.witness is not None
 
     def test_float_tolerance(self):
         from ordeal.diff import diff
@@ -152,7 +163,7 @@ class TestDiffFunction:
             return max(-1e100, min(1e100, x)) * 1.0000001
 
         result = diff(f, g, rtol=1e-5, max_examples=20)
-        assert result.equivalent
+        assert result.status == "no_divergence_observed"
 
     def test_custom_comparator(self):
         from ordeal.diff import diff
@@ -164,7 +175,7 @@ class TestDiffFunction:
             return {"value": x, "extra": "b"}
 
         result = diff(f, g, compare=lambda a, b: a["value"] == b["value"], max_examples=20)
-        assert result.equivalent
+        assert result.status == "no_divergence_observed"
 
 
 # ============================================================================

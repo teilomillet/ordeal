@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 _FINDING_EVIDENCE_SCHEMA = "ordeal.finding-evidence/v1"
+_DIVERGENCE_EVIDENCE_SCHEMA = "ordeal.divergence-evidence/v1"
 
 
 def _json_ready(value: Any) -> Any:
@@ -273,6 +274,130 @@ def _boundaries(replay: Mapping[str, Any]) -> dict[str, Any]:
             "that a future fix works",
         ],
     }
+
+
+def _build_divergence_evidence(
+    *,
+    revisions: Mapping[str, Any],
+    comparison: Mapping[str, Any],
+    original_input: Mapping[str, Any],
+    minimized_input: Mapping[str, Any],
+    original_observations: Mapping[str, Any],
+    observations: Mapping[str, Any],
+    differences: Sequence[str],
+    replay_attempts: int,
+    replay_matches: int,
+    expected_signature: str,
+    observed_signatures: Sequence[str | None],
+    witness_source: str = "hypothesis_shrunk_counterexample",
+    minimization_method: str = "hypothesis shrinking",
+    minimization_boundary: str = (
+        "Shrinking searched only within the declared or inferred Hypothesis strategies."
+    ),
+) -> dict[str, Any]:
+    """Build one source-bound, replay-scoped differential evidence artifact."""
+    ready_revisions = _json_ready(revisions)
+    ready_comparison = _json_ready(comparison)
+    ready_original_input = _json_ready(original_input)
+    ready_minimized_input = _json_ready(minimized_input)
+    ready_original_observations = _json_ready(original_observations)
+    ready_observations = _json_ready(observations)
+    attempts = _integer(replay_attempts)
+    matches = min(attempts, _integer(replay_matches))
+    replay_status = "verified" if attempts > 0 and matches == attempts else "failed"
+
+    missing_bindings: list[str] = []
+    for revision in ("a", "b"):
+        binding = _mapping(_mapping(ready_revisions).get(revision))
+        if not binding.get("source_sha256"):
+            missing_bindings.append(f"revision_{revision}")
+    for role in ("comparator", "normalizer"):
+        binding = _mapping(_mapping(ready_comparison).get(role))
+        if not binding.get("source_sha256"):
+            missing_bindings.append(role)
+    binding_status = "complete" if not missing_bindings else "partial"
+    supported = replay_status == "verified" and binding_status == "complete"
+
+    witness = {
+        "available": True,
+        "original_input": ready_original_input,
+        "original_sha256": _sha256_json(ready_original_input),
+        "input": ready_minimized_input,
+        "sha256": _sha256_json(ready_minimized_input),
+        "source": witness_source,
+    }
+    changed = witness["original_sha256"] != witness["sha256"]
+    minimization_status = (
+        "not_run"
+        if minimization_method == "not_run"
+        else "verified"
+        if replay_status == "verified"
+        else "performed"
+    )
+    establishes = (
+        "The recorded minimized input produced the same paired observations and "
+        f"full-envelope divergence in {matches}/{attempts} exact immediate replays "
+        "under the recorded comparator and normalizer."
+        if replay_status == "verified"
+        else (
+            "A full-envelope divergence was observed for the recorded input, but only "
+            f"{matches}/{attempts} immediate replays matched its paired observations."
+        )
+    )
+    if missing_bindings:
+        establishes += " Source binding is incomplete for: " + ", ".join(missing_bindings) + "."
+
+    payload: dict[str, Any] = {
+        "schema": _DIVERGENCE_EVIDENCE_SCHEMA,
+        "status": "supported" if supported else "exploratory",
+        "claim": (
+            "For the recorded input, revision a and revision b produced different "
+            "observable outcomes under the recorded comparison semantics."
+        ),
+        "revisions": ready_revisions,
+        "source_binding": {
+            "status": binding_status,
+            "missing": missing_bindings,
+        },
+        "comparison": ready_comparison,
+        "witness": witness,
+        "observations": ready_observations,
+        "replay": {
+            "status": replay_status,
+            "attempts": attempts,
+            "exact_matches": matches,
+            "match_basis": (
+                "same minimized input, bound revisions, comparison semantics, "
+                "paired observations, and divergence channels"
+            ),
+            "expected_signature": expected_signature,
+            "observed_signatures": list(observed_signatures),
+        },
+        "minimization": {
+            "status": minimization_status,
+            "method": minimization_method,
+            "changed_input": changed,
+            "original_input": ready_original_input,
+            "original_observations": ready_original_observations,
+            "boundary": minimization_boundary,
+        },
+        "differences": list(differences),
+        "boundaries": {
+            "establishes": establishes,
+            "does_not_establish": [
+                "the root cause",
+                "behavior for untested inputs, states, or unselected side effects",
+                "general equivalence when no divergence is observed",
+                "that either revision is correct",
+            ],
+        },
+        "runtime": {
+            "python_version": platform.python_version(),
+            "python_implementation": platform.python_implementation(),
+        },
+    }
+    payload["artifact_id"] = f"div_{_sha256_json(payload)[:16]}"
+    return payload
 
 
 def _build_finding_evidence(

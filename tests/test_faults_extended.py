@@ -6,6 +6,7 @@ import copy
 import errno
 import math
 import pickle
+import sys
 import threading
 
 import pytest
@@ -202,11 +203,41 @@ class TestDiskFull:
         fault = subprocess_timeout("__ordeal_never_matches__")
         fault.activate()
         try:
-            result = subprocess.run(["/usr/bin/true"], check=False)
+            result = subprocess.run([sys.executable, "-c", "pass"], check=False)
             assert result.returncode == 0
             assert fault.observation_hits == 0
         finally:
             fault.deactivate()
+
+    def test_conditional_timeout_counts_the_exact_matching_command(self):
+        import subprocess
+
+        from ordeal.faults.io import subprocess_timeout
+
+        fault = subprocess_timeout("-c pass")
+        fault.activate()
+        try:
+            with pytest.raises(subprocess.TimeoutExpired):
+                subprocess.run([sys.executable, "-c", "pass"], check=False)
+            assert fault.observation_hits == 1
+        finally:
+            fault.deactivate()
+
+    def test_deepcopied_timeout_records_hits_on_the_active_copy(self):
+        import subprocess
+
+        from ordeal.faults.io import subprocess_timeout
+
+        original = subprocess_timeout(f"{sys.executable} -c pass")
+        copied = copy.deepcopy(original)
+        copied.activate()
+        try:
+            with pytest.raises(subprocess.TimeoutExpired):
+                subprocess.run([sys.executable, "-c", "pass"], check=False)
+            assert original.observation_hits == 0
+            assert copied.observation_hits == 1
+        finally:
+            copied.deactivate()
 
     def test_restores_builtins(self):
         import builtins

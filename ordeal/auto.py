@@ -9984,6 +9984,35 @@ _FAULT_PATTERNS: dict[str, list[tuple[str, str, dict[str, Any]]]] = {
 }
 
 
+def _source_bound_subprocess_match(node: ast.Call) -> str | None:
+    """Resolve a complete subprocess command from literals and ``sys.executable``."""
+    command: ast.AST | None = node.args[0] if node.args else None
+    if command is None:
+        command = next(
+            (keyword.value for keyword in node.keywords if keyword.arg == "args"),
+            None,
+        )
+    if isinstance(command, ast.Constant) and isinstance(command.value, str):
+        return command.value.strip() or None
+    if not isinstance(command, (ast.List, ast.Tuple)) or not command.elts:
+        return None
+    tokens: list[str] = []
+    for item in command.elts:
+        if isinstance(item, ast.Constant) and isinstance(item.value, str) and item.value:
+            tokens.append(item.value)
+            continue
+        if (
+            isinstance(item, ast.Attribute)
+            and item.attr == "executable"
+            and isinstance(item.value, ast.Name)
+            and item.value.id == "sys"
+        ):
+            tokens.append(sys.executable)
+            continue
+        return None
+    return " ".join(tokens)
+
+
 def _ml_data_fault_specs(call_str: str) -> list[tuple[str, str, dict[str, Any]]]:
     """Infer ML/data seam faults from one dotted call target string."""
     parts = [part.lower() for part in call_str.split(".") if part]

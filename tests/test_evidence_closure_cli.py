@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
+import signal
+import subprocess
 from pathlib import Path
 
+import pytest
+
+import ordeal.cli as ordeal_cli
 from ordeal.cli import main
 
 
@@ -40,6 +46,80 @@ def test_deepen_requires_an_explicit_time_budget(capsys) -> None:
     assert rc == 2
     assert payload["status"] == "blocked"
     assert "explicit --time-limit" in payload["blocking_reason"]
+
+
+def test_invalid_base_ref_blocks_changed_code_prioritization(capsys) -> None:
+    rc = main(["scan", "ordeal.demo", "--base-ref", "missing-base", "--json", "-n", "1"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 2
+    assert payload["status"] == "blocked"
+    assert payload["raw_details"]["base_ref"] == "missing-base"
+    assert "unavailable" in payload["blocking_reason"]
+
+
+def test_budgeted_child_uses_a_group_and_cleans_the_tree_on_timeout(monkeypatch) -> None:
+    class FakeProcess:
+        pid = 4242
+        returncode = -1
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.killed = False
+
+        def communicate(self, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise subprocess.TimeoutExpired(["child"], timeout)
+            return "partial-out", "partial-err"
+
+        def poll(self):
+            return None if not self.killed else self.returncode
+
+        def wait(self, timeout=None):
+            self.killed = True
+            return self.returncode
+
+        def terminate(self):
+            self.killed = True
+
+        def kill(self):
+            self.killed = True
+
+    process = FakeProcess()
+    popen_kwargs = {}
+
+    def fake_popen(command, **kwargs):
+        popen_kwargs.update(kwargs)
+        return process
+
+    monkeypatch.setattr(ordeal_cli.subprocess, "Popen", fake_popen)
+    if os.name == "nt":
+        taskkill = []
+        monkeypatch.setattr(
+            ordeal_cli.subprocess,
+            "run",
+            lambda command, **kwargs: taskkill.append(command),
+        )
+    else:
+        signals = []
+        monkeypatch.setattr(
+            ordeal_cli.os,
+            "killpg",
+            lambda pid, sig: signals.append((pid, sig)),
+        )
+
+    with pytest.raises(subprocess.TimeoutExpired) as raised:
+        ordeal_cli._run_budgeted_child(["child"], timeout=0.01)
+
+    assert raised.value.output == "partial-out"
+    assert raised.value.stderr == "partial-err"
+    if os.name == "nt":
+        assert popen_kwargs["creationflags"] == subprocess.CREATE_NEW_PROCESS_GROUP
+        assert taskkill == [["taskkill", "/PID", "4242", "/T", "/F"]]
+    else:
+        assert popen_kwargs["start_new_session"] is True
+        assert signals == [(4242, signal.SIGTERM), (4242, signal.SIGKILL)]
 
 
 def test_deepen_executes_one_safe_planned_scan_within_budget(

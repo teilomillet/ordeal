@@ -173,17 +173,30 @@ def run_corpus(output: Path) -> dict[str, Any]:
         reliability_map,
         {str(row["name"]) for row in rows},
     )
-    runtime_observation = _run_fault_probe(
+    file_observation = _run_fault_probe(
         PACKAGE,
         "runtime_file_recovery",
         "disk_full",
         max_examples=2,
     )
+    timeout_pass = _run_fault_probe(
+        PACKAGE,
+        "runtime_subprocess_recovery",
+        "timeout",
+        max_examples=2,
+    )
+    timeout_fail = _run_fault_probe(
+        PACKAGE,
+        "runtime_subprocess_bug",
+        "timeout",
+        max_examples=2,
+    )
+    runtime_observations = [file_observation, timeout_pass, timeout_fail]
     observed_map = _build_reliability_map(
         PACKAGE,
         SimpleNamespace(
             functions={},
-            supervisor_info={"reliability_observations": [runtime_observation]},
+            supervisor_info={"reliability_observations": runtime_observations},
         ),
         rows,
     )
@@ -191,13 +204,19 @@ def run_corpus(output: Path) -> dict[str, Any]:
         operation["id"]: operation["target"] for operation in observed_map["operations"]
     }
     property_names = {item["id"]: item["name"] for item in observed_map["properties"]}
-    closed_cells = [
-        cell
-        for cell in observed_map["cells"]
-        if operation_targets[cell["operation_id"]].endswith("runtime_file_recovery")
-        and cell["fault"] == "disk_full"
-        and property_names[cell["property_id"]] == _runtime_fault_property("disk_full")
-    ]
+
+    def runtime_cells(selector: str, fault: str) -> list[dict[str, Any]]:
+        return [
+            cell
+            for cell in observed_map["cells"]
+            if operation_targets[cell["operation_id"]].endswith(selector)
+            and cell["fault"] == fault
+            and property_names[cell["property_id"]] == _runtime_fault_property(fault)
+        ]
+
+    file_cells = runtime_cells("runtime_file_recovery", "disk_full")
+    timeout_pass_cells = runtime_cells("runtime_subprocess_recovery", "timeout")
+    timeout_fail_cells = runtime_cells("runtime_subprocess_bug", "timeout")
 
     if closure_metrics["supported_finding_recall"] <= baseline_metrics["supported_finding_recall"]:
         raise AssertionError("Evidence Closure did not improve supported-finding recall")
@@ -214,10 +233,18 @@ def run_corpus(output: Path) -> dict[str, Any]:
         raise AssertionError("a tool-side limitation was misclassified as target behavior")
     if invalid_actions:
         raise AssertionError(f"invalid suggested actions: {invalid_actions}")
-    if runtime_observation["status"] != "PASS" or not closed_cells:
+    if file_observation["status"] != "PASS" or not file_cells:
         raise AssertionError("fault-specific runtime observation did not close a map cell")
-    if closed_cells[0]["status"] != "PASS":
+    if file_cells[0]["status"] != "PASS":
         raise AssertionError("merged fault observation did not transition the cell to PASS")
+    if timeout_pass["status"] != "PASS" or not timeout_pass_cells:
+        raise AssertionError("source-bound timeout recovery did not close a PASS cell")
+    if timeout_pass_cells[0]["status"] != "PASS":
+        raise AssertionError("merged timeout recovery did not remain PASS")
+    if timeout_fail["status"] != "FAIL" or not timeout_fail_cells:
+        raise AssertionError("source-bound timeout bug did not close a FAIL cell")
+    if timeout_fail_cells[0]["status"] != "FAIL":
+        raise AssertionError("merged timeout bug did not remain FAIL")
 
     report = {
         "schema": "ordeal.evidence-closure-corpus/v1",
@@ -235,8 +262,14 @@ def run_corpus(output: Path) -> dict[str, Any]:
         },
         "runtime_cell_transition": {
             "before": "NOT EXERCISED",
-            "after": closed_cells[0]["status"],
-            "observation": runtime_observation,
+            "after": file_cells[0]["status"],
+            "observation": file_observation,
+        },
+        "runtime_timeout_controls": {
+            "recovery": timeout_pass,
+            "bug": timeout_fail,
+            "recovery_cell": timeout_pass_cells[0]["status"],
+            "bug_cell": timeout_fail_cells[0]["status"],
         },
         "baseline_targets": sorted(baseline_targets),
         "planned_targets": sorted(planned_targets),

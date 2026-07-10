@@ -10,9 +10,11 @@ from __future__ import annotations
 import ast
 import hashlib
 import importlib
+import inspect
 import json
 import re
 import subprocess
+import textwrap
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -25,6 +27,7 @@ _FAULT_PROBE_ALIASES: dict[str, frozenset[str]] = {
     # implementations record a hit only at the branch that actually raises.
     "io_error": frozenset({"permission_denied"}),
     "disk_full": frozenset({"disk_full"}),
+    "timeout": frozenset({"subprocess_timeout"}),
 }
 
 _SEAM_RULES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
@@ -226,6 +229,9 @@ def _changed_files(base_ref: str | None) -> set[str]:
     """Return committed, staged, unstaged, and untracked files since *base_ref*."""
     if not base_ref:
         return set()
+    error = _base_ref_error(base_ref)
+    if error is not None:
+        raise ValueError(error)
     completed = subprocess.run(
         ["git", "diff", "--name-only", base_ref],
         text=True,
@@ -233,7 +239,8 @@ def _changed_files(base_ref: str | None) -> set[str]:
         check=False,
     )
     if completed.returncode != 0:
-        return set()
+        detail = completed.stderr.strip() or "git diff could not compare the requested revision"
+        raise ValueError(f"Git revision {base_ref!r} could not be compared: {detail}")
     changed = {line.strip() for line in completed.stdout.splitlines() if line.strip()}
     untracked = subprocess.run(
         ["git", "ls-files", "--others", "--exclude-standard"],
@@ -244,6 +251,20 @@ def _changed_files(base_ref: str | None) -> set[str]:
     if untracked.returncode == 0:
         changed.update(line.strip() for line in untracked.stdout.splitlines() if line.strip())
     return changed
+
+
+def _base_ref_error(base_ref: str) -> str | None:
+    """Return a blocking reason when *base_ref* is not a committed Git revision."""
+    completed = subprocess.run(
+        ["git", "rev-parse", "--verify", "--end-of-options", f"{base_ref}^{{commit}}"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode == 0:
+        return None
+    detail = completed.stderr.strip() or "revision was not found in this Git checkout"
+    return f"Git revision {base_ref!r} is unavailable: {detail}"
 
 
 def _relative_path(path: Path) -> str:
@@ -310,6 +331,7 @@ def _source_fault_probe_supported(
     calls: set[str],
     *,
     writes_file: bool,
+    source_bound_subprocesses: int,
 ) -> bool:
     """Return whether source analysis will construct this exact fault kind."""
     if not _fault_probe_supported(fault):
@@ -319,7 +341,11 @@ def _source_fault_probe_supported(
     aliases = _FAULT_PROBE_ALIASES[fault]
     if fault in {"disk_full", "io_error"} and not writes_file:
         return False
+    if fault == "timeout" and source_bound_subprocesses != 1:
+        return False
     for call in calls:
+        if fault == "timeout" and call.lower() != "subprocess.run":
+            continue
         for pattern, specs in _FAULT_PATTERNS.items():
             if pattern.lower() in call.lower() and any(spec[1] in aliases for spec in specs):
                 return True
@@ -517,6 +543,8 @@ def _operation_records(
     allow_service_faults: bool,
 ) -> list[dict[str, Any]]:
     """Build source-backed operations, seams, hypotheses, and cells."""
+    from ordeal.auto import _source_bound_subprocess_match
+
     changed_files = _changed_files(base_ref)
     sources = _module_sources(module)
     test_roots = sorted({root for _, _, root in sources})
@@ -549,6 +577,12 @@ def _operation_records(
                 function_source = _function_source(source, node)
                 lowered = function_source.lower()
                 calls = {_call_name(call) for call in ast.walk(node) if isinstance(call, ast.Call)}
+                source_bound_subprocesses = sum(
+                    _call_name(call) == "subprocess.run"
+                    and _source_bound_subprocess_match(call) is not None
+                    for call in ast.walk(node)
+                    if isinstance(call, ast.Call)
+                )
                 writes_file = any(
                     _write_mode_open(call) for call in ast.walk(node) if isinstance(call, ast.Call)
                 )
@@ -622,6 +656,7 @@ def _operation_records(
                         fault,
                         calls,
                         writes_file=writes_file,
+                        source_bound_subprocesses=source_bound_subprocesses,
                     ):
                         return
                     property_name = _runtime_fault_property(fault)
@@ -896,6 +931,7 @@ def _run_fault_probe(
         _infer_faults,
         _resolve_module,
         _selected_public_functions,
+        _source_bound_subprocess_match,
         _unwrap,
         scan_module,
     )
@@ -926,20 +962,43 @@ def _run_fault_probe(
             object_teardowns=kwargs.get("object_teardowns"),
             object_harnesses=kwargs.get("object_harnesses"),
         )
-        if len(selected) == 1:
-            resolved = _unwrap(selected[0][1])
+        resolved = _unwrap(selected[0][1]) if len(selected) == 1 else None
+        if resolved is not None:
             target = f"{resolved.__module__}.{resolved.__qualname__}"
             observation["target"] = target
-        inferred = _infer_faults(
-            mod,
-            module,
-            object_factories=kwargs.get("object_factories"),
-            object_setups=kwargs.get("object_setups"),
-            object_scenarios=kwargs.get("object_scenarios"),
-            object_state_factories=kwargs.get("object_state_factories"),
-            object_teardowns=kwargs.get("object_teardowns"),
-            object_harnesses=kwargs.get("object_harnesses"),
-        )
+        if fault == "timeout" and resolved is not None:
+            from ordeal.faults.io import subprocess_timeout
+
+            source = textwrap.dedent(inspect.getsource(inspect.unwrap(resolved)))
+            tree = ast.parse(source)
+            inferred = []
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call) or _call_name(node) != "subprocess.run":
+                    continue
+                command_match = _source_bound_subprocess_match(node)
+                if command_match is None:
+                    continue
+                inferred_fault = subprocess_timeout(command_match)
+                setattr(inferred_fault, "__ordeal_operation__", selector)
+                setattr(inferred_fault, "__ordeal_fault_kind__", "subprocess_timeout")
+                setattr(inferred_fault, "__ordeal_source_match__", command_match)
+                setattr(
+                    inferred_fault,
+                    "__ordeal_source_location__",
+                    (node.lineno, node.col_offset),
+                )
+                inferred.append(inferred_fault)
+        else:
+            inferred = _infer_faults(
+                mod,
+                module,
+                object_factories=kwargs.get("object_factories"),
+                object_setups=kwargs.get("object_setups"),
+                object_scenarios=kwargs.get("object_scenarios"),
+                object_state_factories=kwargs.get("object_state_factories"),
+                object_teardowns=kwargs.get("object_teardowns"),
+                object_harnesses=kwargs.get("object_harnesses"),
+            )
     except Exception as exc:
         observation["blocking_reason"] = (f"fault discovery failed: {type(exc).__name__}: {exc}")[
             :500
@@ -956,6 +1015,12 @@ def _run_fault_probe(
     if not candidates:
         observation["blocking_reason"] = (
             f"source analysis found no injectable {fault} boundary for {target}"
+        )
+        return observation
+    if len(candidates) != 1:
+        observation["blocking_reason"] = (
+            f"source analysis found {len(candidates)} injectable {fault} boundaries for "
+            f"{target}; automatic closure requires exactly one"
         )
         return observation
 

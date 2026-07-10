@@ -22,6 +22,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import time as _time
@@ -250,6 +251,7 @@ class CommandSpec:
     arguments: tuple[ArgumentSpec, ...] = ()
     description: str | Callable[[], str] | None = None
     formatter_class: type[argparse.HelpFormatter] | None = None
+    usage: str | None = None
     defaults: dict[str, Any] = field(default_factory=dict)
     show_in_help: bool = False
 
@@ -4705,6 +4707,29 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         return 2
     module_name = _scan_base_module(scan_target)
     scan_started = _time.monotonic()
+    reliability_base_ref = (
+        str(getattr(args, "base_ref", None) or os.environ.get("ORDEAL_BASE_REF", "")).strip()
+        or None
+    )
+    if reliability_base_ref is not None:
+        from ordeal.reliability import _base_ref_error
+
+        base_ref_error = _base_ref_error(reliability_base_ref)
+        if base_ref_error is not None:
+            if args.json:
+                print(
+                    _build_blocked_agent_envelope(
+                        tool="scan",
+                        target=scan_target,
+                        summary="changed-code prioritization is blocked",
+                        blocking_reason=base_ref_error,
+                        suggested_commands=("git fetch origin",),
+                        raw_details={"base_ref": reliability_base_ref},
+                    ).to_json()
+                )
+            else:
+                _stderr(f"Cannot prioritize changed code: {base_ref_error}.\n")
+            return 2
     if getattr(args, "deepen", False) and args.time_limit is None:
         reason = "--deepen requires an explicit --time-limit safety budget"
         if args.json:
@@ -5084,10 +5109,6 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         state.supervisor_info = dict(getattr(state, "supervisor_info", {}) or {})
         state.supervisor_info["reliability_observations"] = [observation]
 
-    reliability_base_ref = (
-        str(getattr(args, "base_ref", None) or os.environ.get("ORDEAL_BASE_REF", "")).strip()
-        or None
-    )
     try:
         reliability_map = _build_reliability_map(
             module_name,
@@ -5160,11 +5181,8 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                 command.append("--json")
             started = _time.monotonic()
             try:
-                completed = subprocess.run(
+                completed = _run_budgeted_child(
                     command,
-                    text=True,
-                    capture_output=True,
-                    check=False,
                     timeout=remaining,
                 )
             except subprocess.TimeoutExpired:
@@ -5344,6 +5362,67 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         )
 
     return 1 if state.findings else 0
+
+
+def _terminate_child_tree(process: subprocess.Popen[str]) -> None:
+    """Terminate a budgeted child and descendants without leaking the process tree."""
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if process.poll() is None:
+            process.kill()
+        return
+
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except (PermissionError, ProcessLookupError):
+        if process.poll() is None:
+            process.terminate()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=0.5)
+    # The group can outlive its leader; SIGKILL any remaining descendants.
+    with contextlib.suppress(PermissionError, ProcessLookupError):
+        os.killpg(process.pid, signal.SIGKILL)
+    if process.poll() is None:
+        process.kill()
+
+
+def _run_budgeted_child(
+    command: Sequence[str],
+    *,
+    timeout: float,
+) -> subprocess.CompletedProcess[str]:
+    """Run one child in an isolated process group and enforce a hard tree timeout."""
+    group_kwargs: dict[str, Any]
+    if os.name == "nt":
+        group_kwargs = {
+            "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        }
+    else:
+        group_kwargs = {"start_new_session": True}
+    process = subprocess.Popen(
+        list(command),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        **group_kwargs,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_child_tree(process)
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(
+            exc.cmd,
+            exc.timeout,
+            output=stdout,
+            stderr=stderr,
+        ) from None
+    return subprocess.CompletedProcess(list(command), process.returncode, stdout, stderr)
 
 
 def _compose_run_payload(result: Any) -> dict[str, Any]:
@@ -13489,6 +13568,11 @@ def _command_specs() -> tuple[CommandSpec, ...]:
             help="Find replayable failures and show the next action",
             description=_scan_command_description,
             formatter_class=_ScanHelpFormatter,
+            usage=(
+                "%(prog)s [-h] [-n MAX_EXAMPLES] [-t TIME_LIMIT] [--deepen] "
+                "[--base-ref BASE_REF] [--allow-service-faults] [--json] [--save] "
+                "[--list-targets] [target]"
+            ),
             show_in_help=True,
             arguments=(
                 _arg(
@@ -14576,6 +14660,8 @@ def _build_parser() -> argparse.ArgumentParser:
             add_parser_kwargs["description"] = description
         if spec.formatter_class is not None:
             add_parser_kwargs["formatter_class"] = spec.formatter_class
+        if spec.usage is not None:
+            add_parser_kwargs["usage"] = spec.usage
         subparser = sub.add_parser(spec.name, **add_parser_kwargs)
         for argument in spec.arguments:
             subparser.add_argument(*argument.tokens, **argument.kwargs)

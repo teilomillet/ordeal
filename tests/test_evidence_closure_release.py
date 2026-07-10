@@ -30,4 +30,8 @@ def test_evidence_closure_release_gates(tmp_path: Path) -> None:
     assert report["suggested_actions"]["invalid"] == []
     assert report["runtime_cell_transition"]["after"] == "PASS"
     assert report["runtime_cell_transition"]["observation"]["injection"]["hits"] > 0
+    assert report["runtime_timeout_controls"]["recovery"]["status"] == "PASS"
+    assert report["runtime_timeout_controls"]["bug"]["status"] == "FAIL"
+    assert report["runtime_timeout_controls"]["recovery_cell"] == "PASS"
+    assert report["runtime_timeout_controls"]["bug_cell"] == "FAIL"
     assert (tmp_path / "evidence-closure-corpus.json").is_file()

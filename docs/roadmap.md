@@ -8,17 +8,14 @@ description: >-
 
 ## The one-minute version
 
-Most tests check situations a developer thought to write down. Production bugs often hide between them:
-a timeout during a retry, a worker restart after a write, or a damaged response that reaches a recovery path.
+Most tests check situations a developer thought to write down. Production bugs often hide between them: a timeout during a retry, a worker restart after a write, or a damaged response that reaches a recovery path.
 
-Ordeal explores those combinations automatically. When something breaks, the
-goal is not a large log file. The goal is a small, readable sequence that shows
-what happened and can become a permanent regression test.
+Ordeal explores those combinations automatically. When something breaks, the goal is not a large log file.
+The goal is a small, readable sequence that shows what happened and can become a permanent regression test.
 
 ### A concrete example
 
-Imagine an order service that charges a card and then asks a worker to confirm the order. The normal test passes.
-In production, the confirmation times out, the client retries, and the card is charged twice.
+Imagine an order service whose normal test passes. In production, confirmation times out, the client retries, and the card is charged twice.
 
 Ordeal can:
 
@@ -59,8 +56,7 @@ This distinction is central to the product: show useful evidence without turning
 ### Coverage that follows behavior
 
 The Explorer records which rules ran, which faults were active, and which properties were observed.
-Its summaries surface productive swarm configurations, stressed properties, uncovered fault pairs,
-and paths that were not reached.
+Its summaries surface productive swarm configurations, stressed properties, uncovered fault pairs, and paths that were not reached.
 
 ### Real failure boundaries
 
@@ -78,6 +74,7 @@ system versions and minimizes the first mismatch.
 
 ### Implementation evidence
 
+- `ordeal/reliability.py` deepens exact file and timeout cells; the release gate measures pinned public pairs.
 - `ordeal/explore.py` exposes swarm statistics, behavior coverage, property stress, native-boundary findings, and pairwise coverage.
 - `tests/test_explore_telemetry.py` checks the structured telemetry and trace evidence.
 - `ordeal/compose.py` and `tests/test_compose.py` cover service lifecycle, fault windows, recovery, trace replay, and evidence promotion.
@@ -91,7 +88,8 @@ system versions and minimizes the first mismatch.
    across sequence, accumulation, service, and process-boundary bugs.
 2. **Deepen evidence closure.** The shipped reliability map connects retry,
    fallback, recovery, production I/O, and ML/data seams to observed or missing
-   behavior cells; expand its held-out corpus and safe automatic experiments.
+   behavior cells; expand beyond exact file writes and resolved subprocess
+   timeouts only when injection-hit attribution remains provable.
 3. **Complete native-boundary evidence.** Distinguish truncated output and
    preserve minimized replay evidence across more process adapters.
 4. **Go beyond pairs.** Make selected higher-order fault combinations

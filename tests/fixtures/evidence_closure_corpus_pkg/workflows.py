@@ -6,6 +6,8 @@ release gate measures scan classification rather than environment setup.
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from typing import Protocol as _Protocol
 
 
@@ -187,3 +189,18 @@ def runtime_file_recovery(path: str) -> None:
             handle.write("ok")
     except (OSError, ValueError):
         return None
+
+
+def runtime_subprocess_recovery() -> int:
+    """Handle one source-bound child timeout without leaking an exception."""
+    try:
+        subprocess.run([sys.executable, "-c", "pass"], check=False)
+    except subprocess.TimeoutExpired:
+        return 124
+    return 0
+
+
+def runtime_subprocess_bug() -> int:
+    """Leak one source-bound child timeout to the caller."""
+    subprocess.run([sys.executable, "-c", "pass"], check=False)
+    return 0

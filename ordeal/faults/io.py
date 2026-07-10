@@ -329,6 +329,35 @@ def _subprocess_output_truncation_factory(
     return _factory
 
 
+class _SubprocessTimeoutFault(PatchFault):
+    """Patch ``subprocess.run`` while keeping hit state on the active instance."""
+
+    def __init__(self, target: str, timeout_sec: float) -> None:
+        super().__init__(
+            "subprocess.run",
+            lambda original: original,
+            name=f"subprocess_timeout({target!r})",
+        )
+        self.command_match = target
+        self.timeout_sec = timeout_sec
+
+    def _do_activate(self) -> None:
+        if self._original is None:
+            self._resolve()
+        self._skipped = False
+        original = self._original
+
+        @functools.wraps(original)
+        def timeout_run(*args: object, **kwargs: object) -> object:
+            cmd_str = _subprocess_cmd_string(args, kwargs)
+            if self.command_match in cmd_str:
+                self._record_observation_hit()
+                raise _sp.TimeoutExpired(cmd_str, self.timeout_sec)
+            return original(*args, **kwargs)
+
+        setattr(self._parent, self._attr_name, timeout_run)
+
+
 def subprocess_timeout(target: str, *, timeout_sec: float = 0.001) -> PatchFault:
     """Make ``subprocess.run``/``subprocess.check_output`` calls matching *target* time out.
 
@@ -355,19 +384,7 @@ def subprocess_timeout(target: str, *, timeout_sec: float = 0.001) -> PatchFault
         target: Substring to match in the command (e.g. ``"cargo run"``).
         timeout_sec: Fake timeout duration for the error.
     """
-    import subprocess as _sp
-
-    def _factory(original: object) -> object:
-        def _timeout_run(*args: object, **kwargs: object) -> object:
-            cmd = args[0] if args else kwargs.get("args", "")
-            cmd_str = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
-            if target in cmd_str:
-                raise _sp.TimeoutExpired(cmd_str, timeout_sec)
-            return original(*args, **kwargs)  # type: ignore[operator]
-
-        return _timeout_run
-
-    return PatchFault("subprocess.run", _factory, name=f"subprocess_timeout({target!r})")
+    return _SubprocessTimeoutFault(target, timeout_sec)
 
 
 def subprocess_exit(

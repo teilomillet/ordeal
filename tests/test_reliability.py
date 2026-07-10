@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import ordeal.reliability as reliability
 from ordeal.reliability import (
     RELIABILITY_MAP_SCHEMA,
@@ -372,6 +374,162 @@ def test_fault_probe_records_fault_specific_pass_and_fail(
     assert failed["injection"]["hits"] > 0
 
 
+def test_subprocess_timeout_probe_uses_a_literal_source_match(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sys.modules.pop("subprocess_probe_fixture", None)
+    (tmp_path / "subprocess_probe_fixture.py").write_text(
+        "import subprocess\n"
+        "import sys\n"
+        "\n"
+        "def recovered() -> int:\n"
+        "    try:\n"
+        "        subprocess.run([sys.executable, '-c', 'pass'], check=False)\n"
+        "    except subprocess.TimeoutExpired:\n"
+        "        return 124\n"
+        "    return 0\n"
+        "\n"
+        "def broken() -> int:\n"
+        "    subprocess.run([sys.executable, '-c', 'pass'], check=False)\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    importlib.invalidate_caches()
+
+    passed = reliability._run_fault_probe(
+        "subprocess_probe_fixture",
+        "recovered",
+        "timeout",
+        max_examples=2,
+    )
+    failed = reliability._run_fault_probe(
+        "subprocess_probe_fixture",
+        "broken",
+        "timeout",
+        max_examples=2,
+    )
+
+    assert passed["status"] == "PASS"
+    assert passed["injection"]["hits"] > 0
+    assert "-c pass" in passed["injection"]["name"]
+    assert failed["status"] == "FAIL"
+    assert failed["injection"]["hits"] > 0
+
+
+def test_dynamic_subprocess_command_stays_a_planned_gap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sys.modules.pop("dynamic_subprocess_fixture", None)
+    (tmp_path / "dynamic_subprocess_fixture.py").write_text(
+        "import subprocess\n"
+        "\n"
+        "def invoke(command: list[str]) -> int:\n"
+        "    return subprocess.run(command, check=False).returncode\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    importlib.invalidate_caches()
+
+    payload = _build_reliability_map(
+        "dynamic_subprocess_fixture",
+        SimpleNamespace(functions={}, supervisor_info={}),
+        [],
+    )
+    properties = {item["id"]: item["name"] for item in payload["properties"]}
+    timeout_runtime_cells = [
+        cell
+        for cell in payload["cells"]
+        if cell["fault"] == "timeout"
+        and properties[cell["property_id"]].startswith(reliability.RUNTIME_FAULT_PROPERTY_PREFIX)
+    ]
+
+    assert timeout_runtime_cells == []
+    assert any(
+        experiment["reason"] == "review_side_effecting_target"
+        for experiment in payload["experiments"]
+    )
+
+
+def test_multiple_source_bound_subprocesses_stay_a_planned_gap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sys.modules.pop("multiple_subprocess_fixture", None)
+    (tmp_path / "multiple_subprocess_fixture.py").write_text(
+        "import subprocess\n"
+        "import sys\n"
+        "\n"
+        "def invoke() -> int:\n"
+        "    first = subprocess.run([sys.executable, '-c', 'pass'], check=False)\n"
+        "    second = subprocess.run([sys.executable, '-c', 'print(1)'], check=False)\n"
+        "    return first.returncode + second.returncode\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    importlib.invalidate_caches()
+
+    payload = _build_reliability_map(
+        "multiple_subprocess_fixture",
+        SimpleNamespace(functions={}, supervisor_info={}),
+        [],
+    )
+    properties = {item["id"]: item["name"] for item in payload["properties"]}
+    timeout_runtime_cells = [
+        cell
+        for cell in payload["cells"]
+        if cell["fault"] == "timeout"
+        and properties[cell["property_id"]].startswith(reliability.RUNTIME_FAULT_PROPERTY_PREFIX)
+    ]
+    observation = reliability._run_fault_probe(
+        "multiple_subprocess_fixture",
+        "invoke",
+        "timeout",
+        max_examples=1,
+    )
+
+    assert timeout_runtime_cells == []
+    assert observation["status"] == "NOT EXERCISED"
+    assert "2 injectable timeout boundaries" in observation["blocking_reason"]
+
+
+def test_evidence_timeout_resolution_does_not_change_chaos_fault_targets() -> None:
+    from ordeal.auto import _infer_faults
+
+    module = importlib.import_module("tests.fixtures.evidence_closure_corpus_pkg.workflows")
+    inferred = [
+        fault
+        for fault in _infer_faults(module, module.__name__)
+        if getattr(fault, "__ordeal_operation__", None) == "runtime_subprocess_recovery"
+    ]
+    timeout = next(
+        fault
+        for fault in inferred
+        if getattr(fault, "__ordeal_fault_kind__", None) == "subprocess_timeout"
+    )
+    delay = next(
+        fault
+        for fault in inferred
+        if getattr(fault, "__ordeal_fault_kind__", None) == "subprocess_delay"
+    )
+    original_run = subprocess.run
+    timeout.activate()
+    delay.activate()
+    timeout.deactivate()
+    delay.deactivate()
+    try:
+        completed = subprocess.run([sys.executable, "-c", "pass"], check=False)
+        assert completed.returncode == 0
+        assert timeout.observation_hits == 0
+    finally:
+        subprocess.run = original_run
+
+
 def test_expected_precondition_exception_does_not_become_fault_probe_pass(
     tmp_path: Path,
     monkeypatch,
@@ -418,6 +576,14 @@ def test_changed_files_include_worktree_and_untracked_paths(
     (tmp_path / "untracked.py").write_text("VALUE = 3\n", encoding="utf-8")
 
     assert reliability._changed_files("HEAD") == {"tracked.py", "untracked.py"}
+
+
+def test_changed_files_reject_an_invalid_base_ref(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    subprocess.run(["git", "init", "-q"], check=True)
+
+    with pytest.raises(ValueError, match="missing-base.*unavailable"):
+        reliability._changed_files("missing-base")
 
 
 def test_persisted_map_diffs_runs_and_carries_hints_forward(

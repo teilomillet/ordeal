@@ -219,6 +219,38 @@ jobs:
           path: .artifacts/tornado-14-evidence.json
           retention-days: 14
 
+  evidence-closure-real-projects:
+    runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.12"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.28"
+
+      - run: uv python install 3.12
+
+      - run: uv lock --check
+
+      - run: uv sync --locked --extra dev
+
+      - run: uv run python -c "import os, platform; assert platform.python_version().startswith(os.environ['UV_PYTHON'] + '.')"
+
+      - name: Measure Evidence Closure on pinned public reproductions
+        run: |
+          mkdir -p .artifacts
+          uv run python scripts/verify_evidence_closure_real_projects.py \
+            --output .artifacts/evidence-closure-real-projects.json
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: evidence-closure-real-projects
+          path: .artifacts/evidence-closure-real-projects.json
+          retention-days: 14
+
   compose-e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -308,6 +340,7 @@ jobs:
       - bug-evidence-httpie
       - bug-evidence-pysnooper
       - bug-evidence-tornado
+      - evidence-closure-real-projects
       - compose-e2e
     runs-on: ubuntu-latest
     env:

@@ -181,3 +181,14 @@ class TestCheckedInCIWorkflow:
         assert "--verify-evidence benchmarks/evidence/tornado-14.toml" in workflow
         assert "--output-json .artifacts/tornado-14-evidence.json" in workflow
         assert "name: tornado-14-evidence" in workflow
+
+    def test_real_project_evidence_closure_blocks_publication(self):
+        workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+        release = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
+
+        assert "evidence-closure-real-projects:" in workflow
+        assert "- evidence-closure-real-projects" in workflow
+        assert "scripts/verify_evidence_closure_real_projects.py" in workflow
+        assert "name: evidence-closure-real-projects" in workflow
+        assert "scripts/verify_evidence_closure_real_projects.py" in release
+        assert "tests/test_evidence_closure_real_projects.py" in release

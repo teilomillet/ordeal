@@ -57,7 +57,8 @@ must be positive before that cell can become PASS or FAIL. FAIL additionally
 requires the same uncaught outcome to replay; otherwise the cell remains NOT
 EXERCISED with a blocker. An expected-precondition exception is not a clean
 return and cannot become PASS. Automatic Python closure currently covers only
-source-bound file-write faults with exact injection-hit accounting.
+source-bound file-write faults and operations with exactly one fully resolved
+`subprocess.run` timeout boundary. Dynamic or multiple commands remain NOT EXERCISED.
 
 ## Experiment safety
 

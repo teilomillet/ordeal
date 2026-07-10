@@ -278,6 +278,24 @@ class InitConfig:
 
 
 @dataclass
+class DiffConfig:
+    """Settings for revision-isolated ``ordeal diff`` runs."""
+
+    target: str | None = None
+    base_ref: str | None = None
+    candidate_ref: str = "HEAD"
+    max_examples: int = 100
+    seed: int = 42
+    rtol: float | None = None
+    atol: float | None = None
+    include_private: bool = False
+    fixture_registries: list[str] = field(default_factory=list)
+    replay_attempts: int = 2
+    save_artifacts: bool = False
+    artifact_dir: str = ".ordeal/diff"
+
+
+@dataclass
 class ComposeRequestConfig:
     """One HTTP operation used by the long-lived Compose runner."""
 
@@ -332,6 +350,7 @@ class OrdealConfig:
     mutations: MutationConfig | None = None
     audit: AuditConfig = field(default_factory=AuditConfig)
     init: InitConfig = field(default_factory=InitConfig)
+    diff: DiffConfig = field(default_factory=DiffConfig)
     compose: ComposeConfig | None = None
 
 
@@ -365,6 +384,7 @@ _KNOWN_SECTIONS = {
     "mutations",
     "audit",
     "init",
+    "diff",
     "compose",
 }
 
@@ -386,6 +406,7 @@ _KNOWN_CONTRACT_KEYS = _fields_of(ContractConfig)
 _KNOWN_AUDIT_TARGET_KEYS = _fields_of(AuditTargetConfig)
 _KNOWN_AUDIT_KEYS = _fields_of(AuditConfig)
 _KNOWN_INIT_KEYS = _fields_of(InitConfig)
+_KNOWN_DIFF_KEYS = _fields_of(DiffConfig)
 _KNOWN_COMPOSE_KEYS = _fields_of(ComposeConfig)
 _KNOWN_COMPOSE_REQUEST_KEYS = (_fields_of(ComposeRequestConfig) - {"json_body"}) | {"json"}
 # API and Test configs have extra TOML-only keys not in the dataclass
@@ -928,6 +949,36 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
             f"Must be one of: {_valid_presets()}"
         )
 
+    # -- Diff --
+    diff_raw = raw.get("diff", {})
+    _warn_unknown_keys("diff", diff_raw, _KNOWN_DIFF_KEYS)
+    diff_cfg = DiffConfig(
+        target=diff_raw.get("target"),
+        base_ref=diff_raw.get("base_ref"),
+        candidate_ref=str(diff_raw.get("candidate_ref", "HEAD")),
+        max_examples=int(diff_raw.get("max_examples", 100)),
+        seed=int(diff_raw.get("seed", 42)),
+        rtol=(float(value) if (value := diff_raw.get("rtol")) is not None else None),
+        atol=(float(value) if (value := diff_raw.get("atol")) is not None else None),
+        include_private=bool(diff_raw.get("include_private", False)),
+        fixture_registries=list(diff_raw.get("fixture_registries", [])),
+        replay_attempts=int(diff_raw.get("replay_attempts", 2)),
+        save_artifacts=bool(diff_raw.get("save_artifacts", False)),
+        artifact_dir=str(diff_raw.get("artifact_dir", ".ordeal/diff")),
+    )
+    if diff_cfg.max_examples < 1:
+        raise ConfigError("diff.max_examples must be >= 1")
+    if diff_cfg.rtol is not None and diff_cfg.rtol < 0:
+        raise ConfigError("diff.rtol must be >= 0")
+    if diff_cfg.atol is not None and diff_cfg.atol < 0:
+        raise ConfigError("diff.atol must be >= 0")
+    if diff_cfg.replay_attempts < 1:
+        raise ConfigError("diff.replay_attempts must be >= 1")
+    if not diff_cfg.candidate_ref.strip():
+        raise ConfigError("diff.candidate_ref cannot be empty")
+    if not diff_cfg.artifact_dir.strip():
+        raise ConfigError("diff.artifact_dir cannot be empty")
+
     compose_cfg = _load_compose_config(raw["compose"], config_path=p) if "compose" in raw else None
 
     return OrdealConfig(
@@ -942,5 +993,6 @@ def load_config(path: str | Path = "ordeal.toml") -> OrdealConfig:
         mutations=mutations_cfg,
         audit=audit_cfg,
         init=init_cfg,
+        diff=diff_cfg,
         compose=compose_cfg,
     )

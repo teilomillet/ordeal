@@ -6026,6 +6026,201 @@ def _cmd_mine_pair(args: argparse.Namespace) -> int:
     return 0
 
 
+def _diff_artifact_paths(artifact_dir: Path, target: str) -> tuple[Path, Path]:
+    """Return stable JSON and Markdown paths for one revision diff target."""
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", target.replace(":", ".")).strip(".-")
+    slug = slug or "target"
+    return artifact_dir / f"{slug}.json", artifact_dir / f"{slug}.md"
+
+
+def _write_diff_artifacts(result: Any, artifact_dir: Path) -> tuple[Path, Path]:
+    """Persist machine-readable and review-readable revision diff evidence."""
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    json_path, markdown_path = _diff_artifact_paths(artifact_dir, result.target)
+    payload = result.to_dict()
+    payload["generated_at"] = datetime.now(UTC).isoformat()
+    rerun = [
+        "ordeal",
+        "diff",
+        result.target,
+        "--base-ref",
+        result.base.ref,
+        "--candidate-ref",
+        result.candidate.ref,
+        "--max-examples",
+        str(result.max_examples),
+        "--seed",
+        str(result.seed),
+        "--replay-attempts",
+        str(result.replay_attempts),
+    ]
+    if result.rtol is not None:
+        rerun.extend(("--rtol", str(result.rtol)))
+    if result.atol is not None:
+        rerun.extend(("--atol", str(result.atol)))
+    payload["commands"] = {"rerun": _shell_command(*rerun)}
+    json_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    markdown = (
+        f"# Ordeal revision diff: `{result.target}`\n\n"
+        "This report compares the recorded commits in separate detached worktrees and "
+        "subprocesses. Sampled agreement is not a proof of equivalence.\n\n"
+        "```text\n"
+        f"{result.summary()}\n"
+        "```\n"
+    )
+    markdown_path.write_text(markdown, encoding="utf-8")
+    return json_path, markdown_path
+
+
+def _warn_if_diff_head_is_dirty(candidate_ref: str) -> None:
+    """Explain when committed ``HEAD`` excludes local working-tree changes."""
+    if candidate_ref != "HEAD":
+        return
+    import subprocess
+
+    completed = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    changed = [line for line in completed.stdout.splitlines() if line.strip()]
+    if completed.returncode == 0 and changed:
+        _stderr(
+            f"Note: candidate HEAD uses committed content; {len(changed)} working-tree "
+            "change(s) are not included.\n"
+        )
+
+
+def _cmd_diff(args: argparse.Namespace) -> int:
+    """Compare one callable or module across isolated Git revisions."""
+    from ordeal._revision_diff import RevisionDiffError, run_revision_diff
+
+    try:
+        cfg = _load_optional_config(getattr(args, "config", None))
+    except FileNotFoundError:
+        _stderr(f"Config not found: {args.config}\n")
+        return 2
+    except ConfigError as exc:
+        _stderr(f"Config error: {exc}\n")
+        return 2
+
+    diff_cfg = cfg.diff if cfg is not None else None
+    target = _cli_or_config(args.target, diff_cfg.target if diff_cfg else None)
+    if not target:
+        _stderr("No diff target specified. Pass TARGET or set [diff].target.\n")
+        return 2
+
+    base_ref = _cli_or_config(args.base_ref, diff_cfg.base_ref if diff_cfg else None)
+    candidate_ref = str(
+        _cli_or_config(args.candidate_ref, diff_cfg.candidate_ref if diff_cfg else "HEAD")
+    )
+    max_examples = int(
+        _cli_or_config(args.max_examples, diff_cfg.max_examples if diff_cfg else 100)
+    )
+    seed = int(_cli_or_config(args.seed, diff_cfg.seed if diff_cfg else 42))
+    rtol = _cli_or_config(args.rtol, diff_cfg.rtol if diff_cfg else None)
+    atol = _cli_or_config(args.atol, diff_cfg.atol if diff_cfg else None)
+    replay_attempts = int(
+        _cli_or_config(
+            args.replay_attempts,
+            diff_cfg.replay_attempts if diff_cfg else 2,
+        )
+    )
+    include_private = bool(
+        _cli_or_config(
+            args.include_private,
+            diff_cfg.include_private if diff_cfg else False,
+        )
+    )
+    save_artifacts = bool(
+        _cli_or_config(
+            args.save_artifacts,
+            diff_cfg.save_artifacts if diff_cfg else False,
+        )
+    )
+    configured_registries = diff_cfg.fixture_registries if diff_cfg else []
+    shared_registries = cfg.fixtures.registries if cfg is not None else []
+    fixture_registries = list(
+        dict.fromkeys(
+            [
+                *shared_registries,
+                *configured_registries,
+                *(args.fixture_registries or []),
+            ]
+        )
+    )
+
+    artifact_dir: Path | None = None
+    if save_artifacts:
+        raw_artifact_dir = str(
+            _cli_or_config(
+                args.artifact_dir,
+                diff_cfg.artifact_dir if diff_cfg else ".ordeal/diff",
+            )
+        )
+        try:
+            artifact_dir = _workspace_output_path(raw_artifact_dir, label="diff.artifact_dir")
+        except ValueError as exc:
+            _stderr(f"Invalid artifact directory: {exc}\n")
+            return 2
+
+    _warn_if_diff_head_is_dirty(candidate_ref)
+
+    try:
+        result = run_revision_diff(
+            str(target),
+            base_ref=base_ref,
+            candidate_ref=candidate_ref,
+            max_examples=max_examples,
+            seed=seed,
+            rtol=rtol,
+            atol=atol,
+            include_private=include_private,
+            fixture_registries=fixture_registries,
+            replay_attempts=replay_attempts,
+        )
+    except (RevisionDiffError, ValueError) as exc:
+        if getattr(args, "json", False):
+            print(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "tool": "ordeal diff",
+                        "target": str(target),
+                        "status": "inconclusive",
+                        "reason": str(exc),
+                    }
+                )
+            )
+        else:
+            _stderr(f"Diff unavailable: {exc}\n")
+        return 2
+
+    written_paths: tuple[Path, Path] | None = None
+    if artifact_dir is not None:
+        written_paths = _write_diff_artifacts(result, artifact_dir)
+
+    if getattr(args, "json", False):
+        payload = result.to_dict()
+        if written_paths is not None:
+            payload["saved_artifacts"] = {
+                "json": _display_path(written_paths[0]),
+                "markdown": _display_path(written_paths[1]),
+            }
+        print(json.dumps(payload, indent=2))
+    else:
+        print(result.summary())
+        if written_paths is not None:
+            _stderr(f"Diff artifacts saved: {written_paths[0]}, {written_paths[1]}\n")
+
+    if result.status == "no_divergence_observed":
+        return 0
+    if result.status == "divergent":
+        return 1
+    return 2
+
+
 def _cmd_benchmark(args: argparse.Namespace) -> int:
     """Measure scaling, mutation latency, or a checked-in perf/quality contract."""
     import os
@@ -11971,6 +12166,25 @@ def _mine_command_description() -> str:
     )
 
 
+def _diff_command_description() -> str:
+    """Return the long-form ``ordeal diff`` help description."""
+    return (
+        "Check whether a committed refactor changed one callable or module.\n\n"
+        "Ordeal checks out the base and candidate into separate temporary worktrees. "
+        "The base generates test inputs; the candidate receives those exact inputs. "
+        "The command reports differences but does not decide which version is correct.\n\n"
+        "Example:\n"
+        "  ordeal diff mypkg.scoring --base-ref origin/main --candidate-ref HEAD\n\n"
+        "HEAD means committed files only. Defaults may live in [diff] in ordeal.toml. "
+        "NO DIVERGENCE OBSERVED is sampled evidence, never as proven equivalence.\n"
+        "Beginner model: https://docs.byordeal.com/concepts/differential-testing/\n"
+        "Divergence evidence: https://docs.byordeal.com/concepts/divergence-evidence/\n"
+        "Start: https://docs.byordeal.com/guides/revision-diff/\n"
+        "Fix problems: https://docs.byordeal.com/guides/revision-diff-troubleshooting/\n"
+        "JSON fields: https://docs.byordeal.com/reference/revision-diff-schema/"
+    )
+
+
 def _init_command_description() -> str:
     """Return the long-form `ordeal init` help description."""
     return (
@@ -12494,6 +12708,95 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     ),
                 ),
                 _arg("--json", action="store_true", help="Output agent-facing JSON"),
+            ),
+        ),
+        CommandSpec(
+            name="diff",
+            handler=_cmd_diff,
+            help="Compare a target across isolated Git revisions",
+            description=_diff_command_description,
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            arguments=(
+                _arg(
+                    "target",
+                    nargs="?",
+                    help="Callable or module target (omit to use [diff].target)",
+                ),
+                _arg(
+                    "--config",
+                    "-c",
+                    default=None,
+                    help="Config file with [diff] defaults (default: ordeal.toml if present)",
+                ),
+                _arg(
+                    "--base-ref",
+                    default=None,
+                    help="Baseline Git ref (default: remote default branch/main/HEAD^)",
+                ),
+                _arg(
+                    "--candidate-ref",
+                    default=None,
+                    help="Candidate Git ref (default: HEAD)",
+                ),
+                _arg(
+                    "--max-examples",
+                    "-n",
+                    type=int,
+                    default=None,
+                    help="Examples per function (default: 100, or [diff].max_examples)",
+                ),
+                _arg(
+                    "--seed",
+                    type=int,
+                    default=None,
+                    help="Deterministic input-generation seed (default: 42)",
+                ),
+                _arg(
+                    "--rtol",
+                    type=float,
+                    default=None,
+                    help="Relative tolerance for numeric outputs",
+                ),
+                _arg(
+                    "--atol",
+                    type=float,
+                    default=None,
+                    help="Absolute tolerance for numeric outputs",
+                ),
+                _arg(
+                    "--include-private",
+                    action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="Include _private functions in module targets",
+                ),
+                _arg(
+                    "--fixture-registry",
+                    dest="fixture_registries",
+                    action="append",
+                    default=None,
+                    metavar="MODULE",
+                    help="Repeat to import a project fixture registry in the base worker",
+                ),
+                _arg(
+                    "--replay-attempts",
+                    type=int,
+                    default=None,
+                    metavar="N",
+                    help="Immediate same-input replays per mismatch (default: 2)",
+                ),
+                _arg(
+                    "--save-artifacts",
+                    action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="Save JSON and Markdown evidence under .ordeal/diff",
+                ),
+                _arg(
+                    "--artifact-dir",
+                    default=None,
+                    metavar="PATH",
+                    help="Artifact directory (default: .ordeal/diff)",
+                ),
+                _arg("--json", action="store_true", help="Output machine-readable JSON"),
             ),
         ),
         CommandSpec(
@@ -13070,7 +13373,31 @@ def _cli_catalog_applies_to(
 
 def _cli_catalog_learn_more(name: str) -> list[str]:
     """Return adjacent CLI discovery surfaces for one command."""
+    if name == "diff":
+        return [
+            "ordeal diff --help",
+            "docs/guides/revision-diff.md",
+            "docs/guides/revision-diff-troubleshooting.md",
+            "docs/reference/revision-diff-schema.md",
+            "docs/concepts/differential-testing.md",
+            "docs/concepts/divergence-evidence.md",
+            "docs/guides/divergence-evidence.md",
+            "docs/guides/divergence-evidence-troubleshooting.md",
+            "docs/reference/divergence-evidence-schema.md",
+            "ordeal catalog --json",
+        ]
     return [f"ordeal {name} --help", "ordeal catalog --json"]
+
+
+def _cli_catalog_examples(name: str, usage: str) -> list[str]:
+    """Return copyable examples for one CLI catalog entry."""
+    if name == "diff":
+        return [
+            "ordeal diff mypkg.scoring --base-ref origin/main --candidate-ref HEAD",
+            "ordeal diff mypkg.scoring --base-ref origin/main --save-artifacts",
+            "ordeal diff --json  # uses [diff] from ordeal.toml",
+        ]
+    return [usage] if usage else []
 
 
 def command_catalog() -> list[dict[str, Any]]:
@@ -13105,7 +13432,7 @@ def command_catalog() -> list[dict[str, Any]]:
                     "applies_to": _cli_catalog_applies_to(name, description, arguments),
                     "inputs": _cli_catalog_input_summaries(arguments),
                     "outputs": _cli_catalog_output_summaries(name, arguments),
-                    "examples": [usage] if usage else [],
+                    "examples": _cli_catalog_examples(name, usage),
                     "learn_more": _cli_catalog_learn_more(name),
                 }
             )

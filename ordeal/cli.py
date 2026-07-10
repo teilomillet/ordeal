@@ -22,6 +22,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 import time as _time
 from collections import Counter
@@ -4703,6 +4704,22 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         _stderr(f"Cannot start scan: {exc}.\n")
         return 2
     module_name = _scan_base_module(scan_target)
+    scan_started = _time.monotonic()
+    if getattr(args, "deepen", False) and args.time_limit is None:
+        reason = "--deepen requires an explicit --time-limit safety budget"
+        if args.json:
+            print(
+                _build_blocked_agent_envelope(
+                    tool="scan",
+                    target=scan_target,
+                    summary="automatic deepening needs an explicit budget",
+                    blocking_reason=reason,
+                    suggested_commands=(f"ordeal scan {scan_target} --deepen --time-limit 60",),
+                ).to_json()
+            )
+            return 2
+        _stderr(f"Cannot deepen scan: {reason}.\n")
+        return 2
     allow_config_override = args.max_examples == 50
     runtime_defaults = _resolve_scan_runtime_defaults(
         scan_target,
@@ -4959,7 +4976,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             scan_security_focus=scan_security_focus,
             scan_minimize_findings=bool(getattr(args, "save_artifacts", False)),
             run_mine=False,
-            run_scan=True,
+            run_scan=not bool(getattr(args, "evidence_fault", None)),
             run_mutate=False,
             run_chaos=False,
         )
@@ -4998,6 +5015,228 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     if scenario_libraries:
         state.supervisor_info = dict(getattr(state, "supervisor_info", {}) or {})
         state.supervisor_info["scenario_libraries"] = scenario_libraries
+    from ordeal.reliability import (
+        _build_reliability_map,
+        _default_reliability_map_path,
+        _run_fault_probe,
+    )
+
+    evidence_fault = str(getattr(args, "evidence_fault", None) or "").strip()
+    if evidence_fault:
+        if len(scan_targets) != 1:
+            reason = "--evidence-fault requires exactly one --target selector"
+            if args.json:
+                print(
+                    _build_blocked_agent_envelope(
+                        tool="scan",
+                        target=scan_target,
+                        summary="fault-specific evidence probe is not targeted",
+                        blocking_reason=reason,
+                        suggested_commands=(f"ordeal scan {scan_target} --list-targets",),
+                    ).to_json()
+                )
+            else:
+                _stderr(f"Scan blocked: {reason}.\n")
+            return 2
+        observation = _run_fault_probe(
+            module_name,
+            scan_targets[0],
+            evidence_fault,
+            max_examples=scan_max_examples,
+            scan_kwargs={
+                "check_return_type": True,
+                "include_private": inc_private,
+                "fixtures": runtime_defaults.fixtures,
+                "object_factories": runtime_defaults.object_factories,
+                "object_setups": runtime_defaults.object_setups,
+                "object_scenarios": runtime_defaults.object_scenarios,
+                "object_state_factories": runtime_defaults.object_state_factories,
+                "object_teardowns": runtime_defaults.object_teardowns,
+                "object_harnesses": runtime_defaults.object_harnesses,
+                "expected_failures": runtime_defaults.expected_failures,
+                "expected_preconditions": runtime_defaults.expected_preconditions,
+                "ignore_properties": scan_ignore_properties,
+                "ignore_relations": scan_ignore_relations,
+                "property_overrides": scan_property_overrides,
+                "relation_overrides": scan_relation_overrides,
+                "expected_properties": runtime_defaults.expected_properties,
+                "expected_relations": runtime_defaults.expected_relations,
+                "contract_checks": runtime_defaults.contract_checks,
+                "ignore_contracts": runtime_defaults.ignore_contracts,
+                "contract_overrides": runtime_defaults.contract_overrides,
+                "mode": scan_mode,
+                "seed_from_tests": scan_seed_from_tests,
+                "seed_from_fixtures": runtime_defaults.seed_from_fixtures,
+                "seed_from_docstrings": runtime_defaults.seed_from_docstrings,
+                "seed_from_code": runtime_defaults.seed_from_code,
+                "seed_from_call_sites": scan_seed_from_call_sites,
+                "treat_any_as_weak": runtime_defaults.treat_any_as_weak,
+                "proof_bundles": runtime_defaults.proof_bundles,
+                "auto_contracts": runtime_defaults.auto_contracts,
+                "require_replayable": runtime_defaults.require_replayable,
+                "min_contract_fit": scan_min_contract_fit,
+                "min_reachability": scan_min_reachability,
+                "min_realism": scan_min_realism,
+                "security_focus": scan_security_focus,
+                "minimize_findings": False,
+            },
+        )
+        state.supervisor_info = dict(getattr(state, "supervisor_info", {}) or {})
+        state.supervisor_info["reliability_observations"] = [observation]
+
+    reliability_base_ref = (
+        str(getattr(args, "base_ref", None) or os.environ.get("ORDEAL_BASE_REF", "")).strip()
+        or None
+    )
+    try:
+        reliability_map = _build_reliability_map(
+            module_name,
+            state,
+            scan_target_rows,
+            base_ref=reliability_base_ref,
+            allow_service_faults=bool(getattr(args, "allow_service_faults", False)),
+            previous_path=_default_reliability_map_path(module_name),
+        )
+    except Exception as exc:
+        reliability_map = {
+            "schema": "ordeal.reliability-map/v1",
+            "module": module_name,
+            "status": "blocked",
+            "blocking_reason": f"reliability map construction failed: {type(exc).__name__}: {exc}",
+            "summary": {
+                "operations": 0,
+                "cells": 0,
+                "pass": 0,
+                "not_exercised": 0,
+                "fail": 0,
+                "blocked": 0,
+            },
+            "operations": [],
+            "cells": [],
+            "next_experiment": None,
+        }
+    state.supervisor_info = dict(getattr(state, "supervisor_info", {}) or {})
+    state.supervisor_info["reliability_map"] = reliability_map
+    if getattr(args, "deepen", False):
+        budget = float(args.time_limit)
+        elapsed = _time.monotonic() - scan_started
+        remaining = max(0.0, budget - elapsed)
+        experiment = reliability_map.get("next_experiment")
+        deepening: dict[str, Any] = {
+            "requested": True,
+            "budget_seconds": budget,
+            "remaining_before_seconds": round(remaining, 4),
+            "service_faults_enabled": bool(getattr(args, "allow_service_faults", False)),
+            "service_faults_executed": False,
+        }
+        if remaining <= 0:
+            deepening.update(
+                {
+                    "status": "budget_exhausted",
+                    "reason": "the initial scan consumed the explicit time budget",
+                }
+            )
+        elif not isinstance(experiment, Mapping):
+            deepening.update(
+                {
+                    "status": "no_safe_experiment",
+                    "reason": "the reliability map had no safe automatic follow-up",
+                }
+            )
+        elif not experiment.get("auto_runnable"):
+            deepening.update(
+                {
+                    "status": "review_required",
+                    "engine": experiment.get("engine"),
+                    "command": experiment.get("command"),
+                    "reason": experiment.get("reason"),
+                }
+            )
+        else:
+            command = shlex.split(str(experiment["command"]))
+            if command and command[0] == "ordeal":
+                command = [sys.executable, "-m", "ordeal.cli", *command[1:]]
+            if experiment.get("engine") in {"scan", "compose"} and "--json" not in command:
+                command.append("--json")
+            started = _time.monotonic()
+            try:
+                completed = subprocess.run(
+                    command,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=remaining,
+                )
+            except subprocess.TimeoutExpired:
+                deepening.update(
+                    {
+                        "status": "budget_exhausted",
+                        "engine": experiment.get("engine"),
+                        "command": experiment.get("command"),
+                        "reason": "the follow-up reached the remaining time budget",
+                    }
+                )
+            else:
+                output: dict[str, Any] | None = None
+                with contextlib.suppress(json.JSONDecodeError):
+                    output = json.loads(completed.stdout)
+                child_details = (
+                    output.get("raw_details", {}).get("report", {}).get("details", [])
+                    if output
+                    else []
+                )
+                child_observations = (
+                    output.get("raw_details", {}).get("reliability_observations", [])
+                    if output
+                    else []
+                )
+                if child_observations:
+                    existing_observations = list(
+                        state.supervisor_info.get("reliability_observations", ())
+                    )
+                    existing_observations.extend(
+                        item for item in child_observations if isinstance(item, Mapping)
+                    )
+                    state.supervisor_info["reliability_observations"] = existing_observations
+                    reliability_map = _build_reliability_map(
+                        module_name,
+                        state,
+                        scan_target_rows,
+                        base_ref=reliability_base_ref,
+                        allow_service_faults=bool(getattr(args, "allow_service_faults", False)),
+                        previous_path=_default_reliability_map_path(module_name),
+                    )
+                child_findings = [
+                    {
+                        "target": detail.get("qualname") or detail.get("function"),
+                        "kind": detail.get("kind") or detail.get("category"),
+                        "summary": detail.get("summary") or detail.get("error"),
+                    }
+                    for detail in child_details[:10]
+                    if isinstance(detail, Mapping)
+                ]
+                deepening.update(
+                    {
+                        "status": "completed" if completed.returncode in {0, 1} else "error",
+                        "engine": experiment.get("engine"),
+                        "command": experiment.get("command"),
+                        "exit_code": completed.returncode,
+                        "result_status": output.get("status") if output else None,
+                        "finding_count": (
+                            output.get("raw_details", {}).get("finding_count") if output else None
+                        ),
+                        "findings": child_findings,
+                        "findings_truncated": len(child_details) > 10,
+                        "reliability_observations": child_observations[:10],
+                        "stderr": completed.stderr[-500:]
+                        if completed.returncode not in {0, 1}
+                        else "",
+                        "service_faults_executed": experiment.get("engine") == "compose",
+                    }
+                )
+            deepening["elapsed_seconds"] = round(_time.monotonic() - started, 4)
+        reliability_map["deepening"] = deepening
+        state.supervisor_info["reliability_map"] = reliability_map
 
     if not args.json:
         print(_format_scan_summary(state))
@@ -5020,11 +5259,18 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     written_proofs_path: Path | None = None
     written_replay_path: Path | None = None
     written_scenario_library_path: Path | None = None
+    written_reliability_map_path: Path | None = None
     index_path: Path | None = None
-    has_details = bool(state.findings or _scan_report_details(state))
+    report_details = _scan_report_details(state)
+    has_regression_details = bool(
+        state.findings
+        or any(detail.get("kind") not in {"blocked", "precondition"} for detail in report_details)
+    )
+    has_details = bool(report_details or reliability_map.get("cells"))
     if save_artifacts and has_details:
         report_path = report_path or _default_scan_report_path(state.module)
-        regression_path = regression_path or _DEFAULT_REGRESSION_PATH
+        if has_regression_details:
+            regression_path = regression_path or _DEFAULT_REGRESSION_PATH
     if regression_path:
         written_regression_path = _write_scan_regressions(state, regression_path)
     if report_path:
@@ -5047,6 +5293,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         written_proofs_path = written_review_artifacts.get("proofs")
         written_replay_path = written_review_artifacts.get("replay")
         written_scenario_library_path = written_review_artifacts.get("scenarios")
+        written_reliability_map_path = written_review_artifacts.get("reliability_map")
         bundle_path, bundle = _write_scan_bundle(
             state,
             path_str=_artifact_bundle_path(str(written_report_path)),
@@ -5091,6 +5338,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                 written_proofs_path=written_proofs_path,
                 written_replay_path=written_replay_path,
                 written_scenario_library_path=written_scenario_library_path,
+                written_reliability_map_path=written_reliability_map_path,
                 index_path=index_path,
             ).to_json()
         )
@@ -8309,6 +8557,7 @@ def _format_scan_summary(state: Any) -> str:
     expected = [
         detail for detail in details if detail.get("category") == "expected_precondition_failure"
     ]
+    blocked = [detail for detail in details if detail.get("kind") == "blocked"]
     if state.findings:
         status = "findings found"
     elif coverage_gaps:
@@ -8319,12 +8568,14 @@ def _format_scan_summary(state: Any) -> str:
         status = "robustness findings observed"
     elif invalid_inputs:
         status = "invalid-input crashes observed"
+    elif blocked:
+        status = "blocked targets observed"
     elif expected:
         status = "expected preconditions observed"
     else:
         status = "no findings yet"
     lines.append(f"  status: {status}")
-    lines.append(f"  confidence: {state.confidence:.0%}")
+    lines.append(f"  confidence: {_calibrated_scan_confidence(state):.0%}")
 
     lines.append(f"  checked: {', '.join(_scan_checked_items(state))}")
     sampling = getattr(state, "supervisor_info", {}).get("scan_sampling")
@@ -8366,6 +8617,13 @@ def _format_scan_summary(state: Any) -> str:
             lines.append("  expected preconditions:")
             for detail in expected[:5]:
                 lines.append(f"    - {detail.get('summary', detail.get('function', '?'))}")
+        if blocked:
+            lines.append("  blocked targets:")
+            for detail in blocked[:5]:
+                lines.append(
+                    f"    - {detail.get('function', '?')}: "
+                    f"{detail.get('blocking_reason') or detail.get('error')}"
+                )
 
     if details:
         lines.append("  evidence cards:")
@@ -8387,6 +8645,21 @@ def _format_scan_summary(state: Any) -> str:
                 break
             lines.append(f"    - {name}: {', '.join(gaps)}")
             shown += 1
+
+    reliability_map = getattr(state, "supervisor_info", {}).get("reliability_map")
+    if isinstance(reliability_map, Mapping) and reliability_map.get("summary"):
+        summary = reliability_map["summary"]
+        lines.append(
+            "  reliability map: "
+            f"{summary.get('operations', 0)} operations | "
+            f"PASS {summary.get('pass', 0)} | "
+            f"NOT EXERCISED {summary.get('not_exercised', 0)} | "
+            f"FAIL {summary.get('fail', 0)} | "
+            f"blocked {summary.get('blocked', 0)}"
+        )
+        next_experiment = reliability_map.get("next_experiment")
+        if isinstance(next_experiment, Mapping) and next_experiment.get("command"):
+            lines.append(f"  next evidence: {next_experiment['command']}")
 
     from ordeal.suggest import format_suggestions
 
@@ -8420,6 +8693,30 @@ def _scan_detail_with_evidence(
         "module": module,
         "qualname": detail.get("qualname") or f"{module}.{detail.get('function', '?')}",
     }
+    if normalized.get("kind") == "blocked":
+        normalized["evidence"] = {
+            "schema": "ordeal.scan-limitation/v1",
+            "status": "blocked",
+            "subject": {
+                "target": normalized["qualname"],
+                "source_sha256": normalized.get("source_sha256"),
+            },
+            "limitation": {
+                "kind": normalized.get("limitation_kind"),
+                "reason": normalized.get("blocking_reason") or normalized.get("error"),
+            },
+            "boundaries": {
+                "establishes": "Ordeal did not reach a measured execution of the target.",
+                "does_not_establish": [
+                    "that the target crashed",
+                    "that the target is correct",
+                    "that the blocked path is unreachable",
+                ],
+            },
+        }
+        normalized["regression_test"] = None
+        normalized["regression_binding"] = None
+        return normalized
     regression_test, regression_binding = _regression_metadata(normalized)
     evidence = _build_finding_evidence(normalized, module=module)
     normalized["evidence"] = _evidence_with_regression_binding(
@@ -8630,9 +8927,15 @@ def _scan_evidence_dimensions(state: Any) -> dict[str, Any]:
     functions = getattr(state, "functions", {}) or {}
     skipped = list(getattr(state, "skipped", []))
     details = _scan_report_details(state)
+    actionable_details = [
+        detail
+        for detail in details
+        if detail.get("kind") not in {"blocked", "precondition"}
+        and detail.get("category") != "expected_precondition_failure"
+    ]
     replayable = sum(
         1
-        for detail in details
+        for detail in actionable_details
         if detail.get("replayable")
         or detail.get("counterexample") is not None
         or detail.get("failing_args") is not None
@@ -8643,6 +8946,14 @@ def _scan_evidence_dimensions(state: Any) -> dict[str, Any]:
         if getattr(func_state, "mutation_score", None) is not None
     ]
     total_functions = len(functions) + len(skipped)
+    sampling = getattr(state, "supervisor_info", {}).get("scan_sampling")
+    if isinstance(sampling, Mapping) and int(sampling.get("total_runnable", 0)) > 0:
+        surface_coverage = int(sampling.get("sampled", 0)) / int(sampling.get("total_runnable", 0))
+    else:
+        surface_coverage = len(functions) / total_functions if total_functions > 0 else 1.0
+    blocked_functions = sum(
+        1 for function in functions.values() if getattr(function, "scan_limitation_kind", None)
+    )
     return {
         "search_depth": {
             "functions": len(functions),
@@ -8651,13 +8962,30 @@ def _scan_evidence_dimensions(state: Any) -> dict[str, Any]:
         },
         "replayability": {
             "replayable_findings": replayable,
-            "total_findings": len(details),
+            "total_findings": len(actionable_details),
         },
         "mutation_strength": (
             sum(mutation_scores) / len(mutation_scores) if mutation_scores else None
         ),
         "fixture_completeness": (len(functions) / total_functions if total_functions > 0 else 1.0),
+        "surface_coverage": round(surface_coverage, 4),
+        "blocked_functions": blocked_functions,
     }
+
+
+def _calibrated_scan_confidence(state: Any) -> float:
+    """Bound aggregate confidence by observed surface, replay, and blockers."""
+    evidence = _scan_evidence_dimensions(state)
+    replay = evidence["replayability"]
+    replay_score = (
+        replay["replayable_findings"] / replay["total_findings"]
+        if replay["total_findings"]
+        else 1.0
+    )
+    functions = getattr(state, "functions", {}) or {}
+    blocked_ratio = evidence["blocked_functions"] / max(len(functions), 1)
+    observed = min(float(getattr(state, "confidence", 0.0)), evidence["surface_coverage"])
+    return max(0.0, min(1.0, observed * (0.75 + 0.25 * replay_score) * (1 - blocked_ratio / 2)))
 
 
 def _trim_report_value(
@@ -9828,6 +10156,14 @@ def _write_scan_review_bundle_artifacts(
     support_suggestions = list(report.get("support_suggestions", []))
     scenario_records = list(report.get("scenario_libraries", []))
     written: dict[str, Path] = {}
+    reliability_map = report.get("reliability_map")
+    if isinstance(reliability_map, Mapping) and reliability_map.get("cells"):
+        from ordeal.reliability import _default_reliability_map_path, _write_reliability_map
+
+        written["reliability_map"] = _write_reliability_map(
+            _default_reliability_map_path(state.module), reliability_map
+        )
+        _stderr(f"Reliability map saved: {written['reliability_map']}\n")
     if config_suggestions:
         written["config"] = _write_text_artifact(
             _default_scan_review_config_path(state.module),
@@ -9894,6 +10230,10 @@ def _build_scan_report(
         getattr(state, "supervisor_info", {}).get("support_suggestions", ())
     )
     scenario_libraries = list(getattr(state, "supervisor_info", {}).get("scenario_libraries", ()))
+    reliability_map = getattr(state, "supervisor_info", {}).get("reliability_map", {})
+    reliability_summary = (
+        dict(reliability_map.get("summary", {})) if isinstance(reliability_map, Mapping) else {}
+    )
     guard_command = (
         _shell_command("uv", "run", "ordeal", "verify", "--ci")
         if regression_path is not None
@@ -9931,10 +10271,13 @@ def _build_scan_report(
     expected_count = sum(
         1 for detail in details if detail.get("category") == "expected_precondition_failure"
     )
+    blocked_count = sum(1 for detail in details if detail.get("kind") == "blocked")
     if promoted_count:
         status = "findings found"
     elif exploratory_crash_count or exploratory_property_count or robustness_count:
         status = "exploratory findings"
+    elif blocked_count:
+        status = "blocked"
     elif expected_count:
         status = "expected preconditions observed"
     else:
@@ -9950,6 +10293,7 @@ def _build_scan_report(
         f"Exploratory crashes: {exploratory_crash_count}",
         f"Exploratory properties: {exploratory_property_count}",
         f"Expected precondition failures: {expected_count}",
+        f"Blocked targets: {blocked_count}",
         f"Gaps: {sum(len(v) for v in state.frontier.values()) if state.frontier else 0}",
         (
             "Evidence:"
@@ -9981,6 +10325,23 @@ def _build_scan_report(
         summary.append(
             f"Scenario libraries: {inferred} inferred pack(s), reusable library notes available"
         )
+    if reliability_summary:
+        summary.append(
+            "Reliability map: "
+            f"{reliability_summary.get('operations', 0)} operations, "
+            f"{reliability_summary.get('pass', 0)} PASS, "
+            f"{reliability_summary.get('not_exercised', 0)} NOT EXERCISED, "
+            f"{reliability_summary.get('fail', 0)} FAIL, "
+            f"{reliability_summary.get('blocked', 0)} blocked"
+        )
+        deepening = reliability_map.get("deepening")
+        if isinstance(deepening, Mapping):
+            summary.append(
+                "Automatic deepening: "
+                f"{deepening.get('status')}"
+                + (f" via {deepening.get('engine')}" if deepening.get("engine") else "")
+                + f" in {deepening.get('elapsed_seconds', 0)}s"
+            )
     suggested_commands = [
         f"ordeal scan {state.module}",
         f"ordeal mine {state.module} -n 200",
@@ -10005,11 +10366,12 @@ def _build_scan_report(
                 ],
             )
         )
-        suggested_commands = [
-            f"ordeal scan {state.module} --list-targets",
-            f"ordeal scan {state.module} --target <selector>",
-            f"ordeal scan {state.module} -n 50 --target <selector>",
-        ]
+        sampled_targets = [str(item) for item in sampling.get("targets", ()) if str(item)]
+        suggested_commands = [f"ordeal scan {state.module} --list-targets"]
+        if sampled_targets:
+            suggested_commands.append(
+                f"ordeal scan {state.module} --target {sampled_targets[0]} -n 50"
+            )
     elif scope_notes:
         extra_sections.append(("Scope Notes", scope_notes))
     extra_sections.append(
@@ -10039,11 +10401,45 @@ def _build_scan_report(
             ],
         )
     )
+    if isinstance(reliability_map, Mapping) and reliability_map.get("cells"):
+        operation_names = {
+            item.get("id"): item.get("target") for item in reliability_map.get("operations", ())
+        }
+        property_names = {
+            item.get("id"): item.get("name") for item in reliability_map.get("properties", ())
+        }
+        top_cells = [
+            cell for cell in reliability_map.get("cells", ()) if cell.get("status") != "PASS"
+        ][:5]
+        extra_sections.append(
+            (
+                "Reliability Map",
+                [
+                    f"{operation_names.get(cell.get('operation_id'), '?')} | "
+                    f"{cell.get('seam')} × {cell.get('fault')} × "
+                    f"{property_names.get(cell.get('property_id'), '?')}: "
+                    f"{cell.get('status')}"
+                    + (
+                        f" (blocked: {cell.get('blocking_reason')})"
+                        if cell.get("blocking_reason")
+                        else ""
+                    )
+                    for cell in top_cells
+                ],
+            )
+        )
+        next_experiment = reliability_map.get("next_experiment")
+        if isinstance(next_experiment, Mapping) and next_experiment.get("command"):
+            command = str(next_experiment["command"])
+            suggested_commands = [
+                *suggested_commands,
+                *([] if command in suggested_commands else [command]),
+            ]
     return {
         "target": state.module,
         "tool": "scan",
         "status": status,
-        "confidence": f"{state.confidence:.0%}",
+        "confidence": f"{_calibrated_scan_confidence(state):.0%}",
         "seed": getattr(state, "supervisor_info", {}).get("seed"),
         "summary": summary,
         "details": details,
@@ -10055,6 +10451,7 @@ def _build_scan_report(
         "config_suggestions": config_suggestions,
         "support_suggestions": support_suggestions,
         "scenario_libraries": scenario_libraries,
+        "reliability_map": reliability_map,
     }
 
 
@@ -10519,6 +10916,12 @@ def _recommended_action_for_report(report: Mapping[str, Any]) -> str:
             return f"Add a targeted test to cover the uncovered behavior in {qualname}."
         if kind == "fixture_gap":
             return f"Provide fixtures or constructors so ordeal can verify {qualname}."
+        if kind == "blocked":
+            reason = str(first.get("blocking_reason") or first.get("error") or "").strip()
+            return (
+                f"Provide a supported type, fixture, or object harness for {qualname}; "
+                f"Ordeal did not observe target behavior{f': {reason}' if reason else '.'}"
+            )
         if kind == "function_gap":
             status_detail = str(first.get("details", {}).get("status", "gap"))
             if status_detail == "exploratory":
@@ -10582,21 +10985,27 @@ def _scan_state_payload(state: Any) -> dict[str, Any]:
     """Serialize scan state for agent consumers without assuming a concrete type."""
     to_dict = getattr(state, "to_dict", None)
     if callable(to_dict):
-        return dict(to_dict())
-
-    to_json = getattr(state, "to_json", None)
-    if callable(to_json):
-        return dict(json.loads(to_json()))
-
-    return {
-        "module": getattr(state, "module", None),
-        "confidence": getattr(state, "confidence", None),
-        "findings": list(getattr(state, "findings", [])),
-        "finding_details": _scan_report_details(state),
-        "frontier": dict(getattr(state, "frontier", {})),
-        "skipped": list(getattr(state, "skipped", [])),
-        "supervisor_info": dict(getattr(state, "supervisor_info", {})),
-    }
+        payload = dict(to_dict())
+    else:
+        to_json = getattr(state, "to_json", None)
+        if callable(to_json):
+            payload = dict(json.loads(to_json()))
+        else:
+            payload = {
+                "module": getattr(state, "module", None),
+                "confidence": getattr(state, "confidence", None),
+                "findings": list(getattr(state, "findings", [])),
+                "finding_details": _scan_report_details(state),
+                "frontier": dict(getattr(state, "frontier", {})),
+                "skipped": list(getattr(state, "skipped", [])),
+                "supervisor_info": dict(getattr(state, "supervisor_info", {})),
+            }
+    supervisor_info = payload.get("supervisor_info")
+    if isinstance(supervisor_info, Mapping):
+        payload["supervisor_info"] = {
+            key: value for key, value in supervisor_info.items() if key != "reliability_map"
+        }
+    return payload
 
 
 def _build_scan_agent_envelope(
@@ -10610,11 +11019,32 @@ def _build_scan_agent_envelope(
     written_proofs_path: Path | None = None,
     written_replay_path: Path | None = None,
     written_scenario_library_path: Path | None = None,
+    written_reliability_map_path: Path | None = None,
     index_path: Path | None = None,
 ) -> Any:
     """Build the agent-facing JSON envelope for `ordeal scan`."""
     report = _build_scan_report(state, regression_path=written_regression_path)
     evidence = _scan_evidence_dimensions(state)
+    reliability_map = report.get("reliability_map", {})
+    compact_reliability_map = (
+        {
+            key: reliability_map.get(key)
+            for key in (
+                "schema",
+                "module",
+                "base_ref",
+                "service_faults_enabled",
+                "summary",
+                "next_experiment",
+                "continuity",
+                "deepening",
+            )
+            if key in reliability_map
+        }
+        if isinstance(reliability_map, Mapping)
+        else {}
+    )
+    compact_report = {**report, "reliability_map": compact_reliability_map}
     detail_categories = {detail.get("category") for detail in report.get("details", [])}
     artifacts: list[Any] = []
     if written_report_path is not None:
@@ -10665,6 +11095,14 @@ def _build_scan_agent_envelope(
                 "reusable collaborator scenario libraries",
             )
         )
+    if written_reliability_map_path is not None:
+        artifacts.append(
+            _agent_artifact(
+                "reliability-map",
+                written_reliability_map_path,
+                "source-backed operation, fault, and property evidence plan",
+            )
+        )
     if index_path is not None:
         artifacts.append(_agent_artifact("index", index_path, "artifact index"))
     return _build_agent_envelope_from_report(
@@ -10672,9 +11110,15 @@ def _build_scan_agent_envelope(
         status=(
             "findings"
             if state.findings
-            else ("exploratory" if detail_categories & _SPECULATIVE_SCAN_CATEGORIES else "ok")
+            else (
+                "exploratory"
+                if detail_categories & _SPECULATIVE_SCAN_CATEGORIES
+                else "blocked"
+                if any(detail.get("kind") == "blocked" for detail in report.get("details", []))
+                else "ok"
+            )
         ),
-        confidence=float(getattr(state, "confidence", 0.0)),
+        confidence=_calibrated_scan_confidence(state),
         confidence_basis=(
             (
                 "search depth: "
@@ -10696,17 +11140,30 @@ def _build_scan_agent_envelope(
                 )
             ),
             f"fixture completeness: {evidence['fixture_completeness']:.0%}",
+            f"surface coverage: {evidence['surface_coverage']:.0%}",
+            f"blocked targets: {evidence['blocked_functions']}",
         ),
         artifacts=artifacts,
         raw_details={
-            "report": report,
+            "report": compact_report,
             "state": _scan_state_payload(state),
             "seed": getattr(state, "supervisor_info", {}).get("seed"),
             "finding_count": len(report.get("details", [])),
             "gap_count": len(report.get("gaps", [])),
             "evidence_dimensions": evidence,
+            "reliability_map": reliability_map,
+            "reliability_observations": list(
+                getattr(state, "supervisor_info", {}).get("reliability_observations", ())
+            ),
         },
-        suggested_test_file=(_DEFAULT_REGRESSION_PATH if report.get("details") else None),
+        suggested_test_file=(
+            _DEFAULT_REGRESSION_PATH
+            if any(
+                detail.get("kind") not in {"blocked", "precondition"}
+                for detail in report.get("details", [])
+            )
+            else None
+        ),
     )
 
 
@@ -12841,11 +13298,18 @@ def _scan_command_description() -> str:
         "scan executes target code but does not write project artifacts. If it finds a\n"
         "useful failure, run the same command with `--save` to create the evidence bundle\n"
         "and durable pytest regression, then follow the printed `ordeal verify` command.\n\n"
+        "Every scan also builds a source-backed reliability map of operations, fault\n"
+        "seams, and candidate properties. Static candidates remain NOT EXERCISED\n"
+        "hypotheses until runtime evidence supports PASS or FAIL. Use `--base-ref` to\n"
+        "prioritize changed code. Use `--deepen --time-limit SECONDS` to run one cheapest\n"
+        "safe follow-up inside an explicit budget. Service faults additionally require\n"
+        "`--allow-service-faults` and a configured `[compose]` section.\n\n"
         "Use `--list-targets` only when Ordeal cannot construct a method or you need to\n"
         "inspect what will run. Advanced ranking, fixture, security, and report controls\n"
         "remain compatible and are documented in the full CLI reference.\n\n"
         "Core loop:\n"
         "  ordeal scan .\n"
+        "  ordeal scan . --base-ref origin/main --deepen --time-limit 60\n"
         "  ordeal scan . --save\n"
         "  ordeal verify <finding-id> --allow-unsafe-artifacts\n"
         "  ordeal verify --ci\n\n"
@@ -13109,6 +13573,26 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     type=float,
                     default=None,
                     help="Time budget in seconds",
+                ),
+                _arg(
+                    "--deepen",
+                    action="store_true",
+                    help="Use the remaining time budget for one safe planned follow-up",
+                ),
+                _arg(
+                    "--base-ref",
+                    default=None,
+                    help="Prioritize operations changed since this Git revision",
+                ),
+                _arg(
+                    "--allow-service-faults",
+                    action="store_true",
+                    help="Allow a planned Compose service-fault experiment; off by default",
+                ),
+                _arg(
+                    "--evidence-fault",
+                    default=None,
+                    help=argparse.SUPPRESS,
                 ),
                 _arg(
                     "--ignore-property",
@@ -14367,7 +14851,46 @@ def main(argv: list[str] | None = None) -> int:
     if handler is None:
         parser.print_help()
         return 0
-    return handler(args)
+    try:
+        return handler(args)
+    except Exception as exc:
+        if getattr(args, "command", None) != "scan":
+            raise
+        target = str(getattr(args, "target", None) or ".")
+        limitation_kind = "import" if isinstance(exc, ImportError) else "tool_orchestration"
+        reason = f"{type(exc).__name__}: {exc}"
+        evidence = {
+            "schema": "ordeal.scan-limitation/v1",
+            "status": "blocked",
+            "subject": {"target": target},
+            "limitation": {"kind": limitation_kind, "reason": reason},
+            "boundaries": {
+                "establishes": "Ordeal could not complete the scan command.",
+                "does_not_establish": [
+                    "that the target crashed",
+                    "that the target is correct",
+                ],
+            },
+        }
+        if limitation_kind == "import":
+            evidence["boundaries"]["establishes"] = (
+                "The target could not be imported; target behavior was not observed."
+            )
+        if bool(getattr(args, "json", False)):
+            print(
+                _build_blocked_agent_envelope(
+                    tool="scan",
+                    target=target,
+                    summary="scan blocked by an Ordeal-side limitation",
+                    blocking_reason=reason,
+                    suggested_commands=(f"ordeal scan {target} --list-targets",),
+                    raw_details={"evidence": evidence},
+                ).to_json()
+            )
+        else:
+            _stderr(f"Scan blocked ({limitation_kind}): {reason}\n")
+            _stderr("  This is not evidence that the target crashed.\n")
+        return 1
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised via subprocess

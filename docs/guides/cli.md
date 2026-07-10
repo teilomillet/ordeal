@@ -89,6 +89,7 @@ Explore one module and optionally save reports, regressions, or the full bug bun
 ordeal scan myapp.scoring
 ordeal scan myapp.scoring --json
 ordeal scan ordeal --target mutate --target "audit_*"
+ordeal scan myapp.scoring --base-ref origin/main --deepen --time-limit 60
 ordeal scan myapp.scoring --report-file findings/scoring.md
 ordeal scan myapp.scoring --write-regression
 ordeal scan myapp.scoring --save-artifacts
@@ -98,6 +99,12 @@ Use the [Scan Quickstart](scan-quickstart.md) for the shortest beginner path,
 [Object Harnesses and Stateful Replay](scan-object-harnesses.md) for classes,
 [Scan Troubleshooting](scan-troubleshooting.md) for blocked/noisy runs, and the
 [Scan Evidence Schema](../reference/scan-evidence-schema.md) for JSON fields.
+Every scan also emits a source-backed reliability map. Static properties are
+explicit hypotheses and remain `NOT EXERCISED` until runtime evidence supports
+`PASS` or `FAIL`. `--deepen` runs one cheapest safe planned experiment and
+requires an explicit `--time-limit`. Service faults require both
+`--allow-service-faults` and `[compose]` configuration. See the
+[Evidence Closure Guide](evidence-closure.md).
 
 Use `--save-artifacts` when you want the full handoff package. It writes the
 pytest regression plus its portable `tests/ordeal-regressions.json` CI
@@ -131,6 +138,9 @@ Most of the tuning knobs for `scan` live in `[[scan]]` inside `ordeal.toml`. Use
 | `--security-focus`, `--no-security-focus` | off | Bias scan toward trust-boundary sinks and deterministic security probes |
 | `--workers`, `-w` | `1` | Parallel workers for mutation testing |
 | `--time-limit`, `-t` | — | Time budget in seconds |
+| `--deepen` | off | Run one safe planned experiment; requires `--time-limit` |
+| `--base-ref REF` | — | Prioritize and diff code changed since a Git revision |
+| `--allow-service-faults` | off | Permit configured Compose fault experiments during deepening |
 | `--json` | off | Print the stable agent-facing JSON envelope |
 | `--report-file` | — | Save a Markdown finding report |
 | `--write-regression [PATH]` | `tests/test_ordeal_regressions.py` | Save runnable pytest regressions |

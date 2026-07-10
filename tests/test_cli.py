@@ -2140,10 +2140,9 @@ scan_max_examples = 12
             == (f"Surface sampling: {cli._PACKAGE_ROOT_SCAN_LIMIT}/18 runnable exports checked")
             for item in payload["raw_details"]["report"]["summary"]
         )
-        assert payload["suggested_commands"][:2] == [
-            "ordeal scan ordeal --list-targets",
-            "ordeal scan ordeal --target <selector>",
-        ]
+        assert payload["suggested_commands"][0] == "ordeal scan ordeal --list-targets"
+        assert payload["suggested_commands"][1].startswith("ordeal scan ordeal --target fn_")
+        assert "<" not in payload["suggested_commands"][1]
 
     def test_scan_package_root_sampling_limits_targets_and_reports_scope(
         self,

@@ -9,6 +9,7 @@ user_invocable: true
 Start every general bug-finding request with one workflow:
 
 1. `ordeal scan .` — auto-detect and assess without writing project artifacts.
+   Read its reliability map before choosing a specialized engine.
 2. Explain supported findings and the exact tested boundary.
 3. `ordeal scan . --save` — only when a useful finding should become durable.
 4. Prove the generated regression fails, fix the product code, then run the
@@ -18,6 +19,15 @@ Start every general bug-finding request with one workflow:
 Do not ask the user to choose among mining, auditing, mutation testing,
 exploration, or differential testing first. Use the specialized commands below
 only when the user states that goal or the initial scan identifies that need.
+
+Evidence closure:
+- `ordeal scan . --deepen --time-limit 60` runs one safe planned follow-up.
+- `ordeal scan . --base-ref origin/main` prioritizes changed operations.
+- Mined properties are hypotheses; only observed cells may PASS or FAIL.
+- A fault probe must hit its injection boundary; it closes only the narrow
+  no-uncaught-exception cell, not broader recovery or integrity hypotheses.
+- Tool construction failures are blocked, not target crashes.
+- Service faults require `--allow-service-faults` and `[compose]` configuration.
 
 Specialized CLI:
 - `ordeal mine <target>`: discover suspicious properties

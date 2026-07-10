@@ -10,11 +10,19 @@ When a user asks you to run ordeal on their code — not to develop ordeal itsel
 
 ```bash
 ordeal scan .                            # auto-detect; assess without writing files
+ordeal scan . --deepen --time-limit 60  # run one safe planned follow-up
+ordeal scan . --base-ref origin/main    # prioritize changed operations
 ```
 
 Do not ask the user to choose between mining, auditing, mutation testing, or
 exploration first. Run `scan`, explain the bounded result, and choose a
 specialized workflow only when the result or the user's stated goal requires it.
+Read the reliability map literally: source-mined properties are hypotheses;
+only observed cells may PASS or FAIL. Strategy, import, fixture, and harness
+construction failures are blocked Ordeal limitations, never target crashes.
+Fault probes close only the narrow no-uncaught-exception cell, and only after
+the named injection boundary records a hit; broader mined properties stay open.
+Service faults require explicit `--allow-service-faults` and `[compose]` config.
 
 **Turn a finding into a durable regression:**
 

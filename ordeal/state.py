@@ -126,6 +126,8 @@ class FunctionState:
     scan_input_sources: list[dict[str, str]] = field(default_factory=list)
     scan_input_source: str | None = None
     scan_proof_bundle: dict[str, Any] | None = None
+    scan_limitation_kind: str | None = None
+    scan_blocking_reason: str | None = None
     fuzz_examples: int = 0
     contract_violations: list[str] = field(default_factory=list)
     contract_violation_details: list[dict[str, Any]] = field(default_factory=list)
@@ -197,6 +199,8 @@ class FunctionState:
         self.scan_input_sources = []
         self.scan_input_source = None
         self.scan_proof_bundle = None
+        self.scan_limitation_kind = None
+        self.scan_blocking_reason = None
         self.fuzz_examples = 0
         self.contract_violations = []
         self.contract_violation_details = []
@@ -224,6 +228,8 @@ class FunctionState:
                 gaps.append(f"{unhardened} unhardened survivor(s)")
         if "scan" in enabled and not self.scanned:
             gaps.append("not scanned")
+        elif "scan" in enabled and self.scan_limitation_kind is not None:
+            gaps.append(f"blocked: {self.scan_blocking_reason or self.scan_limitation_kind}")
         elif "scan" in enabled and self.crash_free is False and not self.scan_replayable:
             gaps.append("crash not replayed")
         for note in self.contract_violations:
@@ -375,6 +381,21 @@ class ExplorationState:
 
         details: list[dict[str, Any]] = []
         for name, fs in self.functions.items():
+            if fs.scan_limitation_kind is not None:
+                details.append(
+                    {
+                        "kind": "blocked",
+                        "category": "tool_limitation",
+                        "evidence_class": "blocked",
+                        "function": name,
+                        "summary": f"{name}: Ordeal could not reach a measured target execution",
+                        "error": fs.scan_error,
+                        "limitation_kind": fs.scan_limitation_kind,
+                        "blocking_reason": fs.scan_blocking_reason,
+                        "source_sha256": fs.source_hash,
+                        "lifecycle_signal": 0.0,
+                    }
+                )
             if fs.crash_free is False:
                 category = _reportable_crash_category(
                     category=fs.scan_crash_category,
@@ -460,6 +481,7 @@ class ExplorationState:
             "speculative_property": 6,
             "test_strength_gap": 7,
             "verification_warning": 8,
+            "tool_limitation": 9,
         }
         return sorted(
             details,
@@ -757,7 +779,7 @@ def explore_scan(
         fs = state.function(fr.name)
         fs.source_hash = fr.source_sha256 or fs.source_hash
         fs.scanned = True
-        fs.crash_free = fr.execution_ok
+        fs.crash_free = None if fr.limitation_kind is not None else fr.execution_ok
         fs.scan_error = fr.error
         fs.failing_args = fr.failing_args
         fs.scan_crash_category = fr.crash_category
@@ -773,6 +795,8 @@ def explore_scan(
         fs.scan_input_sources = list(fr.input_sources)
         fs.scan_input_source = fr.input_source
         fs.scan_proof_bundle = fr.proof_bundle
+        fs.scan_limitation_kind = fr.limitation_kind
+        fs.scan_blocking_reason = fr.blocking_reason
         if fr.contract_violations:
             fs.contract_violations = list(fr.contract_violations)
             fs.contract_violation_details = list(fr.contract_violation_details)
@@ -893,6 +917,7 @@ def explore_chaos(
     """Auto-generate and run chaos tests, update state."""
     from ordeal.auto import chaos_for
 
+    completed = False
     try:
         TestCase = chaos_for(
             state.module,
@@ -907,12 +932,13 @@ def explore_chaos(
         )
         test = TestCase("runTest")
         test.runTest()
+        completed = True
     except Exception:
         pass
 
-    # Mark all functions as chaos-tested
-    for fs in state.functions.values():
-        fs.chaos_tested = True
+    if completed:
+        for fs in state.functions.values():
+            fs.chaos_tested = True
     return state
 
 

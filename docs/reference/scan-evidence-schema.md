@@ -5,6 +5,11 @@ description: Technical reference for scan findings, replay identity, proof bundl
 
 # Scan Evidence Schema
 
+Tool-side generation, import, harness, and strategy failures use the blocked
+limitation contract documented in the
+[Evidence Closure Schema](evidence-closure-schema.md). They never become target
+crashes or regressions.
+
 This page describes the fields used by text reports, JSON agent output, saved
 bundles, `.proofs.json`, and evidence cards. Missing data remains missing; ordeal
 does not infer a successful check that did not run.

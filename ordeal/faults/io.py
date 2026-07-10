@@ -129,10 +129,12 @@ class _DiskFullFault(Fault):
 
         def failing_open(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
             if any(c in str(mode) for c in "wax"):
+                self._record_observation_hit()
                 raise OSError(errno.ENOSPC, "No space left on device", str(file))
             return original_open(file, mode, *args, **kwargs)
 
         def failing_write(fd: int, data: bytes) -> int:
+            self._record_observation_hit()
             raise OSError(errno.ENOSPC, "No space left on device")
 
         builtins.open = failing_open  # type: ignore[assignment]
@@ -162,6 +164,7 @@ class _PermissionDeniedFault(Fault):
 
         def denied(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
             if any(c in str(mode) for c in "wax"):
+                self._record_observation_hit()
                 raise PermissionError(errno.EACCES, "Permission denied", str(file))
             return original(file, mode, *args, **kwargs)
 

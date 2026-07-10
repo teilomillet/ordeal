@@ -100,10 +100,17 @@ ordeal scan myapp.scoring --mode candidate       # stricter ranking
 ordeal scan myapp.io --security-focus            # trust-boundary bias
 ordeal scan myapp.scoring --no-seed-from-tests   # ignore nearby test examples
 ordeal scan myapp.scoring --json                 # agent/tool output
+ordeal scan . --deepen --time-limit 60           # one safe planned follow-up
+ordeal scan . --base-ref origin/main              # prioritize changed operations
 ```
 
 Broad package scans sample representative exports and cap depth for speed. Use
 `--list-targets` and explicit selectors when completeness matters.
+
+Every scan also reports a source-backed reliability map. It connects retry,
+fallback, recovery, I/O, transaction, and ML/data seams to candidate properties
+and labels each operation × fault × property cell `PASS`, `NOT EXERCISED`, or
+`FAIL`. Mined properties are hypotheses. See [Evidence Closure](evidence-closure.md).
 
 ## Exit codes
 

@@ -89,6 +89,14 @@ scan → save one witness → fix → verify the same witness → guard it in CI
 | `blocked` | Ordeal could not construct enough of the target | Inspect targets or add a harness |
 | `no findings yet` | Nothing failed in the sampled run | Useful evidence, not a correctness proof |
 
+Each scan also emits a reliability map from source-backed retry, recovery, I/O,
+transaction, and ML/data seams to candidate properties. `PASS`,
+`NOT EXERCISED`, and `FAIL` describe the observed operation × fault × property
+evidence; mined properties remain hypotheses. Use `--deepen --time-limit 60`
+for one safe planned follow-up, or `--base-ref origin/main` to prioritize
+changed operations. Fault probes close only their narrow operational cell after
+the named injection boundary is actually reached.
+
 ## Why Ordeal
 
 - **No test boilerplate for the first signal.** Point it at a project, module,

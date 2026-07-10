@@ -128,6 +128,21 @@ class TestPatchFault:
         fault.deactivate()
         assert sample_function(5) == 10
 
+    def test_generic_patch_does_not_claim_an_injection_hit(self):
+        fault = PatchFault(
+            f"{__name__}.sample_function",
+            lambda original: lambda value: original(value) + 1,
+            name="unobservable_patch",
+        )
+
+        fault.activate()
+        assert sample_function(2) == 5
+        # PatchFault cannot know whether a conditional wrapper injected. Fault
+        # implementations with an exact injection branch record their own hits.
+        assert fault.observation_hits == 0
+        fault.reset()
+        assert fault.observation_hits == 0
+
     def test_reset_clears_resolved_state(self):
         fault = PatchFault(
             f"{__name__}.sample_function",

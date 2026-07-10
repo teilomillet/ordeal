@@ -178,6 +178,7 @@ class TestDiskFull:
             with pytest.raises(OSError) as exc_info:
                 open(tmp_path / "test.txt", "w")
             assert exc_info.value.errno == errno.ENOSPC
+            assert fault.observation_hits == 1
         finally:
             fault.deactivate()
 
@@ -190,6 +191,20 @@ class TestDiskFull:
         fault.activate()
         try:
             assert p.read_text() == "hello"
+        finally:
+            fault.deactivate()
+
+    def test_conditional_timeout_does_not_count_a_nonmatching_command(self):
+        import subprocess
+
+        from ordeal.faults.io import subprocess_timeout
+
+        fault = subprocess_timeout("__ordeal_never_matches__")
+        fault.activate()
+        try:
+            result = subprocess.run(["/usr/bin/true"], check=False)
+            assert result.returncode == 0
+            assert fault.observation_hits == 0
         finally:
             fault.deactivate()
 

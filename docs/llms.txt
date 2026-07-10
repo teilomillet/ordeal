@@ -31,6 +31,7 @@ user explicitly asks for that specialized evidence.
 - Fault injection: timeout, NaN, disk full, network errors, concurrency faults (25+ fault types across 5 modules)
 - Property assertions: always, sometimes, reachable, unreachable (Antithesis assertion model)
 - Reliability coverage: operation by fault by property PASS, NOT EXERCISED, and FAIL evidence with JSON and xdist aggregation
+- Evidence closure: scan maps source seams to hypothesis-backed reliability cells, chooses a safe next experiment, and persists cross-commit continuity
 - Mutation testing: 14 AST operators with presets (essential/standard/thorough), batch + parallel mode, equivalence filtering
 - Coverage-guided exploration: AFL-style edge hashing with energy scheduling and shared-memory parallel workers
 - Property mining: automatically discovers what is true about your functions (ordeal mine)
@@ -76,6 +77,9 @@ user explicitly asks for that specialized evidence.
 - [Object Harnesses](https://docs.byordeal.com/guides/scan-object-harnesses/): Factory, setup, state, scenarios, teardown, and exact replay
 - [Scan Troubleshooting](https://docs.byordeal.com/guides/scan-troubleshooting/): Missing targets, blocked harnesses, replay gaps, and speed
 - [Scan Evidence Schema](https://docs.byordeal.com/reference/scan-evidence-schema/): Exact finding, proof, source, harness, and binding fields
+- [Evidence Closure](https://docs.byordeal.com/concepts/evidence-closure/): Source seams, hypotheses, evidence cells, and boundaries
+- [Evidence Closure Guide](https://docs.byordeal.com/guides/evidence-closure/): Safe deepening, changed-code priority, persistence, and service opt-in
+- [Evidence Closure Schema](https://docs.byordeal.com/reference/evidence-closure-schema/): Exact normalized map and continuity fields
 - [Durable Regression Workflow](https://docs.byordeal.com/guides/durable-regressions/): Copy-paste red-fix-green workflow
 - [Durable Regressions in CI](https://docs.byordeal.com/guides/durable-regressions-ci/): Provider-neutral guard, rollout, and exit codes
 - [Durable Regression FAQ](https://docs.byordeal.com/guides/durable-regressions-faq/): Status, hash, edit, safety, and portability questions

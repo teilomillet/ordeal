@@ -9,6 +9,7 @@ import shlex
 import sys
 import types
 from pathlib import Path
+from typing import Any
 
 import hypothesis.strategies as st
 import pytest
@@ -1055,7 +1056,7 @@ class TestScanModule:
         finally:
             del sys.modules[module_name]
 
-    def test_auto_harness_dry_run_failure_demotes_bound_method_crash_to_coverage_gap(
+    def test_auto_harness_dry_run_failure_is_blocked_instead_of_target_crash(
         self,
         monkeypatch,
     ):
@@ -1087,11 +1088,11 @@ class TestScanModule:
         )
 
         assert getattr(greet, "__ordeal_harness_verified__", True) is False
-        assert result.crash_category == "coverage_gap"
-        assert result.verdict == "coverage_gap"
-        assert result.proof_bundle is not None
-        assert "dry-run" in str(result.proof_bundle["verdict"]["demotion_reason"])
-        assert result.proof_bundle["minimal_reproduction"]["harness_replay_supported"] is False
+        assert result.crash_category is None
+        assert result.verdict == "blocked"
+        assert result.limitation_kind == "harness_construction"
+        assert "factory" in str(result.blocking_reason)
+        assert result.proof_bundle is None
 
         from ordeal.cli import _render_regression_stub
 
@@ -1107,6 +1108,29 @@ class TestScanModule:
             )
             is None
         )
+
+    def test_strategy_construction_failure_is_blocked_before_target_execution(self):
+        called = False
+
+        def target(value: object) -> object:
+            nonlocal called
+            called = True
+            return value
+
+        result = _test_one_function(
+            "target",
+            target,
+            {"value": st.from_type(Any)},
+            object,
+            max_examples=1,
+            check_return_type=False,
+        )
+
+        assert called is False
+        assert result.verdict == "blocked"
+        assert result.crash_category is None
+        assert result.limitation_kind == "strategy_generation"
+        assert "input strategy" in str(result.blocking_reason)
 
     def test_method_factories_enable_async_scan_and_explicit_fuzz_targets(self):
         import sys

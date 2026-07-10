@@ -6,6 +6,24 @@ from ordeal.auto import FunctionResult, ScanResult
 from ordeal.state import ExplorationState
 
 
+def test_failed_chaos_generation_does_not_claim_functions_were_tested(monkeypatch) -> None:
+    import ordeal.auto as auto
+    from ordeal.state import explore_chaos
+
+    state = ExplorationState("pkg.mod")
+    function = state.function("run")
+    monkeypatch.setattr(
+        auto,
+        "chaos_for",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("no runnable rules")),
+    )
+
+    explore_chaos(state, max_examples=1)
+
+    assert function.chaos_tested is False
+    assert function.faults_tested == []
+
+
 class TestExplorationStateSerialization:
     def test_to_json_round_trip_preserves_supervisor_info(self):
         state = ExplorationState("pkg.mod")

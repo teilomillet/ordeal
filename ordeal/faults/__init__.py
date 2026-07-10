@@ -51,6 +51,7 @@ class Fault(ABC):
     def __init__(self, name: str | None = None):
         self.name = name or self.__class__.__name__
         self._active = False
+        self._observation_hits = 0
         self._state_lock = threading.Lock()
 
     @property
@@ -79,6 +80,19 @@ class Fault(ABC):
     def reset(self) -> None:
         """Deactivate and clear any internal state."""
         self.deactivate()
+        with self._state_lock:
+            self._observation_hits = 0
+
+    @property
+    def observation_hits(self) -> int:
+        """Return how often the active injection boundary was reached."""
+        with self._state_lock:
+            return self._observation_hits
+
+    def _record_observation_hit(self) -> None:
+        """Record one call through the active injection boundary."""
+        with self._state_lock:
+            self._observation_hits += 1
 
     def __enter__(self) -> Fault:
         """Activate the fault as a context manager."""

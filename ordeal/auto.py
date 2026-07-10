@@ -87,9 +87,14 @@ class FunctionResult:
     input_source: str | None = None
     proof_bundle: dict[str, Any] | None = None
     source_sha256: str | None = None
+    limitation_kind: str | None = None
+    blocking_reason: str | None = None
 
     def __post_init__(self) -> None:
         """Normalize legacy manual constructions onto the verdict model."""
+        if self.limitation_kind is not None:
+            self.verdict = "blocked"
+            self.passed = True
         if self.verdict == "clean":
             if self.crash_category is not None:
                 self.verdict = _verdict_for_crash(self.crash_category)
@@ -154,6 +159,9 @@ class FunctionResult:
         } or (self.verdict in {"promoted_real_bug", "semantic_contract"} and not self.promoted)
 
     def __str__(self) -> str:
+        if self.verdict == "blocked":
+            reason = self.blocking_reason or self.error or "Ordeal could not reach the target"
+            return f"  BLOCKED  {self.name}: {reason}"
         if self.execution_ok and not self.property_violations and not self.contract_violations:
             return f"  PASS  {self.name}"
         if not self.execution_ok:
@@ -457,6 +465,8 @@ class ScanResult:
             bits.append(f"{exploratory} exploratory")
         if verdict_counts.get("expected_precondition_failure"):
             bits.append(f"{verdict_counts['expected_precondition_failure']} expected precondition")
+        if verdict_counts.get("blocked"):
+            bits.append(f"{verdict_counts['blocked']} blocked")
         lines = [f"scan_module({self.module!r}): {', '.join(bits)}"]
         for f in self.functions:
             if not f.passed and f.name in self.expected_failure_names:
@@ -9258,7 +9268,24 @@ def scan_module(
         object_teardowns=object_teardowns,
         object_harnesses=object_harnesses,
     ):
-        strategies = _infer_strategies(func, fixtures)
+        try:
+            strategies = _infer_strategies(func, fixtures)
+        except Exception as exc:
+            result.functions.append(
+                FunctionResult(
+                    name=name,
+                    passed=True,
+                    execution_ok=False,
+                    verdict="blocked",
+                    error=str(exc)[:300],
+                    error_type=type(exc).__name__,
+                    limitation_kind="strategy_generation",
+                    blocking_reason=(
+                        f"input strategy could not be inferred: {type(exc).__name__}: {exc}"
+                    )[:500],
+                )
+            )
+            continue
         if strategies is None:
             reason = _callable_skip_reason(func) or "missing type hints"
             result.skipped.append((name, reason))
@@ -9417,6 +9444,50 @@ def _test_one_function(
         check for check in effective_contract_checks if not _contract_check_is_static(check)
     ]
 
+    def _tool_limitation(exc: Exception) -> tuple[str, str] | None:
+        """Classify failures produced before the target's behavior was observed."""
+        call_context = getattr(func, "__ordeal_last_call_context__", None)
+        call_stage = str(
+            (call_context or {}).get("failure_stage")
+            or (call_context or {}).get("call_stage")
+            or ""
+        ).strip()
+        if call_stage and call_stage not in {"invoke", "teardown"}:
+            return (
+                "harness_construction",
+                f"object harness failed during {call_stage}: {type(exc).__name__}: {exc}",
+            )
+
+        traceback_codes: set[Any] = set()
+        current = exc.__traceback__
+        while current is not None:
+            traceback_codes.add(current.tb_frame.f_code)
+            current = current.tb_next
+        target = _unwrap(func)
+        target_code = getattr(target, "__code__", None)
+        reached_target = target_code is not None and target_code in traceback_codes
+        message = str(exc)
+        hypothesis_failure = type(exc).__module__.startswith("hypothesis") or any(
+            marker in message
+            for marker in (
+                "Could not resolve typing.Any to a strategy",
+                "no such thing as a runtime instance of typing.Any",
+                "Cannot sample from a length-zero sequence",
+                "defines no arguments",
+            )
+        )
+        if hypothesis_failure and not reached_target:
+            return (
+                "strategy_generation",
+                f"input strategy could not be generated: {type(exc).__name__}: {exc}",
+            )
+        if not last_invocation_recorded and not reached_target:
+            return (
+                "input_generation",
+                f"Ordeal could not construct an input: {type(exc).__name__}: {exc}",
+            )
+        return None
+
     if static_contract_checks:
         contract_violations, contract_details = _evaluate_contract_checks(
             func,
@@ -9511,6 +9582,25 @@ def _test_one_function(
             test()
     except Exception as e:
         call_context = getattr(func, "__ordeal_last_call_context__", None)
+        limitation = _tool_limitation(e)
+        if limitation is not None:
+            limitation_kind, blocking_reason = limitation
+            return FunctionResult(
+                name=name,
+                passed=True,
+                execution_ok=False,
+                verdict="blocked",
+                error=str(e)[:300],
+                error_type=type(e).__name__,
+                limitation_kind=limitation_kind,
+                blocking_reason=blocking_reason[:500],
+                sink_categories=sink_categories,
+                input_sources=[
+                    {"source": example.source, "evidence": example.evidence}
+                    for example in profile.get("seed_examples", [])
+                ],
+                input_source=None,
+            )
         precondition = (
             _documented_precondition_failure(
                 func,
@@ -10015,9 +10105,12 @@ def _infer_faults(
                     # Faults that need a target get the module name
                     params = inspect.signature(factory).parameters
                     if "target" in params:
-                        faults.append(factory(f"{mod_name}.{name}", **kwargs))
+                        inferred_fault = factory(f"{mod_name}.{name}", **kwargs)
                     else:
-                        faults.append(factory(**kwargs))
+                        inferred_fault = factory(**kwargs)
+                    setattr(inferred_fault, "__ordeal_operation__", name)
+                    setattr(inferred_fault, "__ordeal_fault_kind__", fault_fn)
+                    faults.append(inferred_fault)
 
             for fault_mod, fault_fn, kwargs in _ml_data_fault_specs(call_str):
                 key = (
@@ -10033,9 +10126,12 @@ def _infer_faults(
                 factory = getattr(fault_module, fault_fn)
                 params = inspect.signature(factory).parameters
                 if "target" in params:
-                    faults.append(factory(f"{mod_name}.{name}", **kwargs))
+                    inferred_fault = factory(f"{mod_name}.{name}", **kwargs)
                 else:
-                    faults.append(factory(**kwargs))
+                    inferred_fault = factory(**kwargs)
+                setattr(inferred_fault, "__ordeal_operation__", name)
+                setattr(inferred_fault, "__ordeal_fault_kind__", fault_fn)
+                faults.append(inferred_fault)
 
             # Cross-function calls → error_on_call
             if (
@@ -10051,7 +10147,10 @@ def _infer_faults(
                 seen.add((name, "io", call_str, ()))
                 from ordeal.faults.io import error_on_call
 
-                faults.append(error_on_call(call_str))
+                inferred_fault = error_on_call(call_str)
+                setattr(inferred_fault, "__ordeal_operation__", name)
+                setattr(inferred_fault, "__ordeal_fault_kind__", "error_on_call")
+                faults.append(inferred_fault)
 
     return faults
 

@@ -51,6 +51,7 @@ nav:
       - Scan Your Project: guides/scan-quickstart.md
       - Methods That Need Setup: guides/scan-object-harnesses.md
       - Understand a Finding: guides/finding-evidence.md
+      - Close Evidence Gaps: guides/evidence-closure.md
       - Fix It Once: concepts/durable-regressions.md
       - Save, Fix, and Verify: guides/durable-regressions.md
       - Guard It in CI: guides/durable-regressions-ci.md
@@ -107,6 +108,7 @@ nav:
       - Core Concepts: core-concepts.md
       - Chaos Testing: concepts/chaos-testing.md
       - Coverage Guidance: concepts/coverage-guidance.md
+      - Evidence Closure: concepts/evidence-closure.md
       - Property Assertions: concepts/property-assertions.md
       - Fault Injection: concepts/fault-injection.md
       - Shrinking: concepts/shrinking.md
@@ -117,6 +119,7 @@ nav:
       - System Differential Reference: reference/system-differential.md
       - Revision Diff Schema: reference/revision-diff-schema.md
       - Scan Evidence Schema: reference/scan-evidence-schema.md
+      - Evidence Closure Schema: reference/evidence-closure-schema.md
       - Durable Regression Schema: reference/durable-regression-schema.md
       - Divergence Evidence Schema: reference/divergence-evidence-schema.md
       - Test Protection Schema: reference/test-protection-schema.md

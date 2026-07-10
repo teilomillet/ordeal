@@ -89,8 +89,9 @@ system versions and minimizes the first mismatch.
 
 1. **Measure swarm efficacy.** Run repeatable swarm-versus-no-swarm studies
    across sequence, accumulation, service, and process-boundary bugs.
-2. **Explain missing behavior.** Connect likely retry, fallback, and recovery
-   paths in source code to the behavior cells a run did or did not observe.
+2. **Deepen evidence closure.** The shipped reliability map connects retry,
+   fallback, recovery, production I/O, and ML/data seams to observed or missing
+   behavior cells; expand its held-out corpus and safe automatic experiments.
 3. **Complete native-boundary evidence.** Distinguish truncated output and
    preserve minimized replay evidence across more process adapters.
 4. **Go beyond pairs.** Make selected higher-order fault combinations

@@ -68,6 +68,8 @@ source location matched. It does not prove the root cause or certify the project
 - [Object Harnesses](guides/scan-object-harnesses.md) — methods that need setup or state.
 - [Scan Troubleshooting](guides/scan-troubleshooting.md) — blocked, noisy, or slow scans.
 - [Finding Evidence](guides/finding-evidence.md) — what a bounded claim establishes.
+- [Evidence Closure](concepts/evidence-closure.md) — what important failure stories were
+  inferred but not exercised, and the cheapest safe next experiment.
 
 New users can stop here. Everything below is a specialized workflow.
 
@@ -124,6 +126,7 @@ Continue with [Writing Tests](guides/writing-tests.md),
 - [Configuration](guides/configuration.md) — `ordeal.toml`.
 - [API reference](reference/api.md) — Python functions and types.
 - [Scan evidence schema](reference/scan-evidence-schema.md) — finding JSON.
+- [Evidence closure schema](reference/evidence-closure-schema.md) — reliability-map JSON.
 - [Durable regression schema](reference/durable-regression-schema.md) — bindings and manifests.
 - [Divergence evidence schema](reference/divergence-evidence-schema.md) — comparison artifacts.
 - [Test protection schema](reference/test-protection-schema.md) — audit and mutation evidence.

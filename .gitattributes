@@ -1,0 +1,3 @@
+benchmarks/*.toml text eol=lf
+benchmarks/evidence/*.toml text eol=lf
+benchmarks/fixtures/**/*.py text eol=lf

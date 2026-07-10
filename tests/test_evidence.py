@@ -136,6 +136,16 @@ def test_checked_in_httpie_evidence_replays_exact_oracle_offline(monkeypatch) ->
     assert result.backing_values["oracle"]["workspace_isolation"] == ("declared_artifacts_only")
 
 
+def test_pinned_evidence_files_force_lf_on_every_platform() -> None:
+    attributes = (Path(__file__).resolve().parent.parent / ".gitattributes").read_text(
+        encoding="utf-8"
+    )
+
+    assert "benchmarks/*.toml text eol=lf" in attributes
+    assert "benchmarks/evidence/*.toml text eol=lf" in attributes
+    assert "benchmarks/fixtures/**/*.py text eol=lf" in attributes
+
+
 @pytest.mark.parametrize("literal", ["0", '"false"'])
 def test_evidence_rejects_non_boolean_online_requirement(
     tmp_path: Path,

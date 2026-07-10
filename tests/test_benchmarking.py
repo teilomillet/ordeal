@@ -445,6 +445,8 @@ def test_benchmark_bug_manifest_filters_tier(monkeypatch, tmp_path: Path) -> Non
     public_workspace.mkdir()
     private_workspace.mkdir()
     manifest = tmp_path / "suite.toml"
+    public_workspace_toml = public_workspace.as_posix()
+    private_workspace_toml = private_workspace.as_posix()
     manifest.write_text(
         f"""
 [defaults]
@@ -454,7 +456,7 @@ evidence_level = "benchmark_curated"
 [[cases]]
 name = "public_case"
 tier = "public"
-workspace = "{public_workspace}"
+workspace = "{public_workspace_toml}"
 module = "pkg.public"
 expected_targets = ["pkg.public.issue"]
 selection_reason = "Public anchor case for comparability."
@@ -464,7 +466,7 @@ allowed_for_optimization = false
 [[cases]]
 name = "private_case"
 tier = "private"
-workspace = "{private_workspace}"
+workspace = "{private_workspace_toml}"
 module = "pkg.private"
 expected_targets = ["pkg.private.issue"]
 selection_reason = "Private holdout case for optimization tracking."
@@ -919,11 +921,12 @@ def test_manifest_blocks_case_when_linked_evidence_binding_disagrees(
     workspace.mkdir()
     manifest = tmp_path / "manifest.toml"
     witness_sha256 = "0" * 64
+    workspace_toml = workspace.as_posix()
     manifest.write_text(
         f'''
 [[cases]]
 name = "bound_case"
-workspace = "{workspace}"
+workspace = "{workspace_toml}"
 module = "pkg.buggy"
 project = "demo"
 bug_id = "1"

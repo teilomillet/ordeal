@@ -7584,6 +7584,8 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
                 surface_groups=surface_groups,
             ).to_json()
         )
+        if any(result.survived for _, result in all_results):
+            exit_code = 1
 
     return exit_code
 

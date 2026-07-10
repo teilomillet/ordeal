@@ -331,6 +331,7 @@ class ComposeConfig:
     request_timeout: float = 5.0
     startup_timeout: float = 30.0
     replay_attempts: int = 3
+    workload_mutations: int = 0
     trace_dir: str = ".ordeal/traces"
     keep_running: bool = False
 
@@ -563,6 +564,7 @@ def _load_compose_config(raw: dict, *, config_path: Path) -> ComposeConfig:
         request_timeout=float(raw.get("request_timeout", 5.0)),
         startup_timeout=float(raw.get("startup_timeout", 30.0)),
         replay_attempts=int(raw.get("replay_attempts", 3)),
+        workload_mutations=int(raw.get("workload_mutations", 0)),
         trace_dir=str(trace_dir),
         keep_running=_compose_bool(
             raw.get("keep_running", False),
@@ -581,6 +583,8 @@ def _load_compose_config(raw: dict, *, config_path: Path) -> ComposeConfig:
         raise ConfigError("compose request and startup timeouts must be > 0")
     if cfg.replay_attempts < 1:
         raise ConfigError("compose.replay_attempts must be >= 1")
+    if cfg.workload_mutations < 0:
+        raise ConfigError("compose.workload_mutations must be >= 0")
     return cfg
 
 

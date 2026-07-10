@@ -27,11 +27,16 @@ the same `ordeal.toml` used by other commands.
 | `request_timeout` | number | `5` | Timeout passed to each HTTP request |
 | `startup_timeout` | number | `30` | Readiness polling budget |
 | `replay_attempts` | integer | `3` | Immediate attempts after a failure |
+| `workload_mutations` | integer | `0` | Replay clean prefixes with up to N mutated response oracles |
 | `trace_dir` | string | `.ordeal/traces` | Output directory, relative to `ordeal.toml` |
 | `keep_running` | boolean | `false` | Leave a topology started by ordeal running |
 
 `base_url`, timeouts, probability, step count, and replay count are validated.
 Unknown keys fail closed with a list of valid keys.
+
+`workload_mutations = 0` disables the extra replays. A positive budget mutates
+only response expectations whose unmodified trace prefix first replays cleanly;
+it does not mutate application source inside containers.
 
 If `services` is empty, `faults` defaults to `delay_response` and
 `corrupt_response`. If services are present, it also defaults to `kill` and
@@ -77,6 +82,7 @@ delay_seconds = 0.5
 request_timeout = 3
 startup_timeout = 45
 replay_attempts = 10
+workload_mutations = 20
 trace_dir = ".ordeal/service-traces"
 keep_running = false
 

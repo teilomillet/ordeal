@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import json
 from collections.abc import Mapping
 from typing import Any
 
 _REGRESSION_BINDING_SCHEMA = "ordeal.regression-binding/v1"
+_COMPOSE_REGRESSION_BINDING_SCHEMA = "ordeal.compose-regression-binding/v1"
 
 
 def _ast_sha256(node: ast.AST) -> str:
@@ -131,3 +133,29 @@ def _regression_binding_matches(
     expected_imports = {str(value) for value in expected.get("import_ast_sha256", ())}
     observed_imports = {str(value) for value in observed.get("import_ast_sha256", ())}
     return expected_imports <= observed_imports
+
+
+def _compose_regression_binding(trace_payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Bind an exact, redacted Compose trace to a canonical JSON digest."""
+    canonical = json.dumps(trace_payload, sort_keys=True, separators=(",", ":"), default=str)
+    actions = trace_payload.get("actions", [])
+    return {
+        "schema": _COMPOSE_REGRESSION_BINDING_SCHEMA,
+        "trace_sha256": hashlib.sha256(canonical.encode()).hexdigest(),
+        "failure_signature": trace_payload.get("failure_signature"),
+        "action_count": len(actions) if isinstance(actions, list) else 0,
+    }
+
+
+def _compose_regression_binding_matches(
+    expected: Mapping[str, Any],
+    observed: Mapping[str, Any],
+) -> bool:
+    """Return whether a Compose trace preserves its exact canonical binding."""
+    return (
+        expected.get("schema") == _COMPOSE_REGRESSION_BINDING_SCHEMA
+        and observed.get("schema") == _COMPOSE_REGRESSION_BINDING_SCHEMA
+        and expected.get("trace_sha256") == observed.get("trace_sha256")
+        and expected.get("failure_signature") == observed.get("failure_signature")
+        and expected.get("action_count") == observed.get("action_count")
+    )

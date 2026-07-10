@@ -23,7 +23,10 @@ from ordeal.compose import (
     ComposeTrace,
     HttpResponse,
     HttpTransport,
+    compose_reliability_coverage,
+    measure_compose_workload_strength,
     replay_compose_trace,
+    save_compose_regression,
 )
 from ordeal.config import ComposeConfig, ComposeRequestConfig, ConfigError, load_config
 
@@ -141,6 +144,7 @@ expect_json = {"json.active" = true}
         assert cfg.compose.trace_dir == str(tmp_path / ".ordeal/traces")
         assert cfg.compose.initial_state == {"tenant": "acme"}
         assert cfg.compose.replay_attempts == 7
+        assert cfg.compose.workload_mutations == 0
         assert cfg.compose.requests[0].faultable is False
         assert cfg.compose.requests[1].faultable is True
         assert cfg.compose.requests[1].requires == ["item_id"]
@@ -162,6 +166,7 @@ expect_json = {"json.active" = true}
             ('base_url = "http://localhost"\nfault_probability = 2', "between"),
             ('base_url = "http://localhost"\nfaults = ["kill"]', "services"),
             ('base_url = "http://localhost"\nreplay_attempts = 0', ">= 1"),
+            ('base_url = "http://localhost"\nworkload_mutations = -1', ">= 0"),
         ],
     )
     def test_rejects_invalid_service_config(self, tmp_path: Path, body: str, message: str) -> None:
@@ -566,6 +571,101 @@ class TestComposeRunner:
         assert trace.failure_signature == trace.failure.signature
         assert len(trace.failure_signature) == 64
 
+    def test_reports_operation_fault_property_coverage(self) -> None:
+        request = ComposeRequestConfig(
+            name="read",
+            path="/items",
+            expect_status=[200],
+            expect_json={"json.ok": True},
+            capture={"item_id": "json.id"},
+        )
+        cfg = compose_config(
+            requests=[request],
+            fault_probability=1.0,
+            faults=["corrupt_response"],
+        )
+        trace = ComposeRunner(
+            cfg,
+            controller=FakeController(),
+            transport=FakeTransport(
+                [
+                    response(),
+                    response(body=b'{"ok":true,"id":1}'),
+                    response(body=b'{"ok":true,"id":1}'),
+                ]
+            ),
+            sleep=lambda _seconds: None,
+        ).run()
+
+        coverage = compose_reliability_coverage(trace)
+        rows = {(row["operation"], row["fault"], row["property"]): row for row in coverage["rows"]}
+
+        assert coverage["dimensions"] == ["operation", "fault", "property"]
+        assert rows[("read", "corrupt_response", "status:200")]["status"] == "PASS"
+        assert rows[("read", "corrupt_response", "valid_json")]["status"] == "PASS"
+        assert rows[("read", "corrupt_response", "json:json.ok")]["status"] == "PASS"
+        assert rows[("read", "corrupt_response", "capture:item_id")]["status"] == "PASS"
+        assert rows[("read", "none", "status:200")]["status"] == "NOT EXERCISED"
+        assert coverage["summary"] == {
+            "pass": 4,
+            "not_exercised": 4,
+            "fail": 0,
+            "total": 8,
+        }
+
+    def test_failed_property_is_not_erased_by_failure_metadata(self) -> None:
+        cfg = compose_config(requests=[ComposeRequestConfig(name="read", expect_status=[200])])
+        trace = ComposeRunner(
+            cfg,
+            controller=FakeController(),
+            transport=FakeTransport([response(), response(503)]),
+            sleep=lambda _seconds: None,
+        ).run()
+
+        request_action = next(action for action in trace.actions if action.kind == "request")
+        assert request_action.result["property_results"] == [
+            {"property": "status:200", "type": "always", "passed": False}
+        ]
+        coverage = compose_reliability_coverage(trace)
+        assert coverage["rows"] == [
+            {
+                "operation": "read",
+                "fault": "none",
+                "property": "status:200",
+                "type": "always",
+                "status": "FAIL",
+                "hits": 1,
+                "passes": 0,
+                "failures": 1,
+            }
+        ]
+
+    def test_recovery_readiness_failure_is_a_fault_property_cell(self) -> None:
+        cfg = compose_config(
+            requests=[ComposeRequestConfig(name="read")],
+            faults=["kill"],
+        )
+        ticks = iter([0.0, 0.0, 2.0])
+        runner = ComposeRunner(
+            cfg,
+            controller=FakeController(),
+            transport=FakeTransport([]),
+            monotonic=lambda: next(ticks),
+            sleep=lambda _seconds: None,
+        )
+        runner._started_at = 0.0
+        trace = ComposeTrace(seed=1, compose=compose_module._config_payload(cfg))
+        action = runner._ready_action(trace, operation="read", fault="kill")
+        trace.actions.append(action)
+        trace.failure = runner._wait_ready(action)
+
+        coverage = compose_reliability_coverage(trace)
+        rows = {(row["operation"], row["fault"], row["property"]): row for row in coverage["rows"]}
+
+        assert trace.failure is not None
+        assert trace.failure.kind == "readiness_timeout"
+        assert rows[("read", "kill", "service_ready")]["status"] == "FAIL"
+
 
 class TestComposeTraceReplay:
     def test_trace_round_trip_preserves_exact_actions(self, tmp_path: Path) -> None:
@@ -685,6 +785,224 @@ class TestComposeTraceReplay:
         assert ComposeTrace.load(result.trace_path).replay == expected_report
 
 
+class TestComposeEvidenceLoop:
+    def test_workload_mutations_require_a_clean_control_and_detect_oracle_changes(self) -> None:
+        action = compose_module.ComposeTraceAction(
+            index=0,
+            kind="request",
+            name="read",
+            params={
+                "method": "GET",
+                "url": "http://service/items",
+                "validate": True,
+                "fault": "restart",
+                "expect_status": [200],
+                "expect_json": {"json.ok": True},
+                "capture": {},
+            },
+            result={
+                "property_results": [
+                    {"property": "status:200", "type": "always", "passed": True},
+                    {"property": "valid_json", "type": "always", "passed": True},
+                    {"property": "json:json.ok", "type": "always", "passed": True},
+                ]
+            },
+        )
+        trace = ComposeTrace(
+            seed=1,
+            compose={
+                "base_url": "http://service",
+                "file": "compose.yaml",
+                "requests": [],
+                "replay_attempts": 2,
+            },
+            actions=[action],
+        )
+
+        class OracleRunner:
+            def __init__(self, config: ComposeConfig) -> None:
+                assert config.base_url == "http://service"
+
+            def replay(self, source: ComposeTrace) -> ComposeFailure | None:
+                request = source.actions[-1]
+                if request.params["expect_status"] != [200]:
+                    return ComposeFailure("unexpected_status", "mutant", 0, "read")
+                if request.params["expect_json"] != {"json.ok": True}:
+                    return ComposeFailure("unexpected_json", "mutant", 0, "read")
+                return None
+
+        protection = measure_compose_workload_strength(
+            trace,
+            budget=3,
+            runner_factory=OracleRunner,
+        )
+
+        assert protection["status"] == "protective_within_measured_scope"
+        assert protection["mutation_score"] == "2/2 (100%)"
+        assert protection["tested_mutants"] == 2
+        assert protection["killed_mutants"] == 2
+        assert protection["inconclusive_mutants"] == 0
+        assert {row["property"] for row in protection["mutations"]} == {
+            "status:200",
+            "json:json.ok",
+        }
+
+    def test_compose_failure_uses_scan_evidence_schema(self) -> None:
+        failure = ComposeFailure("unexpected_status", "boom", 0, "read")
+        trace = ComposeTrace(
+            seed=1,
+            compose={"base_url": "http://service", "file": "compose.yaml", "requests": []},
+            failure=failure,
+        )
+        replay = ComposeReplayReport(3, 2, failure.signature)
+        coverage = {
+            "dimensions": ["operation", "fault", "property"],
+            "rows": [],
+            "summary": {"pass": 1, "not_exercised": 0, "fail": 1, "total": 2},
+        }
+        protection = {
+            "status": "weak",
+            "protects": False,
+            "summary": "1 workload mutation survived",
+        }
+
+        evidence = compose_module.build_compose_finding_evidence(
+            trace,
+            replay=replay,
+            coverage=coverage,
+            protection=protection,
+            trace_path=Path(".ordeal/traces/failure.json"),
+        )
+
+        assert evidence["schema"] == "ordeal.finding-evidence/v1"
+        assert evidence["status"] == "supported"
+        assert evidence["subject"]["runner"] == "compose"
+        assert evidence["observation"]["failure_signature"] == failure.signature
+        assert evidence["replay"]["exact_matches"] == 2
+        assert evidence["reliability_coverage"] == coverage
+        assert evidence["test_protection"] == protection
+        assert "2/3" in evidence["boundaries"]["establishes"]
+
+    def test_replay_backed_failure_becomes_portable_manifest_entry(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        compose_file = tmp_path / "compose.yaml"
+        compose_file.write_text("services: {}\n", encoding="utf-8")
+        failure = ComposeFailure("unexpected_status", "boom", 0, "read")
+        trace = ComposeTrace(
+            seed=1,
+            compose={
+                "base_url": "http://service",
+                "file": str(compose_file),
+                "trace_dir": str(tmp_path / ".ordeal" / "traces"),
+                "requests": [],
+                "replay_attempts": 3,
+            },
+            failure=failure,
+            replay=ComposeReplayReport(3, 2, failure.signature),
+        )
+        result = ComposeExplorationResult(
+            trace=trace,
+            trace_path=tmp_path / ".ordeal" / "traces" / "failure.json",
+            replay=trace.replay,
+            requests=1,
+            faults=1,
+            duration=0.1,
+            evidence=compose_module.build_compose_finding_evidence(
+                trace,
+                replay=trace.replay,
+                coverage=compose_reliability_coverage(trace),
+                protection={"status": "inconclusive", "protects": None},
+            ),
+        )
+
+        artifacts = save_compose_regression(result, workspace=tmp_path)
+
+        assert artifacts is not None
+        assert artifacts.trace_path.parent == tmp_path / "tests" / "ordeal-compose-regressions"
+        saved = json.loads(artifacts.trace_path.read_text())
+        assert saved["compose"]["file"] == "compose.yaml"
+        assert saved["compose"]["trace_dir"] == ".ordeal/traces"
+        manifest = json.loads(artifacts.manifest_path.read_text())
+        record = manifest["regressions"][0]
+        assert manifest["schema"] == "ordeal.regression-manifest/v1"
+        assert record["runner"] == "compose"
+        assert record["trace_file"].startswith("tests/ordeal-compose-regressions/")
+        assert record["binding"]["schema"] == "ordeal.compose-regression-binding/v1"
+        assert record["failure_signature"] == failure.signature
+        assert record["replay_policy"] == {
+            "attempts": 3,
+            "expected": "clean",
+            "maximum_failures": 0,
+        }
+        assert record["evidence"]["regression"]["status"] == "saved"
+
+    def test_durable_promotion_rejects_external_compose_file(self, tmp_path: Path) -> None:
+        failure = ComposeFailure("unexpected_status", "boom", 0, "read")
+        replay = ComposeReplayReport(1, 1, failure.signature)
+        trace = ComposeTrace(
+            seed=1,
+            compose={
+                "base_url": "http://service",
+                "file": str(tmp_path.parent / "outside-compose.yaml"),
+                "requests": [],
+            },
+            failure=failure,
+            replay=replay,
+        )
+        result = ComposeExplorationResult(
+            trace=trace,
+            trace_path=tmp_path / "trace.json",
+            replay=replay,
+            requests=1,
+            faults=0,
+            duration=0.1,
+            evidence=compose_module.build_compose_finding_evidence(
+                trace,
+                replay=replay,
+                coverage=compose_reliability_coverage(trace),
+                protection={"status": "inconclusive", "protects": None},
+            ),
+        )
+
+        with pytest.raises(ValueError, match="Compose file in the workspace"):
+            save_compose_regression(result, workspace=tmp_path)
+
+        assert not (tmp_path / "tests" / "ordeal-regressions.json").exists()
+
+    def test_reproducible_compose_setup_failure_is_not_promoted(self, tmp_path: Path) -> None:
+        failure = ComposeFailure("compose_command", "docker was not found", 0, "up")
+        replay = ComposeReplayReport(3, 3, failure.signature)
+        trace = ComposeTrace(
+            seed=1,
+            compose={
+                "base_url": "http://service",
+                "file": str(tmp_path / "compose.yaml"),
+                "requests": [],
+            },
+            failure=failure,
+            replay=replay,
+        )
+        result = ComposeExplorationResult(
+            trace=trace,
+            trace_path=tmp_path / "trace.json",
+            replay=replay,
+            requests=0,
+            faults=0,
+            duration=0.1,
+            evidence=compose_module.build_compose_finding_evidence(
+                trace,
+                replay=replay,
+                coverage=compose_reliability_coverage(trace),
+                protection={"status": "inconclusive", "protects": None},
+            ),
+        )
+
+        assert save_compose_regression(result, workspace=tmp_path) is None
+        assert not (tmp_path / "tests" / "ordeal-regressions.json").exists()
+
+
 class TestHttpTransport:
     def test_returns_http_errors_as_observable_responses(self) -> None:
         class Handler(BaseHTTPRequestHandler):
@@ -746,6 +1064,160 @@ class TestComposeCLI:
         assert "Actions: 0 exact, requests=2, faults=1" in stderr
         assert "Replay attempted 3 times, reproduced 2 times." in stderr
         assert "not deterministic" in stderr
+
+    def test_explore_save_artifacts_promotes_replay_backed_compose_failure(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+        config_path = tmp_path / "ordeal.toml"
+        config_path.write_text(
+            '[compose]\nbase_url = "http://localhost:8000"\n',
+            encoding="utf-8",
+        )
+        failure = ComposeFailure("unexpected_status", "boom", 0, "root")
+        trace = ComposeTrace(
+            seed=42,
+            compose={
+                "base_url": "http://localhost:8000",
+                "file": str(tmp_path / "compose.yaml"),
+                "requests": [],
+                "replay_attempts": 3,
+            },
+            failure=failure,
+        )
+        report = ComposeReplayReport(3, 2, failure.signature)
+        trace.replay = report
+        result = ComposeExplorationResult(
+            trace=trace,
+            trace_path=tmp_path / ".ordeal" / "traces" / "trace.json",
+            replay=report,
+            requests=1,
+            faults=1,
+            duration=0.1,
+            evidence=compose_module.build_compose_finding_evidence(
+                trace,
+                replay=report,
+                coverage=compose_reliability_coverage(trace),
+                protection={"status": "inconclusive", "protects": None},
+            ),
+        )
+        monkeypatch.setattr(compose_module, "run_compose_exploration", lambda *a, **k: result)
+
+        code = main(["explore", "--runner", "compose", "-c", str(config_path), "--save-artifacts"])
+
+        assert code == 1
+        manifest_path = tmp_path / "tests" / "ordeal-regressions.json"
+        assert manifest_path.exists()
+        record = json.loads(manifest_path.read_text())["regressions"][0]
+        assert (tmp_path / record["trace_file"]).exists()
+        stderr = capsys.readouterr().err
+        assert "Durable trace: tests/ordeal-compose-regressions/" in stderr
+        assert "Regression manifest: tests/ordeal-regressions.json" in stderr
+        assert f"Verify fix: uv run ordeal verify {record['finding_id']}" in stderr
+        assert "CI guard: uv run ordeal verify --ci" in stderr
+
+    def test_verify_ci_replays_bound_compose_manifest_entry(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+        failure = ComposeFailure("unexpected_status", "boom", 0, "root")
+        replay = ComposeReplayReport(2, 1, failure.signature)
+        trace = ComposeTrace(
+            seed=1,
+            compose={
+                "base_url": "http://service",
+                "file": str(tmp_path / "compose.yaml"),
+                "requests": [],
+                "replay_attempts": 2,
+            },
+            failure=failure,
+            replay=replay,
+        )
+        result = ComposeExplorationResult(
+            trace=trace,
+            trace_path=tmp_path / ".ordeal" / "traces" / "trace.json",
+            replay=replay,
+            requests=1,
+            faults=1,
+            duration=0.1,
+            evidence=compose_module.build_compose_finding_evidence(
+                trace,
+                replay=replay,
+                coverage=compose_reliability_coverage(trace),
+                protection={"status": "inconclusive", "protects": None},
+            ),
+        )
+        artifacts = save_compose_regression(result, workspace=tmp_path)
+        assert artifacts is not None
+
+        def fake_replay(
+            source: ComposeTrace,
+            *,
+            attempts: int | None = None,
+        ) -> ComposeReplayReport:
+            assert Path(str(source.compose["file"])).is_absolute()
+            assert attempts == 2
+            return ComposeReplayReport(
+                2,
+                0,
+                source.failure_signature,
+                observed_signatures=[None, None],
+            )
+
+        monkeypatch.setattr(compose_module, "replay_compose_trace", fake_replay)
+
+        code = main(["verify", "--ci", "--manifest", str(artifacts.manifest_path)])
+
+        assert code == 0
+        output = capsys.readouterr().out
+        assert "Compose clean replays 2/2" in output
+        assert "verify --ci: 1 passed, 0 failed, 0 error(s)" in output
+
+        def reproducing_replay(
+            source: ComposeTrace,
+            *,
+            attempts: int | None = None,
+        ) -> ComposeReplayReport:
+            assert attempts == 2
+            return ComposeReplayReport(
+                2,
+                2,
+                source.failure_signature,
+                observed_signatures=[source.failure_signature, source.failure_signature],
+            )
+
+        monkeypatch.setattr(compose_module, "replay_compose_trace", reproducing_replay)
+        code = main(["verify", "--ci", "--manifest", str(artifacts.manifest_path)])
+
+        assert code == 1
+        error = capsys.readouterr().err
+        assert "Compose regression failed" in error
+        assert "clean replays 0/2" in error
+
+        monkeypatch.setattr(compose_module, "replay_compose_trace", fake_replay)
+
+        finding_id = json.loads(artifacts.manifest_path.read_text())["regressions"][0][
+            "finding_id"
+        ]
+        code = main(
+            [
+                "verify",
+                finding_id,
+                "--manifest",
+                str(artifacts.manifest_path),
+                "--allow-unsafe-artifacts",
+            ]
+        )
+
+        assert code == 0
+        assert f"verified: {finding_id} (Compose clean replays 2/2)" in capsys.readouterr().out
 
     def test_replay_compose_trace_accepts_attempt_count_and_json(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

@@ -5019,7 +5019,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 
 def _cmd_explore_compose(args: argparse.Namespace, cfg: OrdealConfig) -> int:
     """Run the long-lived Docker Compose service harness."""
-    from ordeal.compose import REPLAY_BOUNDARY, run_compose_exploration
+    from ordeal.compose import REPLAY_BOUNDARY, run_compose_exploration, save_compose_regression
 
     if cfg.compose is None:
         _stderr("No [compose] section in config.\n")
@@ -5057,9 +5057,25 @@ def _cmd_explore_compose(args: argparse.Namespace, cfg: OrdealConfig) -> int:
         f"requests={result.requests}, faults={result.faults}\n"
     )
     _stderr(f"  Trace: {result.trace_path}\n")
+    coverage_rows = result.coverage.get("rows", [])
+    if coverage_rows:
+        _stderr("  Reliability coverage (operation × fault × property):\n")
+        for row in coverage_rows:
+            _stderr(
+                f"    {row['operation']} × {row['fault']} × {row['property']}: "
+                f"{row['status']} ({row['passes']}/{row['hits']} passed)\n"
+            )
+    if result.protection:
+        _stderr(
+            "  Workload protection: "
+            f"{str(result.protection.get('status', 'inconclusive')).upper()}: "
+            f"{result.protection.get('summary', 'not measured')}\n"
+        )
     if result.trace.failure is None:
         _stderr("  No failure recorded; replay not attempted.\n")
         _stderr(f"  Boundary: {REPLAY_BOUNDARY}\n")
+        if args.save_artifacts:
+            _stderr("  No durable regression saved because no failure was recorded.\n")
         return 0
 
     failure = result.trace.failure
@@ -5069,6 +5085,45 @@ def _cmd_explore_compose(args: argparse.Namespace, cfg: OrdealConfig) -> int:
         f"  Replay attempted {result.replay.attempted} times, "
         f"reproduced {result.replay.reproduced} times.\n"
     )
+    if result.evidence is not None:
+        _stderr("  Evidence card:\n")
+        for label, value in _evidence_card_fields(result.evidence):
+            _stderr(f"    {label}: {value}\n")
+    if args.save_artifacts:
+        try:
+            artifacts = save_compose_regression(result)
+        except (OSError, ValueError) as exc:
+            _stderr(f"  Durable regression error: {exc}\n")
+            _stderr(f"  Boundary: {result.replay.boundary}\n")
+            return 2
+        if artifacts is None:
+            _stderr(
+                "  Durable regression not saved: no replay-backed service-contract "
+                "failure was observed.\n"
+            )
+        else:
+            try:
+                durable_display = (
+                    artifacts.trace_path.resolve().relative_to(Path.cwd().resolve()).as_posix()
+                )
+                manifest_display = (
+                    artifacts.manifest_path.resolve().relative_to(Path.cwd().resolve()).as_posix()
+                )
+            except ValueError:
+                durable_display = artifacts.trace_path.as_posix()
+                manifest_display = artifacts.manifest_path.as_posix()
+            _stderr(f"  Durable trace: {durable_display}\n")
+            _stderr(f"  Regression manifest: {manifest_display}\n")
+            verify_command = _shell_command(
+                "uv",
+                "run",
+                "ordeal",
+                "verify",
+                artifacts.finding_id,
+                "--allow-unsafe-artifacts",
+            )
+            _stderr(f"  Verify fix: {verify_command}\n")
+            _stderr(f"  CI guard: {_shell_command('uv', 'run', 'ordeal', 'verify', '--ci')}\n")
     _stderr(f"  Boundary: {result.replay.boundary}\n")
     return 1
 
@@ -8256,11 +8311,13 @@ def _evidence_card_fields(card: Mapping[str, Any]) -> list[tuple[str, str]]:
     subject = card.get("subject")
     if isinstance(subject, Mapping):
         source_sha256 = subject.get("source_sha256")
-        binding = (
-            f"callable source sha256={source_sha256}"
-            if source_sha256
-            else "callable source hash unavailable"
-        )
+        trace_sha256 = subject.get("trace_sha256")
+        if source_sha256:
+            binding = f"callable source sha256={source_sha256}"
+        elif trace_sha256:
+            binding = f"compose trace sha256={trace_sha256}"
+        else:
+            binding = "callable source hash unavailable"
         fields.append(("Code binding", binding))
     witness = card.get("witness")
     if isinstance(witness, Mapping) and witness.get("available"):
@@ -8325,6 +8382,27 @@ def _evidence_card_fields(card: Mapping[str, Any]) -> list[tuple[str, str]]:
     if isinstance(guard, Mapping):
         command = f": {guard.get('command')}" if guard.get("command") else ""
         fields.append(("CI guard", f"{guard.get('status')}{command}"))
+    coverage = card.get("reliability_coverage")
+    if isinstance(coverage, Mapping):
+        summary = coverage.get("summary")
+        if isinstance(summary, Mapping):
+            fields.append(
+                (
+                    "Reliability coverage",
+                    f"{summary.get('pass', 0)} pass, "
+                    f"{summary.get('not_exercised', 0)} not exercised, "
+                    f"{summary.get('fail', 0)} fail",
+                )
+            )
+    protection = card.get("test_protection")
+    if isinstance(protection, Mapping):
+        fields.append(
+            (
+                "Test protection",
+                f"{protection.get('status', 'inconclusive')}: "
+                f"{protection.get('summary', 'not measured')}",
+            )
+        )
     boundaries = card.get("boundaries")
     if isinstance(boundaries, Mapping):
         limits = ", ".join(str(item) for item in boundaries.get("does_not_establish", ()))
@@ -11744,6 +11822,91 @@ def _path_is_within(path: Path, root: Path) -> bool:
     return True
 
 
+def _replay_compose_manifest_record(
+    record: Mapping[str, Any],
+    *,
+    workspace: Path,
+) -> tuple[Any | None, str | None]:
+    """Validate and replay one workspace-bound Compose manifest record."""
+    from dataclasses import replace
+
+    from ordeal.compose import ComposeTrace, replay_compose_trace
+    from ordeal.regression_evidence import (
+        _compose_regression_binding,
+        _compose_regression_binding_matches,
+    )
+
+    finding_id = str(record.get("finding_id") or "?")
+    trace_file = str(record.get("trace_file") or "").strip()
+    expected = record.get("binding")
+    if not trace_file or not isinstance(expected, Mapping):
+        return None, f"incomplete Compose record for {finding_id}"
+    trace_path = _resolve_artifact_path(trace_file, workspace=str(workspace))
+    if trace_path is None or not _path_is_within(trace_path, workspace):
+        return None, f"Compose trace outside workspace for {finding_id}"
+    if not trace_path.is_file():
+        return None, f"Compose trace is missing for {finding_id}: {trace_file}"
+    try:
+        trace = ComposeTrace.load(trace_path)
+    except (json.JSONDecodeError, KeyError, OSError, TypeError, ValueError) as exc:
+        return None, f"could not load Compose trace for {finding_id}: {exc}"
+    observed = _compose_regression_binding(trace.to_dict())
+    if not _compose_regression_binding_matches(expected, observed):
+        return None, f"Compose binding failed for {finding_id}"
+    compose_file_value = str(trace.compose.get("file") or "").strip()
+    compose_file = Path(compose_file_value)
+    if not compose_file.is_absolute():
+        compose_file = workspace / compose_file
+    if not compose_file_value or not _path_is_within(compose_file, workspace):
+        return None, f"Compose file outside workspace for {finding_id}"
+    policy = record.get("replay_policy")
+    policy = policy if isinstance(policy, Mapping) else {}
+    if policy.get("expected") not in {None, "clean"}:
+        return None, f"unsupported Compose replay policy for {finding_id}"
+    if int(policy.get("maximum_failures", 0)) != 0:
+        return None, f"unsupported Compose failure allowance for {finding_id}"
+    attempts = max(1, int(policy.get("attempts", 1)))
+    replay_trace = replace(
+        trace,
+        compose={**trace.compose, "file": str(compose_file.resolve())},
+    )
+    try:
+        return replay_compose_trace(replay_trace, attempts=attempts), None
+    except (OSError, TypeError, ValueError) as exc:
+        return None, f"could not replay Compose trace for {finding_id}: {exc}"
+
+
+def _compose_replay_is_clean(report: Any) -> tuple[bool, int]:
+    """Return whether every Compose replay attempt completed without failure."""
+    clean_replays = sum(signature is None for signature in report.observed_signatures)
+    return clean_replays == report.attempted, clean_replays
+
+
+def _locate_compose_manifest_record(
+    finding_id: str,
+    manifest_path: Path,
+) -> tuple[Path, Mapping[str, Any]] | None:
+    """Locate one Compose regression record in the portable manifest."""
+    if not manifest_path.is_file():
+        return None
+    payload = _read_json_file(manifest_path)
+    if payload.get("schema") != "ordeal.regression-manifest/v1":
+        return None
+    records = payload.get("regressions")
+    if not isinstance(records, list):
+        return None
+    resolved = manifest_path.resolve()
+    workspace = resolved.parent.parent if resolved.parent.name == "tests" else Path.cwd().resolve()
+    for record in records:
+        if (
+            isinstance(record, Mapping)
+            and record.get("runner") == "compose"
+            and record.get("finding_id") == finding_id
+        ):
+            return workspace, record
+    return None
+
+
 def _cmd_verify_ci(args: argparse.Namespace) -> int:
     """Fail closed when any saved regression binding or test fails in CI."""
     import subprocess
@@ -11791,6 +11954,30 @@ def _cmd_verify_ci(args: argparse.Namespace) -> int:
             errors += 1
             continue
         seen.add(finding_id)
+        if record.get("runner") == "compose":
+            report, replay_error = _replay_compose_manifest_record(
+                record,
+                workspace=workspace,
+            )
+            if replay_error is not None:
+                _stderr(f"CI guard {replay_error}.\n")
+                errors += 1
+                continue
+            assert report is not None
+            clean, clean_replays = _compose_replay_is_clean(report)
+            if clean:
+                passed += 1
+                print(
+                    f"  passed: {finding_id} "
+                    f"(Compose clean replays {clean_replays}/{report.attempted})"
+                )
+            else:
+                failed += 1
+                _stderr(
+                    f"CI guard Compose regression failed for {finding_id}: clean replays "
+                    f"{clean_replays}/{report.attempted}; every replay must be clean.\n"
+                )
+            continue
         test_file = str(record.get("test_file") or "").strip()
         test_name = str(record.get("test_name") or "").strip()
         expected = record.get("binding")
@@ -11912,8 +12099,35 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         _stderr(f"Artifact data is not valid JSON: {exc}\n")
         return 2
     if located is None:
-        _stderr(f"Finding not found in artifact index: {args.finding_id}\n")
-        return 2
+        try:
+            compose_located = _locate_compose_manifest_record(
+                args.finding_id,
+                Path(args.manifest),
+            )
+        except json.JSONDecodeError as exc:
+            _stderr(f"Regression manifest is not valid JSON: {exc}\n")
+            return 2
+        if compose_located is None:
+            _stderr(f"Finding not found in artifact index or manifest: {args.finding_id}\n")
+            return 2
+        workspace, record = compose_located
+        report, replay_error = _replay_compose_manifest_record(record, workspace=workspace)
+        if replay_error is not None:
+            _stderr(f"Compose regression verification error: {replay_error}.\n")
+            return 2
+        assert report is not None
+        clean, clean_replays = _compose_replay_is_clean(report)
+        if clean:
+            print(
+                f"verified: {args.finding_id} "
+                f"(Compose clean replays {clean_replays}/{report.attempted})"
+            )
+            return 0
+        _stderr(
+            f"reproduced: {args.finding_id} (Compose clean replays "
+            f"{clean_replays}/{report.attempted}; every replay must be clean)\n"
+        )
+        return 1
 
     bundle_path, bundle, finding = located
     command = _verification_command(bundle, finding)
@@ -12184,12 +12398,14 @@ def _catalog_command_description() -> str:
 def _verify_command_description() -> str:
     """Return the long-form `ordeal verify` help description."""
     return (
-        "Re-run a saved regression from `.ordeal/findings/index.json`.\n\n"
-        "Use the stable `finding_id` from a JSON bug bundle or index entry.\n"
+        "Re-run a saved regression from `.ordeal/findings/index.json` or the portable"
+        " manifest.\n\n"
+        "Use the stable `finding_id` from a JSON bug bundle, index, or Compose record.\n"
         "For safety, verification requires `--allow-unsafe-artifacts` because "
         "artifact bundles can point pytest at repo-controlled code.\n"
-        "Verification updates the bundle status and appends a verification event"
-        " to the artifact index. Use `ordeal verify --ci` for a read-only,"
+        "Python verification updates its bundle and index; Compose verification reads the"
+        " bound trace and requires every replay to finish cleanly. Use `ordeal verify --ci`"
+        " for a read-only,"
         " provider-neutral guard over every saved regression and binding."
     )
 
@@ -12573,6 +12789,14 @@ def _command_specs() -> tuple[CommandSpec, ...]:
                     default=None,
                     metavar="N",
                     help="Replay a Compose failure N times (default: [compose].replay_attempts)",
+                ),
+                _arg(
+                    "--save-artifacts",
+                    action="store_true",
+                    help=(
+                        "For a replay-backed Compose failure, commit a portable trace binding "
+                        "under tests/ and update tests/ordeal-regressions.json"
+                    ),
                 ),
                 _arg("--verbose", "-v", action="store_true", help="Live progress"),
                 _arg("--no-shrink", action="store_true", help="Skip shrinking"),

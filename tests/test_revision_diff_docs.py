@@ -33,7 +33,7 @@ def test_revision_diff_pages_are_in_navigation_and_have_valid_links() -> None:
     for page in PAGES.values():
         relative = page.relative_to(ROOT / "docs").as_posix()
         assert relative in nav, f"{relative} is missing from the documentation nav"
-        for raw_target in re.findall(r"\[[^]]+\]\(([^)]+)\)", page.read_text()):
+        for raw_target in re.findall(r"\[[^]]+\]\(([^)]+)\)", page.read_text(encoding="utf-8")):
             target = raw_target.split("#", maxsplit=1)[0]
             if not target or target.startswith(("#", "http://", "https://", "mailto:")):
                 continue

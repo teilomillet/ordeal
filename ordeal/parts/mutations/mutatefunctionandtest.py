@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+
 # ruff: noqa
 def mutate_function_and_test(
     target: str,
@@ -6,7 +8,7 @@ def mutate_function_and_test(
     operators: list[str] | None = None,
     *,
     preset: PresetName | None = None,
-    workers: int = 1,
+    workers: int = 0,
     filter_equivalent: bool = True,
     equivalence_samples: int = 10,
     extra_mutants: list[str | tuple[str, str]] | None = None,
@@ -76,9 +78,9 @@ def mutate_function_and_test(
 
             Mutually exclusive with *operators*. When neither is given,
             all operators are used.
-        workers: Number of parallel worker processes. ``1`` (default)
-            runs sequentially.  Higher values give near-linear speedup
-            since each mutant is tested independently.
+        workers: Number of parallel worker processes. ``0`` (default)
+            selects from mutant count, collected tests, and prior observed
+            timing. A positive value is an explicit override.
         filter_equivalent: If ``True`` (default), skip mutants that produce
             identical output to the original on random sample inputs.
             Reduces noise from equivalent mutants that always survive.
@@ -160,13 +162,28 @@ def mutate_function_and_test(
             result.timings.update(timings)
             result.timings["total_seconds"] = time.perf_counter() - started_at
             return result
+        selection = _mutation_test_selection(target, test_filter=test_filter)
+        profile = _load_mutation_execution_profile(target)
+        selected_test_count = (
+            profile.collected_tests
+            if profile is not None and profile.collected_tests > 0
+            else max(1, len(selection.ast_scores), len(selection.paths))
+        )
+        effective_workers = _resolve_mutation_worker_count(
+            workers,
+            mutant_count=len(mutant_pairs),
+            selected_test_count=selected_test_count,
+            profile=profile,
+            disk_mutation=disk_mutation,
+        )
+        stats["workers_selected"] = effective_workers
         try:
             with _timed_phase(timings, "test_execution_seconds"):
-                if workers > 1 and len(mutant_pairs) > 1:
+                if effective_workers > 1 and len(mutant_pairs) > 1:
                     batch_results = _parallel_function_batch_test(
                         target,
                         mutant_pairs,
-                        workers,
+                        effective_workers,
                         test_filter=test_filter,
                         disk_mutation=disk_mutation,
                         stats=stats,
@@ -217,7 +234,7 @@ def mutate_function_and_test(
             mutant.error = error
             mutant.killed_by = killer
             result.mutants.append(mutant)
-    elif workers > 1:
+    elif workers > 1 and not disk_mutation:
         with _timed_phase(timings, "test_execution_seconds"):
             result = _parallel_function_test(
                 target,
@@ -345,6 +362,8 @@ def mutate_function_and_test(
     result.timings.update(timings)
     result.timings["total_seconds"] = time.perf_counter() - started_at
     return result
+
+
 def _mine_based_mutation_test(
     target: str,
     func: Callable,

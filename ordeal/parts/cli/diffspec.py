@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+
 # ruff: noqa
 def _diff_spec() -> CommandSpec:
     return CommandSpec(
@@ -98,6 +100,8 @@ def _diff_spec() -> CommandSpec:
             _arg("--json", action="store_true", help="Output machine-readable JSON"),
         ),
     )
+
+
 def _migrate_spec() -> CommandSpec:
     return CommandSpec(
         name="migrate",
@@ -181,6 +185,8 @@ def _migrate_spec() -> CommandSpec:
             _arg("--json", action="store_true", help="Output machine-readable JSON"),
         ),
     )
+
+
 def _minepair_spec() -> CommandSpec:
     return CommandSpec(
         name="mine-pair",
@@ -198,6 +204,8 @@ def _minepair_spec() -> CommandSpec:
             ),
         ),
     )
+
+
 def _benchmark_spec() -> CommandSpec:
     return CommandSpec(
         name="benchmark",
@@ -329,6 +337,8 @@ def _benchmark_spec() -> CommandSpec:
             ),
         ),
     )
+
+
 def _skill_spec() -> CommandSpec:
     return CommandSpec(
         name="skill",
@@ -340,6 +350,8 @@ def _skill_spec() -> CommandSpec:
             ),
         ),
     )
+
+
 def _init_spec() -> CommandSpec:
     return CommandSpec(
         name="init",
@@ -396,6 +408,8 @@ def _init_spec() -> CommandSpec:
             ),
         ),
     )
+
+
 def _mutate_spec() -> CommandSpec:
     return CommandSpec(
         name="mutate",
@@ -420,7 +434,13 @@ def _mutate_spec() -> CommandSpec:
                 default=None,
                 help="Operator preset (default: standard)",
             ),
-            _arg("--workers", "-w", type=int, default=1, help="Parallel workers (default: 1)"),
+            _arg(
+                "--workers",
+                "-w",
+                type=int,
+                default=0,
+                help="Parallel workers (default: 0, adaptive)",
+            ),
             _arg(
                 "--threshold",
                 "-t",
@@ -472,29 +492,3 @@ def _mutate_spec() -> CommandSpec:
             _arg("--json", action="store_true", help="Output agent-facing JSON"),
         ),
     )
-def _command_specs() -> tuple[CommandSpec, ...]:
-    """Return the declarative registry for CLI commands."""
-    return (
-        _catalog_spec(),
-        _check_spec(),
-        _scan_spec(),
-        _verify_spec(),
-        _explore_spec(),
-        _replay_spec(),
-        _seeds_spec(),
-        _audit_spec(),
-        _mine_spec(),
-        _diff_spec(),
-        _migrate_spec(),
-        _minepair_spec(),
-        _benchmark_spec(),
-        _skill_spec(),
-        _init_spec(),
-        _mutate_spec(),
-    )
-def _resolve_command_description(spec: CommandSpec) -> str | None:
-    """Resolve a command description from a static string or callable."""
-    description = spec.description
-    if callable(description):
-        return description()
-    return description

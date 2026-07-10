@@ -1180,11 +1180,11 @@ mutate_function_and_test(
     test_fn: Callable[[], None],                # test to run against each mutant
     operators: list[str] | None = None,         # None = all operators
     *,
-    workers: int = 1,                           # parallel workers (1 = sequential)
+    workers: int = 0,                           # adaptive; positive = explicit
 ) -> MutationResult
 ```
 
-Mutate a single function via PatchFault. Safer than module-level. Recommended. Set `workers > 1` for parallel mutant testing — each mutant is independent, giving near-linear speedup.
+Mutate a single function via PatchFault. Safer than module-level. Recommended. The default chooses workers from the workload and prior observed timing; set a positive `workers` value to override it.
 
 ### mutate_and_test
 
@@ -1194,7 +1194,7 @@ mutate_and_test(
     test_fn: Callable[[], None],
     operators: list[str] | None = None,
     *,
-    workers: int = 1,                           # parallel workers (1 = sequential)
+    workers: int = 0,                           # adaptive; positive = explicit
 ) -> MutationResult
 ```
 

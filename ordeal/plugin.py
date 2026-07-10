@@ -47,6 +47,7 @@ from pathlib import Path as _FacadePath
 
 _PART_FILES = (
     "pytestaddoption.py",
+    "tomlfixtures.py",
     "pytestterminalsummary.py",
 )
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
+
 # ruff: noqa
 import importlib
 import sys
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:
@@ -34,6 +36,8 @@ class ExplorerConfig:
     ngram: int = 2  # N-gram depth for edge coverage (1=classic AFL, 2+=path-context)
     rule_swarm: bool = False  # random rule subsets per run (swarm testing for rules)
     rule_timeout: float = 30.0  # per-rule timeout in seconds (0 to disable)
+
+
 @dataclass
 class TestConfig:
     """One ``[[tests]]`` entry — a ChaosTest class to explore."""
@@ -48,6 +52,8 @@ class TestConfig:
         module_path, class_name = self.class_path.rsplit(":", 1)
         module = importlib.import_module(module_path)
         return getattr(module, class_name)
+
+
 @dataclass
 class ReportConfig:
     """Output settings for exploration reports."""
@@ -58,6 +64,8 @@ class ReportConfig:
     traces_dir: str = ".ordeal/traces"
     verbose: bool = False
     corpus_dir: str = ".ordeal/seeds"
+
+
 @dataclass
 class ScanConfig:
     """One ``[[scan]]`` entry — a module to auto-test."""
@@ -98,11 +106,15 @@ class ScanConfig:
     property_overrides: dict[str, list[str]] = field(default_factory=dict)
     relation_overrides: dict[str, list[str]] = field(default_factory=dict)
     contract_overrides: dict[str, list[str]] = field(default_factory=dict)
+
+
 @dataclass
 class FixturesConfig:
     """Shared fixture registry configuration for the whole project."""
 
     registries: list[str] = field(default_factory=list)
+
+
 @dataclass
 class APIConfig:
     """Settings for ``[api]`` OpenAPI chaos testing."""
@@ -137,6 +149,8 @@ class APIConfig:
             obj = getattr(parent, attr)
             results.append(obj() if callable(obj) else obj)
         return results
+
+
 @dataclass
 class MutationConfig:
     """Settings for ``[mutations]`` — declarative mutation testing."""
@@ -144,7 +158,7 @@ class MutationConfig:
     targets: list[str] = field(default_factory=list)
     preset: str = "standard"
     operators: list[str] | None = None  # mutually exclusive with preset
-    workers: int = 1
+    workers: int = 0
     threshold: float = 0.0  # 0.0 = no threshold enforcement
     filter_equivalent: bool = True
     equivalence_samples: int = 10
@@ -152,6 +166,8 @@ class MutationConfig:
     mutant_timeout: float | None = None  # seconds; abort generation if exceeded
     promote_clusters_only: bool = True
     cluster_min_size: int = 2
+
+
 @dataclass
 class ObjectConfig:
     """One ``[[objects]]`` entry — reusable factory/setup/scenario hooks.
@@ -169,6 +185,8 @@ class ObjectConfig:
     scenarios: list[str] = field(default_factory=list)
     methods: list[str] = field(default_factory=list)
     include_private: bool = False
+
+
 @dataclass
 class ContractConfig:
     """One ``[[contracts]]`` entry — semantic probes for scan targets."""
@@ -183,6 +201,8 @@ class ContractConfig:
     followup_phases: list[str] = field(default_factory=list)
     fault: str | None = None
     handler_name: str | None = None
+
+
 @dataclass
 class AuditTargetConfig:
     """One ``[[audit.targets]]`` entry — a module/class/method target with hooks.
@@ -199,6 +219,8 @@ class AuditTargetConfig:
     scenarios: list[str] = field(default_factory=list)
     methods: list[str] = field(default_factory=list)
     include_private: bool = False
+
+
 @dataclass
 class AuditConfig:
     """Settings for ``[audit]`` — declarative audit defaults."""
@@ -215,6 +237,8 @@ class AuditConfig:
     write_gaps_dir: str | None = None
     include_exploratory_function_gaps: bool = False
     require_direct_tests: bool = False
+
+
 @dataclass
 class InitConfig:
     """Settings for ``[init]`` — declarative bootstrap defaults."""
@@ -228,6 +252,8 @@ class InitConfig:
     gap_output_dir: str | None = None
     mutation_preset: str = "essential"
     scan_max_examples: int = 10
+
+
 @dataclass
 class DiffConfig:
     """Settings for revision-isolated ``ordeal diff`` runs."""
@@ -244,6 +270,8 @@ class DiffConfig:
     replay_attempts: int = 2
     save_artifacts: bool = False
     artifact_dir: str = ".ordeal/diff"
+
+
 @dataclass
 class ComposeRequestConfig:
     """One HTTP operation used by the long-lived Compose runner."""
@@ -258,6 +286,8 @@ class ComposeRequestConfig:
     capture: dict[str, str] = field(default_factory=dict)
     requires: list[str] = field(default_factory=list)
     faultable: bool = True
+
+
 @dataclass
 class ComposeConfig:
     """Settings for ``ordeal explore --runner compose``."""
@@ -281,6 +311,8 @@ class ComposeConfig:
     workload_mutations: int = 0
     trace_dir: str = ".ordeal/traces"
     keep_running: bool = False
+
+
 @dataclass
 class OrdealConfig:
     """Top-level configuration loaded from ``ordeal.toml``."""
@@ -298,6 +330,8 @@ class OrdealConfig:
     init: InitConfig = field(default_factory=InitConfig)
     diff: DiffConfig = field(default_factory=DiffConfig)
     compose: ComposeConfig | None = None
+
+
 # ============================================================================
 # Validation
 # ============================================================================
@@ -307,10 +341,14 @@ _VALID_REPORT_FORMATS = {"json", "text", "both"}
 _VALID_AUDIT_VALIDATION_MODES = {"fast", "deep"}
 _VALID_SCAN_MODES = {"coverage_gap", "evidence", "real_bug", "candidate"}
 _VALID_COMPOSE_FAULTS = {"kill", "restart", "delay_response", "corrupt_response"}
+
+
 def _valid_presets() -> frozenset[str]:
     from ordeal.mutations import PRESETS
 
     return frozenset(PRESETS.keys())
+
+
 _KNOWN_SECTIONS = {
     "explorer",
     "tests",
@@ -327,11 +365,15 @@ _KNOWN_SECTIONS = {
     "diff",
     "compose",
 }
+
+
 def _fields_of(cls: type) -> set[str]:
     """Derive known keys from a dataclass's fields."""
     from dataclasses import fields as _dc_fields
 
     return {f.name for f in _dc_fields(cls)}
+
+
 _KNOWN_EXPLORER_KEYS = _fields_of(ExplorerConfig) | {"verbose"}
 _KNOWN_REPORT_KEYS = _fields_of(ReportConfig)
 _KNOWN_MUTATIONS_KEYS = _fields_of(MutationConfig)
@@ -349,8 +391,12 @@ _KNOWN_COMPOSE_REQUEST_KEYS = (_fields_of(ComposeRequestConfig) - {"json_body"})
 _KNOWN_API_KEYS = _fields_of(APIConfig) | {"stateful", "mutation_targets", "auto_discover"}
 _KNOWN_TEST_KEYS = (_fields_of(TestConfig) - {"class_path"}) | {"class"}
 _VALID_OBJECT_HARNESSES = {"fresh", "stateful"}
+
+
 class ConfigError(Exception):
     """Raised when ``ordeal.toml`` is invalid."""
+
+
 def _warn_unknown_keys(section: str, data: dict, known: set[str]) -> None:
     unknown = set(data.keys()) - known
     if unknown:
@@ -358,6 +404,8 @@ def _warn_unknown_keys(section: str, data: dict, known: set[str]) -> None:
             f"Unknown key(s) in [{section}]: {', '.join(sorted(unknown))}. "
             f"Valid keys: {', '.join(sorted(known))}"
         )
+
+
 def _map_of_lists(value: object, *, key_name: str) -> dict[str, list[str]]:
     """Normalize either ``{name=[...]}`` or ``[...]`` into a dict of string lists."""
     if value is None:
@@ -367,6 +415,8 @@ def _map_of_lists(value: object, *, key_name: str) -> dict[str, list[str]]:
     if isinstance(value, list):
         return {"*": [str(item) for item in value]}
     raise ConfigError(f"{key_name} must be a list or table, got {type(value).__name__}")
+
+
 def _compose_statuses(value: object, *, request_index: int) -> list[int]:
     """Normalize one Compose request's expected HTTP status codes."""
     if value is None:
@@ -382,6 +432,8 @@ def _compose_statuses(value: object, *, request_index: int) -> list[int]:
             f"compose.requests.{request_index}.expect_status values must be between 100 and 599"
         )
     return statuses
+
+
 def _compose_bool(value: object, *, field_name: str) -> bool:
     """Return a strict TOML boolean for a Compose safety setting."""
     if not isinstance(value, bool):

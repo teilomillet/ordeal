@@ -122,7 +122,11 @@ Module-level mutation testing can be slow because each mutant needs a full test 
 
 **Equivalence filtering** (default on): Before testing, ordeal runs each mutant on random inputs and skips mutants that produce identical outputs. These "equivalent mutants" can never be killed and waste testing time.
 
-**Parallel workers**: Distribute mutants across multiple processes. Each worker runs a batched pytest session on its chunk.
+**Adaptive test order**: Collection, direct-call AST evidence, in-session target coverage, and prior kill attribution rank likely killers first. Each mutant stops at its first observed failure. Lower-confidence tests remain as a broad fallback.
+
+**Adaptive workers**: The default uses one, two, or four processes based on mutant count, collected tests, and a prior in-session timing calibration. A positive `workers` value remains an explicit override.
+
+Disk mutation always stays serial because concurrent workers cannot safely rewrite and restore the same source file.
 
 ```bash
 ordeal mutate myapp.scoring --workers 4           # 4 parallel workers

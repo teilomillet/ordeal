@@ -53,6 +53,8 @@ def _mutated_module(module_name: str, mutated_tree: ast.Module):
         for name, value in saved.items():
             if not name.startswith("__"):
                 setattr(original, name, value)
+
+
 _CROSS_PROCESS_IMPORTS = frozenset(
     {
         "ray",
@@ -78,6 +80,8 @@ _CROSS_PROCESS_CALLS = frozenset(
         "subprocess.check_call",
     }
 )
+
+
 def _has_cross_process_imports(source: str) -> bool:
     """Check whether source code contains cross-process imports or decorators."""
     try:
@@ -101,6 +105,8 @@ def _has_cross_process_imports(source: str) -> bool:
                 if dec_name and any(dec_name.startswith(p) for p in _CROSS_PROCESS_IMPORTS):
                     return True
     return False
+
+
 def _read_module_source(module_name: str) -> str | None:
     """Read source for a module — works even when the module can't be imported."""
     source_file = None
@@ -121,6 +127,8 @@ def _read_module_source(module_name: str) -> str | None:
             return f.read()
     except Exception:
         return None
+
+
 def _needs_disk_mutation(target: str) -> bool:
     """Auto-detect whether *target* or its tests use cross-process patterns.
 
@@ -155,6 +163,8 @@ def _needs_disk_mutation(target: str) -> bool:
             continue
 
     return False
+
+
 def _decorator_name(node: ast.expr) -> str | None:
     """Extract dotted name from a decorator AST node."""
     if isinstance(node, ast.Name):
@@ -165,6 +175,8 @@ def _decorator_name(node: ast.expr) -> str | None:
     if isinstance(node, ast.Call):
         return _decorator_name(node.func)
     return None
+
+
 def _resolve_disk_mutation(disk_mutation: bool | None, target: str) -> bool:
     """Resolve disk_mutation: None means auto-detect."""
     if disk_mutation is not None:
@@ -181,6 +193,8 @@ def _resolve_disk_mutation(disk_mutation: bool | None, target: str) -> bool:
             stacklevel=3,
         )
     return needed
+
+
 def _clear_pyc(source_path: str) -> None:
     """Remove ``__pycache__`` bytecode for *source_path*.
 
@@ -197,6 +211,8 @@ def _clear_pyc(source_path: str) -> None:
         stem = source.stem
         for pyc in cache_dir.glob(f"{stem}.*.pyc"):
             pyc.unlink(missing_ok=True)
+
+
 @contextmanager
 def _mutated_source_file(source_path: str, mutated_source: str):
     """Write mutated source to disk, clear bytecode, restore on exit.
@@ -219,6 +235,8 @@ def _mutated_source_file(source_path: str, mutated_source: str):
         with open(source_path, "w") as f:
             f.write(original_source)
         _clear_pyc(source_path)
+
+
 @contextmanager
 def _mutated_module_on_disk(module_name: str, mutated_tree: ast.Module):
     """Mutate a module both in-memory and on disk.
@@ -250,6 +268,8 @@ def _mutated_module_on_disk(module_name: str, mutated_tree: ast.Module):
     ):
         importlib.invalidate_caches()
         yield mod
+
+
 @contextmanager
 def _function_mutated_on_disk(
     target_spec: _ResolvedMutationTarget,
@@ -327,6 +347,8 @@ def _function_mutated_on_disk(
     with _mutated_source_file(source_path, mutated_module_source):
         importlib.invalidate_caches()
         yield
+
+
 def _module_is_equivalent(
     original: types.ModuleType,
     mutated_tree: ast.Module,
@@ -361,24 +383,15 @@ def _module_is_equivalent(
         if not _is_runtime_equivalent(orig_fn, mut_fn, n_samples):
             return False
     return True
-@dataclass(frozen=True)
-class _MutationTestSelection:
-    """Pytest selection derived for a mutation target."""
 
-    paths: tuple[str, ...]
-    k_filter: str | None
 
-    def pytest_args(self) -> list[str]:
-        """Build positional pytest args plus any ``-k`` filter."""
-        args = list(self.paths)
-        if self.k_filter:
-            args.extend(["-k", self.k_filter])
-        return args
 @dataclass(frozen=True)
 class _EquivalenceSamplePlan:
     """Prepared argument tuples reused across runtime-equivalence checks."""
 
     samples: tuple[tuple[object, ...], ...]
+
+
 @functools.lru_cache(maxsize=128)
 def _split_mutation_target(target: str) -> tuple[str, str | None]:
     """Return ``(module_name, func_name)`` for a mutation target."""
@@ -398,6 +411,8 @@ def _split_mutation_target(target: str) -> tuple[str, str | None]:
 
     resolved = _resolve_mutation_target(target)
     return resolved.module_name, resolved.leaf_name
+
+
 def _mutation_test_name_variants(module_name: str) -> tuple[str, ...]:
     """Return likely filename stems for tests covering *module_name*."""
     short = module_name.rsplit(".", 1)[-1]
@@ -406,6 +421,8 @@ def _mutation_test_name_variants(module_name: str) -> tuple[str, ...]:
     if normalized and normalized != short:
         variants.append(normalized)
     return tuple(variants)
+
+
 @functools.lru_cache(maxsize=8)
 def _all_test_files() -> tuple[str, ...]:
     """Return every discovered ``test_*.py`` file under the project."""
@@ -425,6 +442,8 @@ def _all_test_files() -> tuple[str, ...]:
                     seen.add(resolved)
                     found.append(resolved)
     return tuple(found)
+
+
 @functools.lru_cache(maxsize=128)
 def _named_mutation_test_candidates(module_name: str) -> tuple[str, ...]:
     """Return likely test files based on the target module name."""
@@ -454,6 +473,8 @@ def _named_mutation_test_candidates(module_name: str) -> tuple[str, ...]:
                     seen.add(resolved)
                     found.append(resolved)
     return tuple(found)
+
+
 def _additional_mutation_test_candidates(module_name: str) -> tuple[str, ...]:
     """Return broader test-file candidates for content-based scoring."""
     seen: set[str] = set()

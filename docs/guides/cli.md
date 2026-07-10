@@ -213,7 +213,7 @@ run `audit` for the combined generated-check protection verdict. See
 |---|---|---|
 | `targets` | required | Dotted paths (positional, one or more) |
 | `--preset` | `standard` | `"essential"`, `"standard"`, or `"thorough"` |
-| `--workers` | `1` | Parallel workers (batched pytest sessions per worker) |
+| `--workers` | `0` | Adaptive workers; pass a positive count to override |
 | `--threshold` | `0.0` | Minimum score; exit code 1 if below |
 | `--generate-stubs` | — | Write test stubs for surviving mutants to this path |
 | `--no-filter` | off | Disable equivalence filtering |

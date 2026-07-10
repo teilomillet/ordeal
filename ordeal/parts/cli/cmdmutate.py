@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+
 # ruff: noqa
 def _cmd_mutate(args: argparse.Namespace) -> int:
     """Run mutation testing on specified targets."""
@@ -119,7 +121,7 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
             preset = cfg.mutations.preset
         if cfg.mutations.operators is not None and preset is None:
             operators = cfg.mutations.operators
-        if args.workers == 1 and cfg.mutations.workers > 1:
+        if args.workers == 0 and cfg.mutations.workers > 0:
             workers = cfg.mutations.workers
         if args.threshold == 0.0 and cfg.mutations.threshold > 0.0:
             threshold = cfg.mutations.threshold
@@ -289,6 +291,8 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
             exit_code = 1
 
     return exit_code
+
+
 # ============================================================================
 # Reporting
 # ============================================================================
@@ -297,6 +301,8 @@ def _cmd_mutate(args: argparse.Namespace) -> int:
 def _telemetry_root(result: Any) -> Any | None:
     """Return the nested telemetry container if one exists."""
     return _result_value(result, "telemetry", "telemetry_info", "exploration_telemetry")
+
+
 def _result_value(source: Any, *names: str) -> Any | None:
     """Return the first non-None value found under one of *names*."""
     if source is None:
@@ -312,6 +318,8 @@ def _result_value(source: Any, *names: str) -> Any | None:
             if value is not None:
                 return value
     return None
+
+
 def _lookup_telemetry_value(result: Any, *names: str) -> Any | None:
     """Return telemetry data from the nested telemetry object or the result itself."""
     root = _telemetry_root(result)
@@ -319,6 +327,8 @@ def _lookup_telemetry_value(result: Any, *names: str) -> Any | None:
     if value is not None:
         return value
     return _result_value(result, *names)
+
+
 def _count_entries(value: Any) -> int | None:
     """Return a size-like count for mappings or sequences."""
     if value is None:
@@ -335,6 +345,8 @@ def _count_entries(value: Any) -> int | None:
         return len(value)
     except TypeError:
         return None
+
+
 def _normalize_telemetry_label(value: Any) -> str | None:
     """Return a compact human-readable label for one telemetry item."""
     if value is None:
@@ -343,6 +355,8 @@ def _normalize_telemetry_label(value: Any) -> str | None:
     if not text:
         return None
     return text.replace("_", " ")
+
+
 def _telemetry_item_label(item: Any) -> str | None:
     """Return a best-effort label for one telemetry item."""
     for name in ("kind", "category", "type", "status", "error_type"):
@@ -361,6 +375,8 @@ def _telemetry_item_label(item: Any) -> str | None:
     if signal_value is not None:
         return "signal death"
     return None
+
+
 def _summarize_telemetry_items(value: Any) -> tuple[int | None, Counter[str]]:
     """Return a count and label histogram for a telemetry collection."""
     if value is None:
@@ -390,12 +406,16 @@ def _summarize_telemetry_items(value: Any) -> tuple[int | None, Counter[str]]:
         if label is not None:
             histogram[label] += 1
     return len(items), histogram
+
+
 def _format_counter(counter: Counter[str]) -> str | None:
     """Render a compact count histogram."""
     if not counter:
         return None
     parts = [f"{label} x{count}" for label, count in counter.most_common(3)]
     return ", ".join(parts) if parts else None
+
+
 def _format_mapping_counts(
     value: Any,
     *,
@@ -448,6 +468,8 @@ def _format_mapping_counts(
                 break
 
     return ", ".join(items) if items else None
+
+
 def _resolve_telemetry_section(result: Any, *names: str) -> Any | None:
     """Return the first available telemetry section by name."""
     for source in (_telemetry_root(result), result):

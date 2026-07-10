@@ -612,22 +612,35 @@ _CROSS_PROCESS_IMPORTS = ...
 _CROSS_PROCESS_CALLS = ...
 
 @dataclass(frozen=True)
-class _MutationTestSelection:
-    """Pytest selection derived for a mutation target."""
-
-    paths: tuple[str, ...]
-    k_filter: str | None
-
-    def pytest_args(self) -> list[str]:
-        """Build positional pytest args plus any ``-k`` filter."""
-        ...
-
-@dataclass(frozen=True)
 class _EquivalenceSamplePlan:
     """Prepared argument tuples reused across runtime-equivalence checks."""
 
     samples: tuple[tuple[object, ...], ...]
     ...
+
+@dataclass(frozen=True)
+class _MutationTestSelection:
+    """Pytest selection derived for a mutation target."""
+
+    paths: tuple[str, ...]
+    k_filter: str | None
+    ast_scores: tuple[tuple[str, int], ...] = ...
+
+    def pytest_args(self) -> list[str]:
+        """Build positional pytest args plus any ``-k`` filter."""
+        ...
+
+@dataclass
+class _MutationExecutionProfile:
+    """Local hints for ordering tests and choosing mutation workers."""
+
+    kill_counts: dict[str, int] = ...
+    mutant_killers: dict[str, str] = ...
+    coverage_hits: tuple[str, ...] = ...
+    collected_tests: int = ...
+    mutant_count: int = ...
+    pytest_seconds: float = ...
+    workers: int = ...
 
 @dataclass(frozen=True)
 class _ValidationSampleMatrix:
@@ -676,7 +689,8 @@ def mutate_and_test(
         operators: Mutation operators to use (default: all).
         preset: Named operator group: ``"essential"``, ``"standard"``,
             or ``"thorough"``. Mutually exclusive with *operators*.
-        workers: Parallel workers for testing mutants. Default ``1``.
+        workers: Parallel workers for testing mutants. ``0`` (default)
+            selects adaptively; a positive value is an explicit override.
         filter_equivalent: Drop mutants that produce identical outputs on
             random inputs.  Default ``True``.
         equivalence_samples: Number of random inputs for equivalence
@@ -809,9 +823,9 @@ def mutate_function_and_test(
 
             Mutually exclusive with *operators*. When neither is given,
             all operators are used.
-        workers: Number of parallel worker processes. ``1`` (default)
-            runs sequentially.  Higher values give near-linear speedup
-            since each mutant is tested independently.
+        workers: Number of parallel worker processes. ``0`` (default)
+            selects from mutant count, collected tests, and prior observed
+            timing. A positive value is an explicit override.
         filter_equivalent: If ``True`` (default), skip mutants that produce
             identical output to the original on random sample inputs.
             Reduces noise from equivalent mutants that always survive.
@@ -891,7 +905,8 @@ def mutate(
             *preset*.
         preset: Named operator group: ``"essential"``, ``"standard"``,
             or ``"thorough"``. Mutually exclusive with *operators*.
-        workers: Parallel worker processes. Default ``1``.
+        workers: Parallel worker processes. ``0`` (default) selects
+            adaptively; a positive value is an explicit override.
         filter_equivalent: Skip equivalent mutants. Default ``True``.
         equivalence_samples: Samples for equivalence filtering. Default ``10``.
         extra_mutants: Source strings (or ``(description, source)`` tuples)

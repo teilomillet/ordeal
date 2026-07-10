@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+
 # ruff: noqa
 def _parallel_function_test(
     target: str,
@@ -60,6 +62,8 @@ def _parallel_function_test(
         result.mutants.append(mutant)
 
     return result
+
+
 def _is_function_target(target: str) -> bool:
     """Determine if a dotted path refers to a callable (vs a module)."""
     try:
@@ -67,13 +71,15 @@ def _is_function_target(target: str) -> bool:
     except Exception:
         return False
     return resolved.leaf_name is not None
+
+
 def mutate(
     target: str,
     test_fn: Callable[[], None] | None = None,
     operators: list[str] | None = None,
     *,
     preset: PresetName | None = None,
-    workers: int = 1,
+    workers: int = 0,
     filter_equivalent: bool = True,
     equivalence_samples: int = 10,
     extra_mutants: list[str | tuple[str, str]] | None = None,
@@ -121,7 +127,8 @@ def mutate(
             *preset*.
         preset: Named operator group: ``"essential"``, ``"standard"``,
             or ``"thorough"``. Mutually exclusive with *operators*.
-        workers: Parallel worker processes. Default ``1``.
+        workers: Parallel worker processes. ``0`` (default) selects
+            adaptively; a positive value is an explicit override.
         filter_equivalent: Skip equivalent mutants. Default ``True``.
         equivalence_samples: Samples for equivalence filtering. Default ``10``.
         extra_mutants: Source strings (or ``(description, source)`` tuples)
@@ -220,6 +227,8 @@ def mutate(
             pass
 
     return result
+
+
 def mutation_faults(
     target: str,
     operators: list[str] | None = None,

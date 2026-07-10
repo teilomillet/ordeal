@@ -10,6 +10,7 @@ import types
 from pathlib import Path
 
 import ordeal.mutations as mutations
+import tests._mutation_bench_target as mutation_bench_target
 
 
 def _clear_module_family(prefix: str) -> None:
@@ -197,6 +198,154 @@ def test_create_pytest_test_fn_disables_seed_replay(monkeypatch):
     assert observed["env"] == "1"
     assert observed["args"] is not None
     assert os.environ.get("ORDEAL_DISABLE_SEED_REPLAY") is None
+
+
+def test_adaptive_mutation_workers_keep_small_workloads_serial(monkeypatch):
+    monkeypatch.setattr(mutations.os, "cpu_count", lambda: 12)
+
+    assert (
+        mutations._resolve_mutation_worker_count(
+            0,
+            mutant_count=22,
+            selected_test_count=22,
+            profile=None,
+        )
+        == 1
+    )
+    assert (
+        mutations._resolve_mutation_worker_count(
+            8,
+            mutant_count=22,
+            selected_test_count=22,
+            profile=None,
+        )
+        == 8
+    )
+
+
+def test_adaptive_mutation_workers_parallelize_broader_workloads(monkeypatch):
+    monkeypatch.setattr(mutations.os, "cpu_count", lambda: 12)
+
+    assert (
+        mutations._resolve_mutation_worker_count(
+            0,
+            mutant_count=30,
+            selected_test_count=22,
+            profile=None,
+        )
+        == 4
+    )
+
+
+def test_adaptive_mutation_workers_keep_disk_mutation_serial(monkeypatch):
+    monkeypatch.setattr(mutations.os, "cpu_count", lambda: 12)
+
+    assert (
+        mutations._resolve_mutation_worker_count(
+            8,
+            mutant_count=30,
+            selected_test_count=22,
+            profile=None,
+            disk_mutation=True,
+        )
+        == 1
+    )
+
+
+def test_adaptive_mutation_workers_use_observed_calibration(monkeypatch):
+    monkeypatch.setattr(mutations.os, "cpu_count", lambda: 12)
+    cheap_profile = mutations._MutationExecutionProfile(
+        collected_tests=2,
+        mutant_count=30,
+        pytest_seconds=0.08,
+        workers=1,
+    )
+
+    assert (
+        mutations._resolve_mutation_worker_count(
+            0,
+            mutant_count=30,
+            selected_test_count=2,
+            profile=cheap_profile,
+        )
+        == 1
+    )
+
+
+def test_mutation_test_order_combines_prior_kills_coverage_ast_and_fallback():
+    class _Item:
+        def __init__(self, nodeid: str) -> None:
+            self.nodeid = nodeid
+
+    mutant = mutations.Mutant(
+        operator="arithmetic",
+        description="+ -> -",
+        line=4,
+        col=11,
+    )
+    items = [
+        _Item("tests/test_calc.py::test_fallback"),
+        _Item("tests/test_calc.py::test_ast"),
+        _Item("tests/test_calc.py::test_covered"),
+        _Item("tests/test_calc.py::test_previous"),
+    ]
+    selection = mutations._MutationTestSelection(
+        paths=("tests/test_calc.py",),
+        k_filter=None,
+        ast_scores=(("tests/test_calc.py::test_ast", 12),),
+    )
+    profile = mutations._MutationExecutionProfile(
+        kill_counts={"tests/test_calc.py::test_previous": 3},
+        mutant_killers={
+            mutations._mutant_profile_key(mutant): "tests/test_calc.py::test_previous"
+        },
+    )
+
+    ordered = mutations._order_mutation_test_items(
+        items,
+        mutant=mutant,
+        selection=selection,
+        coverage_hits={"tests/test_calc.py::test_covered"},
+        profile=profile,
+    )
+
+    assert [item.nodeid for item in ordered] == [
+        "tests/test_calc.py::test_previous",
+        "tests/test_calc.py::test_covered",
+        "tests/test_calc.py::test_ast",
+        "tests/test_calc.py::test_fallback",
+    ]
+
+
+def test_mutation_coverage_calibration_observes_target_entry_only():
+    class _Hook:
+        def pytest_runtest_protocol(self, *, item, nextitem) -> None:
+            del nextitem
+            item.callback()
+
+    class _Item:
+        def __init__(self, nodeid: str, callback) -> None:
+            self.nodeid = nodeid
+            self.callback = callback
+            self.config = types.SimpleNamespace(hook=_Hook())
+
+    session = types.SimpleNamespace(
+        items=[
+            _Item("tests/test_calc.py::test_unrelated", lambda: None),
+            _Item(
+                "tests/test_calc.py::test_tiny_add",
+                lambda: mutation_bench_target.tiny_add(1, 2),
+            ),
+        ],
+        testsfailed=0,
+    )
+
+    hits = mutations._calibrate_mutation_test_coverage(
+        session,
+        "tests._mutation_bench_target.tiny_add",
+    )
+
+    assert hits == {"tests/test_calc.py::test_tiny_add"}
 
 
 def test_review_signature_refreshes_shadowed_local_modules(tmp_path_factory, monkeypatch):

@@ -46,6 +46,7 @@ _PART_FILES = (
     "recordpostfixcontrol.py",
     "checkspec.py",
     "diffspec.py",
+    "commanddescription.py",
     "buildparser.py",
 )
 

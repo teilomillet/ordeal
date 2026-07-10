@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import textwrap
 from pathlib import Path
 
@@ -303,6 +304,42 @@ def test_auto_discovered_function_mutation_uses_parallel_batch_path(monkeypatch)
     assert result.killed == 1
 
 
+def test_custom_test_disk_mutation_avoids_parallel_patch_only_path(monkeypatch):
+    mutant = Mutant(operator="arithmetic", description="+ -> -", line=2, col=11)
+    mutated_tree = ast.parse("def _add(a: int, b: int) -> int:\n    return a - b\n")
+    disk_entries: list[str] = []
+
+    monkeypatch.setattr(
+        mutations,
+        "generate_mutants",
+        lambda *args, **kwargs: [(mutant, mutated_tree)],
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_parallel_function_test",
+        lambda *args, **kwargs: pytest.fail("disk mutation must not use patch-only workers"),
+    )
+
+    def fake_disk_mutation(target_spec, tree):
+        del target_spec, tree
+        disk_entries.append("entered")
+        return contextlib.nullcontext()
+
+    monkeypatch.setattr(mutations, "_function_mutated_on_disk", fake_disk_mutation)
+
+    result = mutate_function_and_test(
+        f"{__name__}._add",
+        test_fn=lambda: _add(1, 2),
+        operators=["arithmetic"],
+        workers=8,
+        filter_equivalent=False,
+        disk_mutation=True,
+    )
+
+    assert disk_entries == ["entered"]
+    assert result.total == 1
+
+
 def test_auto_discovered_function_mutation_falls_back_to_mine_after_batch_collection(monkeypatch):
     mutant = Mutant(operator="arithmetic", description="+ -> -", line=1, col=0)
     mutated_tree = ast.parse("def _add(a: int, b: int) -> int:\n    return a - b\n")
@@ -541,7 +578,7 @@ def test_mutations_config_defaults(tmp_path: Path):
     assert cfg.mutations is not None
     assert cfg.mutations.preset == "standard"
     assert cfg.mutations.threshold == 0.0
-    assert cfg.mutations.workers == 1
+    assert cfg.mutations.workers == 0
     assert cfg.mutations.filter_equivalent is True
     assert cfg.mutations.equivalence_samples == 10
     assert cfg.mutations.test_filter is None

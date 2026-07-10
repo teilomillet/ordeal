@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 # ruff: noqa
 import os
 from collections.abc import Generator
@@ -8,6 +9,8 @@ from ordeal import assertions
 from ordeal.buggify import activate as _buggify_activate
 from ordeal.buggify import deactivate as _buggify_deactivate
 from ordeal.buggify import set_seed as _buggify_set_seed
+
+
 def pytest_addoption(parser: pytest.Parser) -> None:
     """Register ``--chaos``, ``--chaos-seed``, and ``--buggify-prob`` CLI flags."""
     group = parser.getgroup("ordeal", "Chaos testing with ordeal")
@@ -54,6 +57,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="Replay saved ordeal seeds during pytest startup (trusted seeds only).",
     )
+
+
 def _register_array_strategies() -> None:
     """Register Hypothesis strategies for ML array types if available.
 
@@ -114,14 +119,22 @@ def _register_array_strategies() -> None:
         )
     except (ImportError, Exception):
         pass
+
+
 _seed_replay_results: list[dict[str, Any]] = []
+
+
 def _truthy_env(name: str) -> bool:
     """Return whether environment variable *name* is set to a truthy value."""
     value = os.environ.get(name, "")
     return value.lower() in {"1", "true", "yes", "on"}
+
+
 def _seed_replay_disabled() -> bool:
     """Return ``True`` when pytest seed replay should be skipped."""
     return _truthy_env("ORDEAL_DISABLE_SEED_REPLAY")
+
+
 def _seed_replay_enabled(config: pytest.Config) -> bool:
     """Return ``True`` when pytest seed replay is explicitly enabled."""
     if _seed_replay_disabled():
@@ -129,6 +142,8 @@ def _seed_replay_enabled(config: pytest.Config) -> bool:
     if config.getoption("ordeal_seed_replay", default=False):
         return True
     return _truthy_env("ORDEAL_ENABLE_SEED_REPLAY")
+
+
 def _replay_seed_corpus() -> list[dict[str, Any]]:
     """Scan .ordeal/seeds/ and replay all seeds.  Returns replay results."""
     from pathlib import Path
@@ -172,6 +187,8 @@ def _replay_seed_corpus() -> list[dict[str, Any]]:
                 }
             )
     return results
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Activate assertions + buggify when ``--chaos`` is passed."""
     config.addinivalue_line("markers", "chaos: mark test for chaos mode")
@@ -218,10 +235,14 @@ def pytest_configure(config: pytest.Config) -> None:
         seed = config.getoption("chaos_seed", default=None)
         if seed is not None:
             _buggify_set_seed(seed)
+
+
 def pytest_unconfigure(config: pytest.Config) -> None:
     """Deactivate assertions and buggify on session teardown."""
     assertions.tracker.active = False
     _buggify_deactivate()
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """Publish reliability rows from an xdist worker to its controller."""
     workeroutput = getattr(session.config, "workeroutput", None)
@@ -229,6 +250,8 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         workeroutput["ordeal_reliability_coverage"] = [
             cell.as_dict() for cell in assertions.tracker.reliability_results
         ]
+
+
 @pytest.hookimpl(optionalhook=True)
 def pytest_testnodedown(node: Any, error: object | None) -> None:
     """Merge one completed xdist worker's reliability evidence."""
@@ -238,6 +261,8 @@ def pytest_testnodedown(node: Any, error: object | None) -> None:
     rows = workeroutput.get("ordeal_reliability_coverage", [])
     if isinstance(rows, list):
         assertions.tracker.merge_reliability(rows)
+
+
 def pytest_collection_modifyitems(
     config: pytest.Config,
     items: list[pytest.Item],
@@ -263,6 +288,8 @@ def pytest_collection_modifyitems(
         for item in items:
             if "mutate" in item.keywords:
                 item.add_marker(skip_mutate)
+
+
 # -- Fixtures ---------------------------------------------------------------
 
 
@@ -275,8 +302,12 @@ def chaos_enabled() -> Generator[None, None, None]:
     yield
     _buggify_deactivate()
     assertions.tracker.active = prev_active
+
+
 # Storage for mutation results collected during the session
 _mutation_results: list[tuple[str, Any]] = []
+
+
 @pytest.fixture
 def mutate_target(request: pytest.FixtureRequest):
     """Run mutation testing on the target specified in @pytest.mark.mutate.
@@ -305,11 +336,13 @@ def mutate_target(request: pytest.FixtureRequest):
     preset = marker.kwargs.get("preset") or request.config.getoption(
         "mutate_preset", default="standard"
     )
-    workers = marker.kwargs.get("workers", 1)
+    workers = marker.kwargs.get("workers", 0)
 
     result = mutate(target, preset=preset, workers=workers)
     _mutation_results.append((target, result))
     return result
+
+
 # -- Auto-scan test collection from ordeal.toml ----------------------------
 
 
@@ -353,8 +386,12 @@ class OrdealScanItem(pytest.Item):
 
     def reportinfo(self) -> tuple[str, int | None, str]:
         return (self.module_name, None, f"ordeal::scan::{self.module_name}.{self.func_name}")
+
+
 class OrdealScanError(Exception):
     """Raised when an auto-scanned function fails."""
+
+
 class OrdealScanCollector(pytest.Collector):
     """Collects scan items for one [[scan]] entry."""
 
@@ -401,6 +438,8 @@ class OrdealScanCollector(pytest.Collector):
                 )
             )
         return items
+
+
 def pytest_collect_file(parent: pytest.Collector, file_path: Any) -> OrdealScanCollector | None:
     """Auto-collect scan tests from ordeal.toml if present."""
     # Only trigger once, on ordeal.toml itself
@@ -425,6 +464,8 @@ def pytest_collect_file(parent: pytest.Collector, file_path: Any) -> OrdealScanC
         path=file_path,
         scan_configs=cfg.scan,
     )
+
+
 class _OrdealTomlCollector(pytest.File):
     """Collects all [[scan]] entries from ordeal.toml."""
 
@@ -451,21 +492,3 @@ class _OrdealTomlCollector(pytest.File):
             )
             items.extend(collector.collect())
         return items
-def _parse_toml_fixtures(raw: dict[str, str]) -> dict[str, Any] | None:
-    """Convert TOML fixture strings to Hypothesis strategies.
-
-    Supports: ``"a,b,c"`` → ``sampled_from(["a","b","c"])``.
-    """
-    import hypothesis.strategies as _st
-
-    if not raw:
-        return None
-    fixtures: dict[str, Any] = {}
-    for name, value in raw.items():
-        if isinstance(value, str) and "," in value:
-            fixtures[name] = _st.sampled_from(value.split(","))
-        elif isinstance(value, str):
-            fixtures[name] = _st.just(value)
-        else:
-            fixtures[name] = _st.just(value)
-    return fixtures

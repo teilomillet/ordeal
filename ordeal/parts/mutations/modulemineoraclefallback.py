@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+
 # ruff: noqa
 def _module_mine_oracle_fallback(
     target: str,
@@ -88,13 +90,15 @@ def _module_mine_oracle_fallback(
         combined.diagnostics["tested"] = combined.total
         return combined
     return None
+
+
 def mutate_and_test(
     target: str,
     test_fn: Callable[[], None] | None = None,
     operators: list[str] | None = None,
     *,
     preset: PresetName | None = None,
-    workers: int = 1,
+    workers: int = 0,
     filter_equivalent: bool = True,
     equivalence_samples: int = 10,
     extra_mutants: list[str | tuple[str, str]] | None = None,
@@ -124,7 +128,8 @@ def mutate_and_test(
         operators: Mutation operators to use (default: all).
         preset: Named operator group: ``"essential"``, ``"standard"``,
             or ``"thorough"``. Mutually exclusive with *operators*.
-        workers: Parallel workers for testing mutants. Default ``1``.
+        workers: Parallel workers for testing mutants. ``0`` (default)
+            selects adaptively; a positive value is an explicit override.
         filter_equivalent: Drop mutants that produce identical outputs on
             random inputs.  Default ``True``.
         equivalence_samples: Number of random inputs for equivalence
@@ -195,13 +200,36 @@ def mutate_and_test(
 
     # Batch mode: single pytest session for all mutants (much faster)
     if use_batch and mutant_pairs:
+        selection = _mutation_test_selection(target, test_filter=test_filter)
+        profile = _load_mutation_execution_profile(target)
+        selected_test_count = (
+            profile.collected_tests
+            if profile is not None and profile.collected_tests > 0
+            else max(1, len(selection.ast_scores), len(selection.paths))
+        )
+        effective_workers = _resolve_mutation_worker_count(
+            workers,
+            mutant_count=len(mutant_pairs),
+            selected_test_count=selected_test_count,
+            profile=profile,
+            disk_mutation=disk_mutation,
+        )
+        stats["workers_selected"] = effective_workers
         with _timed_phase(timings, "test_execution_seconds"):
-            if workers > 1 and len(mutant_pairs) > 1:
-                batch_results = _parallel_module_test(target, mutant_pairs, workers)
+            if effective_workers > 1 and len(mutant_pairs) > 1:
+                batch_results = _parallel_module_test(
+                    target,
+                    mutant_pairs,
+                    effective_workers,
+                    test_filter=test_filter,
+                    disk_mutation=disk_mutation,
+                    timings=timings,
+                )
             else:
                 batch_results = _batch_module_test(
                     target,
                     mutant_pairs,
+                    test_filter=test_filter,
                     disk_mutation=disk_mutation,
                     stats=stats,
                     timings=timings,
@@ -268,6 +296,8 @@ def mutate_and_test(
     result.timings.update(timings)
     result.timings["total_seconds"] = time.perf_counter() - started_at
     return result
+
+
 # ============================================================================
 # Function-level mutation testing (recommended)
 # ============================================================================
@@ -280,6 +310,8 @@ class _MinedPropertyFailure(AssertionError):
         self.property_names = property_names
         joined = ", ".join(repr(name) for name in property_names)
         super().__init__(f"Mined properties no longer hold on mutant: {joined}")
+
+
 def validate_mined_properties(
     target: str,
     max_examples: int = 100,
@@ -385,6 +417,8 @@ def validate_mined_properties(
         for prop in universal
     ]
     return result
+
+
 _BOUNDARY_VALUES: dict[type, list] = {
     int: [0, 1, -1, 2, -2],
     float: [0.0, 1.0, -1.0, 0.5, -0.5],

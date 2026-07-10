@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.41
+
+**Features:**
+
+- persist replay-backed Compose regressions
+- gate module migrations with measured evidence
+- compare isolated Git revisions
+- compare multi-step system behavior
+- add replay-scoped differential evidence
+
+**Fixes:**
+
+- read revision docs as UTF-8
+- fail JSON mutation reports on survivors
+- keep Compose regression bindings portable
+- expose mutation oracle fallback
+- refresh stale mutation target imports
+- fall back when parallel exploration is unavailable
+
+**Docs:**
+
+- refresh the evidence workflow roadmap
+- clarify deterministic supervisor scope
+
+
 ## 0.3.40
 
 **Features:**

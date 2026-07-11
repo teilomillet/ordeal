@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.43
+
+**Features:**
+
+- adapt mutation test ordering and workers
+
+**Fixes:**
+
+- prevent recursive mutation test selection
+- preserve reliable adaptive mutation evidence
+
+**Other:**
+
+- test: make mutation path assertion cross-platform
+- perf: reuse checked-hash bytecode for facade imports
+- refactor: split runtime modules and harden evidence workers
+
+
 ## 0.3.42
 
 **Features:**

@@ -393,69 +393,6 @@ def _score_mutation_test_nodes(
     return tuple(scored)
 
 
-def _calibrate_mutation_test_coverage(session: Any, target: str) -> set[str]:
-    """Observe target entry per test inside the already-open pytest session."""
-    target_spec = _resolve_mutation_target(target)
-    target_code = None
-    target_file = None
-    if target_spec.leaf_name is not None:
-        try:
-            target_code = _unwrap_func(_resolved_target_callable(target_spec)).__code__
-        except Exception:
-            target_code = None
-    else:
-        source_path = getattr(target_spec.module, "__file__", None)
-        if source_path is not None:
-            target_file = str(Path(source_path).resolve())
-    if target_code is None and target_file is None:
-        return set()
-
-    hits: set[str] = set()
-    items = list(session.items)
-    failures_before = session.testsfailed
-    for index, item in enumerate(items):
-        entered = False
-        previous_profiler = sys.getprofile()
-
-        def _profile(frame: types.FrameType, event: str, arg: object) -> None:
-            nonlocal entered
-            if previous_profiler is not None:
-                previous_profiler(frame, event, arg)
-            if event != "call":
-                return
-            if target_code is not None and frame.f_code is target_code:
-                entered = True
-            elif target_file is not None:
-                entered = entered or (
-                    frame.f_globals.get("__name__") == target_spec.module_name
-                    and str(Path(frame.f_code.co_filename).resolve()) == target_file
-                )
-
-        try:
-            sys.setprofile(_profile)
-            next_item = items[index + 1] if index + 1 < len(items) else None
-            item.config.hook.pytest_runtest_protocol(item=item, nextitem=next_item)
-        finally:
-            sys.setprofile(previous_profiler)
-        if entered:
-            hits.add(str(item.nodeid))
-    session._ordeal_mutation_baseline_failed = session.testsfailed > failures_before
-    session.testsfailed = failures_before
-    return hits
-
-
-def _mutation_test_baseline_fails(session: Any) -> bool:
-    """Run every selected original test once and restore pytest failure state."""
-    failures_before = session.testsfailed
-    items = list(session.items)
-    for index, item in enumerate(items):
-        next_item = items[index + 1] if index + 1 < len(items) else None
-        item.config.hook.pytest_runtest_protocol(item=item, nextitem=next_item)
-    failed = session.testsfailed > failures_before
-    session.testsfailed = failures_before
-    return failed
-
-
 def _record_mutation_execution_profile(
     target: str,
     results: Sequence[tuple[Mutant, bool, str | None, str | None]],

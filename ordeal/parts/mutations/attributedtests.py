@@ -154,10 +154,15 @@ def _attributed_mutation_modules(module_name: str) -> tuple[str, ...]:
 def _mutation_test_baseline_fingerprint(
     target: str,
     selection: _MutationTestSelection,
+    *,
+    excluded_test: _PytestItemIdentity | None = None,
 ) -> str:
     """Fingerprint selected test bodies, target source, and pytest configuration."""
     digest = hashlib.sha256()
     digest.update((selection.k_filter or "").encode())
+    if excluded_test is not None:
+        digest.update(b"\0excluded-pytest-item\0")
+        digest.update("\0".join(excluded_test).encode())
     content_paths = {Path(item.split("::", 1)[0]).resolve() for item in selection.paths}
     if not content_paths:
         content_paths.update(Path(path).resolve() for path in _all_test_files())

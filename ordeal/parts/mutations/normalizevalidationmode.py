@@ -57,8 +57,9 @@ def _timed_phase(timings: dict[str, float], name: str) -> Callable[[], None]:
         timings[name] = timings.get(name, 0.0) + (time.perf_counter() - start)
 @contextmanager
 def _disable_seed_replay() -> Callable[[], None]:
-    """Suppress pytest seed-corpus replay for mutation test sessions."""
+    """Suppress seed replay while preserving an enclosing pytest identity."""
     previous = os.environ.get("ORDEAL_DISABLE_SEED_REPLAY")
+    previous_pytest_item = os.environ.get("PYTEST_CURRENT_TEST")
     os.environ["ORDEAL_DISABLE_SEED_REPLAY"] = "1"
     try:
         yield
@@ -67,6 +68,10 @@ def _disable_seed_replay() -> Callable[[], None]:
             os.environ.pop("ORDEAL_DISABLE_SEED_REPLAY", None)
         else:
             os.environ["ORDEAL_DISABLE_SEED_REPLAY"] = previous
+        if previous_pytest_item is None:
+            os.environ.pop("PYTEST_CURRENT_TEST", None)
+        else:
+            os.environ["PYTEST_CURRENT_TEST"] = previous_pytest_item
 def _unwrap_func(func: object) -> object:
     """Unwrap decorated/wrapped functions to reach the original source.
 

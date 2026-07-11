@@ -12,6 +12,7 @@ import types
 
 import pytest
 
+import ordeal.mutations as mutations
 from ordeal.faults import PatchFault
 from ordeal.integrations.openapi import auto_faults
 
@@ -334,8 +335,8 @@ class TestModuleMineOracleFallback:
 class TestFunctionMineOracleFallback:
     """mutate_function_and_test falls back to mine oracle on 0% score."""
 
-    def test_fallback_triggers_on_zero_kills(self):
-        """When auto-discovered tests kill nothing, mine oracle takes over."""
+    def test_fallback_triggers_on_zero_kills(self, monkeypatch):
+        """The invoking pytest item cannot recursively test its own mutation run."""
         from ordeal.mutations import mutate_function_and_test
 
         def add(a: int, b: int) -> int:
@@ -345,7 +346,21 @@ class TestFunctionMineOracleFallback:
         _make_module("_test_fallback_mod", {"add": add})
 
         try:
-            # No tests match -k _test_fallback_mod → 0 kills → mine fallback
+            outer_test = mutations._current_pytest_item_identity()
+            assert outer_test is not None
+            selected_node = outer_test[0]
+            selection = mutations._MutationTestSelection(
+                paths=(selected_node,),
+                k_filter=None,
+            )
+            monkeypatch.setattr(
+                mutations,
+                "_mutation_test_selection",
+                lambda target, test_filter=None: selection,
+            )
+
+            # The only collected test is this outer caller. Excluding it avoids
+            # recursive mutation and correctly uses the no-tests mine fallback.
             with pytest.warns(UserWarning, match="tests killed 0/"):
                 result = mutate_function_and_test(
                     "_test_fallback_mod.add",

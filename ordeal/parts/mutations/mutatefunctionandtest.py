@@ -88,6 +88,7 @@ def mutate_function_and_test(
             far.  Prevents hanging on complex AST expressions (numpy, cv2).
     """
     started_at = time.perf_counter()
+    excluded_test = _current_pytest_item_identity()
     timings: dict[str, float] = {}
     # Try auto-discovering tests; fall back to mine()-based oracle
     disk_mutation = _resolve_disk_mutation(disk_mutation, target)
@@ -172,6 +173,7 @@ def mutate_function_and_test(
                         disk_mutation=disk_mutation,
                         stats=stats,
                         timings=timings,
+                        excluded_test=excluded_test,
                     )
                     remaining_pairs = mutant_pairs[1:]
                     profile = _load_mutation_execution_profile(target)
@@ -195,6 +197,7 @@ def mutate_function_and_test(
                             disk_mutation=disk_mutation,
                             stats=stats,
                             timings=timings,
+                            excluded_test=excluded_test,
                         )
                     )
                 elif remaining_pairs:
@@ -206,6 +209,7 @@ def mutate_function_and_test(
                             disk_mutation=disk_mutation,
                             stats=stats,
                             timings=timings,
+                            excluded_test=excluded_test,
                         )
                     )
         except NoTestsFoundError:

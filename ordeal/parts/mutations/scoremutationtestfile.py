@@ -210,6 +210,7 @@ def _batch_module_test(
     selection_override: _MutationTestSelection | None = None,
     allow_broad_fallback: bool = True,
     baseline_validated: bool = False,
+    excluded_test: _PytestItemIdentity | None = None,
 ) -> list[tuple[Mutant, bool, str | None, str | None]]:
     """Run all mutants in a single pytest session via a custom plugin.
 
@@ -218,6 +219,7 @@ def _batch_module_test(
     """
     import pytest
 
+    excluded_test = excluded_test or _current_pytest_item_identity()
     results: list[tuple[Mutant, bool, str | None, str | None]] = []
     phase_timings = timings if timings is not None else {}
     with _timed_phase(phase_timings, "test_selection_seconds"):
@@ -226,7 +228,11 @@ def _batch_module_test(
             test_filter=test_filter,
         )
     profile = _load_mutation_execution_profile(target)
-    baseline_fingerprint = _mutation_test_baseline_fingerprint(target, selection)
+    baseline_fingerprint = _mutation_test_baseline_fingerprint(
+        target,
+        selection,
+        excluded_test=excluded_test,
+    )
     baseline_validated = baseline_validated or bool(
         profile and profile.baseline_fingerprint == baseline_fingerprint
     )
@@ -245,19 +251,25 @@ def _batch_module_test(
             self.coverage_hits: set[str] = set()
             self.coverage_calibrated = False
             self.executed_tests = 0
+            self.excluded_active_tests = 0
 
         @pytest.hookimpl(tryfirst=True)
         def pytest_runtestloop(self, session: pytest.Session) -> bool:
             """Override the default test loop to iterate mutants."""
             if not session.config.option.collectonly:
-                self.collected_tests = len(session.items)
-                if not session.items:
+                selected_items = _eligible_mutation_test_items(
+                    session.items,
+                    excluded_test,
+                )
+                self.excluded_active_tests = len(session.items) - len(selected_items)
+                self.collected_tests = len(selected_items)
+                if not selected_items:
                     self.no_tests_found = True
                     return True
                 prior_coverage = set(profile.coverage_hits) if profile is not None else set()
                 self.coverage_hits = {
                     str(item.nodeid)
-                    for item in session.items
+                    for item in selected_items
                     if str(item.nodeid) in prior_coverage
                 }
                 self.coverage_calibrated = bool(profile and profile.coverage_calibrated)
@@ -269,7 +281,11 @@ def _batch_module_test(
                 )
                 calibrated_now = False
                 if persist_profile and (not self.coverage_calibrated or stale_coverage):
-                    self.coverage_hits = _calibrate_mutation_test_coverage(session, target)
+                    self.coverage_hits = _calibrate_mutation_test_coverage(
+                        session,
+                        target,
+                        items=selected_items,
+                    )
                     self.coverage_calibrated = True
                     calibrated_now = True
                     self.baseline_failed = bool(
@@ -278,7 +294,10 @@ def _batch_module_test(
                     if self.baseline_failed:
                         return True
                 elif not baseline_validated:
-                    self.baseline_failed = _mutation_test_baseline_fails(session)
+                    self.baseline_failed = _mutation_test_baseline_fails(
+                        session,
+                        items=selected_items,
+                    )
                     if self.baseline_failed:
                         return True
                 if (
@@ -304,7 +323,7 @@ def _batch_module_test(
                             if not disk_mutation:
                                 importlib.invalidate_caches()
                             ordered_items = _order_mutation_test_items(
-                                session.items,
+                                selected_items,
                                 mutant=mutant,
                                 selection=selection,
                                 coverage_hits=self.coverage_hits,
@@ -347,6 +366,7 @@ def _batch_module_test(
         stats["collected_tests"] = plugin.collected_tests
         stats["coverage_selected_tests"] = len(plugin.coverage_hits)
         stats["executed_tests"] = plugin.executed_tests
+        stats["excluded_active_tests"] = plugin.excluded_active_tests
     if plugin.no_tests_found:
         _raise_no_tests_found(target)
     if plugin.baseline_failed:
@@ -371,6 +391,7 @@ def _batch_module_test(
                 persist_profile=False,
                 selection_override=broad_selection,
                 allow_broad_fallback=False,
+                excluded_test=excluded_test,
             )
             results = _merge_mutation_batch_results(results, fallback_results)
     if persist_profile:
@@ -386,111 +407,3 @@ def _batch_module_test(
             baseline_fingerprint=baseline_fingerprint,
         )
     return results
-
-
-def _parallel_module_test(
-    target: str,
-    mutant_pairs: list[tuple[Mutant, ast.Module]],
-    workers: int,
-    *,
-    test_filter: str | None = None,
-    disk_mutation: bool = False,
-    timings: dict[str, float] | None = None,
-    baseline_validated: bool = False,
-) -> list[tuple[Mutant, bool, str | None, str | None]]:
-    """Run module-level mutants in parallel, each worker batch-testing a chunk.
-
-    Divides *mutant_pairs* across *workers* processes.  Each worker runs
-    a single pytest session that iterates its chunk — combining the startup
-    savings of batch mode with parallelism.
-    """
-    import multiprocessing as mp
-
-    # Serialize mutant pairs: ast.Module doesn't pickle, so send source text
-    serialized: list[tuple[Mutant, str]] = []
-    for mutant, tree in mutant_pairs:
-        try:
-            serialized.append((mutant, ast.unparse(tree)))
-        except Exception:
-            continue
-
-    # Chunk work across workers
-    chunk_size = max(1, (len(serialized) + workers - 1) // workers)
-    chunks: list[list[tuple[Mutant, str]]] = []
-    for i in range(0, len(serialized), chunk_size):
-        chunks.append(serialized[i : i + chunk_size])
-
-    ctx = mp.get_context("fork" if sys.platform != "win32" else "spawn")
-    phase_timings = timings if timings is not None else {}
-    with _timed_phase(phase_timings, "pytest_seconds"):
-        with ctx.Pool(min(workers, len(chunks))) as pool:
-            chunk_results = pool.map(
-                _parallel_module_batch_worker,
-                [
-                    (target, chunk, test_filter, disk_mutation, baseline_validated)
-                    for chunk in chunks
-                ],
-            )
-
-    # Flatten results
-    results: list[tuple[Mutant, bool, str | None, str | None]] = []
-    for chunk_result in chunk_results:
-        results.extend(chunk_result)
-    selection = _mutation_test_selection(target, test_filter=test_filter)
-    if test_filter is None:
-        fallback_pairs = _surviving_mutant_pairs(mutant_pairs, results)
-        broad_selection = (
-            _broad_mutation_test_selection(target, selection) if fallback_pairs else None
-        )
-        if broad_selection is not None and fallback_pairs:
-            fallback_results = _batch_module_test(
-                target,
-                fallback_pairs,
-                test_filter=None,
-                disk_mutation=disk_mutation,
-                timings=phase_timings,
-                persist_profile=False,
-                selection_override=broad_selection,
-                allow_broad_fallback=False,
-            )
-            results = _merge_mutation_batch_results(results, fallback_results)
-    prior = _load_mutation_execution_profile(target)
-    collected_hint = (
-        prior.collected_tests
-        if prior is not None and prior.collected_tests > 0
-        else max(1, len(selection.ast_scores), len(selection.paths))
-    )
-    _record_mutation_execution_profile(
-        target,
-        results,
-        coverage_hits=set(),
-        coverage_calibrated=False,
-        collected_tests=collected_hint,
-        mutant_count=len(serialized),
-        pytest_seconds=phase_timings.get("pytest_seconds", 0.0),
-        workers=min(workers, len(chunks)),
-        baseline_fingerprint=_mutation_test_baseline_fingerprint(target, selection),
-    )
-    return results
-
-
-def _parallel_module_batch_worker(
-    args: tuple[str, list[tuple[Mutant, str]], str | None, bool, bool],
-) -> list[tuple[Mutant, bool, str | None, str | None]]:
-    """Re-parse ASTs and batch-test one module-level chunk."""
-    target, chunk, test_filter, disk_mutation, baseline_validated = args
-    reparsed = []
-    for mutant, source_text in chunk:
-        try:
-            reparsed.append((mutant, ast.parse(source_text)))
-        except Exception:
-            continue
-    return _batch_module_test(
-        target,
-        reparsed,
-        test_filter=test_filter,
-        disk_mutation=disk_mutation,
-        persist_profile=False,
-        allow_broad_fallback=False,
-        baseline_validated=baseline_validated,
-    )

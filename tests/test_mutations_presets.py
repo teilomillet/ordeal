@@ -323,6 +323,7 @@ def test_explicit_parallel_rejects_failing_baseline_before_workers(monkeypatch):
         "_filter_function_mutant_pairs",
         lambda func, module, func_name, pairs, **kwargs: pairs,
     )
+
     def fake_parallel(*args, baseline_validated=False, **kwargs):
         assert baseline_validated is False
         raise RuntimeError("tests fail before mutation")

@@ -421,13 +421,9 @@ def test_broad_fallback_keeps_indirect_killer(
     assert results[0][1] is True
     assert results[0][3] is not None
     assert "test_mixed.py::test_service_contract" in results[0][3]
-    refreshed_profile = mutations._load_mutation_execution_profile(
-        "fallbackpkg.calc.compute"
-    )
+    refreshed_profile = mutations._load_mutation_execution_profile("fallbackpkg.calc.compute")
     assert refreshed_profile is not None
-    assert refreshed_profile.coverage_hits == (
-        "tests/test_calc.py::test_direct_but_weak",
-    )
+    assert refreshed_profile.coverage_hits == ("tests/test_calc.py::test_direct_but_weak",)
 
     mutations._mutation_test_selection.cache_clear()
     learned_selection = mutations._mutation_test_selection("fallbackpkg.calc.compute")
@@ -566,6 +562,15 @@ def test_empty_path_baseline_fingerprint_tracks_discovered_tests_and_target(
         "fingerprintpkg.calc.compute",
         selection,
     )
+    excluded = mutations._mutation_test_baseline_fingerprint(
+        "fingerprintpkg.calc.compute",
+        selection,
+        excluded_test=(
+            f"{test_source}::test_same_node",
+            str(test_source.resolve()),
+            "test_same_node",
+        ),
+    )
     test_source.write_text("def test_same_node():\n    assert False\n", encoding="utf-8")
     test_changed = mutations._mutation_test_baseline_fingerprint(
         "fingerprintpkg.calc.compute",
@@ -582,9 +587,78 @@ def test_empty_path_baseline_fingerprint_tracks_discovered_tests_and_target(
         selection,
     )
 
+    assert excluded != first
     assert len({first, test_changed, helper_changed, target_changed}) == 4
     _clear_module_family("fingerprintpkg")
     mutations._all_test_files.cache_clear()
+
+
+def test_mutation_test_items_exclude_only_the_exact_outer_node(tmp_path: Path):
+    class _Item:
+        def __init__(self, nodeid: str) -> None:
+            self.nodeid = nodeid
+
+    test_path = tmp_path / "test_calc.py"
+    excluded = (
+        "tests/test_calc.py::TestCalc::test_add[value-1]",
+        str(test_path.resolve()),
+        "TestCalc::test_add[value-1]",
+    )
+    items = [
+        _Item(f"{test_path}::TestCalc::test_add[value-1]"),
+        _Item(f"{test_path}::TestCalc::test_add[value-2]"),
+        _Item(f"{test_path}::TestCalc::test_subtract"),
+    ]
+
+    eligible = mutations._eligible_mutation_test_items(items, excluded)
+
+    assert [item.nodeid for item in eligible] == [
+        f"{test_path}::TestCalc::test_add[value-2]",
+        f"{test_path}::TestCalc::test_subtract",
+    ]
+
+
+def test_nested_pytest_context_restores_the_outer_item(monkeypatch):
+    outer = "tests/test_mutations.py::test_outer (call)"
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", outer)
+
+    with mutations._disable_seed_replay():
+        os.environ.pop("PYTEST_CURRENT_TEST")
+
+    assert os.environ["PYTEST_CURRENT_TEST"] == outer
+
+
+@pytest.mark.parametrize(
+    ("runner", "target"),
+    [
+        (mutations._batch_function_test, "tests._mutation_bench_target.tiny_add"),
+        (mutations._batch_module_test, "tests._mutation_bench_target"),
+    ],
+)
+def test_mutation_batches_exclude_the_active_node_but_keep_its_sibling(
+    runner,
+    target: str,
+    monkeypatch,
+):
+    active = "tests/test_mutation_bench_target.py::test_tiny_add_basics"
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", f"{active} (call)")
+    selection = mutations._MutationTestSelection(
+        paths=("tests/test_mutation_bench_target.py",),
+        k_filter="tiny_add",
+    )
+    stats: dict[str, int] = {}
+
+    runner(
+        target,
+        [],
+        stats=stats,
+        persist_profile=False,
+        selection_override=selection,
+        baseline_validated=True,
+    )
+
+    assert stats["collected_tests"] == 1
+    assert stats["excluded_active_tests"] == 1
 
 
 def test_mutation_test_order_combines_prior_kills_coverage_ast_and_fallback():

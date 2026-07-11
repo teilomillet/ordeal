@@ -93,6 +93,8 @@ from __future__ import annotations
 
 from pathlib import Path as _FacadePath
 
+from ordeal._facade_loader import load_parts as _load_parts
+
 _PART_FILES = (
     "transition.py",
     "enter.py",
@@ -105,11 +107,7 @@ def _load_facade_parts() -> None:
     while root.name != "ordeal":
         root = root.parent
     root = root / "parts" / "supervisor"
-    namespace = globals()
-    for filename in _PART_FILES:
-        path = root / filename
-        source = path.read_bytes()
-        exec(compile(source, str(path), "exec"), namespace, namespace)
+    _load_parts(globals(), root, _PART_FILES)
 
 
 _load_facade_parts()

@@ -64,6 +64,28 @@ def test_public_facades_point_to_existing_part_folders() -> None:
         assert len(_implementation_files(matching_folders[0])) >= 2
 
 
+def test_every_facade_uses_a_safe_loading_path() -> None:
+    facades = [
+        path
+        for path in SOURCE.rglob("*.py")
+        if PARTS not in path.parents and "_load_facade_parts" in path.read_text(encoding="utf-8")
+    ]
+    isolated = {SOURCE / "_diff_worker.py", SOURCE / "_observation.py"}
+
+    assert isolated <= set(facades)
+    for facade in facades:
+        source = facade.read_text(encoding="utf-8")
+        if facade in isolated:
+            assert "from ordeal" not in source, facade
+            assert ".read_bytes()" in source, facade
+            assert "exec(compile(" in source, facade
+        else:
+            assert ".read_bytes()" not in source, facade
+            assert "exec(compile(" not in source, facade
+            assert "from ordeal._facade_loader import load_parts as _load_parts" in source, facade
+            assert "_load_parts(globals(), root, _PART_FILES)" in source, facade
+
+
 def _stub_names(path: Path) -> set[str]:
     names: set[str] = set()
     for node in ast.parse(path.read_text(encoding="utf-8")).body:

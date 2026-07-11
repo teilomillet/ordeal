@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from collections import OrderedDict
 from pathlib import Path
 
@@ -44,6 +45,31 @@ def test_all_diff_modes_load_the_canonical_observation_layer() -> None:
         Path(revision_worker._OBSERVATION.__file__).resolve()
         == Path(observation.__file__).resolve()
     )
+
+
+def test_revision_worker_bootstrap_does_not_import_target_ordeal() -> None:
+    package = Path(revision_worker.__file__).resolve().parent
+    bootstrap_files = [
+        package / "_diff_worker.py",
+        package / "_observation.py",
+        *(package / "parts" / "diffworker").glob("*.py"),
+        *(package / "parts" / "observation").glob("*.py"),
+    ]
+    imports: list[tuple[str, str]] = []
+    for path in bootstrap_files:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imports.extend(
+                    (path.name, alias.name)
+                    for alias in node.names
+                    if alias.name == "ordeal" or alias.name.startswith("ordeal.")
+                )
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                if node.module == "ordeal" or node.module.startswith("ordeal."):
+                    imports.append((path.name, node.module))
+
+    assert imports == []
 
 
 def test_exact_replay_rejects_a_corrupted_recorded_signature() -> None:

@@ -399,7 +399,11 @@ def test_broad_fallback_keeps_indirect_killer(
         narrow_selection,
     )
     assert broad_selection is not None
-    assert [path.split("tests/", 1)[-1] for path in broad_selection.paths] == [
+    displayed_paths = []
+    for nodeid in broad_selection.paths:
+        path, separator, node = nodeid.partition("::")
+        displayed_paths.append(f"{Path(path).name}::{node}" if separator else Path(path).name)
+    assert displayed_paths == [
         "test_contract.py::test_indirect_contract",
         "test_mixed.py::test_weak_direct",
         "test_mixed.py::test_weak_wrapper",
